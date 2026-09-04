@@ -3311,7 +3311,7 @@ impl ExpandExec {
             edge_var: node.edge_var,
             demand_batch: None,
             demand: None,
-            capture_epoch: demand::capture_epoch(),
+            capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
             required_output: None,
             ordinal_identities,
             ordinal_identity_required,

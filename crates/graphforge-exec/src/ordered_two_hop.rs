@@ -197,7 +197,7 @@ impl OrderedTwoHopPathCountExec {
             provider: spec.provider,
             ordinal_identities: spec.ordinal_identities,
             require_edge_disjoint: spec.require_edge_disjoint,
-            capture_epoch: demand::capture_epoch(),
+            capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
     }
 }

@@ -6,6 +6,7 @@
 //! the fixed-hop operators below that semantic boundary. Unknown and blocking
 //! operators are deliberately opaque: demand never crosses them.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::pin::Pin;
@@ -194,11 +195,36 @@ pub struct DemandSnapshot {
     pub execution_batch_rows: u64,
 }
 
+/// Mirrored for lock-free plan stamping / optimizer probes. Authoritative
+/// enable+epoch+snapshot transitions happen under [`CAPTURE`].
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_EPOCH: AtomicU64 = AtomicU64::new(1);
 static CAPTURE_GUARD: Mutex<()> = Mutex::new(());
-static CAPTURE: LazyLock<Mutex<DemandSnapshot>> =
-    LazyLock::new(|| Mutex::new(DemandSnapshot::default()));
+
+thread_local! {
+    /// Capture session epoch bound to this thread (and inherited across
+    /// `GraphForge::block_on` worker threads). Concurrent tests that `execute`
+    /// while another capture is active keep `0` and must not stamp/instrument
+    /// into the live process-global session.
+    static BOUND_CAPTURE_SESSION: Cell<u64> = const { Cell::new(0) };
+}
+
+struct CaptureState {
+    enabled: bool,
+    epoch: u64,
+    snapshot: DemandSnapshot,
+}
+
+static CAPTURE: LazyLock<Mutex<CaptureState>> = LazyLock::new(|| {
+    Mutex::new(CaptureState {
+        enabled: false,
+        epoch: 1,
+        snapshot: DemandSnapshot::default(),
+    })
+});
+
+#[cfg(test)]
+static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct CaptureDisable;
 
@@ -206,6 +232,45 @@ impl Drop for CaptureDisable {
     fn drop(&mut self) {
         disable();
     }
+}
+
+struct CaptureScopeGuard {
+    previous: u64,
+}
+
+impl Drop for CaptureScopeGuard {
+    fn drop(&mut self) {
+        BOUND_CAPTURE_SESSION.set(self.previous);
+    }
+}
+
+fn enter_capture_scope(epoch: u64) -> CaptureScopeGuard {
+    let previous = BOUND_CAPTURE_SESSION.get();
+    BOUND_CAPTURE_SESSION.set(epoch);
+    CaptureScopeGuard { previous }
+}
+
+/// Epoch bound to the current thread's capture scope, if any.
+#[must_use]
+#[doc(hidden)]
+pub fn bound_capture_session() -> u64 {
+    BOUND_CAPTURE_SESSION.get()
+}
+
+/// Inherit a capture session onto the current thread (for `block_on` workers).
+#[doc(hidden)]
+pub fn set_bound_capture_session(epoch: u64) {
+    BOUND_CAPTURE_SESSION.set(epoch);
+}
+
+/// Epoch to stamp on physical plans for the active capture bound to this thread.
+pub(crate) fn stamp_capture_epoch() -> Option<u64> {
+    let bound = BOUND_CAPTURE_SESSION.get();
+    (bound != 0 && capture_enabled() && capture_epoch() == bound).then_some(bound)
+}
+
+fn may_instrument_demand() -> bool {
+    stamp_capture_epoch().is_some()
 }
 
 /// Run one ordinary operation with exclusive aggregate diagnostic capture.
@@ -220,6 +285,10 @@ impl Drop for CaptureDisable {
 /// not mutate the next session: record paths ignore mismatched epochs so
 /// one-hop expand evidence cannot leak into a following optimized two-hop
 /// snapshot (Bazel CI failure mode).
+///
+/// Epoch checks and snapshot mutations share one mutex so a deferred worker
+/// that observed the prior session cannot win a TOCTOU race against `reset`
+/// and append expand counters into the next capture (high-thread CI failure).
 #[doc(hidden)]
 pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
     let _exclusive = CAPTURE_GUARD
@@ -227,34 +296,56 @@ pub fn capture<T>(operation: impl FnOnce() -> T) -> (T, DemandSnapshot) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     reset();
     let disable_on_exit = CaptureDisable;
+    let _scope = enter_capture_scope(capture_epoch());
     let result = operation();
     // Snapshot while this session is still the active epoch, then retire it so
     // any still-alive operator streams cannot append to the next capture.
     let captured = snapshot();
     drop(disable_on_exit);
-    CAPTURE_EPOCH.fetch_add(1, Ordering::SeqCst);
+    retire_epoch();
     (result, captured)
 }
 
 /// Reset and enable fixed-hop demand capture.
 #[doc(hidden)]
 pub fn reset() {
-    CAPTURE_EPOCH.fetch_add(1, Ordering::SeqCst);
-    *CAPTURE.lock().expect("demand stats lock") = DemandSnapshot::default();
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.epoch = state.epoch.saturating_add(1).max(1);
+    state.snapshot = DemandSnapshot::default();
+    state.enabled = true;
+    CAPTURE_EPOCH.store(state.epoch, Ordering::SeqCst);
     CAPTURE_ENABLED.store(true, Ordering::SeqCst);
 }
 
 /// Disable demand capture without discarding the last snapshot.
 #[doc(hidden)]
 pub fn disable() {
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.enabled = false;
     CAPTURE_ENABLED.store(false, Ordering::SeqCst);
+}
+
+fn retire_epoch() {
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.epoch = state.epoch.saturating_add(1).max(1);
+    CAPTURE_EPOCH.store(state.epoch, Ordering::SeqCst);
 }
 
 /// Copy the current fixed-hop demand counters.
 #[must_use]
 #[doc(hidden)]
 pub fn snapshot() -> DemandSnapshot {
-    CAPTURE.lock().expect("demand stats lock").clone()
+    CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .snapshot
+        .clone()
 }
 
 pub(crate) fn capture_enabled() -> bool {
@@ -268,12 +359,15 @@ pub(crate) fn capture_epoch() -> u64 {
     CAPTURE_EPOCH.load(Ordering::Acquire)
 }
 
-fn session_active(epoch: u64) -> bool {
-    capture_enabled() && CAPTURE_EPOCH.load(Ordering::Acquire) == epoch
+fn session_active_locked(state: &CaptureState, epoch: u64) -> bool {
+    state.enabled && state.epoch == epoch
 }
 
 pub(crate) fn session_active_for(epoch: u64) -> bool {
-    session_active(epoch)
+    let state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    session_active_locked(&state, epoch)
 }
 
 /// Preserve physical-plan and memory evidence after execution, including when
@@ -317,29 +411,36 @@ pub(crate) fn record_plan_completion(
     let mut sorts = Vec::new();
     visit(plan, &mut sorts);
     let completion_rss = current_rss_bytes();
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !state.enabled {
+        return;
+    }
     // The physical plan can retain an RSS-probe stream after collection has
     // completed. Treat this ordinary collect-completion boundary as the
     // authoritative release observation for wrappers that have not dropped.
-    for operator in &mut capture.operator_rss {
+    for operator in &mut state.snapshot.operator_rss {
         if operator.after_bytes == 0 {
             operator.after_bytes = completion_rss;
             operator.peak_bytes = operator.peak_bytes.max(completion_rss);
         }
     }
-    capture.sorts = sorts;
-    capture.memory_reserved_before = memory_reserved_before as u64;
-    capture.memory_reserved_after = memory_reserved_after as u64;
-    capture.returned_batch_bytes = returned_batch_bytes as u64;
-    capture.execution_batch_rows = execution_batch_rows as u64;
+    state.snapshot.sorts = sorts;
+    state.snapshot.memory_reserved_before = memory_reserved_before as u64;
+    state.snapshot.memory_reserved_after = memory_reserved_after as u64;
+    state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;
+    state.snapshot.execution_batch_rows = execution_batch_rows as u64;
 }
 
 fn with_hop(epoch: u64, edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
-    if !session_active(epoch) {
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !session_active_locked(&state, epoch) {
         return;
     }
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
-    update(capture.hops.entry(edge_var).or_default());
+    update(state.snapshot.hops.entry(edge_var).or_default());
 }
 
 pub(crate) fn record_input(epoch: u64, edge_var: u32, rows: usize) {
@@ -411,15 +512,21 @@ pub(crate) fn record_emitted(epoch: u64, edge_var: u32, rows: usize) {
 }
 
 fn record_filter(epoch: u64, ordinal: usize, uniqueness: bool, input: bool, rows: usize) {
-    if !session_active(epoch) {
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !session_active_locked(&state, epoch) {
         return;
     }
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
-    let filter = capture.filters.entry(ordinal).or_insert(FilterSnapshot {
-        ordinal,
-        relationship_uniqueness: uniqueness,
-        ..FilterSnapshot::default()
-    });
+    let filter = state
+        .snapshot
+        .filters
+        .entry(ordinal)
+        .or_insert(FilterSnapshot {
+            ordinal,
+            relationship_uniqueness: uniqueness,
+            ..FilterSnapshot::default()
+        });
     if input {
         filter.input_rows += rows as u64;
     } else {
@@ -445,7 +552,8 @@ impl QueryDemand {
             max_in_flight_reads: AtomicUsize::new(0),
             produced_rows: AtomicUsize::new(0),
             quiescent_waker: AtomicWaker::new(),
-            capture_epoch: capture_epoch(),
+            // QueryDemand is only constructed from FixedHopDemandRule inside capture.
+            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
         }
     }
 
@@ -458,8 +566,13 @@ impl QueryDemand {
     }
 
     fn cancel(&self) {
-        if !self.cancelled.swap(true, Ordering::AcqRel) && session_active(self.capture_epoch) {
-            CAPTURE.lock().expect("demand stats lock").cancellations += 1;
+        if !self.cancelled.swap(true, Ordering::AcqRel) {
+            let mut state = CAPTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session_active_locked(&state, self.capture_epoch) {
+                state.snapshot.cancellations += 1;
+            }
         }
     }
 
@@ -478,9 +591,14 @@ impl QueryDemand {
         let current = self.in_flight_reads.fetch_add(1, Ordering::AcqRel) + 1;
         self.max_in_flight_reads
             .fetch_max(current, Ordering::AcqRel);
-        if session_active(self.capture_epoch) {
-            let mut capture = CAPTURE.lock().expect("demand stats lock");
-            capture.max_in_flight_reads = capture.max_in_flight_reads.max(current as u64);
+        {
+            let mut state = CAPTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session_active_locked(&state, self.capture_epoch) {
+                state.snapshot.max_in_flight_reads =
+                    state.snapshot.max_in_flight_reads.max(current as u64);
+            }
         }
         if self.is_cancelled() {
             self.finish_read();
@@ -638,17 +756,20 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
         };
         let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
-            if capture_enabled() {
+            if may_instrument_demand() {
                 let mut rss_ordinal = 0;
                 return instrument_operator_rss(plan, &mut rss_ordinal);
             }
             return Ok(plan);
         };
         if !contains_demand_expand(&plan) {
-            if capture_enabled() {
+            if may_instrument_demand() {
                 let mut rss_ordinal = 0;
                 return instrument_operator_rss(plan, &mut rss_ordinal);
             }
+            return Ok(plan);
+        }
+        if !may_instrument_demand() {
             return Ok(plan);
         }
         let demand = Arc::new(QueryDemand::new());
@@ -728,7 +849,7 @@ impl RssProbeExec {
             input,
             ordinal,
             operator,
-            capture_epoch: capture_epoch(),
+            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
         }
     }
 
@@ -802,26 +923,31 @@ impl ExecutionPlan for RssProbeExec {
         let stream = self.input.execute(partition, context)?;
         let epoch = self.capture_epoch;
         let before = current_rss_bytes();
-        if session_active(epoch) {
-            let mut capture = CAPTURE.lock().expect("demand stats lock");
-            if let Some(operator) = capture
-                .operator_rss
-                .iter_mut()
-                .find(|operator| operator.ordinal == self.ordinal)
-            {
-                operator.before_bytes = match (operator.before_bytes, before) {
-                    (0, value) | (value, 0) => value,
-                    (left, right) => left.min(right),
-                };
-                operator.peak_bytes = operator.peak_bytes.max(before);
-            } else {
-                capture.operator_rss.push(OperatorRssSnapshot {
-                    ordinal: self.ordinal,
-                    operator: self.operator,
-                    before_bytes: before,
-                    peak_bytes: before,
-                    after_bytes: 0,
-                });
+        {
+            let mut state = CAPTURE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session_active_locked(&state, epoch) {
+                if let Some(operator) = state
+                    .snapshot
+                    .operator_rss
+                    .iter_mut()
+                    .find(|operator| operator.ordinal == self.ordinal)
+                {
+                    operator.before_bytes = match (operator.before_bytes, before) {
+                        (0, value) | (value, 0) => value,
+                        (left, right) => left.min(right),
+                    };
+                    operator.peak_bytes = operator.peak_bytes.max(before);
+                } else {
+                    state.snapshot.operator_rss.push(OperatorRssSnapshot {
+                        ordinal: self.ordinal,
+                        operator: self.operator,
+                        before_bytes: before,
+                        peak_bytes: before,
+                        after_bytes: 0,
+                    });
+                }
             }
         }
         Ok(Box::pin(RssProbeStream {
@@ -863,12 +989,15 @@ impl RecordBatchStream for RssProbeStream {
 }
 
 fn record_operator_rss(epoch: u64, ordinal: usize, released: bool) {
-    if !session_active(epoch) {
+    let rss = current_rss_bytes();
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !session_active_locked(&state, epoch) {
         return;
     }
-    let rss = current_rss_bytes();
-    let mut capture = CAPTURE.lock().expect("demand stats lock");
-    if let Some(operator) = capture
+    if let Some(operator) = state
+        .snapshot
         .operator_rss
         .iter_mut()
         .find(|operator| operator.ordinal == ordinal)
@@ -1147,7 +1276,7 @@ impl ProbeExec {
     ) -> Self {
         let props = Arc::clone(input.properties());
         Self {
-            capture_epoch: capture_epoch(),
+            capture_epoch: stamp_capture_epoch().unwrap_or_else(capture_epoch),
             input,
             ordinal,
             uniqueness,
@@ -1420,7 +1549,6 @@ mod tests {
         };
 
         // Process-global capture must not interleave with other capture users.
-        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
         let _guard = CAPTURE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1547,7 +1675,6 @@ mod tests {
 
     #[test]
     fn stale_capture_epoch_cannot_pollute_next_session() {
-        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
         let _guard = CAPTURE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1589,7 +1716,6 @@ mod tests {
 
     #[test]
     fn plan_stamped_epoch_ignores_later_global_epoch() {
-        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
         let _guard = CAPTURE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1618,6 +1744,76 @@ mod tests {
         assert_eq!(hop.input_rows, 0);
         assert_eq!(hop.candidates_generated, 0);
         assert!(second.operator_rss.is_empty());
+    }
+
+    #[test]
+    fn deferred_record_cannot_win_reset_toctou() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut stale_epoch = 0_u64;
+        let ((), _first) = capture(|| {
+            stale_epoch = capture_epoch();
+            record_input(stale_epoch, 1, 1024);
+            record_candidates(stale_epoch, 1, 4310);
+            record_emitted(stale_epoch, 1, 4300);
+        });
+
+        // Hold CAPTURE so a deferred writer can pass an out-of-lock epoch check
+        // against the retired session, then observe reset under the same lock.
+        let barrier = Arc::new(Barrier::new(2));
+        let stale = stale_epoch;
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = thread::spawn(move || {
+            // Wait until the main thread is inside the next capture session.
+            writer_barrier.wait();
+            record_input(stale, 1, 1024);
+            record_candidates(stale, 1, 4310);
+            record_emitted(stale, 1, 4300);
+            record_operator_rss(stale, 0, true);
+        });
+
+        let ((), second) = capture(|| {
+            let live = capture_epoch();
+            assert_ne!(live, stale_epoch);
+            record_emitted(live, 1, 1000);
+            barrier.wait();
+            // Give the deferred writer a chance to race against this session.
+            thread::yield_now();
+            thread::sleep(std::time::Duration::from_millis(10));
+        });
+        writer.join().expect("deferred writer");
+
+        let hop = &second.hops[&1];
+        assert_eq!(hop.rows_emitted, 1000);
+        assert_eq!(hop.input_rows, 0);
+        assert_eq!(hop.candidates_generated, 0);
+        assert!(second.operator_rss.is_empty());
+    }
+
+    #[test]
+    fn stamp_capture_epoch_requires_bound_session() {
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        disable();
+        assert!(stamp_capture_epoch().is_none());
+        let ((), _captured) = capture(|| {
+            assert_eq!(stamp_capture_epoch(), Some(capture_epoch()));
+            // Unbound peer thread must not stamp the live session.
+            let live = capture_epoch();
+            let peer = std::thread::spawn(move || {
+                assert!(stamp_capture_epoch().is_none());
+                assert_ne!(bound_capture_session(), live);
+            });
+            peer.join().expect("peer");
+        });
+        assert!(stamp_capture_epoch().is_none());
     }
 
     #[test]
