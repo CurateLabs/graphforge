@@ -158,6 +158,13 @@ are byte-identical, and 1x/2x/4x ordinal work remains a linear constant factor
 of candidates examined. A bounded RSS result does not pass if logical reads
 grow as expansion chunks multiplied by graph size.
 
+## OVHC-AGENCY host execution (#900 / #1087)
+
+The designated SUT is **OVHC-AGENCY** under profile `local-linux-cgroups-v2`.
+Use `make -C benchmarks progressive-host-ladder-run` with an ext4 work root
+under the process-root filesystem. Prefer that path over disposable Fly
+provider execution. See `benchmarks/README.md` (OVHC-AGENCY host ladder).
+
 ## Commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /

@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim
 
 install:
 	uv sync --locked
@@ -112,3 +112,33 @@ ingest-ladder-bundle: install
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.ladder_bundle_ingest \
 		--source "$(SOURCE)" $(if $(DESTINATION),--destination "$(DESTINATION)",) \
 		$(if $(filter 1 true yes,$(VALIDATE_ONLY)),--validate-only,)
+
+# OVHC-AGENCY / local-linux-cgroups-v2 host ladder (no Fly). WORK_ROOT must share
+# the process-root filesystem device with `/` (ext4 on this host).
+progressive-host-ladder-plan: install progressive-qualification-binaries
+	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" --dry-run \
+		--gf "$(CURDIR)/../target/release/gf" \
+		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
+		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
+		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
+
+progressive-host-ladder-run: install progressive-qualification-binaries
+	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
+		--gf "$(CURDIR)/../target/release/gf" \
+		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
+		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
+		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
+
+progressive-host-ladder-inventory: install
+	test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+		--inventory --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)"
+
+progressive-host-ladder-reclaim: install
+	test -n "$(RUNG_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+		--reclaim "$(RUNG_SCALE)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)"

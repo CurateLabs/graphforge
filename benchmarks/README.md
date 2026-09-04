@@ -300,6 +300,41 @@ particular, macOS and Docker Desktop do not prove native Linux admission and
 must not be used as substitutes. This probe creates no Fly resources and does
 not authorize a Graph500 scale run.
 
+## OVHC-AGENCY host ladder (`local-linux-cgroups-v2`)
+
+Issue #900/#745 certify on dedicated host **OVHC-AGENCY** under BenchExec
+cgroups v2. Disposable Fly execution remains optional offline tooling and is
+not the close path.
+
+Prepare controllers once (root), then admit and run as the unprivileged user:
+
+```bash
+sudo benchmarks/scripts/prepare-ovhc-agency-host.sh
+# After first install, reboot or recreate the user manager so Delegate=yes applies.
+mkdir -p "$HOME/graphforge-ladder"/{evidence,workspace,tmp}
+WORK_ROOT=$HOME/graphforge-ladder
+OUTPUT_DIR=$WORK_ROOT/evidence
+# Admission (must pass before ladder execution):
+GRAPHFORGE_ADMISSION_EVIDENCE=$PWD/benchmarks/outputs/local-admission-evidence.json GRAPHFORGE_EXPECTED_UID=$(id -u) GRAPHFORGE_SYSTEMD_SCOPE_MODE=user GRAPHFORGE_SYSTEMD_SCOPE=gf-admit.scope   systemd-run --user --scope --slice=benchexec -p Delegate=yes --unit=gf-admit   "$PWD/benchmarks/scripts/run-delegated-local-admission.sh"
+```
+
+Execute rungs sequentially. `WORK_ROOT` must share the process-root filesystem
+device with `/` (ext4 on OVHC-AGENCY). Do not use `/tmp` (tmpfs).
+
+```bash
+make -C benchmarks progressive-host-ladder-run   RUNG=S18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
+# after accepted evidence:
+make -C benchmarks progressive-host-ladder-reclaim   RUNG_SCALE=18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
+# S20+ also requires:
+#   HOST_CAPACITY=benchmarks/fixtures/progressive/ovhc-agency-host-capacity.json
+```
+
+Terminal teardown proof:
+
+```bash
+make -C benchmarks progressive-host-ladder-inventory   OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
+```
+
 ## Progressive Graph500 qualification
 
 `profiles/graph500/` contains distinct declarative S18 and S19 local profiles

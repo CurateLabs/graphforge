@@ -461,9 +461,9 @@ def _authority_staging_parent(output_dir: Path) -> Path | None:
     return None
 
 
-def _benchexec_tool_directory(stage: Path) -> Path:
+def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Path:
     """Prefer image-local executables once staged identity checks have passed."""
-    if _provider_volume_mounted():
+    if prefer_stage or _provider_volume_mounted():
         return stage / "bin"
     local = Path("/usr/local/bin")
     try:
@@ -485,8 +485,8 @@ def _benchexec_memory_limit() -> list[str]:
     return []
 
 
-def _benchexec_container_flags(stage: Path) -> list[str]:
-    """Configure BenchExec container mounts for durable provider-volume runs."""
+def _benchexec_container_flags(stage: Path, *, durable_root: Path | None = None) -> list[str]:
+    """Configure BenchExec container mounts for durable provider/host work roots."""
     if _provider_volume_mounted():
         return [
             "--read-only-dir",
@@ -498,17 +498,35 @@ def _benchexec_container_flags(stage: Path) -> list[str]:
             "--full-access-dir",
             "/work",
         ]
+    if durable_root is not None:
+        return [
+            "--read-only-dir",
+            "/",
+            "--hidden-dir",
+            "/run",
+            "--hidden-dir",
+            "/tmp",
+            "--full-access-dir",
+            str(durable_root.resolve()),
+        ]
     if stage.is_dir():
         return ["--full-access-dir", str(stage.resolve())]
     return []
 
 
-def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
+def _run_benchexec(
+    stage: Path,
+    executables: Executables,
+    identities: Mapping[str, Any],
+    *,
+    durable_root: Path | None = None,
+    home: Path | None = None,
+) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = _bench_home(stage)
+    resolved_home = home or _bench_home(stage)
     environment = {
-        "HOME": str(home),
+        "HOME": str(resolved_home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
@@ -516,12 +534,16 @@ def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[st
     }
     if _provider_volume_mounted():
         (Path("/work") / "tmp").mkdir(exist_ok=True)
-        environment["TMPDIR"] = str(home / "tmp")
+        environment["TMPDIR"] = str(resolved_home / "tmp")
+    elif durable_root is not None:
+        tmp = durable_root / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        environment["TMPDIR"] = str(tmp)
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
-        str(_benchexec_tool_directory(stage)),
-        *_benchexec_container_flags(stage),
+        str(_benchexec_tool_directory(stage, prefer_stage=durable_root is not None)),
+        *_benchexec_container_flags(stage, durable_root=durable_root),
         *_benchexec_memory_limit(),
         "--no-compress-results",
         "--outputpath",
