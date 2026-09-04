@@ -1,4 +1,4 @@
-//! UUIDv7 generation and Arrow/Parquet serialisation helpers.
+//! UUID generation, deterministic derivation, and Arrow/Parquet serialisation helpers.
 //!
 //! All write paths (CREATE, MERGE, batch ingest, provenance) mint UUIDv7
 //! identifiers for new first-class objects.  Centralising generation here keeps
@@ -32,6 +32,49 @@ pub const PROVENANCE_NAMESPACE: Uuid = Uuid::from_bytes([
 #[must_use]
 pub fn new_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
     Uuid::new_v5(namespace, name)
+}
+
+/// Derive the portable-v1 imported generation from its caller-owned operation.
+/// The versioned name is a persisted compatibility contract.
+#[must_use]
+pub fn portable_import_generation(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-import-generation/1")
+}
+
+/// Derive the portable-v2 imported generation in a separate versioned domain.
+#[must_use]
+pub fn portable_v2_import_generation(operation: &Uuid) -> Uuid {
+    new_v5(operation, b"graphforge-portable-v2-import-generation/1")
+}
+
+/// Derive one composite delta operation using its original mutation index.
+/// The slash separates the versioned domain from the unambiguous decimal index.
+#[must_use]
+pub fn composite_delta_operation(operation: &Uuid, index: usize) -> Uuid {
+    new_v5(
+        operation,
+        format!("graphforge-composite-delta-operation/1/{index}").as_bytes(),
+    )
+}
+
+/// Derive the composite delta run from its transaction identity.
+#[must_use]
+pub fn composite_delta_run(transaction: &Uuid) -> Uuid {
+    new_v5(transaction, b"graphforge-composite-delta-run/1")
+}
+
+/// Derive a hub clone operation using the historical URL namespace and name.
+///
+/// `repository` must be the validated canonical `owner/repository` identity
+/// (whose slugs cannot contain `:`), and `immutable_version` the verified package
+/// version. The colon therefore separates the components unambiguously. Preserve
+/// this legacy domain: adding a new prefix would change existing retry identities.
+#[must_use]
+pub fn hub_clone_operation(repository: &str, immutable_version: &str) -> Uuid {
+    new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("{repository}:{immutable_version}").as_bytes(),
+    )
 }
 
 /// Convert a [`Uuid`] into its 16-byte big-endian form, suitable for an Arrow
@@ -96,6 +139,82 @@ mod tests {
         assert_eq!(first, new_v5(&namespace, b"graphforge"));
         assert_ne!(first, new_v5(&namespace, b"GraphForge"));
         assert_eq!(first.get_version_num(), 5);
+    }
+
+    #[test]
+    fn persisted_derivation_golden_vectors() {
+        // Frozen from the original namespace/name pairs, independently calculated
+        // with Python uuid.uuid5. Compare bytes to protect persisted identities.
+        let operation = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        let version_a = format!("sha256:{}", "a".repeat(64));
+        let version_b = format!("sha256:{}", "b".repeat(64));
+        let vectors = [
+            (
+                portable_import_generation(&operation),
+                "02abd337-e93c-56a3-bf8f-dadbb5b1e8d5",
+            ),
+            (
+                portable_v2_import_generation(&operation),
+                "167a58d3-52f2-533e-b3c4-01d743d7537d",
+            ),
+            (
+                composite_delta_operation(&operation, 0),
+                "bf613aba-38a4-5ae7-8982-1675caa13e7c",
+            ),
+            (
+                composite_delta_operation(&operation, 1),
+                "dcffd77e-a011-5480-8fb3-8493d22ff8be",
+            ),
+            (
+                composite_delta_operation(&operation, 10),
+                "de381822-c256-5bf9-904f-25692a6b6c7e",
+            ),
+            (
+                composite_delta_run(&operation),
+                "d230eba6-b8a4-549e-b032-888112a9fc62",
+            ),
+            (
+                hub_clone_operation("curatelabs/demo", &version_a),
+                "e6caa879-f226-55fc-9d67-41c15b8f9658",
+            ),
+            (
+                hub_clone_operation("curatelabs/demo", &version_b),
+                "db3c36b4-97ee-57bb-ac63-995c79fb577b",
+            ),
+            (
+                hub_clone_operation("curatelabs/other", &version_a),
+                "29ea96be-d350-5026-a85b-32cbf5b835cc",
+            ),
+            (
+                new_v5(&PROVENANCE_NAMESPACE, b"graphforge"),
+                "59a64d29-3fe8-5c2c-ad21-1f285e53d758",
+            ),
+        ];
+        let mut unique = std::collections::HashSet::new();
+        for (actual, expected) in vectors {
+            assert_eq!(
+                actual.as_bytes(),
+                Uuid::parse_str(expected).unwrap().as_bytes()
+            );
+            assert!(unique.insert(actual), "derivation domains collided");
+        }
+        let other_operation = Uuid::from_bytes([7; 16]);
+        assert_ne!(
+            portable_import_generation(&operation),
+            portable_import_generation(&other_operation)
+        );
+        assert_ne!(
+            portable_v2_import_generation(&operation),
+            portable_v2_import_generation(&other_operation)
+        );
+        assert_ne!(
+            composite_delta_operation(&operation, 0),
+            composite_delta_operation(&other_operation, 0)
+        );
+        assert_ne!(
+            composite_delta_run(&operation),
+            composite_delta_run(&other_operation)
+        );
     }
 
     #[test]

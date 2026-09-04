@@ -85,9 +85,9 @@ fn eligible_delta_operations(
             ),
             _ => return Ok(None),
         };
-        let operation_uuid = Uuid::new_v5(
+        let operation_uuid = graphforge_core::uuid::composite_delta_operation(
             &request.context.operation_uuid.0,
-            format!("graphforge-composite-delta-operation/1/{index}").as_bytes(),
+            index,
         );
         operations.push(graphforge_storage::GraphDeltaOp {
             operation_uuid,
@@ -285,24 +285,23 @@ impl GraphForge {
             // Select the storage route from explicit typed input before the
             // private workspace is mutated. Capacity exhaustion deliberately
             // falls back to canonical full-Parquet publication.
-            let prepared_delta = if !optimistic
-                && let Some(operations) = eligible_delta_operations(request)?
-            {
-                let delta_request = graphforge_storage::GraphDeltaPublishRequest {
-                    transaction_uuid,
-                    generation_uuid,
-                    run_uuid: Uuid::new_v5(&transaction_uuid, b"graphforge-composite-delta-run/1"),
-                    operations,
-                    limits: graphforge_storage::GraphDeltaJournalLimits::default(),
+            let prepared_delta =
+                if !optimistic && let Some(operations) = eligible_delta_operations(request)? {
+                    let delta_request = graphforge_storage::GraphDeltaPublishRequest {
+                        transaction_uuid,
+                        generation_uuid,
+                        run_uuid: graphforge_core::uuid::composite_delta_run(&transaction_uuid),
+                        operations,
+                        limits: graphforge_storage::GraphDeltaJournalLimits::default(),
+                    };
+                    match graphforge_storage::prepare_graph_delta(parent, &delta_request) {
+                        Ok(prepared) => Some(prepared),
+                        Err(error) if error.code() == "GF_RESOURCE_LIMIT" => None,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    None
                 };
-                match graphforge_storage::prepare_graph_delta(parent, &delta_request) {
-                    Ok(prepared) => Some(prepared),
-                    Err(error) if error.code() == "GF_RESOURCE_LIMIT" => None,
-                    Err(error) => return Err(error),
-                }
-            } else {
-                None
-            };
             let property_inventory =
                 crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
             apply_graph_mutations(

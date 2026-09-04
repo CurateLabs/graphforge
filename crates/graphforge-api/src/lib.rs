@@ -198,6 +198,7 @@ pub use graphforge_core::embedding_options::{
     GraphSageOptions, HashGnnOptions, Node2VecOptions,
 };
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
+pub use graphforge_core::uuid::hub_clone_operation;
 pub use graphforge_core::{
     AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError, NodeHandle,
     NodeSelector, OntologyFormat, OntologyMode, PathsOptions, ProjectErrorCode, PropValue,

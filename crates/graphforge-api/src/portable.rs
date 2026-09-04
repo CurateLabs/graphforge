@@ -482,10 +482,8 @@ impl GraphForge {
         project_root: &Path,
         request: &PortableImportRequest,
     ) -> Result<PortableImportResult, GfError> {
-        let generation_uuid = Uuid::new_v5(
-            &request.operation_id.0,
-            b"graphforge-portable-import-generation/1",
-        );
+        let generation_uuid =
+            graphforge_core::uuid::portable_import_generation(&request.operation_id.0);
         let receipt = graphforge_storage::import_portable_project_file(
             &request.input,
             project_root,
@@ -519,10 +517,8 @@ impl GraphForge {
         request: &PortableV2ImportRequest,
         cancelled: Option<&AtomicBool>,
     ) -> Result<PortableV2ImportResult, graphforge_storage::PortableV2Error> {
-        let generation_uuid = Uuid::new_v5(
-            &request.operation_id.0,
-            b"graphforge-portable-v2-import-generation/1",
-        );
+        let generation_uuid =
+            graphforge_core::uuid::portable_v2_import_generation(&request.operation_id.0);
         let receipt = graphforge_storage::import_complete_portable_v2(
             &request.input,
             project_root,

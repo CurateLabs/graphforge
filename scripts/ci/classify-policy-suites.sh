@@ -132,6 +132,7 @@ while IFS= read -r -d '' path; do
       cli_publish=true
       ;;
     scripts/ci/check-domain-dependencies.py | scripts/ci/test-domain-dependencies.py | \
+      scripts/ci/test-uuid-derivation-policy.py | \
       docs/adr/0014-* | Cargo.toml | crates/*/Cargo.toml)
       domain_dependencies=true
       ;;
