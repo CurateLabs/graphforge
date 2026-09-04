@@ -542,8 +542,10 @@ def _benchexec_container_flags(stage: Path, *, durable_root: Path | None = None)
             "/work",
         ]
     if durable_root is not None:
+        # Keep TMPDIR off the full-access work root: fuse-overlayfs deadlocks when
+        # the container temp directory is also marked full-access.
         return [
-            "--overlay-dir",
+            "--read-only-dir",
             "/",
             "--hidden-dir",
             "/run",
@@ -579,9 +581,9 @@ def _run_benchexec(
         (Path("/work") / "tmp").mkdir(exist_ok=True)
         environment["TMPDIR"] = str(resolved_home / "tmp")
     elif durable_root is not None:
-        tmp = durable_root / "tmp"
-        tmp.mkdir(parents=True, exist_ok=True)
-        environment["TMPDIR"] = str(tmp)
+        # Intentionally leave TMPDIR unset / default-hidden so fuse-overlayfs
+        # (or namespace temp) is not placed under the full-access work root.
+        environment.pop("TMPDIR", None)
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
