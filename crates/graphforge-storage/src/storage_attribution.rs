@@ -738,13 +738,22 @@ impl StorageAttributionSnapshot {
     /// Validate the stricter scale-qualification contract.
     ///
     /// Qualification is fail-closed when any retained graph artifact remains
-    /// in [`ArtifactCategory::Other`].
+    /// in [`ArtifactCategory::Other`], or when any category reports more
+    /// physical objects than logical references.
     pub fn validate_for_qualification(&self) -> Result<(), GfError> {
         self.validate_reconciliation()?;
         if !self.is_fully_classified() {
             return Err(validation(
                 "storage attribution contains unclassified retained artifacts",
             ));
+        }
+        for category in ArtifactCategory::ALL {
+            let totals = &self.categories[&category];
+            if totals.physical_objects > totals.logical_references {
+                return Err(validation(
+                    "storage attribution category physical identities contradict",
+                ));
+            }
         }
         Ok(())
     }
@@ -851,8 +860,12 @@ pub fn capture_storage_attribution(
                     Ok(bytes)
                 },
             )?;
+            // Graph-manifest CAS chunks are retained catalog artifacts. Count each
+            // as a logical reference before attributing its physical identity so
+            // category reconciliation cannot report physical_objects without refs.
             for (digest, length) in manifest_objects {
                 let object = lease.open(&digest, length)?;
+                accumulator.add_logical(ArtifactCategory::CatalogAndManifests, length)?;
                 accumulator.add_physical(
                     ArtifactCategory::CatalogAndManifests,
                     object.as_ref(),
@@ -1185,6 +1198,78 @@ mod tests {
         };
         assert!(snapshot.validate_reconciliation().is_ok());
         assert!(snapshot.validate_for_qualification().is_err());
+    }
+
+    #[test]
+    fn qualification_rejects_category_physical_without_logical_refs() {
+        let mut categories: BTreeMap<_, _> = ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| (category, ArtifactStorageTotals::default()))
+            .collect();
+        categories
+            .get_mut(&ArtifactCategory::CatalogAndManifests)
+            .unwrap()
+            .physical_objects = 2;
+        categories
+            .get_mut(&ArtifactCategory::CatalogAndManifests)
+            .unwrap()
+            .logical_references = 1;
+        let snapshot = StorageAttributionSnapshot {
+            generation_uuid: uuid::Uuid::nil(),
+            generation_manifest_sha256: [0; 32],
+            categories,
+            logical_references: 1,
+            logical_bytes: 0,
+            physical_objects: 2,
+            physical_logical_bytes: 0,
+            allocated_bytes: 0,
+            physical_identity_allocated_bytes: BTreeMap::from([
+                ("dev:a".to_owned(), 0),
+                ("dev:b".to_owned(), 0),
+            ]),
+        };
+        assert!(snapshot.validate_reconciliation().is_ok());
+        assert!(snapshot.validate_for_qualification().is_err());
+    }
+
+    #[test]
+    fn compact_v2_catalog_manifest_objects_have_matching_logical_refs() {
+        // Durable project admission rejects tmpfs; keep the fixture on the build
+        // target volume (ext4 on OVHC-AGENCY / CI runners).
+        let scratch = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let project = tempfile::TempDir::new_in(&scratch).unwrap();
+        let workspace = tempfile::TempDir::new_in(&scratch).unwrap();
+        let topology = workspace.path().join("topology").join("nodes");
+        std::fs::create_dir_all(&topology).unwrap();
+        // Enough inventory entries that the compact graph-files root spans multiple
+        // CAS objects (the OVHC-AGENCY S18 failure mode).
+        for index in 0..64 {
+            std::fs::write(
+                topology.join(format!("{index}.parquet")),
+                format!("compact-catalog-fixture-{index}"),
+            )
+            .unwrap();
+        }
+        let _ = crate::open_or_initialize_project(project.path()).unwrap();
+        let generation = publish_compact_fixture(project.path(), workspace.path());
+        let snapshot = capture_storage_attribution(&generation).unwrap();
+        snapshot.validate_reconciliation().unwrap();
+        snapshot.validate_for_qualification().unwrap();
+        let catalog = &snapshot.categories[&ArtifactCategory::CatalogAndManifests];
+        assert!(
+            catalog.physical_objects > 1,
+            "fixture must exercise multi-object catalog manifests; got {}",
+            catalog.physical_objects
+        );
+        assert!(
+            catalog.physical_objects <= catalog.logical_references,
+            "catalog physical_objects={} exceeded logical_references={}",
+            catalog.physical_objects,
+            catalog.logical_references
+        );
     }
 
     #[test]
