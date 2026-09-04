@@ -7,6 +7,9 @@
 
 ## Overview
 
+The native directory authority, lifecycle policy, and adversarial checks are
+documented in [Directory capabilities](directory-capabilities.md).
+
 GraphForge uses a **pluggable storage provider** model. No provider is the semantic owner of the query language. All providers implement a common Rust trait and are selected at runtime based on the use case.
 
 ```rust

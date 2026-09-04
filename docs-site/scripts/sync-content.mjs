@@ -70,6 +70,7 @@ const PAGES = [
   'book/architecture/overview.md',
   'book/architecture/graphforge-vs-neo4j-gds.md',
   'book/architecture/storage.md',
+  'book/architecture/directory-capabilities.md',
   'book/architecture/concurrency-recovery.md',
   'book/architecture/project-format-compatibility.md',
   'book/architecture/portable-project-v2.md',

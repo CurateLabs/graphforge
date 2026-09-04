@@ -1678,6 +1678,10 @@ fn unsupported(phase: &'static str, cause: &'static str) -> GfError {
 mod tests {
     use super::*;
 
+    mod directory_capability_conformance {
+        include!("directory_capability_conformance.rs");
+    }
+
     fn canonical_tempdir() -> tempfile::TempDir {
         let base = std::env::temp_dir().canonicalize().unwrap();
         tempfile::tempdir_in(base).unwrap()
