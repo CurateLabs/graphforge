@@ -19,6 +19,22 @@ pub trait StorageProvider: Send + Sync {
 
 ---
 
+## Value contract and current dependencies
+
+`graphforge-storage` currently depends on both `graphforge-ir` and
+`graphforge-ontology` in production. Its writer and GFDR journal consume
+`IrLiteral`; catalog and topology paths consume IR's runtime catalog and tagged
+IDs; ontology/composition adapters supply semantic binding validation. Storage
+is therefore not yet independent of compiler-owned value definitions.
+
+[ADR 0025](../../adr/0025-storage-value-contract.md) chooses `graphforge-value`
+for the shared value/ID/catalog encoding contract; extraction is pending in
+#1011 and #1012. Storage retains physical schemas, I/O, and project admission.
+Moving definitions must preserve existing bytes and public Arrow layouts.
+`graphforge.ir_version` metadata is descriptive and does not admit a project:
+container, participant and value compatibility use their own checked contracts.
+See [project format compatibility](project-format-compatibility.md).
+
 ## Provider Role: Parquet
 
 Parquet is the sole storage provider for the Rust core. It:

@@ -52,6 +52,19 @@ plus bindings in the same generation. A missing or mismatched authority fails
 before publication; import never drops the bindings or fabricates composition
 state.
 
+## Shared value contract extraction for v0.6.0
+
+[ADR 0025](../../adr/0025-storage-value-contract.md) separates compiler IR
+versioning from persisted ID/value/catalog schemas. The current container
+marker is `graphforge-project/v1\n`, distinct from the product version.
+`IrVersion` is result metadata, not a project-open compatibility gate. The
+planned extraction in #1011/#1012 preserves current integer, Arrow and serde
+encodings; it introduces no automatic migration or mandatory new metadata for
+existing supported projects. Unknown versions and malformed values must fail
+through shared checked decoders without rewriting committed authority. The
+ADR identifies the required catalog/value admission and durable reopen tests;
+it does not claim those follow-up changes are already implemented.
+
 ## Knowledge-layer implementation boundary
 
 The knowledge layer starts from the v0.5 graph and project contracts on `main`.
