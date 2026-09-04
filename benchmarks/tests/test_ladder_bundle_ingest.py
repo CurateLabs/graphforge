@@ -73,6 +73,17 @@ class LadderBundleIngestTests(unittest.TestCase):
         self.assertEqual(report["manifest_commit"], COMMIT)
         self.assertEqual(report["rung_files"], ["s18-rung.json"])
 
+    def test_historical_controller_result_names_do_not_select_native_schema(self) -> None:
+        for schema in (
+            "graphforge-progressive-run-result/1",
+            "graphforge-progressive-provider-run-result/1",
+        ):
+            with self.subTest(schema=schema):
+                (self.source / "s18-result.json").write_text(json.dumps({"schema": schema}))
+                self.assertEqual(
+                    validate_ladder_bundle(self.source)["rung_files"], ["s18-rung.json"]
+                )
+
     def test_validate_refuses_missing_manifest(self) -> None:
         (self.source / "manifest.json").unlink()
         with self.assertRaises(LadderBundleIngestError):
@@ -111,8 +122,11 @@ class ParityGateHarnessAuthorityTests(unittest.TestCase):
                 for row in status["criteria"]
                 if row["name"] == "harness_authoritative_after_ladder_comparison"
             )
-            self.assertTrue(harness["met"])
-            self.assertIsNone(harness["blocked_by"])
+            self.assertFalse(harness["met"])
+            self.assertEqual(harness["blocked_by"], "#900")
+            self.assertTrue(status["prefix_parity_ready"])
+            self.assertFalse(status["full_ladder_evidence_complete"])
+            self.assertNotIn("ready_for_retirement", status)
 
 
 if __name__ == "__main__":

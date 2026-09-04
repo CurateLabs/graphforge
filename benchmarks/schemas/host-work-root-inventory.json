@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-host-work-root-inventory-schema/2",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "graphforge-host-work-root-inventory/2"
+    },
+    "host_profile_id": {
+      "const": "local-linux-cgroups-v2"
+    },
+    "scope": {
+      "const": "work_root_except_evidence_and_empty_scaffolding"
+    },
+    "retained_evidence_directory": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[^/\\\\]+$"
+    },
+    "result_sha256": {
+      "type": "object",
+      "patternProperties": {
+        "^s(18|19|20|22|24|25|26)-result\\.json$": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+      }
+    },
+    "empty": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema",
+    "host_profile_id",
+    "scope",
+    "retained_evidence_directory",
+    "result_sha256",
+    "entries",
+    "empty"
+  ]
+}

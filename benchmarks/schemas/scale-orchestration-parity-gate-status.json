@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-scale-orchestration-parity-gate-status-schema/1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "graphforge-scale-orchestration-parity-gate-status/1"
+    },
+    "structural_retirement_ready": { "type": "boolean" },
+    "prefix_parity_ready": { "type": "boolean" },
+    "full_ladder_evidence_complete": { "type": "boolean" },
+    "accepted_differences_schema": {
+      "const": "graphforge-scale-orchestration-accepted-differences/1"
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "$ref": "#/$defs/criterion" }
+    }
+  },
+  "required": [
+    "schema",
+    "structural_retirement_ready",
+    "prefix_parity_ready",
+    "full_ladder_evidence_complete",
+    "accepted_differences_schema",
+    "criteria"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "criterion": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,80}$"
+        },
+        "met": { "type": "boolean" },
+        "blocked_by": {
+          "type": ["string", "null"],
+          "maxLength": 120
+        },
+        "evidence": {
+          "type": ["string", "null"],
+          "maxLength": 1024
+        }
+      },
+      "required": ["name", "met", "blocked_by", "evidence"],
+      "additionalProperties": false
+    }
+  }
+}
