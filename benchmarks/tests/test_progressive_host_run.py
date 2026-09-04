@@ -196,9 +196,7 @@ class ProgressiveHostRunTests(unittest.TestCase):
                 generator=generator,
                 benchexec_python=python,
             )
-            with patch(
-                "graphforge_bench.progressive_host_run.version", return_value="3.35"
-            ):
+            with patch("graphforge_bench.progressive_host_run.version", return_value="3.35"):
                 plan = build_plan(
                     root=ROOT,
                     output_dir=output,
