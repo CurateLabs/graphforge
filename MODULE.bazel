@@ -27,6 +27,20 @@ use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+# Bazel models the Python distribution cdylib. Keep its extension-only build
+# environment explicit instead of enabling a Cargo feature for all Rust tests.
+crate.annotation(
+    crate = "pyo3",
+    build_script_env = {"PYO3_BUILD_EXTENSION_MODULE": "1"},
+)
+crate.annotation(
+    crate = "pyo3-build-config",
+    build_script_env = {"PYO3_BUILD_EXTENSION_MODULE": "1"},
+)
+crate.annotation(
+    crate = "pyo3-ffi",
+    build_script_env = {"PYO3_BUILD_EXTENSION_MODULE": "1"},
+)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",

@@ -535,6 +535,11 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Validate Python test and extension build modes
+        run: |
+          python3 scripts/ci/python-build-mode-check.py
+          python3 scripts/ci/test-python-build-mode-check.py
+
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
 

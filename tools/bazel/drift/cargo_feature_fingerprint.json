@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "7bff132d4c674e4bdc233fd065ffb378e9512889b36ca1316fdd40033b9a4e13",
+  "sha256": "0e8388776ea735062c4becc7eb3ef7200fbb16b15d36ceae80b74286a1326a4d",
   "entries": [
     {
       "name": "graphforge-api",
@@ -442,7 +442,9 @@
     {
       "name": "graphforge-bindings-py",
       "version": "0.5.2",
-      "features": [],
+      "features": [
+        "extension-module"
+      ],
       "dependencies": [
         {
           "name": "arrow",
@@ -487,8 +489,7 @@
           "name": "pyo3",
           "req": "^0.28",
           "features": [
-            "abi3-py310",
-            "extension-module"
+            "abi3-py310"
           ],
           "optional": false,
           "uses_default_features": true,

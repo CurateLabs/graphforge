@@ -64,10 +64,9 @@ tantivy = { version = "=0.26.1", default-features = false, features = ["mmap", "
 lalrpop-util = "0.23"
 logos = "0.16"
 
-# Python binding. NOTE: the `extension-module` feature is scoped to the
-# `graphforge-bindings-py` crate (not enabled here), because it suppresses libpython
-# linkage for ALL crates that share this workspace dep — which would break
-# `cargo test`/embedded-Python use elsewhere.
+# Python binding. Distribution-only extension mode is an opt-in feature of
+# graphforge-bindings-py. It must not enter the default workspace feature graph:
+# Cargo unification would suppress libpython linkage for Rust test executables.
 pyo3 = { version = "0.28" }
 
 # Node binding

@@ -32,8 +32,8 @@ filegroup(
 gf_rust_shared_library(
     name = "graphforge_bindings_py",
     crate_name = "graphforge_bindings_py",
-    # abi3-py310 + extension-module are selected via crate_universe feature
-    # unification from this package's Cargo.toml (see cargo-bazel-lock.json).
+    # ABI3 comes from Cargo.toml; extension-build mode is scoped explicitly to
+    # PyO3's Bazel build scripts in MODULE.bazel (see cargo-bazel-lock.json).
     # Mirror `.cargo/config.toml` apple rustflags so PyO3 extension-module
     # symbols resolve at Python load time (not link time).
     rustc_flags = select({

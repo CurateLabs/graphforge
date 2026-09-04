@@ -11,6 +11,10 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Distribution builds opt in; ordinary Rust tests must link libpython.
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
 graphforge-api = { version = "0.5.2", path = "../graphforge-api" }
 graphforge-cli = { version = "0.5.2", path = "../graphforge-cli" }
@@ -24,11 +28,12 @@ arrow = { workspace = true, features = ["pyarrow"] }
 serde.workspace = true
 serde_json.workspace = true
 uuid = { workspace = true }
-# `extension-module` is enabled HERE only (a Python extension must not link
-# libpython); keeping it off the workspace dep avoids breaking other crates.
+# Keep extension mode out of the default dependency graph: Cargo unifies
+# dependency features across the workspace, including Rust test executables.
+# Maturin explicitly enables our extension-module feature for distribution.
 # `abi3-py310` builds a single stable-ABI wheel that installs on CPython 3.10+,
 # so one wheel per OS covers the whole py3.10–3.14 CI matrix.
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py310"] }
+pyo3 = { workspace = true, features = ["abi3-py310"] }
 
 [lints]
 workspace = true
