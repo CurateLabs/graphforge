@@ -57,6 +57,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install uv for lock validation
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Validate committed Python lock
+        run: uv lock --check
+
+      - name: Test Python lock validation policy
+        run: python3 scripts/ci/test-python-lock-policy.py
+
       - name: Classify Repository Policy suites
         id: policy-suites
         shell: bash
@@ -329,7 +340,7 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
       - name: Check formatting
         run: uv run ruff format --check .
@@ -611,7 +622,7 @@ jobs:
       - name: Install test dependencies and wheel
         shell: bash
         run: |
-          uv sync --all-extras
+          uv sync --locked --all-extras
           uv pip install dist/*.whl
 
       - name: Restore SNAP ego-Facebook fixture
