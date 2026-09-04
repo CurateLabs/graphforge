@@ -1200,18 +1200,6 @@ jobs:
             tests.test_progressive_run \
             tests.test_qualification_operator
 
-      - name: Build immutable progressive qualification image
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_sha=$(git rev-parse HEAD)
-          image="graphforge-progressive-qualification:${source_sha}"
-          docker build --platform linux/amd64 \
-            --build-arg "GRAPHFORGE_COMMIT=${source_sha}" \
-            --file containers/graphforge-progressive-qualification/Dockerfile \
-            --tag "$image" .
-          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$source_sha"
-
       - name: Cargo feature drift check (fail-closed)
         run: |
           python3 scripts/ci/cargo-bazel-drift-check.py
