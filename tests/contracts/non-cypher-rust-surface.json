@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "87c96476a9ec9403f5d95afc57a2029979e6627903111fd3995329c93aec5a6b",
+  "public_method_digest": "932d8d9c7edf3f4aac04695933b01600e47a637f5aa332ca86ed53cb9989515d",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -26,7 +26,6 @@
     "MultiOntologyError": "introspection",
     "PageToken": "introspection",
       "ProviderRerankedFindResult": "introspection",
-      "RecordBatch": "introspection",
       "ResolvedBeliefProjection": "introspection",
       "SearchIndexOptions": "introspection",
       "ExecutionResourcePolicy": "introspection"

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "87c96476a9ec9403f5d95afc57a2029979e6627903111fd3995329c93aec5a6b"
+EXPECTED_RUST_DIGEST = "932d8d9c7edf3f4aac04695933b01600e47a637f5aa332ca86ed53cb9989515d"
 EXPECTED_RELEASE_DIGEST = "84310d5de1f83e7080f71e7933470640be96cd1b32b0bc10b0584496380924b3"
 
 PYTHON_ONLY_METHODS = frozenset(
