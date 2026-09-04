@@ -434,6 +434,26 @@ real `/work` mount. The host
 must separately pass native Linux cgroups-v2 admission. The runner has no
 laptop fallback and never calls a provider API.
 
+Build the optional provider image explicitly from the repository root when
+preparing provider execution:
+
+```bash
+set -euo pipefail
+source_sha=$(git rev-parse HEAD)
+image="graphforge-progressive-qualification:${source_sha}"
+docker build --platform linux/amd64 \
+  --build-arg "GRAPHFORGE_COMMIT=${source_sha}" \
+  --file containers/graphforge-progressive-qualification/Dockerfile \
+  --tag "$image" .
+test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" = "$source_sha"
+```
+
+This builds and verifies a local image. Provider publication and execution use
+the existing operator authorization. Required PR CI retains the static image
+contract, offline provider tests, and real tiny lifecycle through ordinary
+executables; it does not build an unused provider image. OVHC-AGENCY uses those
+native executables directly.
+
 A successful rung emits exactly `sN-plan.json`, `sN-benchexec.json`,
 `sN-graphforge.json`, `sN-rung.json`, and `sN-result.json`, all scoped to
 engineering evidence. The canonical order remains S18, S19, S20, S22, S24,
