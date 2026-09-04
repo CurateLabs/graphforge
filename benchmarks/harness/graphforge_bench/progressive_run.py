@@ -543,7 +543,7 @@ def _benchexec_container_flags(stage: Path, *, durable_root: Path | None = None)
         ]
     if durable_root is not None:
         return [
-            "--read-only-dir",
+            "--overlay-dir",
             "/",
             "--hidden-dir",
             "/run",
