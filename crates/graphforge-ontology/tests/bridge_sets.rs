@@ -372,6 +372,12 @@ fn deterministic_export_and_reopen() {
         )],
     );
     let digest_a = bridge_document_digest(&document).unwrap();
+    // Pin the existing document across register/adopt, JSON/YAML export/import,
+    // and snapshot reopen; equality with a recomputed hash alone misses drift.
+    assert_eq!(
+        digest_a,
+        "6e6013870946d3b4a07022ac4d210c1252dc233763fc98125ddfd57f1042fc9e"
+    );
     let id = inv.create_register(document.clone(), "c").unwrap();
     assert_eq!(id.canonical_digest, digest_a);
     inv.adopt(&BridgeSelector::Exact(id.clone()), 0, "a")
