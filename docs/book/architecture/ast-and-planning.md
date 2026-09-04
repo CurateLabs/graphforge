@@ -190,7 +190,9 @@ The AST version is internal only. The IR version is the cross-layer contract. Su
 
 ## Relational Lowering
 
-The relational lowering stage (`graphforge-rel`) translates graph IR operators into DataFusion `LogicalPlan` nodes:
+The relational lowering stage (`graphforge-rel`) translates graph IR operators into DataFusion `LogicalPlan` nodes. Compiler consumers configure `GraphPlanLowerer` with the catalog, ontology, and project context, then call `lower_plan`. The execution session owns DataFusion analysis and optimization; applications enter through the `graphforge-api` facade.
+
+The former context-free `graphforge_rel::lower` and `lower_and_optimize` convenience functions are removed for v0.6.0. Compiler tests that only need schema lowering use `GraphPlanLowerer::new(None, None).lower_plan(&plan)`; production lowering retains its explicit runtime context.
 
 - Simple scans, filters, projections, and aggregations lower cleanly to DataFusion relational operators
 - DataFusion then optimizes projections and filters and chooses physical scan strategies
