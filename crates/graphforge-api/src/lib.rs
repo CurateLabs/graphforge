@@ -1927,10 +1927,14 @@ impl GraphForge {
     {
         let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
+            let capture_session = graphforge_exec::demand::bound_capture_session();
             std::thread::scope(|s| {
-                s.spawn(|| handle.block_on(fut))
-                    .join()
-                    .map_err(|_| GfError::Execution("execution thread panicked".into()))?
+                s.spawn(|| {
+                    graphforge_exec::demand::set_bound_capture_session(capture_session);
+                    handle.block_on(fut)
+                })
+                .join()
+                .map_err(|_| GfError::Execution("execution thread panicked".into()))?
             })
         } else {
             handle.block_on(fut)
@@ -3846,10 +3850,14 @@ impl RuntimeGuard {
     {
         let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
+            let capture_session = graphforge_exec::demand::bound_capture_session();
             std::thread::scope(|s| {
-                s.spawn(|| handle.block_on(fut))
-                    .join()
-                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+                s.spawn(|| {
+                    graphforge_exec::demand::set_bound_capture_session(capture_session);
+                    handle.block_on(fut)
+                })
+                .join()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
             })
         } else {
             handle.block_on(fut)

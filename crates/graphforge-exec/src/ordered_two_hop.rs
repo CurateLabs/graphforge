@@ -183,6 +183,7 @@ pub struct OrderedTwoHopPathCountExec {
     provider: Arc<dyn AdjacencyProvider>,
     ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
     require_edge_disjoint: bool,
+    capture_epoch: u64,
 }
 
 impl OrderedTwoHopPathCountExec {
@@ -196,6 +197,7 @@ impl OrderedTwoHopPathCountExec {
             provider: spec.provider,
             ordinal_identities: spec.ordinal_identities,
             require_edge_disjoint: spec.require_edge_disjoint,
+            capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
     }
 }
@@ -273,6 +275,7 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
         let mut remaining = self.fetch;
         let mut uuids = Vec::with_capacity(self.fetch);
         let mut candidates = 0_u64;
+        let epoch = self.capture_epoch;
         for destination in 0..=max_node {
             if remaining == 0 {
                 break;
@@ -287,7 +290,7 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
                 .ordinal_identities
                 .lookup_node_uuids(&[destination])
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
-            demand::record_identity_projection(1, 1, 1, &lookup.metrics);
+            demand::record_identity_projection(epoch, 1, 1, 1, &lookup.metrics);
             let uuid = *lookup.values[0]
                 .as_ref()
                 .ok_or_else(|| DataFusionError::Internal("missing destination uuid".into()))?
@@ -297,8 +300,8 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
             remaining -= emit;
         }
 
-        demand::record_candidates(1, usize_from_u64(candidates));
-        demand::record_emitted(1, uuids.len());
+        demand::record_candidates(epoch, 1, usize_from_u64(candidates));
+        demand::record_emitted(epoch, 1, uuids.len());
 
         let field = Field::new("id", DataType::FixedSizeBinary(16), true);
         let schema = Arc::new(Schema::new(vec![field]));
