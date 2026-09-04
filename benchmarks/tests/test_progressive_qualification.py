@@ -144,7 +144,7 @@ def storage_attribution(scale: int, multiplier: int) -> dict:
 def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
     multiplier = 1 << max(0, scale - 18)
     return {
-        "assembly_contract": "graphforge-progressive-rung-assembly/2",
+        "assembly_contract": "graphforge-progressive-rung-assembly/3",
         "profile_id": f"graph500-s{scale}-evidence",
         "source": "canonical_ladder" if scale in {24, 25} else "progressive_profile",
         "scale": scale,
@@ -167,10 +167,10 @@ def rung(scale: int, *, rss: int = 1_000_000_000, wall: int = 100) -> dict:
         "metric_sources": {
             "benchexec": [
                 "wall_seconds",
-                "peak_rss_bytes",
                 "physical_read_bytes",
                 "physical_write_bytes",
             ],
+            "graphforge_process": ["peak_rss_bytes"],
             "storage_attribution": [
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",

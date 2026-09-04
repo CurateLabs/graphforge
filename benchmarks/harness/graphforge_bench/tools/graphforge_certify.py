@@ -15,6 +15,14 @@ def _certify_evidence_path() -> str:
             return str(tmp / "graphforge-certify-evidence.json")
     except OSError:
         pass
+    host_root = os.environ.get("GRAPHFORGE_HOST_WORK_ROOT")
+    if host_root:
+        try:
+            tmp = Path(host_root) / "tmp"
+            tmp.mkdir(parents=True, exist_ok=True)
+            return str(tmp / "graphforge-certify-evidence.json")
+        except OSError:
+            pass
     return "evidence.json"
 
 

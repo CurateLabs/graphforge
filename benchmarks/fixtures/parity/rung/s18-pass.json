@@ -32,7 +32,6 @@
   "metric_sources": {
     "benchexec": [
       "wall_seconds",
-      "peak_rss_bytes",
       "physical_read_bytes",
       "physical_write_bytes"
     ],
@@ -44,7 +43,13 @@
       "reader_calls",
       "publication_work_units"
     ],
-    "query_qualification": ["live_edges", "correctness"]
+    "query_qualification": [
+      "live_edges",
+      "correctness"
+    ],
+    "graphforge_process": [
+      "peak_rss_bytes"
+    ]
   },
   "storage_components": {
     "source_allocated_physical_bytes": 1048576,

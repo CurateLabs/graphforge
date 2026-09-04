@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema": "graphforge-host-capacity-schema/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "host_profile_id",
+    "volume_bytes",
+    "reserved_headroom_bytes",
+    "physical_read_bytes_per_second",
+    "physical_write_bytes_per_second",
+    "reader_calls_per_second",
+    "publication_work_per_second"
+  ],
+  "properties": {
+    "schema": {"const": "graphforge-host-capacity/1"},
+    "host_profile_id": {"const": "local-linux-cgroups-v2"},
+    "volume_bytes": {"type": "integer", "minimum": 1},
+    "reserved_headroom_bytes": {"type": "integer", "minimum": 0},
+    "physical_read_bytes_per_second": {"type": "integer", "minimum": 1},
+    "physical_write_bytes_per_second": {"type": "integer", "minimum": 1},
+    "reader_calls_per_second": {"type": "integer", "minimum": 1},
+    "publication_work_per_second": {"type": "integer", "minimum": 1}
+  }
+}

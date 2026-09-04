@@ -406,7 +406,50 @@ def _make_benchexec_stage_writable(stage: Path) -> None:
 def _native_authority() -> Mapping[str, Any]:
     if platform.system() != "Linux":
         raise ControllerError("native Linux BenchExec authority is required")
-    evidence = qualify_local_host()
+    # ReFrame admission uses /usr/bin/python3 so package-managed BenchExec and
+    # pystemd can obtain a delegated cgroup. Preserve the user D-Bus session so
+    # pystemd can create that scope when this controller is already nested.
+    system_python = Path("/usr/bin/python3")
+    harness = str(Path(__file__).resolve().parents[1])
+    if system_python.is_file():
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            in {
+                "HOME",
+                "PATH",
+                "USER",
+                "LOGNAME",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "DBUS_SESSION_BUS_PID",
+            }
+            and value
+        }
+        environment.update(
+            {
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PYTHONPATH": harness,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        completed = subprocess.run(
+            [str(system_python), "-m", "graphforge_bench.local_admission"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        try:
+            evidence = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise ControllerError("native BenchExec admission evidence is malformed") from error
+        if not isinstance(evidence, Mapping):
+            raise ControllerError("native BenchExec admission evidence is malformed")
+    else:
+        evidence = qualify_local_host()
     if evidence.get("result") != "passed":
         cause = evidence.get("cause")
         raise ControllerError(f"native BenchExec admission refused: {cause}")
@@ -461,9 +504,9 @@ def _authority_staging_parent(output_dir: Path) -> Path | None:
     return None
 
 
-def _benchexec_tool_directory(stage: Path) -> Path:
+def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Path:
     """Prefer image-local executables once staged identity checks have passed."""
-    if _provider_volume_mounted():
+    if prefer_stage or _provider_volume_mounted():
         return stage / "bin"
     local = Path("/usr/local/bin")
     try:
@@ -481,12 +524,21 @@ def _stage_benchmark_xml(root: Path, stage: Path) -> None:
     (stage / "benchmark.xml").write_text(text, encoding="utf-8")
 
 
-def _benchexec_memory_limit() -> list[str]:
-    return []
+# Host durable writes charge page cache into cgroup memory.peak. Keep the product
+# envelope at 4 GiB process VmHWM, but raise the BenchExec kill ceiling so NVMe
+# page cache cannot false-OOM an otherwise bounded construction. Host runs also
+# default to `--benchexec-python /usr/bin/python3` (system BenchExec + pystemd).
+HOST_BENCHEXEC_MEMORY_CEILING = "96GB"
 
 
-def _benchexec_container_flags(stage: Path) -> list[str]:
-    """Configure BenchExec container mounts for durable provider-volume runs."""
+def _benchexec_memory_limit(*, durable_root: Path | None = None) -> list[str]:
+    if durable_root is None:
+        return []
+    return ["--memorylimit", HOST_BENCHEXEC_MEMORY_CEILING]
+
+
+def _benchexec_container_flags(stage: Path, *, durable_root: Path | None = None) -> list[str]:
+    """Configure BenchExec container mounts for durable provider/host work roots."""
     if _provider_volume_mounted():
         return [
             "--read-only-dir",
@@ -498,31 +550,69 @@ def _benchexec_container_flags(stage: Path) -> list[str]:
             "--full-access-dir",
             "/work",
         ]
+    if durable_root is not None:
+        # Keep TMPDIR off the full-access work root: fuse-overlayfs deadlocks when
+        # the container temp directory is also marked full-access.
+        return [
+            "--read-only-dir",
+            "/",
+            "--hidden-dir",
+            "/run",
+            "--hidden-dir",
+            "/tmp",
+            "--full-access-dir",
+            str(durable_root.resolve()),
+        ]
     if stage.is_dir():
         return ["--full-access-dir", str(stage.resolve())]
     return []
 
 
-def _run_benchexec(stage: Path, executables: Executables, identities: Mapping[str, Any]) -> int:
+def _run_benchexec(
+    stage: Path,
+    executables: Executables,
+    identities: Mapping[str, Any],
+    *,
+    durable_root: Path | None = None,
+    home: Path | None = None,
+) -> int:
     raw_output = stage / "raw"
     raw_output.mkdir()
-    home = _bench_home(stage)
+    resolved_home = home or _bench_home(stage)
     environment = {
-        "HOME": str(home),
+        "HOME": str(resolved_home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": f"{stage / 'bin'}:/usr/local/bin:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
     }
+    for key in (
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DBUS_SESSION_BUS_PID",
+        "USER",
+        "LOGNAME",
+    ):
+        value = os.environ.get(key)
+        if value:
+            environment[key] = value
     if _provider_volume_mounted():
         (Path("/work") / "tmp").mkdir(exist_ok=True)
-        environment["TMPDIR"] = str(home / "tmp")
+        environment["TMPDIR"] = str(resolved_home / "tmp")
+    elif durable_root is not None:
+        # Keep process temp on the durable work-root device. Default /tmp is tmpfs
+        # here and causes EXDEV when GraphForge installs CAS objects into the project.
+        # Do not combine this with fuse-overlayfs mounts of the same path.
+        tmp = durable_root / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        environment["TMPDIR"] = str(tmp.resolve())
+        environment["GRAPHFORGE_HOST_WORK_ROOT"] = str(durable_root.resolve())
     command = [
         str(_benchexec_cli(executables.benchexec_python)),
         "--tool-directory",
-        str(_benchexec_tool_directory(stage)),
-        *_benchexec_container_flags(stage),
-        *_benchexec_memory_limit(),
+        str(_benchexec_tool_directory(stage, prefer_stage=durable_root is not None)),
+        *_benchexec_container_flags(stage, durable_root=durable_root),
+        *_benchexec_memory_limit(durable_root=durable_root),
         "--no-compress-results",
         "--outputpath",
         str(raw_output),
@@ -928,8 +1018,18 @@ def assemble_rung_evidence(
     if not isinstance(authority, Mapping):
         raise ControllerError("BenchExec authority is missing")
     phases = [phase.get("phase") for phase in graphforge.get("phases", [])]
+    process_peak_rss = 0
+    for phase in graphforge.get("phases", []):
+        if not isinstance(phase, Mapping):
+            continue
+        phase_rss = phase.get("peak_rss_bytes")
+        if isinstance(phase_rss, bool) or not isinstance(phase_rss, int) or phase_rss < 0:
+            raise ControllerError("GraphForge phase peak_rss_bytes is malformed")
+        process_peak_rss = max(process_peak_rss, phase_rss)
+    if process_peak_rss <= 0:
+        raise ControllerError("GraphForge process VmHWM peak_rss_bytes is missing")
     rung = {
-        "assembly_contract": "graphforge-progressive-rung-assembly/2",
+        "assembly_contract": "graphforge-progressive-rung-assembly/3",
         "profile_id": profile_id or f"graph500-s{scale}-local",
         "source": source,
         "scale": scale,
@@ -939,7 +1039,9 @@ def assemble_rung_evidence(
         "phases": phases,
         "metrics": {
             "wall_seconds": int(float(authority["wall_seconds"]) + 0.999_999),
-            "peak_rss_bytes": int(authority["peak_rss_bytes"]),
+            # Process VmHWM from the public certify runner — not cgroup memory.peak,
+            # which includes durable page cache on host NVMe full-access mounts.
+            "peak_rss_bytes": process_peak_rss,
             **{name: lifecycle_storage[name] for name in lifecycle_names},
             **{
                 name: construction[name]
@@ -956,10 +1058,10 @@ def assemble_rung_evidence(
         "metric_sources": {
             "benchexec": [
                 "wall_seconds",
-                "peak_rss_bytes",
                 "physical_read_bytes",
                 "physical_write_bytes",
             ],
+            "graphforge_process": ["peak_rss_bytes"],
             "storage_attribution": [
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",

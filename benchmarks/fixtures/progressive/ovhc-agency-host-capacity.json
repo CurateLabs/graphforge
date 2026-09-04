@@ -1,0 +1,10 @@
+{
+  "schema": "graphforge-host-capacity/1",
+  "host_profile_id": "local-linux-cgroups-v2",
+  "volume_bytes": 536870912000,
+  "reserved_headroom_bytes": 80530636800,
+  "physical_read_bytes_per_second": 1000000000,
+  "physical_write_bytes_per_second": 1000000000,
+  "reader_calls_per_second": 1000000,
+  "publication_work_per_second": 1000000
+}
