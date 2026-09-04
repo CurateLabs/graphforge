@@ -40,7 +40,7 @@ impl DirectoryContract for LifecycleDirectory {
         Self::open_child(
             self,
             name.as_ref(),
-            &self.path.join(name),
+            &self.path().join(name),
             "IDENTITY",
             "conformance_child",
         )

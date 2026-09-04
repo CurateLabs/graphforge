@@ -7,7 +7,7 @@ of query semantics or project-format migration.
 ## Threat model before consolidation
 
 `graphforge-filesystem::StableDirectory` and storage's private
-`LifecycleDirectory` currently both retain a directory handle and its native
+`LifecycleDirectory` both retained a directory handle and its native
 volume/file identity. Their platform opens are identical: Unix uses
 `RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC` with `openat` for child lookup;
 Windows uses read access, `FILE_FLAG_BACKUP_SEMANTICS`,
@@ -51,16 +51,42 @@ and checked; the suite does not skip link cases when a privilege is unavailable.
 The Unix-only ancestor mutation reflects Windows' different no-delete-sharing
 semantics, which the named-directory replacement case checks directly.
 
-## Consolidation requirements
+The test-only baseline was committed before replacing either mechanism. At
+`edbf4336`, the [Windows native lane](https://github.com/CurateLabs/graphforge/actions/runs/33927328124/job/101199483840)
+passed all 24 admission tests (including the three applicable shared cases) and
+25 filesystem tests; the [macOS native lane](https://github.com/CurateLabs/graphforge/actions/runs/33927328124/job/101199483884)
+also passed. Linux passed the four shared cases, all 27 admission tests and all
+15 filesystem tests before consolidation. The host's `/tmp` was tmpfs, so Linux
+durable-admission tests used an explicit `TMPDIR` on the host's admitted ext4
+volume.
 
-Lifecycle admission becomes a policy wrapper over `StableDirectory`, retaining
-ancestor capabilities and its existing same-volume and barrier rules. One
-filesystem revalidation protocol must check both named and retained directory
-kind/identity and reject final-component links/reparse points. Storage may map
-those failures into its existing phase/cause diagnostics; it must not reimplement
-the native checks. Strengthening retained-handle validation in the generic
-capability is intentional. No relaxed directory acceptance, fallback reopen, or
-new claim of Windows directory-flush durability is permitted.
+## Consolidated implementation
+
+Lifecycle admission is a policy wrapper over `StableDirectory`, retaining
+ancestor capabilities and its existing same-volume and barrier rules.
+`ProbeDirectory` also delegates its directory validation to the same capability.
+The duplicate `RetainedDirectory` type, directory-open flags, link/reparse
+predicate, and storage directory revalidation bodies are removed.
+
+`StableDirectory::revalidate_named_detailed` is the sole native directory
+revalidation protocol: it checks named and retained metadata, ordinary directory
+kind, link/reparse status, and named/retained identity against the captured
+identity. Typed failure stages let storage preserve its phase/cause diagnostics;
+the ordinary I/O adapter retains the native error kind. Initial admission still
+performs its policy-specific prechecks before adopting a retained handle.
+Adoption accepts an opaque `OpenedDirectoryHandle` constructed by the shared
+native open primitive, not an arbitrary `File`: metadata and identity alone
+cannot prove that a Windows handle denies delete sharing.
+
+The stronger retained-handle check is intentional. Lifecycle child opening now
+also uses the capability's validated single-component name and before/after
+parent checks; ancestry cloning revalidates the capability before and after
+cloning. These additional checks can reject a concurrent substitution earlier.
+The retained-ancestor rule remains storage policy: a standalone child still
+validates its own identity, while lifecycle validates the retained ancestry.
+No filesystem class, same-volume restriction, cooperative lock, probe evidence
+field, or namespace barrier changes. In particular, admission does not call the
+generic Windows directory `sync` operation or claim directory-flush durability.
 
 The existing admission evidence and recovery tests remain the behavioral gate.
 The shared cases prove capability behavior; they do not by themselves certify

@@ -109,6 +109,80 @@ pub struct FileSpaceUsage {
     pub allocated_bytes: u64,
 }
 
+/// Stage of a failed retained-directory validation. Policy owners may preserve
+/// their own diagnostics without duplicating native identity checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryValidationStage {
+    /// Named path metadata could not be read.
+    NamedMetadata,
+    /// Retained handle metadata could not be read.
+    RetainedMetadata,
+    /// Named path identity could not be read.
+    NamedIdentity,
+    /// Retained handle identity could not be read.
+    RetainedIdentity,
+    /// A path/handle is not an ordinary directory or its identity changed.
+    IdentityChanged,
+}
+
+/// Native validation failure with a typed stage and original I/O diagnostic.
+#[derive(Debug)]
+pub struct DirectoryValidationError {
+    stage: DirectoryValidationStage,
+    source: io::Error,
+}
+
+impl DirectoryValidationError {
+    fn new(stage: DirectoryValidationStage, source: io::Error) -> Self {
+        Self { stage, source }
+    }
+
+    /// Return the failing native operation for a caller's policy mapping.
+    #[must_use]
+    pub fn stage(&self) -> DirectoryValidationStage {
+        self.stage
+    }
+
+    /// Preserve the existing native I/O error and kind for generic consumers.
+    #[must_use]
+    pub fn into_io_error(self) -> io::Error {
+        self.source
+    }
+}
+
+impl std::fmt::Display for DirectoryValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for DirectoryValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Directory handle opened with this crate's native no-follow and sharing policy.
+/// Private construction prevents an arbitrary `File` from claiming that policy.
+#[derive(Debug)]
+pub struct OpenedDirectoryHandle {
+    file: File,
+}
+
+impl OpenedDirectoryHandle {
+    /// Borrow the native handle for metadata, volume queries, or cooperative locks.
+    #[must_use]
+    pub fn as_file(&self) -> &File {
+        &self.file
+    }
+
+    /// Transfer the raw handle to a caller that owns its validation policy.
+    #[must_use]
+    pub fn into_file(self) -> File {
+        self.file
+    }
+}
+
 /// Retained directory capability whose children are opened without following
 /// links or reparse points.
 #[derive(Debug)]
@@ -179,18 +253,80 @@ impl StableDirectory {
         Ok(directory)
     }
 
-    /// Require that the named path still identifies this retained directory.
-    pub fn revalidate_named(&self) -> io::Result<()> {
-        let metadata = std::fs::symlink_metadata(&self.path)?;
-        if !metadata.is_dir() || is_link_or_reparse(&metadata) {
-            return Err(io::Error::other(
-                "stable directory path is linked or special",
+    /// Adopt an already retained handle and expected identity, validating both
+    /// the named path and the handle before issuing a directory capability.
+    pub fn from_retained_handle(
+        path: PathBuf,
+        handle: OpenedDirectoryHandle,
+        identity: FileIdentity,
+    ) -> Result<Self, DirectoryValidationError> {
+        let directory = Self {
+            path,
+            file: handle.file,
+            identity,
+        };
+        directory.revalidate_named_detailed()?;
+        Ok(directory)
+    }
+
+    /// Borrow the retained handle for native volume queries and cooperative locks.
+    /// Callers must revalidate around namespace-sensitive operations.
+    #[must_use]
+    pub fn as_file(&self) -> &File {
+        &self.file
+    }
+
+    /// Return the named path associated with this capability.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Transfer the policy-proven native handle for adoption by another capability.
+    #[must_use]
+    pub fn into_handle(self) -> OpenedDirectoryHandle {
+        OpenedDirectoryHandle { file: self.file }
+    }
+
+    /// Require that the named path and retained handle still identify this
+    /// ordinary directory, returning a typed failure stage for policy adapters.
+    pub fn revalidate_named_detailed(&self) -> Result<(), DirectoryValidationError> {
+        use DirectoryValidationStage as Stage;
+        let named = std::fs::symlink_metadata(&self.path)
+            .map_err(|error| DirectoryValidationError::new(Stage::NamedMetadata, error))?;
+        let retained = self
+            .file
+            .metadata()
+            .map_err(|error| DirectoryValidationError::new(Stage::RetainedMetadata, error))?;
+        if !named.is_dir() || is_link_or_reparse(&named) || !retained.is_dir() {
+            return Err(DirectoryValidationError::new(
+                Stage::IdentityChanged,
+                io::Error::other("stable directory path is linked or special"),
             ));
         }
-        if path_identity(&self.path)? != self.identity {
-            return Err(io::Error::other("stable directory identity changed"));
+        let named_identity = path_identity(&self.path)
+            .map_err(|error| DirectoryValidationError::new(Stage::NamedIdentity, error))?;
+        if named_identity != self.identity {
+            return Err(DirectoryValidationError::new(
+                Stage::IdentityChanged,
+                io::Error::other("stable directory identity changed"),
+            ));
+        }
+        let retained_identity = file_identity(&self.file)
+            .map_err(|error| DirectoryValidationError::new(Stage::RetainedIdentity, error))?;
+        if retained_identity != self.identity {
+            return Err(DirectoryValidationError::new(
+                Stage::IdentityChanged,
+                io::Error::other("stable directory identity changed"),
+            ));
         }
         Ok(())
+    }
+
+    /// Require that the named path still identifies this retained directory.
+    pub fn revalidate_named(&self) -> io::Result<()> {
+        self.revalidate_named_detailed()
+            .map_err(DirectoryValidationError::into_io_error)
     }
 
     /// Open one real child directory relative to this capability.
@@ -556,6 +692,13 @@ impl StableDirectory {
     pub fn identity(&self) -> FileIdentity {
         self.identity
     }
+}
+
+/// Open a directory handle using the platform's no-follow and sharing policy.
+/// The caller must validate directory kind and retained/named identity before
+/// treating it as authority; prefer `StableDirectory::open` for a capability.
+pub fn open_directory_handle(path: &Path) -> io::Result<OpenedDirectoryHandle> {
+    stable_open_directory(path).map(|file| OpenedDirectoryHandle { file })
 }
 
 fn validate_child_name(name: &OsStr) -> io::Result<()> {
@@ -1250,16 +1393,20 @@ fn verify_space_usage_metadata(metadata: &std::fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether metadata denotes a symlink or native reparse point.
 #[cfg(windows)]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+#[must_use]
+pub fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt as _;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
     metadata.file_type().is_symlink()
         || (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
 }
 
+/// Whether metadata denotes a symlink or native reparse point.
 #[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+#[must_use]
+pub fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
@@ -2828,6 +2975,66 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_directory_adoption_checks_handle_and_named_identity() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_identity = path_identity(first.path()).unwrap();
+        let wrong_handle = open_directory_handle(second.path()).unwrap();
+
+        // The named directory is genuine and matches the claimed identity;
+        // only the retained handle is wrong. Named-only validation would pass.
+        let failure = StableDirectory::from_retained_handle(
+            first.path().to_path_buf(),
+            wrong_handle,
+            first_identity,
+        )
+        .unwrap_err();
+        assert_eq!(failure.stage(), DirectoryValidationStage::IdentityChanged);
+        assert_eq!(failure.into_io_error().kind(), io::ErrorKind::Other);
+
+        let retained = StableDirectory::from_retained_handle(
+            first.path().to_path_buf(),
+            open_directory_handle(first.path()).unwrap(),
+            first_identity,
+        )
+        .unwrap();
+        retained.revalidate_named_detailed().unwrap();
+        retained.try_clone().unwrap().revalidate_named().unwrap();
+        assert_eq!(file_identity(retained.as_file()).unwrap(), first_identity);
+        assert_eq!(
+            file_identity(&retained.into_handle().into_file()).unwrap(),
+            first_identity
+        );
+    }
+
+    #[test]
+    fn retained_directory_adoption_rejects_regular_handle_and_missing_name() {
+        let root = tempfile::tempdir().unwrap();
+        let identity = path_identity(root.path()).unwrap();
+        let regular = root.path().join("regular");
+        std::fs::write(&regular, b"unchanged").unwrap();
+        let failure = StableDirectory::from_retained_handle(
+            root.path().to_path_buf(),
+            OpenedDirectoryHandle {
+                file: File::open(&regular).unwrap(),
+            },
+            identity,
+        )
+        .unwrap_err();
+        assert_eq!(failure.stage(), DirectoryValidationStage::IdentityChanged);
+        assert_eq!(std::fs::read(regular).unwrap(), b"unchanged");
+
+        let failure = StableDirectory::from_retained_handle(
+            root.path().join("missing"),
+            open_directory_handle(root.path()).unwrap(),
+            identity,
+        )
+        .unwrap_err();
+        assert_eq!(failure.stage(), DirectoryValidationStage::NamedMetadata);
+        assert_eq!(failure.into_io_error().kind(), io::ErrorKind::NotFound);
+    }
 
     #[cfg(windows)]
     #[allow(unsafe_code)]
