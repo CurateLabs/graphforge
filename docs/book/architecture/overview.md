@@ -171,16 +171,16 @@ remains separate from compiler-plan versioning.
 ```
 crates/
   graphforge-api/              # public Rust facade (lifecycle, Cypher, verbs, knowledge)
-  graphforge-core/             # shared primitive types, identities, and errors
+  graphforge-core/             # shared identities, values, options, and facade errors
   graphforge-ast/              # AST + spans + syntax diagnostics
   graphforge-cypher/           # hand-written lexer + recursive-descent/Pratt parser
   graphforge-ontology/         # runtime ontology model, validation, migration
   graphforge-ir/               # graph IR + serde DTOs
   graphforge-rel/              # graph IR → relational lowering
-  graphforge-plan/             # DataFusion integration, optimizer rules, custom nodes
+  graphforge-plan/             # DataFusion logical extension nodes and mutation specifications
   graphforge-exec/             # execution session, algorithms, search, result streaming
-  graphforge-storage/          # generic generations, participants, Parquet I/O
-  graphforge-io/               # CSV/JSON/Parquet/IPC sinks and loaders
+  graphforge-storage/          # project generations, Arrow schemas, and Parquet storage
+  graphforge-io/               # bounded, atomic Parquet and Arrow IPC result sinks
   graphforge-provenance/       # knowledge-layer provenance events + lineage domain
   graphforge-knowledge/        # knowledge-layer immutable + epistemic record domains
   graphforge-bindings-py/      # thin PyO3 + maturin Python binding
@@ -300,7 +300,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [GraphForge v0.5 and Neo4j GDS](graphforge-vs-neo4j-gds.md) — whole-system positioning, current limitations, and result-lifecycle tradeoffs
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog across rank/cluster/paths/analyze/similar
 - [Execution Model](execution-model.md) — DataFusion integration, custom graph operators, Arrow result streams
-- [Storage](storage.md) — StorageProvider trait, Parquet provider
+- [Storage](storage.md) — Project generations, Arrow schemas, and Parquet storage
 - [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0025`)
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Rust core and binding strategy
 - [ADR 0002: RD+Pratt Parser](../../adr/0002-lr1-grammar.md) — Parser algorithm decision

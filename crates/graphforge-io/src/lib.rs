@@ -1,4 +1,8 @@
-//! Bounded, atomic GraphForge result sinks.
+//! GraphForge bounded, atomic Parquet and Arrow IPC result sinks.
+//!
+//! Streams Arrow record batches into the formats enumerated by [`ResultSinkFormat`],
+//! with bounded buffering, cancellation, progress, and atomic destination publication.
+//! Sink failures use [`ResultSinkError`].
 #![forbid(unsafe_code)]
 
 use std::fmt::Display;

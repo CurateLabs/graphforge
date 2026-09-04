@@ -1,6 +1,6 @@
 [package]
 name = "graphforge-storage"
-description = "GraphForge StorageProvider trait and Parquet backend"
+description = "GraphForge project generations, Arrow schemas, and Parquet storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

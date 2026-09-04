@@ -27,8 +27,8 @@ are **Shipped** (see the per-algorithm status in [Algorithm Verbs](algorithms.md
 graph-native execution is a **graph-layer** capability under
 [ADR 0005](../../adr/0005-layered-architecture.md). A workbench or knowledge workflow may prepare
 their inputs and consume their results, but the graph layer never depends upward on either layer.
-Polars is used as a **storage-layer companion** for IO and sinks (CSV, JSON, Parquet, IPC).
-It is not the semantic owner of query execution.
+`graphforge-io` streams Arrow result batches into bounded, atomic Parquet or
+Arrow IPC sinks. Query semantics remain in the Rust compiler and execution layers.
 
 ---
 
@@ -398,5 +398,5 @@ validation, and forbidden dependency directions are normative in
 - [Architecture Overview](overview.md) — workspace layout and unified API
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog
 - [AST & Planning](ast-and-planning.md) — compiler pipeline and Graph IR
-- [Storage](storage.md) — StorageProvider trait, Parquet provider
+- [Storage](storage.md) — Project generations, Arrow schemas, and Parquet storage
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — DataFusion and Arrow choice rationale
