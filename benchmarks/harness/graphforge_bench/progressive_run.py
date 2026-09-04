@@ -406,7 +406,50 @@ def _make_benchexec_stage_writable(stage: Path) -> None:
 def _native_authority() -> Mapping[str, Any]:
     if platform.system() != "Linux":
         raise ControllerError("native Linux BenchExec authority is required")
-    evidence = qualify_local_host()
+    # ReFrame admission uses /usr/bin/python3 so package-managed BenchExec and
+    # pystemd can obtain a delegated cgroup. Preserve the user D-Bus session so
+    # pystemd can create that scope when this controller is already nested.
+    system_python = Path("/usr/bin/python3")
+    harness = str(Path(__file__).resolve().parents[1])
+    if system_python.is_file():
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            in {
+                "HOME",
+                "PATH",
+                "USER",
+                "LOGNAME",
+                "XDG_RUNTIME_DIR",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "DBUS_SESSION_BUS_PID",
+            }
+            and value
+        }
+        environment.update(
+            {
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PYTHONPATH": harness,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+        completed = subprocess.run(
+            [str(system_python), "-m", "graphforge_bench.local_admission"],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        try:
+            evidence = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise ControllerError("native BenchExec admission evidence is malformed") from error
+        if not isinstance(evidence, Mapping):
+            raise ControllerError("native BenchExec admission evidence is malformed")
+    else:
+        evidence = qualify_local_host()
     if evidence.get("result") != "passed":
         cause = evidence.get("cause")
         raise ControllerError(f"native BenchExec admission refused: {cause}")
