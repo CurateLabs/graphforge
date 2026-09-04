@@ -591,9 +591,12 @@ def _run_benchexec(
         (Path("/work") / "tmp").mkdir(exist_ok=True)
         environment["TMPDIR"] = str(resolved_home / "tmp")
     elif durable_root is not None:
-        # Intentionally leave TMPDIR unset / default-hidden so fuse-overlayfs
-        # (or namespace temp) is not placed under the full-access work root.
-        environment.pop("TMPDIR", None)
+        # Keep process temp on the durable work-root device. Default /tmp is tmpfs
+        # here and causes EXDEV when GraphForge installs CAS objects into the project.
+        # Do not combine this with fuse-overlayfs mounts of the same path.
+        tmp = durable_root / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        environment["TMPDIR"] = str(tmp.resolve())
         environment["GRAPHFORGE_HOST_WORK_ROOT"] = str(durable_root.resolve())
     command = [
         str(_benchexec_cli(executables.benchexec_python)),

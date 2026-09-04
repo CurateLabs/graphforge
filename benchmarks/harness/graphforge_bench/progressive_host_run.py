@@ -278,6 +278,16 @@ def _rewrite_profile_for_work_root(profile_text: str, scale: int, work_root: Pat
     )
 
 
+def _wrap_executable_for_tmp(staged: Path, tmp_dir: Path) -> None:
+    real = staged.with_name(f"{staged.name}.real")
+    staged.rename(real)
+    staged.write_text(
+        f'#!/bin/sh\nexport TMPDIR="{tmp_dir}"\nexec "{real}" "$@"\n',
+        encoding="utf-8",
+    )
+    staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 def _safe_stage_host(
     root: Path,
     profile_path: Path,
@@ -296,6 +306,8 @@ def _safe_stage_host(
     _stage_benchmark_xml(root, stage)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
+    tmp_dir = work_root / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     for name, source, identity_key in (
         ("gf", executables.gf, "gf_sha256"),
         ("graphforge-benchmark-certify", executables.certify, "certify_sha256"),
@@ -310,6 +322,7 @@ def _safe_stage_host(
         staged.chmod(staged.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if _digest(staged) != identities.get(identity_key):
             raise HostRunError(f"staged executable identity mismatch: {name}")
+        _wrap_executable_for_tmp(staged, tmp_dir.resolve())
     stage.chmod(0o777)
     for path in stage.rglob("*"):
         if path.is_dir():
