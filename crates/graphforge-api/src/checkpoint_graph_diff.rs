@@ -102,7 +102,7 @@ fn streamed_logical_rows(
             checkpoint(cancellation)?;
             let next = graph.block_on(async { Ok(stream.next().await) })?;
             let Some(batch) = next else { break };
-            let batch = batch.map_err(|error| GfError::Execution(error.to_string()))?;
+            let batch = batch.map_err(GfError::from_execution_error)?;
             page_count += batch.num_rows();
             records.extend(logical_rows(std::slice::from_ref(&batch), cancellation)?);
         }

@@ -101,7 +101,7 @@ pub enum OntologyMode {
 /// Compiler stages, I/O, discovery, and other subsystems also expose dedicated
 /// error types. Boundary adapters classify them as needed; [`GfError::code`]
 /// supplies stable public codes rather than a one-to-one variant/exception map.
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum GfError {
     /// Feature exists in the API but has not been implemented yet.
     #[error("not implemented: {0}")]
@@ -183,6 +183,8 @@ pub enum GfError {
     #[error("ontology error: {0}")]
     Ontology(String),
 }
+
+mod error_conversion;
 
 impl GfError {
     /// Return the stable public error code for this failure.

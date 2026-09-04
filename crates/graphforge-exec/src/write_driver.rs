@@ -451,14 +451,13 @@ impl Frontier {
             .first()
             .map_or_else(|| Arc::clone(self.df_schema.inner()), RecordBatch::schema);
         let input = arrow::compute::concat_batches(&schema, &self.batches)
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         let indices = UInt64Array::from(indices.to_vec());
         let columns = input
             .columns()
             .iter()
             .map(|column| {
-                arrow::compute::take(column, &indices, None)
-                    .map_err(|error| GfError::Execution(error.to_string()))
+                arrow::compute::take(column, &indices, None).map_err(GfError::from_execution_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.batches = vec![
@@ -467,7 +466,7 @@ impl Frontier {
                 columns,
                 &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(indices.len())),
             )
-            .map_err(|error| GfError::Execution(error.to_string()))?,
+            .map_err(GfError::from_execution_error)?,
         ];
         Ok(())
     }
@@ -518,7 +517,7 @@ impl Frontier {
             }
             rebuilt.push(
                 RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
-                    .map_err(|e| GfError::Execution(e.to_string()))?,
+                    .map_err(GfError::from_execution_error)?,
             );
         }
         self.batches = rebuilt;
@@ -539,7 +538,7 @@ impl Frontier {
             schema_fields.push((Some(qualifier), Arc::new(Field::new(name, data_type, true))));
         }
         self.df_schema = DFSchema::new_with_metadata(schema_fields, HashMap::new())
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         Ok(())
     }
 
@@ -573,7 +572,7 @@ impl Frontier {
             for u in &uuids[range.clone()] {
                 uuid_b
                     .append_value(u)
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
             }
             Ok(vec![
                 Arc::new(uuid_b.finish()) as ArrayRef,
@@ -620,7 +619,7 @@ impl Frontier {
             for u in &uuids[range.clone()] {
                 uuid_b
                     .append_value(u)
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
             }
             let mut cols: Vec<ArrayRef> = vec![
                 Arc::new(uuid_b.finish()) as ArrayRef,
@@ -633,7 +632,7 @@ impl Frontier {
                 cols.push(
                     scalar
                         .to_array_of_size(rows)
-                        .map_err(|e| GfError::Execution(e.to_string()))?,
+                        .map_err(GfError::from_execution_error)?,
                 );
             }
             for (name, _) in &spec.computed_properties {
@@ -693,7 +692,7 @@ impl Frontier {
             for row in selected {
                 uuid_builder
                     .append_value(row.uuid)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
             }
             let mut columns: Vec<ArrayRef> = vec![
                 Arc::new(uuid_builder.finish()),
@@ -714,10 +713,9 @@ impl Frontier {
                 });
                 let values = values
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 columns.push(
-                    ScalarValue::iter_to_array(values)
-                        .map_err(|error| GfError::Execution(error.to_string()))?,
+                    ScalarValue::iter_to_array(values).map_err(GfError::from_execution_error)?,
                 );
             }
             Ok(columns)
@@ -756,7 +754,7 @@ impl Frontier {
             );
         }
         self.df_schema = DFSchema::new_with_metadata(logical_fields, HashMap::new())
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
 
         self.batches = self
             .batches
@@ -772,7 +770,7 @@ impl Frontier {
                     fields[*index] = fields[*index].clone().with_name(replacement);
                 }
                 RecordBatch::try_new(Arc::new(Schema::new(fields)), batch.columns().to_vec())
-                    .map_err(|error| GfError::Execution(error.to_string()))
+                    .map_err(GfError::from_execution_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -819,13 +817,13 @@ impl Frontier {
             for row in range {
                 uuid_b
                     .append_value(uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 src_b
                     .append_value(src_uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 dst_b
                     .append_value(dst_uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 name_b.append_option(rel_names[row].as_deref());
             }
             Ok(vec![
@@ -872,13 +870,13 @@ impl Frontier {
             for row in range.clone() {
                 uuid_b
                     .append_value(identities.uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 src_b
                     .append_value(identities.src_uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 dst_b
                     .append_value(identities.dst_uuids[row])
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 name_b.append_option(identities.rel_names[row].as_deref());
             }
             let mut columns: Vec<ArrayRef> = vec![
@@ -891,7 +889,7 @@ impl Frontier {
                 columns.push(
                     graphforge_rel::expr::ir_literal_to_scalar(lit)
                         .to_array_of_size(rows)
-                        .map_err(|e| GfError::Execution(e.to_string()))?,
+                        .map_err(GfError::from_execution_error)?,
                 );
             }
             for (name, _) in &spec.computed_properties {
@@ -942,13 +940,13 @@ impl Frontier {
             for row in selected {
                 edge_builder
                     .append_value(row.uuid)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 src_builder
                     .append_value(row.src_uuid)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 dst_builder
                     .append_value(row.dst_uuid)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 type_builder.append_value(&row.rel_type);
             }
             let mut columns: Vec<ArrayRef> = vec![
@@ -967,10 +965,9 @@ impl Frontier {
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 columns.push(
-                    ScalarValue::iter_to_array(values)
-                        .map_err(|error| GfError::Execution(error.to_string()))?,
+                    ScalarValue::iter_to_array(values).map_err(GfError::from_execution_error)?,
                 );
             }
             Ok(columns)
@@ -1040,7 +1037,7 @@ impl Frontier {
             columns[index] = Arc::new(list);
             rebuilt.push(
                 RecordBatch::try_new(batch.schema(), columns)
-                    .map_err(|e| GfError::Execution(e.to_string()))?,
+                    .map_err(GfError::from_execution_error)?,
             );
             offset += batch.num_rows();
         }
@@ -1360,7 +1357,7 @@ fn bind_expr_params(
         ))
     })
     .map(|transformed| transformed.data)
-    .map_err(|e| GfError::Plan(e.to_string()))
+    .map_err(GfError::from_plan_error)
 }
 
 /// Run the statement's write ops in clause order against the shared frontier
@@ -1443,15 +1440,15 @@ pub(crate) async fn run_terminal_suffix(
         .state()
         .create_physical_plan(logical)
         .await
-        .map_err(|e| GfError::Plan(e.to_string()))?;
+        .map_err(GfError::from_plan_error)?;
     let (input_schema, input_batches) = terminal_input(frontier);
     let input = MemorySourceConfig::try_new_from_batches(input_schema, input_batches)
-        .map_err(|e| GfError::Plan(e.to_string()))?;
+        .map_err(GfError::from_plan_error)?;
     let physical = replace_empty_input(physical, input)?;
     let schema = physical.schema();
     let mut batches = datafusion::physical_plan::collect(physical, session.task_ctx())
         .await
-        .map_err(|e| GfError::Execution(e.to_string()))?;
+        .map_err(GfError::from_execution_error)?;
     if batches.is_empty() {
         batches.push(RecordBatch::new_empty(Arc::clone(&schema)));
     }
@@ -1488,7 +1485,7 @@ fn terminal_global_count(
                 let index = frontier
                     .df_schema
                     .index_of_column(column)
-                    .map_err(|error| GfError::Plan(error.to_string()))?;
+                    .map_err(GfError::from_plan_error)?;
                 frontier
                     .batches
                     .iter()
@@ -1507,7 +1504,7 @@ fn terminal_global_count(
     let schema = Arc::clone(logical.schema().inner());
     RecordBatch::try_new(schema, counts)
         .map(Some)
-        .map_err(|error| GfError::Execution(error.to_string()))
+        .map_err(GfError::from_execution_error)
 }
 
 fn terminal_input(frontier: &Frontier) -> (SchemaRef, Vec<RecordBatch>) {
@@ -1532,7 +1529,7 @@ fn replace_empty_input(
         .map(|child| replace_empty_input(Arc::clone(child), Arc::clone(&input)))
         .collect::<Result<Vec<_>, _>>()?;
     plan.with_new_children(children)
-        .map_err(|e| GfError::Plan(e.to_string()))
+        .map_err(GfError::from_plan_error)
 }
 
 /// CREATE phase: mint per frontier row into the shared writer, then extend
@@ -1602,8 +1599,8 @@ fn run_create_phase(
     let mut computed_batches = Vec::with_capacity(frontier.batches.len());
     for batch in &frontier.batches {
         // Evaluate any row-dependent property values against this batch (#814).
-        let computed = crate::eval_create_computed(&cfg, batch)
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        let computed =
+            crate::eval_create_computed(&cfg, batch).map_err(GfError::from_execution_error)?;
         write_batch_creates(
             &cfg,
             &mut ctx.writer,
@@ -1766,7 +1763,7 @@ fn resolve_merge_node_properties_by_row(
         let expr = bind_expr_params(expr.clone(), env.params)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
         let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
-            .map_err(|error| GfError::Plan(error.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
         physical.push((name, expr));
     }
     let mut resolved_rows = Vec::with_capacity(frontier.num_rows());
@@ -1777,18 +1774,17 @@ fn resolve_merge_node_properties_by_row(
                 expr.evaluate(batch)
                     .and_then(|value| value.into_array(batch.num_rows()))
                     .map(|values| ((*name).clone(), values))
-                    .map_err(|error| GfError::Execution(error.to_string()))
+                    .map_err(GfError::from_execution_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         for row in 0..batch.num_rows() {
             let mut resolved = spec.clone();
             for (name, values) in &evaluated {
                 let scalar = ScalarValue::try_from_array(values, row)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 resolved.properties.push((
                     name.clone(),
-                    scalar_to_ir_literal(&scalar)
-                        .map_err(|error| GfError::Execution(error.to_string()))?,
+                    scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?,
                 ));
             }
             resolved.computed_properties.clear();
@@ -1821,7 +1817,7 @@ fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSc
                 format!("__gf_eval_{index}"),
             ))))
         })
-        .map_err(|error| GfError::Plan(error.to_string()))?
+        .map_err(GfError::from_plan_error)?
         .data;
     let fields = schema
         .as_arrow()
@@ -1840,8 +1836,8 @@ fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSc
             )
         })
         .collect();
-    let schema = DFSchema::new_with_metadata(fields, HashMap::new())
-        .map_err(|error| GfError::Plan(error.to_string()))?;
+    let schema =
+        DFSchema::new_with_metadata(fields, HashMap::new()).map_err(GfError::from_plan_error)?;
     Ok((expr, schema))
 }
 
@@ -2092,7 +2088,7 @@ fn resolve_merge_edge_properties_by_row(
         let expr = bind_expr_params(expr.clone(), env.params)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
         let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
-            .map_err(|error| GfError::Plan(error.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
         physical.push((name, expr));
     }
     let mut resolved_rows = Vec::with_capacity(frontier.num_rows());
@@ -2103,18 +2099,17 @@ fn resolve_merge_edge_properties_by_row(
                 expr.evaluate(batch)
                     .and_then(|value| value.into_array(batch.num_rows()))
                     .map(|values| ((*name).clone(), values))
-                    .map_err(|error| GfError::Execution(error.to_string()))
+                    .map_err(GfError::from_execution_error)
             })
             .collect::<Result<Vec<_>, _>>()?;
         for row in 0..batch.num_rows() {
             let mut resolved = spec.clone();
             for (name, values) in &evaluated {
                 let scalar = ScalarValue::try_from_array(values, row)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 resolved.properties.push((
                     name.clone(),
-                    scalar_to_ir_literal(&scalar)
-                        .map_err(|error| GfError::Execution(error.to_string()))?,
+                    scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?,
                 ));
             }
             resolved.computed_properties.clear();
@@ -2381,15 +2376,15 @@ fn collect_delete_expr_targets(
             &frontier.df_schema,
             &ExecutionProps::new(),
         )
-        .map_err(|error| GfError::Plan(error.to_string()))?;
+        .map_err(GfError::from_plan_error)?;
         for batch in &frontier.batches {
             let values = physical
                 .evaluate(batch)
                 .and_then(|value| value.into_array(batch.num_rows()))
-                .map_err(|error| GfError::Execution(error.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
             for row in 0..batch.num_rows() {
                 let value = ScalarValue::try_from_array(&values, row)
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 collect_delete_scalar(&value, nodes, edges)?;
             }
         }
@@ -2423,7 +2418,7 @@ fn collect_delete_scalar(
                 if let Some(column) = values.column_by_name(field) {
                     found_path = true;
                     let nested = ScalarValue::try_from_array(column, 0)
-                        .map_err(|error| GfError::Execution(error.to_string()))?;
+                        .map_err(GfError::from_execution_error)?;
                     collect_delete_scalar(&nested, nodes, edges)?;
                 }
             }
@@ -2449,8 +2444,8 @@ fn collect_delete_list(
     edges: &mut HashSet<[u8; 16]>,
 ) -> Result<(), GfError> {
     for row in 0..items.len() {
-        let item = ScalarValue::try_from_array(items, row)
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+        let item =
+            ScalarValue::try_from_array(items, row).map_err(GfError::from_execution_error)?;
         collect_delete_scalar(&item, nodes, edges)?;
     }
     Ok(())
@@ -2770,7 +2765,7 @@ fn run_set_phase_masked(
         let df_expr = bind_expr_params(df_expr, env.params)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
         let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
-            .map_err(|e| GfError::Plan(e.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
 
         let mut overlay = Vec::with_capacity(frontier.batches.len());
         let mut offset = 0usize;
@@ -2779,7 +2774,7 @@ fn run_set_phase_masked(
             let values = phys
                 .evaluate(batch)
                 .and_then(|cv| cv.into_array(n))
-                .map_err(|e| GfError::Execution(e.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
             let selected = mask.map(|mask| &mask[offset..offset + n]);
             let overlay_values = if let Some(selected) = selected {
                 let selection = BooleanArray::from(selected.to_vec());
@@ -2799,9 +2794,9 @@ fn run_set_phase_masked(
                         },
                         |index| Ok(Arc::clone(batch.column(index))),
                     )
-                    .map_err(|error| GfError::Execution(error.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 arrow::compute::kernels::zip::zip(&selection, &values, &previous)
-                    .map_err(|error| GfError::Execution(error.to_string()))?
+                    .map_err(GfError::from_execution_error)?
             } else {
                 Arc::clone(&values)
             };
@@ -2821,7 +2816,7 @@ fn run_set_phase_masked(
                     ));
                 }
                 let scalar = ScalarValue::try_from_array(&values, row)
-                    .map_err(|e| GfError::Execution(e.to_string()))?;
+                    .map_err(GfError::from_execution_error)?;
                 let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
                 if scalar.is_null() {
                     let present = property_is_present(
@@ -2852,8 +2847,7 @@ fn run_set_phase_masked(
                     }
                     continue;
                 }
-                let lit =
-                    scalar_to_ir_literal(&scalar).map_err(|e| GfError::Execution(e.to_string()))?;
+                let lit = scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?;
                 let pending = if is_edge {
                     ctx.writer.contains_pending_edge(&uuid)
                 } else {
@@ -2958,14 +2952,14 @@ fn run_set_map_phase_with_input(
         let df_expr = bind_expr_params(df_expr, env.params)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
         let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
-            .map_err(|e| GfError::Plan(e.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
         let mut overlays: HashMap<String, Vec<ArrayRef>> = HashMap::new();
 
         for batch in &frontier.batches {
             let values = phys
                 .evaluate(batch)
                 .and_then(|cv| cv.into_array(batch.num_rows()))
-                .map_err(|e| GfError::Execution(e.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
             let maps = values
                 .as_any()
                 .downcast_ref::<StructArray>()
@@ -3047,12 +3041,12 @@ fn run_set_map_phase_with_input(
                 let mut null_keys = HashSet::new();
                 for (field, column) in maps.fields().iter().zip(maps.columns()) {
                     let scalar = ScalarValue::try_from_array(column, row)
-                        .map_err(|e| GfError::Execution(e.to_string()))?;
+                        .map_err(GfError::from_execution_error)?;
                     if scalar.is_null() {
                         null_keys.insert(field.name().clone());
                     } else {
-                        let value = scalar_to_ir_literal(&scalar)
-                            .map_err(|e| GfError::Execution(e.to_string()))?;
+                        let value =
+                            scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?;
                         updates.insert(field.name().clone(), value);
                     }
                 }
@@ -3110,8 +3104,7 @@ fn decode_tagged_map_updates(
     maps: &StructArray,
     row: usize,
 ) -> Result<HashMap<String, graphforge_ir::IrLiteral>, GfError> {
-    let tagged = ScalarValue::try_from_array(maps, row)
-        .map_err(|error| GfError::Execution(error.to_string()))?;
+    let tagged = ScalarValue::try_from_array(maps, row).map_err(GfError::from_execution_error)?;
     let decoded = graphforge_rel::expr::decode_het_scalar(&tagged)
         .ok_or_else(|| GfError::Execution("SET source is not a map".into()))?;
     let ScalarValue::Struct(values) = decoded else {
@@ -3119,14 +3112,13 @@ fn decode_tagged_map_updates(
     };
     let mut updates = HashMap::new();
     for (field, column) in values.fields().iter().zip(values.columns()) {
-        let tagged_value = ScalarValue::try_from_array(column, 0)
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+        let tagged_value =
+            ScalarValue::try_from_array(column, 0).map_err(GfError::from_execution_error)?;
         let value = graphforge_rel::expr::decode_het_scalar(&tagged_value).unwrap_or(tagged_value);
         if !value.is_null() {
             updates.insert(
                 field.name().clone(),
-                scalar_to_ir_literal(&value)
-                    .map_err(|error| GfError::Execution(error.to_string()))?,
+                scalar_to_ir_literal(&value).map_err(GfError::from_execution_error)?,
             );
         }
     }
@@ -3337,7 +3329,7 @@ fn run_remove_phase(
                 ScalarValue::try_from(&overlay_type)
                     .unwrap_or(ScalarValue::Null)
                     .to_array_of_size(batch.num_rows())
-                    .map_err(|e| GfError::Execution(e.to_string()))?,
+                    .map_err(GfError::from_execution_error)?,
             );
         }
         frontier.overlay_property(item.target, &item.prop_name, overlay)?;
@@ -3538,7 +3530,7 @@ pub(crate) fn statement_summary_batch(c: &WriteCounters) -> Result<RecordBatch, 
             Arc::new(UInt64Array::from(vec![c.properties_removed])),
         ],
     )
-    .map_err(|e| GfError::Execution(e.to_string()))
+    .map_err(GfError::from_execution_error)
 }
 
 // ---------------------------------------------------------------------------

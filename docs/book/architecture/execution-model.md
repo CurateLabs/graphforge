@@ -77,6 +77,36 @@ GraphPlan (Graph IR)
 
 ---
 
+## Error identity across DataFusion
+
+A GraphForge operator wraps its `GfError` as a downcastable
+`DataFusionError::External`. Planning, execution, and facade stream consumers
+recover that error through the standard Rust error source chain, including
+DataFusion context and shared wrappers. They preserve its variant, typed code,
+message, and span rather than classifying display text. The original error is
+cloned when a shared upstream failure cannot be exclusively owned. For a
+multi-error wrapper, recovery follows that wrapper's designated source; it does
+not search other branches for a preferred classification.
+
+| Boundary input | Public result |
+| --- | --- |
+| Wrapped `GfError::Parse` or `Bind` | Original variant and span; `GF_PARSE` / binding `ParseError` |
+| Wrapped `GfError::Api` or `Project` | Original closed typed code, such as `GF_RESOURCE_LIMIT` or `GF_PROJECT_CORRUPT` |
+| Any other wrapped `GfError` | Original variant and existing public code |
+| Foreign planner error without a GraphForge source | Existing `GfError::Plan` / `GF_PLAN` classification and diagnostic |
+| Foreign execution error without a GraphForge source | Existing `GfError::Execution` / `GF_EXECUTION` classification and diagnostic |
+
+This corrects the v0.6 error boundary: an owned GraphForge resource, validation,
+or project error no longer becomes a generic execution/plan error solely
+because DataFusion transported it. No new public code is introduced, and
+foreign errors keep their existing fallback classification. Raw Arrow batch
+streams retain DataFusion's error type and downcastable source until a facade
+consumer converts them. Parser/binder kind retention and lowering-kind mapping
+remain the separate work tracked by #1018; this boundary does not claim that
+already flattened errors can be reconstructed.
+
+---
+
 ## Custom Graph Execution Nodes
 
 GraphForge registers custom `ExecutionPlan` implementations with DataFusion for operators
