@@ -99,7 +99,10 @@ fn named_directory_replacement<D: DirectoryContract>() {
         // No FILE_SHARE_DELETE: Windows prevents the replacement rather than
         // allowing a rename and discovering it on the next revalidation.
         let failure = std::fs::rename(&directory, &displaced).unwrap_err();
-        assert_eq!(failure.kind(), std::io::ErrorKind::PermissionDenied);
+        // Rust does not map ERROR_SHARING_VIOLATION to PermissionDenied;
+        // pin the native refusal caused by the retained no-delete-share handle.
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        assert_eq!(failure.raw_os_error(), Some(ERROR_SHARING_VIOLATION), "{failure:?}");
         child.revalidate().unwrap();
         assert_eq!(
             std::fs::read(directory.join("authority")).unwrap(),
