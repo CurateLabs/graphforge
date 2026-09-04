@@ -1,5 +1,5 @@
 {
-  "checksum": "037b1a5c1dc3799576a30eb1ae9e1e4892f4c81b0c5de82a3929bd4d7ebaebb1",
+  "checksum": "7c859f51d46c760db444076d608ec0dfd2143f694233968bab5e5a995296e66c",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -21369,7 +21369,6 @@
             "abi3-py313",
             "abi3-py314",
             "default",
-            "extension-module",
             "macros",
             "pyo3-macros"
           ],
@@ -21444,6 +21443,12 @@
             }
           ],
           "selects": {}
+        },
+        "build_script_env": {
+          "common": {
+            "PYO3_BUILD_EXTENSION_MODULE": "1"
+          },
+          "selects": {}
         }
       },
       "license": "MIT OR Apache-2.0",
@@ -21503,7 +21508,6 @@
             "abi3-py313",
             "abi3-py314",
             "default",
-            "extension-module",
             "resolve-config"
           ],
           "selects": {}
@@ -21543,6 +21547,12 @@
               "target": "target_lexicon"
             }
           ],
+          "selects": {}
+        },
+        "build_script_env": {
+          "common": {
+            "PYO3_BUILD_EXTENSION_MODULE": "1"
+          },
           "selects": {}
         }
       },
@@ -21602,8 +21612,7 @@
             "abi3-py312",
             "abi3-py313",
             "abi3-py314",
-            "default",
-            "extension-module"
+            "default"
           ],
           "selects": {}
         },
@@ -21642,6 +21651,12 @@
               "target": "pyo3_build_config"
             }
           ],
+          "selects": {}
+        },
+        "build_script_env": {
+          "common": {
+            "PYO3_BUILD_EXTENSION_MODULE": "1"
+          },
           "selects": {}
         },
         "links": "python"
@@ -31919,6 +31934,7 @@
             "Win32_System",
             "Win32_System_Console",
             "Win32_System_IO",
+            "Win32_System_Ioctl",
             "Win32_System_Memory",
             "Win32_System_Pipes",
             "Win32_System_SystemServices",

@@ -45,5 +45,5 @@ python-source = "python"
 profile = "release"
 # Only build the Python extension module, not the whole workspace.
 # abi3-py310 → one stable-ABI wheel per OS covers the whole py3.10–3.14 matrix.
-features = ["pyo3/extension-module", "pyo3/abi3-py310"]
+features = ["extension-module"]
 include = ["python/graphforge/_project_skills/**/*"]

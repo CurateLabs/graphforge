@@ -118,6 +118,47 @@ python3 scripts/ci/bazel-migration-ledger-check.py
 - Do not hand-edit `@crates` labels to diverge from lock state — the drift
   check must stay green.
 
+### Python test and extension build modes
+
+Python Rust tests are executables and must link to libpython. Distribution
+extensions resolve Python symbols when loaded by the interpreter and must not
+link libpython on Unix. The same ABI3 (Python 3.10+) contract applies in both modes.
+
+| Build | Link mode |
+|---|---|
+| Ordinary `cargo test` / `cargo llvm-cov` | Default features retain ABI3 and link libpython |
+| `maturin build` / `maturin develop` | The binding's `pyproject.toml` explicitly selects its `extension-module` feature |
+| Bazel Python cdylib | `MODULE.bazel` scopes `PYO3_BUILD_EXTENSION_MODULE` to the PyO3 build scripts |
+
+Do not enable `pyo3/extension-module` in an unconditional Cargo dependency or
+default feature. Cargo unifies dependency features across the workspace, so
+that would break the binding's Rust tests and the ordinary workspace coverage
+command. Do not export `PYO3_BUILD_EXTENSION_MODULE` globally: PyO3 treats its
+presence as enabled, even if its value is `0`. A manual Cargo distribution
+build must opt in with `--features graphforge-bindings-py/extension-module`.
+
+For native Rust tests, select a supported interpreter with its shared development
+library available. On Linux, a managed interpreter's library directory also
+needs to be visible to the runtime loader (as on OVHC-AGENCY):
+
+```bash
+uv python install 3.12
+python_test_exe="$(uv python find 3.12)"
+python_test_libdir="$("$python_test_exe" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+PYO3_PYTHON="$python_test_exe" \
+  LD_LIBRARY_PATH="$python_test_libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  CARGO_TARGET_DIR=target/python-tests \
+  cargo test -p graphforge-bindings-py --lib
+```
+
+`scripts/ci/python-build-mode-check.py` inspects the actual default and packaging
+Cargo feature graphs and the generated Bazel build-script environments. It runs
+in the fast local gate and required Rust Quality job before Clippy. Refresh the
+Cargo/Bazel lock and feature fingerprint after intentionally changing either
+mode. Test builds, a real native import, and inspection of the distribution
+artifact's dynamic dependencies remain required evidence when changing linkage;
+a successful cdylib build alone does not prove the Rust-test executable links.
+
 ### Tests, fixtures, and generated inputs
 
 - Unit tests: `gf_rust_test` next to the library.
