@@ -6,6 +6,10 @@
     "schema": { "const": "graphforge-gdc-graphalytics-evidence/1" },
     "suite_id": { "const": "graphalytics" },
     "dataset_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$" },
+    "certification": { "const": false },
+    "execution_mode": {
+      "enum": ["static_replay", "live_public_api"]
+    },
     "status": {
       "enum": ["passed", "failed", "semantic_incompatibility"]
     },
@@ -53,6 +57,15 @@
       }
     }
   },
-  "required": ["schema", "suite_id", "dataset_id", "status", "identities", "algorithms"],
+  "required": [
+    "schema",
+    "suite_id",
+    "dataset_id",
+    "certification",
+    "execution_mode",
+    "status",
+    "identities",
+    "algorithms"
+  ],
   "additionalProperties": false
 }

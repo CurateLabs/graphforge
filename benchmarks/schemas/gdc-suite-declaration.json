@@ -28,6 +28,18 @@
       "type": "string",
       "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
     },
+    "identity_profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 8,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_-]{0,40}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^profiles/gdc/[A-Za-z0-9_.-]+\\.json$"
+      }
+    },
     "runner": {
       "enum": ["gdc-contracts", "gdc-finbench-transaction", "gdc-graphalytics", "gdc-snb-bi", "gdc-snb-interactive"]
     },

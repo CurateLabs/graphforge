@@ -4,7 +4,11 @@
   "family": "gdc",
   "suite_id": "graphalytics",
   "disposition": "executable",
-  "pinned_identity": "profiles/gdc/graphalytics-identity.json",
+  "pinned_identity": "profiles/gdc/graphalytics-live-identity.json",
+  "identity_profiles": {
+    "static": "profiles/gdc/graphalytics-static-identity.json",
+    "live": "profiles/gdc/graphalytics-live-identity.json"
+  },
   "runner": "gdc-graphalytics",
-  "datasets": ["ga-tiny", "wiki-Talk"]
+  "datasets": ["ga-tiny"]
 }

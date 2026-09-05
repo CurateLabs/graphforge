@@ -17,7 +17,8 @@ from typing import Any
 from graphforge_bench.gdc_contracts import (
     GdcContractError,
     load_pinned_identity,
-    validate_acquisition,
+    load_suite_declaration,
+    validate_suite_acquisition,
     workspace_root,
 )
 
@@ -119,18 +120,14 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded ga-tiny Graphalytics suite through the Rust runner."""
+    """Replay committed outputs through the Rust validator (not live proof)."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "graphalytics-tiny" / fixture_name
-    pin = load_pinned_identity(base / "profiles" / "gdc" / "graphalytics-identity.json")
-    acquisition = json.loads((fixture / "acquisition.json").read_text(encoding="utf-8"))
-    # Provenance evidence from shared contracts (checksummed assets only).
-    contract_evidence = validate_acquisition(pin, acquisition, fixture)
-    identities = contract_evidence["identities"]
+    provenance = _validated_provenance(base, fixture)
     with tempfile.TemporaryDirectory(prefix="gdc-graphalytics-") as tmp:
         tmp_path = Path(tmp)
         identities_path = tmp_path / "identities.json"
-        identities_path.write_text(json.dumps(identities, indent=2) + "\n", encoding="utf-8")
+        identities_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
         out_evidence = evidence_path or (tmp_path / "evidence.json")
         completed = _run_runner(
             [
@@ -149,17 +146,140 @@ def run_tiny_suite(
                 f"runner failed to emit evidence: {completed.stderr.strip()}",
             )
         evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
-        if evidence.get("schema") != EVIDENCE_SCHEMA:
-            raise GraphalyticsSuiteError(
-                "invalid_document",
-                "unexpected graphalytics evidence schema",
-            )
+        _validate_evidence_envelope(evidence, "static_replay")
         if completed.returncode != 0 and fixture_name == "compatible":
             raise GraphalyticsSuiteError(
                 "reference_mismatch",
                 f"compatible fixture must pass: {completed.stderr.strip()}",
             )
         return evidence
+
+
+def run_tiny_live_suite(
+    *,
+    fixture_name: str = "compatible",
+    root: Path | None = None,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Execute ga-tiny through the real in-memory public GraphForge API."""
+    base = root or workspace_root()
+    fixture = base / "fixtures" / "gdc" / "graphalytics-tiny" / fixture_name
+    provenance = _validated_provenance(base, fixture)
+    with tempfile.TemporaryDirectory(prefix="gdc-graphalytics-live-") as tmp:
+        tmp_path = Path(tmp)
+        identities_path = tmp_path / "identities.json"
+        identities_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+        out_evidence = evidence_path or (tmp_path / "evidence.json")
+        completed = _run_runner(
+            [
+                "run-live",
+                str(fixture / "ga-tiny.edges"),
+                str(fixture / "jobs"),
+                str(fixture / "references"),
+                str(identities_path),
+                str(out_evidence),
+            ],
+            base,
+        )
+        if not out_evidence.is_file():
+            raise GraphalyticsSuiteError(
+                "invalid_document",
+                f"live runner failed to emit evidence: {completed.stderr.strip()}",
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+        _validate_evidence_envelope(evidence, "live_public_api")
+        if completed.returncode != 0 and fixture_name == "compatible":
+            raise GraphalyticsSuiteError(
+                "reference_mismatch",
+                f"compatible live fixture must pass: {completed.stderr.strip()}",
+            )
+        return evidence
+
+
+def suite_declaration(root: Path | None = None) -> dict[str, Any]:
+    return load_suite_declaration((root or workspace_root()) / "suites" / "gdc-graphalytics.json")
+
+
+def identity_path(profile: str, root: Path | None = None) -> Path:
+    suite = suite_declaration(root)
+    profiles = suite.get("identity_profiles") or {}
+    if profile not in profiles:
+        raise GraphalyticsSuiteError(
+            "identity_drift",
+            f"unknown Graphalytics identity profile: {profile}",
+        )
+    return (root or workspace_root()) / profiles[profile]
+
+
+def _validated_provenance(base: Path, fixture: Path) -> dict[str, Any]:
+    suite = suite_declaration(base)
+    acquisition = json.loads((fixture / "acquisition.json").read_text(encoding="utf-8"))
+    contract = validate_suite_acquisition(suite, acquisition, fixture, base)
+    return {
+        **contract["identities"],
+        "datasets": contract["datasets"],
+        "references": contract["references"],
+    }
+
+
+def _validate_evidence_envelope(evidence: dict[str, Any], execution_mode: str) -> None:
+    if evidence.get("schema") != EVIDENCE_SCHEMA:
+        raise GraphalyticsSuiteError(
+            "invalid_document",
+            "unexpected graphalytics evidence schema",
+        )
+    if evidence.get("execution_mode") != execution_mode:
+        raise GraphalyticsSuiteError(
+            "invalid_document",
+            f"expected {execution_mode} evidence, got {evidence.get('execution_mode')}",
+        )
+    outcomes = evidence.get("algorithms")
+    if (
+        not isinstance(outcomes, list)
+        or len(outcomes) != len(ALGORITHMS)
+        or any(
+            not isinstance(item, dict) or item.get("workload_key") not in ALGORITHMS
+            for item in outcomes
+        )
+        or sorted(item.get("workload_key", "") for item in outcomes) != sorted(ALGORITHMS)
+    ):
+        raise GraphalyticsSuiteError(
+            "invalid_document", "evidence requires each of the six algorithms exactly once"
+        )
+    if evidence.get("certification") is not False:
+        raise GraphalyticsSuiteError(
+            "invalid_document",
+            "engineering Graphalytics evidence must remain certification=false",
+        )
+
+
+def assert_identity_profiles_are_separated(root: Path | None = None) -> None:
+    """Historical wiki-Talk markers must not claim ga-tiny or v1.0.5 authority."""
+    base = root or workspace_root()
+    static_pin = load_pinned_identity(identity_path("static", base))
+    live_pin = load_pinned_identity(identity_path("live", base))
+    static_ids = {item["id"] for item in static_pin["datasets"]}
+    live_ids = {item["id"] for item in live_pin["datasets"]}
+    if "ga-tiny" in static_ids:
+        raise GraphalyticsSuiteError(
+            "identity_drift",
+            "static historical pin must not claim ga-tiny",
+        )
+    if "wiki-Talk" in live_ids:
+        raise GraphalyticsSuiteError(
+            "identity_drift",
+            "live ga-tiny pin must not claim wiki-Talk",
+        )
+    if live_pin["spec"]["release"] != "v1.0.5":
+        raise GraphalyticsSuiteError(
+            "identity_drift",
+            "live pin must keep the Graphalytics v1.0.5 spec identity",
+        )
+    if static_pin["spec"]["release"] == live_pin["spec"]["release"]:
+        raise GraphalyticsSuiteError(
+            "identity_drift",
+            "static historical pin must not reuse the live spec release",
+        )
 
 
 def assert_separate_from_graph500(root: Path | None = None) -> None:
@@ -201,10 +321,14 @@ __all__ = [
     "LADDER_SCHEMA",
     "GdcContractError",
     "GraphalyticsSuiteError",
+    "assert_identity_profiles_are_separated",
     "assert_separate_from_graph500",
+    "identity_path",
     "list_algorithm_rules",
     "load_ladder",
     "map_job_file",
     "ordered_dataset_ids",
+    "run_tiny_live_suite",
     "run_tiny_suite",
+    "suite_declaration",
 ]

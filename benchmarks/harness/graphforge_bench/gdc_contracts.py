@@ -308,6 +308,93 @@ def validate_acquisition(
     )
 
 
+def suite_identity_profiles(suite: Mapping[str, Any]) -> dict[str, str]:
+    """Return declared identity-profile paths, or an empty map for single-pin suites."""
+    profiles = suite.get("identity_profiles")
+    if profiles is None:
+        return {}
+    if not isinstance(profiles, Mapping) or not profiles:
+        raise GdcContractError("invalid_document", "identity_profiles must be a non-empty object")
+    resolved: dict[str, str] = {}
+    for key, value in profiles.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise GdcContractError("invalid_document", "identity_profiles entries must be strings")
+        resolved[key] = value
+    paths = list(resolved.values())
+    if len(paths) != len(set(paths)):
+        raise GdcContractError(
+            "incomplete_provenance",
+            "identity_profiles must use distinct pin paths",
+        )
+    if suite["pinned_identity"] not in paths:
+        raise GdcContractError(
+            "identity_drift",
+            "suite pinned_identity is not one of the declared identity_profiles",
+        )
+    return resolved
+
+
+def resolve_pinned_identity(
+    suite: Mapping[str, Any],
+    acquisition: Mapping[str, Any],
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Select the pin the suite and acquisition jointly name."""
+    base = root or workspace_root()
+    profiles = suite_identity_profiles(suite)
+    selected = acquisition.get("identity_profile")
+    if profiles:
+        if not isinstance(selected, str) or not selected:
+            raise GdcContractError(
+                "incomplete_provenance",
+                "acquisition must select a suite identity_profile",
+            )
+        if selected not in profiles:
+            raise GdcContractError(
+                "identity_drift",
+                f"acquisition identity_profile {selected!r} is not declared by the suite",
+            )
+        pin_path = profiles[selected]
+    else:
+        if selected is not None:
+            raise GdcContractError(
+                "identity_drift",
+                "acquisition selected an identity_profile the suite does not declare",
+            )
+        pin_path = suite["pinned_identity"]
+    pin = load_pinned_identity(base / pin_path)
+    if pin["suite_id"] != suite["suite_id"]:
+        raise GdcContractError(
+            "identity_drift",
+            "resolved pin suite_id drifted from suite declaration",
+        )
+    if pin["disposition"] != suite["disposition"]:
+        raise GdcContractError(
+            "identity_drift",
+            "resolved pin disposition drifted from suite declaration",
+        )
+    return pin
+
+
+def validate_suite_acquisition(
+    suite: Mapping[str, Any],
+    acquisition: Mapping[str, Any],
+    asset_root: Path,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve the suite/acquisition identity profile, then validate assets."""
+    pin = resolve_pinned_identity(suite, acquisition, root)
+    return validate_acquisition(pin, acquisition, asset_root)
+
+
+def _assert_pin_matches_suite(suite: Mapping[str, Any], pin: Mapping[str, Any]) -> None:
+    if pin["suite_id"] != suite["suite_id"] or pin["disposition"] != suite["disposition"]:
+        raise GdcContractError(
+            "identity_drift",
+            f"pinned identity drifted from suite declaration: {suite['suite_id']}",
+        )
+
+
 def list_gdc_suites(root: Path | None = None) -> tuple[dict[str, Any], ...]:
     base = root or workspace_root()
     by_id: dict[str, dict[str, Any]] = {}
@@ -319,6 +406,10 @@ def list_gdc_suites(root: Path | None = None) -> tuple[dict[str, Any], ...]:
                 "incomplete_provenance",
                 f"duplicate GDC suite declaration: {suite_id}",
             )
+        profiles = suite_identity_profiles(suite)
+        pin_paths = {suite["pinned_identity"], *profiles.values()}
+        for pin_path in pin_paths:
+            _assert_pin_matches_suite(suite, load_pinned_identity(base / pin_path))
         by_id[suite_id] = suite
     if set(by_id) != set(ALL_SUITES):
         raise GdcContractError(

@@ -33,7 +33,10 @@ without sharing workload semantics.
 | Runner | `graphforge-benchmark-gdc-graphalytics` (`suites/gdc-graphalytics.json`) |
 | Ladder | `profiles/gdc/graphalytics-ladder.json` (begins with bounded `ga-tiny`) |
 | Validation | exact (BFS/CDLP), equivalence (WCC), epsilon=1e-4 (PR/LCC/SSSP) |
-| Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP) |
+| Execution | Explicit `run-live` in-memory public API proof; `run-suite` is static replay |
+| Unsupported semantics | Typed `semantic_incompatibility` (fixed-iteration PR; synchronous CDLP; directed LCC normalization) |
+| Identity | Distinct pins: `profiles/gdc/graphalytics-static-identity.json` (historical `wiki-Talk` markers) and `profiles/gdc/graphalytics-live-identity.json` (`ga-tiny` proof). Suite/acquisition select the profile; cross-use is `identity_drift`. |
+| Authority | Synthetic `ga-tiny` engineering evidence only (edges-only fixture; isolated vertices out of scope); `certification=false`; legacy `wiki-Talk` stub excluded |
 
 Profiles, validation, and evidence stay under the GDC Graphalytics suite and are
 not shared with Graph500 orchestration.

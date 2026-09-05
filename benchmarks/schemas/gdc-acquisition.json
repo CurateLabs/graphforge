@@ -13,6 +13,10 @@
         "spb"
       ]
     },
+    "identity_profile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,40}$"
+    },
     "recorded_spec": { "$ref": "#/$defs/toolIdentity" },
     "recorded_generator": {
       "oneOf": [

@@ -1,39 +1,70 @@
 {
   "schema": "graphforge-gdc-acquisition/1",
   "suite_id": "graphalytics",
+  "identity_profile": "live",
   "recorded_spec": {
-    "name": "ldbc-graphalytics",
-    "source": "https://ldbcouncil.org/benchmarks/graphalytics/",
-    "release": "1.0.0-engineering-pin",
-    "commit": null
+    "name": "ldbc-graphalytics-specification",
+    "source": "https://github.com/ldbc/ldbc_graphalytics_docs",
+    "release": "v1.0.5",
+    "commit": "5cf6ae65d26c809f2e3e0dac4716f153c71dc639"
   },
   "recorded_generator": {
-    "name": "graphalytics-datasets",
-    "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics",
-    "release": "wiki-Talk-fixture-pin",
+    "name": "graphforge-ga-tiny-synthetic-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/graphalytics-tiny",
+    "release": "ga-tiny-v1",
     "commit": null
   },
   "recorded_driver": {
-    "name": "ldbc_graphalytics",
-    "source": "https://github.com/ldbc/ldbc_graphalytics",
-    "release": null,
-    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "name": "graphforge-gdc-graphalytics-live-runner",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-graphalytics",
+    "release": "engineering-driver-v1",
+    "commit": null
   },
   "assets": [
     {
-      "id": "wiki-Talk",
-      "path": "wiki-Talk.txt",
-      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "Graphalytics-dataset-terms",
+      "id": "ga-tiny",
+      "path": "ga-tiny.edges",
+      "checksum_sha256": "101e94eed764c6b0a4bbedf9c90a53aec9864fd7ef4942265fb0fb9dce21d5a3",
+      "license": "Apache-2.0",
       "acquisition": "fixture"
     }
   ],
   "references": [
     {
-      "dataset_id": "wiki-Talk",
+      "dataset_id": "ga-tiny",
       "workload_key": "bfs",
-      "path": "wiki-Talk-bfs.ref",
-      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db"
+      "path": "references/ga-tiny-bfs.ref",
+      "checksum_sha256": "8c6fd018d6cdb482d5edd68ffec860c8a4065eb8284da9f1ae90a30d357dda04"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "pr",
+      "path": "references/ga-tiny-pr.ref",
+      "checksum_sha256": "f8b42dd58525241fec37f72346fcda0e471161de27528b2a1c3128d032c7a4a8"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "wcc",
+      "path": "references/ga-tiny-wcc.ref",
+      "checksum_sha256": "0449fd11607f93959951bd5b9aac26ae249eb55311517d61a0b0f8c9b39fdb71"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "cdlp",
+      "path": "references/ga-tiny-cdlp.ref",
+      "checksum_sha256": "0449fd11607f93959951bd5b9aac26ae249eb55311517d61a0b0f8c9b39fdb71"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "lcc",
+      "path": "references/ga-tiny-lcc.ref",
+      "checksum_sha256": "84805d8f5da9f5e33d3a5f4ae57eb317789a2b329d92de343572703041ead0c6"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "sssp",
+      "path": "references/ga-tiny-sssp.ref",
+      "checksum_sha256": "c9ad60ede2c4d3ad1ff802c79d6ad36fcb339f754cab601596a75e6924fc8b51"
     }
   ]
 }
