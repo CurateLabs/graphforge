@@ -57,7 +57,7 @@ const IDENTITY_WIDTH: usize = 32;
 const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
 const RESOLVED_ENDPOINT_WIDTH: usize = 32;
-const COPY_BUFFER_BYTES: usize = 1 << 20;
+const COPY_BUFFER_BYTES: usize = crate::GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES;
 
 #[cfg(test)]
 type SourceSpoolHook = Box<dyn FnMut(&str)>;
@@ -82,6 +82,13 @@ fn run_source_spool_hook(phase: &str) {
 
 #[cfg(not(test))]
 fn run_source_spool_hook(_phase: &str) {}
+
+fn add_evidence_counter(counter: &mut u64, value: u64, name: &str) -> Result<(), GfError> {
+    *counter = counter
+        .checked_add(value)
+        .ok_or_else(|| storage(format!("{name} overflow")))?;
+    Ok(())
+}
 
 struct CountingWriter {
     inner: graphforge_filesystem::DurableFileCacheWriter,
@@ -171,14 +178,8 @@ fn authenticated_source_spool<'a>(
             }
             digest.update(&buffer[..read]);
             spool.write_all(&buffer[..read]).map_err(storage)?;
-            bytes = bytes.saturating_add(read as u64);
-            evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(read as u64);
-            evidence.input_read_operations = evidence.input_read_operations.saturating_add(1);
-            evidence.source_spool_write_bytes = evidence
-                .source_spool_write_bytes
-                .saturating_add(read as u64);
-            evidence.source_spool_write_operations =
-                evidence.source_spool_write_operations.saturating_add(1);
+            add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
+            account_spooled_bytes(evidence, read as u64)?;
         }
         if file_identity(authenticated.file()).map_err(storage)? != expected_identity
             || file_link_count(authenticated.file()).map_err(storage)? != 1
@@ -202,14 +203,16 @@ fn authenticated_source_spool<'a>(
             )));
         }
     };
-    account_cache_release(source_release, evidence);
+    account_cache_release(source_release, evidence)?;
     spool.flush().map_err(storage)?;
     spool.sync_all_and_release().map_err(storage)?;
-    evidence.source_spool_fsync_operations = evidence
-        .source_spool_fsync_operations
-        .saturating_add(spool.evidence().sync_operations);
+    add_evidence_counter(
+        &mut evidence.source_spool_fsync_operations,
+        spool.evidence().sync_operations,
+        "source spool fsync operations",
+    )?;
     let spool_release = spool.evidence();
-    account_cache_release(spool_release, evidence);
+    account_cache_release(spool_release, evidence)?;
     let aggregate_peak = source_release
         .peak_window_bytes
         .checked_add(spool_release.peak_window_bytes)
@@ -221,6 +224,33 @@ fn authenticated_source_spool<'a>(
     let mut spool = spool.into_file();
     spool.rewind().map_err(storage)?;
     Ok((spool, guard))
+}
+
+fn account_spooled_bytes(
+    evidence: &mut GraphConstructionEncodingEvidence,
+    bytes: u64,
+) -> Result<(), GfError> {
+    for (counter, value, name) in [
+        (&mut evidence.input_read_bytes, bytes, "input read bytes"),
+        (
+            &mut evidence.input_read_operations,
+            1,
+            "input read operations",
+        ),
+        (
+            &mut evidence.source_spool_write_bytes,
+            bytes,
+            "source spool write bytes",
+        ),
+        (
+            &mut evidence.source_spool_write_operations,
+            1,
+            "source spool write operations",
+        ),
+    ] {
+        add_evidence_counter(counter, value, name)?;
+    }
+    Ok(())
 }
 
 impl<R: Read> Read for CountingInput<R> {
@@ -247,43 +277,61 @@ impl Write for CountingWriter {
 fn account_cache_release(
     released: graphforge_filesystem::FileCacheReleaseEvidence,
     evidence: &mut GraphConstructionEncodingEvidence,
-) {
-    evidence.cache_release_operations = evidence
-        .cache_release_operations
-        .saturating_add(released.release_operations);
-    evidence.cache_release_unsupported_operations = evidence
-        .cache_release_unsupported_operations
-        .saturating_add(released.unsupported_operations);
-    evidence.cache_released_bytes = evidence
-        .cache_released_bytes
-        .saturating_add(released.released_bytes);
+) -> Result<(), GfError> {
+    add_evidence_counter(
+        &mut evidence.cache_release_operations,
+        released.release_operations,
+        "cache release operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.cache_release_unsupported_operations,
+        released.unsupported_operations,
+        "cache release unsupported operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.cache_released_bytes,
+        released.released_bytes,
+        "cache released bytes",
+    )?;
     evidence.peak_cache_release_window_bytes = evidence
         .peak_cache_release_window_bytes
         .max(released.peak_window_bytes);
+    Ok(())
 }
 
 fn merge_encoding_evidence(
     target: &mut GraphConstructionEncodingEvidence,
     source: &GraphConstructionEncodingEvidence,
-) {
-    target.input_read_bytes = target
-        .input_read_bytes
-        .saturating_add(source.input_read_bytes);
-    target.input_read_operations = target
-        .input_read_operations
-        .saturating_add(source.input_read_operations);
-    target.cache_release_operations = target
-        .cache_release_operations
-        .saturating_add(source.cache_release_operations);
-    target.cache_release_unsupported_operations = target
-        .cache_release_unsupported_operations
-        .saturating_add(source.cache_release_unsupported_operations);
-    target.cache_released_bytes = target
-        .cache_released_bytes
-        .saturating_add(source.cache_released_bytes);
+) -> Result<(), GfError> {
+    add_evidence_counter(
+        &mut target.input_read_bytes,
+        source.input_read_bytes,
+        "input read bytes",
+    )?;
+    add_evidence_counter(
+        &mut target.input_read_operations,
+        source.input_read_operations,
+        "input read operations",
+    )?;
+    add_evidence_counter(
+        &mut target.cache_release_operations,
+        source.cache_release_operations,
+        "cache release operations",
+    )?;
+    add_evidence_counter(
+        &mut target.cache_release_unsupported_operations,
+        source.cache_release_unsupported_operations,
+        "cache release unsupported operations",
+    )?;
+    add_evidence_counter(
+        &mut target.cache_released_bytes,
+        source.cache_released_bytes,
+        "cache released bytes",
+    )?;
     target.peak_cache_release_window_bytes = target
         .peak_cache_release_window_bytes
         .max(source.peak_cache_release_window_bytes);
+    Ok(())
 }
 
 fn storage(error: impl std::fmt::Display) -> GfError {
@@ -514,7 +562,11 @@ pub(crate) fn encode(
     if shape.semantic_authority_sha256 != semantic_digest {
         return Err(storage("shape semantic authority differs from session"));
     }
-    if generation != shape.parent_topology_generation.saturating_add(1) {
+    let expected_generation = shape
+        .parent_topology_generation
+        .checked_add(1)
+        .ok_or_else(|| storage("encoded generation overflow"))?;
+    if generation != expected_generation {
         return Err(storage(
             "encoded generation is not consecutive to its parent",
         ));
@@ -663,11 +715,12 @@ pub(crate) fn encode(
         evidence.ordinal_publication_write_operations = publication.write_operations;
         evidence.ordinal_fsync_operations = metrics
             .fsync_operations
-            .saturating_add(publication.fsync_operations);
+            .checked_add(publication.fsync_operations)
+            .ok_or_else(|| storage("ordinal fsync operation count overflow"))?;
         evidence.ordinal_peak_temporary_bytes = metrics
             .peak_temporary_bytes
             .max(publication.peak_temporary_bytes);
-        account_cache_release(metrics.cache_release, &mut evidence);
+        account_cache_release(metrics.cache_release, &mut evidence)?;
         crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
         index.artifacts.extend(v4_artifacts);
     }
@@ -712,7 +765,7 @@ pub(crate) fn encode(
     evidence.membership_created_runs = index.created_runs;
     evidence.membership_peak_buffer_bytes = index.peak_buffer_bytes;
     evidence.membership_peak_temporary_bytes = index.peak_temporary_bytes;
-    account_cache_release(index.cache_release, &mut evidence);
+    account_cache_release(index.cache_release, &mut evidence)?;
     evidence.retained_index_runs = index.retained_runs;
     evidence.retained_index_payload_bytes = index.retained_payload_bytes;
     let retained_artifacts = index
@@ -745,7 +798,7 @@ pub(crate) fn encode(
     let authentication = authenticate_inventory(&output, &completed, parent_index)?;
     remove_encoding_intent(&output)?;
     let mut invocation = completed.evidence.clone();
-    merge_encoding_evidence(&mut invocation, &authentication);
+    merge_encoding_evidence(&mut invocation, &authentication)?;
     completed.invocation = GraphConstructionEncodingInvocationEvidence {
         performed: true,
         reused: false,
@@ -1185,7 +1238,9 @@ fn encode_node_properties(
                             cache_window,
                             evidence,
                         )?);
-                        *ordinal = ordinal.saturating_add(1);
+                        *ordinal = ordinal
+                            .checked_add(1)
+                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
                     }
                 }
             }
@@ -1197,14 +1252,28 @@ fn encode_node_properties(
             cache_release.check_error().map_err(storage),
             "node property",
         )?;
-        account_cache_release(cache_release.evidence(), evidence);
+        account_cache_release(cache_release.evidence(), evidence)?;
         let (bytes, operations) = counter.values();
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
-        evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
-        evidence.source_spool_read_operations = evidence
-            .source_spool_read_operations
-            .saturating_add(operations);
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            bytes,
+            "node input read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            operations,
+            "node input read operations",
+        )?;
+        add_evidence_counter(
+            &mut evidence.source_spool_read_bytes,
+            bytes,
+            "node spool read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.source_spool_read_operations,
+            operations,
+            "node spool read operations",
+        )?;
     }
     Ok(())
 }
@@ -1538,7 +1607,9 @@ fn encode_edge_properties(
                             cache_window,
                             evidence,
                         )?);
-                        *ordinal = ordinal.saturating_add(1);
+                        *ordinal = ordinal
+                            .checked_add(1)
+                            .ok_or_else(|| storage("encoded ordinal overflows"))?;
                     }
                 }
             }
@@ -1550,14 +1621,28 @@ fn encode_edge_properties(
             cache_release.check_error().map_err(storage),
             "edge property",
         )?;
-        account_cache_release(cache_release.evidence(), evidence);
+        account_cache_release(cache_release.evidence(), evidence)?;
         let (bytes, operations) = counter.values();
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
-        evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
-        evidence.source_spool_read_operations = evidence
-            .source_spool_read_operations
-            .saturating_add(operations);
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            bytes,
+            "edge input read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            operations,
+            "edge input read operations",
+        )?;
+        add_evidence_counter(
+            &mut evidence.source_spool_read_bytes,
+            bytes,
+            "edge spool read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.source_spool_read_operations,
+            operations,
+            "edge spool read operations",
+        )?;
     }
     Ok(())
 }
@@ -1777,14 +1862,28 @@ fn read_runtime_label_ids(
         cache_release.check_error().map_err(storage),
         "runtime catalog",
     )?;
-    account_cache_release(cache_release.evidence(), evidence);
+    account_cache_release(cache_release.evidence(), evidence)?;
     let (bytes, operations) = counter.values();
-    evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-    evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
-    evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(bytes);
-    evidence.source_spool_read_operations = evidence
-        .source_spool_read_operations
-        .saturating_add(operations);
+    add_evidence_counter(
+        &mut evidence.input_read_bytes,
+        bytes,
+        "runtime catalog read bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.input_read_operations,
+        operations,
+        "runtime catalog read operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.source_spool_read_bytes,
+        bytes,
+        "runtime catalog spool read bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.source_spool_read_operations,
+        operations,
+        "runtime catalog spool read operations",
+    )?;
     Ok(labels)
 }
 
@@ -1857,7 +1956,7 @@ fn write_parquet(
     let mut writer = writer.into_inner().map_err(storage)?;
     writer.inner.sync_all_and_release().map_err(storage)?;
     let cache_release = writer.inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_temp_fsync.{relative}"
     ));
@@ -1875,12 +1974,26 @@ fn write_parquet(
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_install.{relative}"
     ));
-    evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(written);
-    evidence.output_write_operations = evidence.output_write_operations.saturating_add(operations);
-    evidence.fsync_operations = evidence
-        .fsync_operations
-        .saturating_add(1)
-        .saturating_add(cache_release.sync_operations);
+    add_evidence_counter(
+        &mut evidence.output_write_bytes,
+        written,
+        "output write bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.output_write_operations,
+        operations,
+        "output write operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        1,
+        "namespace fsync operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        cache_release.sync_operations,
+        "file fsync operations",
+    )?;
     Ok(artifact)
 }
 
@@ -1935,7 +2048,7 @@ fn copy_artifact<R: Read + Seek>(
         .sync_all_and_release()
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_temp_fsync.{relative}"
     ));
@@ -1957,32 +2070,74 @@ fn copy_artifact<R: Read + Seek>(
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_install.{relative}"
     ));
-    evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-    let (read_bytes, read_operations) = read_counter.values();
+    record_copied_artifact_io(
+        evidence,
+        bytes,
+        read_counter.values(),
+        (write_bytes, write_operations),
+        cache_release.sync_operations,
+    )?;
+    artifacts.push(artifact);
+    Ok(())
+}
+
+fn record_copied_artifact_io(
+    evidence: &mut GraphConstructionEncodingEvidence,
+    bytes: u64,
+    read: (u64, u64),
+    written: (u64, u64),
+    file_sync_operations: u64,
+) -> Result<(), GfError> {
+    let (read_bytes, read_operations) = read;
+    let (write_bytes, write_operations) = written;
+    add_evidence_counter(
+        &mut evidence.input_read_bytes,
+        bytes,
+        "copied artifact input bytes",
+    )?;
     if read_bytes != bytes {
         return Err(storage("copied canonical artifact read accounting differs"));
     }
-    evidence.input_read_operations = evidence
-        .input_read_operations
-        .saturating_add(read_operations);
-    evidence.source_spool_read_bytes = evidence.source_spool_read_bytes.saturating_add(read_bytes);
-    evidence.source_spool_read_operations = evidence
-        .source_spool_read_operations
-        .saturating_add(read_operations);
-    evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(bytes);
+    add_evidence_counter(
+        &mut evidence.input_read_operations,
+        read_operations,
+        "copied artifact input operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.source_spool_read_bytes,
+        read_bytes,
+        "copied artifact spool read bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.source_spool_read_operations,
+        read_operations,
+        "copied artifact spool read operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.output_write_bytes,
+        bytes,
+        "copied artifact output bytes",
+    )?;
     if write_bytes != bytes {
         return Err(storage(
             "copied canonical artifact write accounting differs",
         ));
     }
-    evidence.output_write_operations = evidence
-        .output_write_operations
-        .saturating_add(write_operations);
-    evidence.fsync_operations = evidence
-        .fsync_operations
-        .saturating_add(1)
-        .saturating_add(cache_release.sync_operations);
-    artifacts.push(artifact);
+    add_evidence_counter(
+        &mut evidence.output_write_operations,
+        write_operations,
+        "output write operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        1,
+        "namespace fsync operations",
+    )?;
+    add_evidence_counter(
+        &mut evidence.fsync_operations,
+        file_sync_operations,
+        "file fsync operations",
+    )?;
     Ok(())
 }
 
@@ -2005,7 +2160,7 @@ fn copy_file_artifact(
     let released = source.finish().map_err(storage);
     match (copied, released) {
         (Ok(()), Ok(released)) => {
-            account_cache_release(released, evidence);
+            account_cache_release(released, evidence)?;
             Ok(())
         }
         (Ok(()), Err(error)) => Err(error),
@@ -2068,8 +2223,8 @@ fn authenticate_file(
                 break;
             }
             digest.update(&buffer[..read]);
-            bytes = bytes.saturating_add(read as u64);
-            operations = operations.saturating_add(1);
+            add_evidence_counter(&mut bytes, read as u64, "read bytes")?;
+            add_evidence_counter(&mut operations, 1, "read operations")?;
         }
         Ok(ConstructionEncodedArtifact {
             path: path.to_owned(),
@@ -2143,9 +2298,15 @@ fn cleanup_encoding_temps(
     budgets: GraphConstructionBudgets,
 ) -> Result<(), GfError> {
     let limit = usize::try_from(budgets.max_chunks)
-        .unwrap_or(usize::MAX)
-        .saturating_mul(12)
-        .saturating_add(budgets.max_schema_groups.saturating_mul(8))
+        .map_err(storage)?
+        .checked_mul(12)
+        .and_then(|value| {
+            budgets
+                .max_schema_groups
+                .checked_mul(8)
+                .and_then(|groups| value.checked_add(groups))
+        })
+        .ok_or_else(|| storage("encoding cleanup inventory bound overflow"))?
         .max(1024);
     let mut visited = 0_usize;
     cleanup_encoding_directory(root, limit, &mut visited)
@@ -2158,7 +2319,9 @@ fn cleanup_encoding_directory(
 ) -> Result<(), GfError> {
     let mut changed = false;
     for name in directory.child_names().map_err(storage)? {
-        *visited = visited.saturating_add(1);
+        *visited = visited
+            .checked_add(1)
+            .ok_or_else(|| storage("encoding cleanup visit count overflow"))?;
         if *visited > limit {
             return Err(storage("private encoding cleanup inventory exceeds bound"));
         }
@@ -2241,9 +2404,17 @@ fn authenticate_inventory(
         if &actual != expected {
             return Err(storage("canonical artifact differs from inventory"));
         }
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(actual.bytes);
-        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
-        account_cache_release(released, &mut evidence);
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            actual.bytes,
+            "input read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            operations,
+            "input read operations",
+        )?;
+        account_cache_release(released, &mut evidence)?;
     }
     if inventory.retained_artifacts.is_empty() {
         if inventory.evidence.retained_index_runs != 0 {
@@ -2417,7 +2588,10 @@ impl<const N: usize> FixedReader<N> {
             read += amount;
         }
         self.digest.update(record);
-        self.consumed_bytes = self.consumed_bytes.saturating_add(N as u64);
+        self.consumed_bytes = self
+            .consumed_bytes
+            .checked_add(u64::try_from(N).map_err(storage)?)
+            .ok_or_else(|| storage("fixed-width source byte count overflow"))?;
         Ok(Some(record))
     }
 
@@ -2445,7 +2619,7 @@ impl<const N: usize> FixedReader<N> {
         };
         let released = self.reader.get_mut().inner.finish().map_err(storage);
         match (authentication, released) {
-            (Ok(()), Ok(released)) => account_cache_release(released, evidence),
+            (Ok(()), Ok(released)) => account_cache_release(released, evidence)?,
             (Ok(()), Err(release)) => return Err(release),
             (Err(primary), Ok(_)) => return Err(primary),
             (Err(primary), Err(release)) => {
@@ -2455,8 +2629,16 @@ impl<const N: usize> FixedReader<N> {
             }
         }
         let (bytes, operations) = self.counter.values();
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
-        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            bytes,
+            "fixed-width input read bytes",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            operations,
+            "fixed-width input read operations",
+        )?;
         Ok(())
     }
 }
@@ -2484,4 +2666,17 @@ fn hex(bytes: &[u8]) -> String {
         out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proof_counter_addition_rejects_overflow_without_clamping() {
+        let mut counter = u64::MAX;
+        let error = add_evidence_counter(&mut counter, 1, "mutation").unwrap_err();
+        assert!(error.to_string().contains("mutation overflow"));
+        assert_eq!(counter, u64::MAX);
+    }
 }

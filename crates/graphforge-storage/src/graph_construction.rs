@@ -105,6 +105,9 @@ pub static CONSTRUCTION_EDGE_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     ]))
 });
 
+/// Fixed application buffer used by canonical construction encoding streams.
+pub const GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES: usize = 1 << 20;
+
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("graph construction session: {error}"))
 }
@@ -325,9 +328,39 @@ pub struct GraphConstructionEvidence {
     /// Actual canonical artifact write submissions.
     #[serde(default)]
     pub encode_application_write_operations: u64,
+    /// Canonical output writer submissions.
+    #[serde(default)]
+    pub encode_output_write_operations: u64,
+    /// UUID-membership writer submissions, including carry.
+    #[serde(default)]
+    pub encode_membership_write_operations: u64,
+    /// Authenticated source-spool writer submissions.
+    #[serde(default)]
+    pub encode_source_spool_write_operations: u64,
+    /// Ordinal payload writer submissions.
+    #[serde(default)]
+    pub encode_ordinal_artifact_write_operations: u64,
+    /// Ordinal publication-control writer submissions.
+    #[serde(default)]
+    pub encode_ordinal_publication_write_operations: u64,
     /// Canonical encoding file and directory durability barriers.
     #[serde(default)]
     pub encode_fsync_operations: u64,
+    /// Completed canonical objects in the encoded inventory.
+    #[serde(default)]
+    pub canonical_artifact_objects: u64,
+    /// Canonical output file and directory barriers.
+    #[serde(default)]
+    pub encode_output_fsync_operations: u64,
+    /// Authenticated source-spool durability barriers.
+    #[serde(default)]
+    pub encode_source_spool_fsync_operations: u64,
+    /// UUID-membership durability barriers.
+    #[serde(default)]
+    pub encode_membership_fsync_operations: u64,
+    /// Ordinal-index payload and publication durability barriers.
+    #[serde(default)]
+    pub encode_ordinal_fsync_operations: u64,
     /// Application-observed durable control bytes read immediately before publication.
     #[serde(default)]
     pub publication_application_read_bytes: u64,
@@ -349,6 +382,9 @@ pub struct GraphConstructionEvidence {
     /// CAS file and directory durability barriers.
     #[serde(default)]
     pub cas_fsync_operations: u64,
+    /// Actual payload, manifest-install and manifest-path-read work components.
+    #[serde(default)]
+    pub cas_publication_io: crate::graph_object_store::GraphPublicationIo,
     /// Application-observed published payload bytes read while hydrating the workspace.
     #[serde(default)]
     pub hydration_application_read_bytes: u64,
@@ -364,6 +400,15 @@ pub struct GraphConstructionEvidence {
     /// Hydration file and directory durability barriers.
     #[serde(default)]
     pub hydration_fsync_operations: u64,
+    /// Canonical files copied into the private hydrated workspace.
+    #[serde(default)]
+    pub hydration_files_copied: u64,
+    /// Hydration durability barriers completed on materialized files.
+    #[serde(default)]
+    pub hydration_file_fsync_operations: u64,
+    /// Hydration durability barriers completed on containing directories.
+    #[serde(default)]
+    pub hydration_directory_fsync_operations: u64,
     /// Artifact bytes authenticated while repairing an interrupted append.
     #[serde(default)]
     pub recovery_application_read_bytes: u64,
@@ -380,11 +425,18 @@ pub struct GraphConstructionEvidence {
     /// Persisted in the checkpoint so resume never scans the session tree.
     #[serde(default)]
     pub storage_current: BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
+    /// Independently accumulated receipt and category-scoped identity totals.
+    #[serde(default)]
+    pub storage_receipt_category_authorities:
+        BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>,
     /// Per-category peak allocated bytes observed as receipt-backed staging
     /// artifacts accumulated. These are transient construction bytes, not
     /// committed-generation allocation.
     #[serde(default)]
     pub storage_transient_peak_allocated_bytes: BTreeMap<crate::ArtifactCategory, u64>,
+    /// Independently accumulated category-scoped receipt high-water marks.
+    #[serde(default)]
+    pub storage_receipt_transient_peak_authorities: BTreeMap<crate::ArtifactCategory, u64>,
     /// High-water mark of the union of all simultaneously retained,
     /// receipt-authenticated construction artifacts. Unlike the per-category
     /// diagnostics above, this is a total and categories are never treated as
@@ -528,17 +580,195 @@ pub struct GraphConstructionEvidence {
     pub parquet_write_operations: u64,
 }
 
+/// Sanitized current and peak commitments to independent category ledgers.
+pub type StorageCategoryAuthorityCommitments = (
+    BTreeMap<crate::ArtifactCategory, String>,
+    BTreeMap<crate::ArtifactCategory, String>,
+);
+
 impl GraphConstructionEvidence {
+    /// Identity-free category authorities derived from accepted construction
+    /// receipts and the active native-identity union.
+    pub fn storage_category_authorities(
+        &self,
+    ) -> Result<BTreeMap<crate::ArtifactCategory, crate::ArtifactStorageTotals>, GfError> {
+        if self.storage_current.len() != crate::ArtifactCategory::ALL.len()
+            || self.storage_receipt_category_authorities.len() != crate::ArtifactCategory::ALL.len()
+            || crate::ArtifactCategory::ALL.iter().any(|category| {
+                !self.storage_current.contains_key(category)
+                    || !self
+                        .storage_receipt_category_authorities
+                        .contains_key(category)
+            })
+            || self.storage_current != self.storage_receipt_category_authorities
+        {
+            return Err(storage(
+                "construction storage category authority is incomplete",
+            ));
+        }
+        let category_allocated = self
+            .storage_receipt_category_authorities
+            .values()
+            .try_fold(0_u64, |total, category| {
+                total
+                    .checked_add(category.allocated_bytes)
+                    .ok_or_else(|| storage("construction category authority overflows"))
+            })?;
+        let identity_allocated = self
+            .storage_active_identity_allocated_bytes
+            .values()
+            .try_fold(0_u64, |total, allocated| {
+                total
+                    .checked_add(*allocated)
+                    .ok_or_else(|| storage("construction identity authority overflows"))
+            })?;
+        if category_allocated != identity_allocated {
+            return Err(storage(
+                "construction category authority differs from identity union",
+            ));
+        }
+        Ok(self.storage_receipt_category_authorities.clone())
+    }
+
+    /// Identity-free per-category high-water authorities derived from accepted
+    /// construction receipt transitions.
+    pub fn storage_transient_peak_authorities(
+        &self,
+    ) -> Result<BTreeMap<crate::ArtifactCategory, u64>, GfError> {
+        if self.storage_transient_peak_allocated_bytes.len() != crate::ArtifactCategory::ALL.len()
+            || self.storage_receipt_transient_peak_authorities.len()
+                != crate::ArtifactCategory::ALL.len()
+            || crate::ArtifactCategory::ALL.iter().any(|category| {
+                !self
+                    .storage_transient_peak_allocated_bytes
+                    .contains_key(category)
+                    || !self
+                        .storage_receipt_transient_peak_authorities
+                        .contains_key(category)
+            })
+            || self.storage_transient_peak_allocated_bytes
+                != self.storage_receipt_transient_peak_authorities
+        {
+            return Err(storage(
+                "construction peak category authority is incomplete",
+            ));
+        }
+        for category in crate::ArtifactCategory::ALL {
+            if self.storage_transient_peak_allocated_bytes[&category]
+                < self.storage_current[&category].allocated_bytes
+            {
+                return Err(storage(
+                    "construction peak category authority is below current allocation",
+                ));
+            }
+        }
+        Ok(self.storage_receipt_transient_peak_authorities.clone())
+    }
+
+    /// Sanitized commitments to independent current and peak category authority.
+    pub fn storage_category_authority_commitments(
+        &self,
+        context: &crate::ArtifactCategoryAuthorityContext,
+    ) -> Result<StorageCategoryAuthorityCommitments, GfError> {
+        let current = self.storage_category_authorities()?;
+        let peaks = self.storage_transient_peak_authorities()?;
+        Ok((
+            current
+                .iter()
+                .map(|(category, totals)| {
+                    (
+                        *category,
+                        crate::artifact_category_authority_commitment(context, *category, totals),
+                    )
+                })
+                .collect(),
+            peaks
+                .iter()
+                .map(|(category, allocated)| {
+                    (
+                        *category,
+                        crate::artifact_category_peak_authority_commitment(
+                            context, *category, *allocated,
+                        ),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
+    /// Build safe context from hidden construction receipt and identity ledgers.
+    pub fn storage_category_authority_context(
+        &self,
+        contract: &str,
+        rung: u64,
+        generation_sha256: &str,
+        owner: &str,
+        live_nodes: u64,
+        live_edges: u64,
+    ) -> Result<crate::ArtifactCategoryAuthorityContext, GfError> {
+        self.storage_category_authorities()?;
+        if contract.is_empty()
+            || generation_sha256.is_empty()
+            || owner.is_empty()
+            || rung == 0
+            || live_nodes == 0
+            || live_edges == 0
+        {
+            return Err(storage(
+                "construction category authority context is invalid",
+            ));
+        }
+        let empty_identities = BTreeMap::new();
+        let mut category_identity_authorities = crate::ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| {
+                (
+                    category,
+                    crate::storage_attribution::identity_map_authority_sha256(&empty_identities),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        category_identity_authorities.insert(
+            crate::ArtifactCategory::ConstructionStaging,
+            crate::storage_attribution::identity_map_authority_sha256(
+                &self.storage_active_identity_allocated_bytes,
+            ),
+        );
+        Ok(crate::ArtifactCategoryAuthorityContext {
+            contract: contract.to_owned(),
+            version: 1,
+            rung,
+            generation_sha256: generation_sha256.to_owned(),
+            owner: owner.to_owned(),
+            receipt_authority_sha256: crate::storage_attribution::category_map_authority_sha256(
+                b"graphforge-construction-receipt-authority-v1\0",
+                &self.storage_receipt_category_authorities,
+            ),
+            native_identity_authority_sha256:
+                crate::storage_attribution::identity_map_authority_sha256(
+                    &self.storage_active_identity_allocated_bytes,
+                ),
+            native_category_identity_authority_sha256: category_identity_authorities,
+            live_nodes,
+            live_edges,
+        })
+    }
+
     /// Reconciled application-observed payload/control bytes read across construction.
-    #[must_use]
-    pub const fn total_application_read_bytes(&self) -> u64 {
-        self.seal_application_read_bytes
-            .saturating_add(self.shape_application_read_bytes)
-            .saturating_add(self.encode_application_read_bytes)
-            .saturating_add(self.publication_application_read_bytes)
-            .saturating_add(self.cas_application_read_bytes)
-            .saturating_add(self.hydration_application_read_bytes)
-            .saturating_add(self.recovery_application_read_bytes)
+    pub fn total_application_read_bytes(&self) -> Result<u64, GfError> {
+        checked_evidence_sum(
+            "total application read bytes",
+            0,
+            &[
+                self.seal_application_read_bytes,
+                self.shape_application_read_bytes,
+                self.encode_application_read_bytes,
+                self.publication_application_read_bytes,
+                self.cas_application_read_bytes,
+                self.hydration_application_read_bytes,
+                self.recovery_application_read_bytes,
+            ],
+        )
     }
 }
 
@@ -1046,60 +1276,11 @@ impl GraphConstructionSession {
             &mut cancelled,
         )?;
         record_encoded_active_artifacts(&self.root, &encoded, &mut self.checkpoint.evidence)?;
-        let invocation = &encoded.invocation.evidence;
-        self.checkpoint.evidence.encode_application_read_bytes = self
-            .checkpoint
-            .evidence
-            .encode_application_read_bytes
-            .saturating_add(invocation.input_read_bytes)
-            .saturating_add(invocation.membership_read_bytes);
-        self.checkpoint.evidence.encode_application_read_operations = self
-            .checkpoint
-            .evidence
-            .encode_application_read_operations
-            .saturating_add(invocation.input_read_operations)
-            .saturating_add(invocation.membership_read_operations)
-            .saturating_add(invocation.source_spool_read_operations);
-        self.checkpoint.evidence.encode_application_write_bytes = self
-            .checkpoint
-            .evidence
-            .encode_application_write_bytes
-            .saturating_add(invocation.output_write_bytes)
-            .saturating_add(invocation.membership_total_write_bytes)
-            .saturating_add(invocation.source_spool_write_bytes)
-            .saturating_add(invocation.ordinal_artifact_write_bytes)
-            .saturating_add(invocation.ordinal_publication_write_bytes);
-        self.checkpoint.evidence.encode_application_write_operations = self
-            .checkpoint
-            .evidence
-            .encode_application_write_operations
-            .saturating_add(invocation.output_write_operations)
-            .saturating_add(invocation.membership_write_operations)
-            .saturating_add(invocation.source_spool_write_operations)
-            .saturating_add(invocation.ordinal_artifact_write_operations)
-            .saturating_add(invocation.ordinal_publication_write_operations);
-        self.checkpoint.evidence.encode_fsync_operations = self
-            .checkpoint
-            .evidence
-            .encode_fsync_operations
-            .saturating_add(invocation.fsync_operations)
-            .saturating_add(invocation.membership_fsync_operations)
-            .saturating_add(invocation.source_spool_fsync_operations)
-            .saturating_add(invocation.ordinal_fsync_operations);
-        account_encoding_cache_release(invocation, &mut self.checkpoint.evidence);
-        self.checkpoint.evidence.canonical_output_bytes = encoded
-            .artifacts
-            .iter()
-            .map(|artifact| artifact.bytes)
-            .sum();
-        self.checkpoint.evidence.staged_and_retained_disk_bytes =
-            self.checkpoint.evidence.write_bytes.saturating_add(
-                encoded
-                    .retained_artifacts
-                    .iter()
-                    .map(|artifact| artifact.bytes)
-                    .sum(),
-            );
+        record_encoding_io_evidence(&mut self.checkpoint.evidence, &encoded)?;
+        account_encoding_cache_release(
+            &encoded.invocation.evidence,
+            &mut self.checkpoint.evidence,
+        )?;
         let inventory_authority =
             crate::graph_construction_encoding::inventory_authority_sha256(&encoded)?;
         match self.checkpoint.encoding_inventory_sha256.as_deref() {
@@ -1183,7 +1364,13 @@ impl GraphConstructionSession {
         {
             return Err(storage("publication encoding authority changed"));
         }
-        if encoding.generation != self.checkpoint.parent_topology_generation.saturating_add(1) {
+        if encoding.generation
+            != self
+                .checkpoint
+                .parent_topology_generation
+                .checked_add(1)
+                .ok_or_else(|| storage("publication topology generation overflows"))?
+        {
             return Err(storage("publication topology generation changed"));
         }
         let inventory_control =
@@ -1194,14 +1381,16 @@ impl GraphConstructionSession {
             .checkpoint
             .evidence
             .publication_application_read_bytes
-            .saturating_add(inventory_control.read_bytes);
+            .checked_add(inventory_control.read_bytes)
+            .ok_or_else(|| storage("publication read byte count overflows"))?;
         self.checkpoint
             .evidence
             .publication_application_read_operations = self
             .checkpoint
             .evidence
             .publication_application_read_operations
-            .saturating_add(inventory_control.read_calls);
+            .checked_add(inventory_control.read_calls)
+            .ok_or_else(|| storage("publication read operation count overflows"))?;
         let admission = crate::filesystem_admission::admit_project_lifecycle(
             &self.project_path,
             self.checkpoint.lifecycle_mode,
@@ -1216,7 +1405,7 @@ impl GraphConstructionSession {
         }
 
         let lease = crate::begin_graph_object_publication(admission.root())?;
-        let (mut manifest_state, manifest_read_bytes) =
+        let (mut manifest_state, manifest_read_bytes, manifest_read_calls) =
             match parent.declared_graph_files_participant()? {
                 Some(crate::GraphFilesParticipant::V2(root)) => {
                     let (state, evidence) = crate::graph_object_store::GraphManifestState::open(
@@ -1224,23 +1413,36 @@ impl GraphConstructionSession {
                         root,
                         crate::GraphManifestLimits::default(),
                     )?;
-                    (state, evidence.decoded_bytes)
+                    (
+                        state,
+                        evidence.decoded_bytes,
+                        evidence.application_read_calls,
+                    )
                 }
                 Some(crate::GraphFilesParticipant::V1(inventory)) if inventory.file_count == 0 => {
-                    (crate::graph_object_store::GraphManifestState::empty(), 0)
+                    (crate::graph_object_store::GraphManifestState::empty(), 0, 0)
                 }
                 Some(crate::GraphFilesParticipant::V1(_)) => {
                     return Err(storage(
                         "nonempty construction parent requires compact graph root",
                     ));
                 }
-                None => (crate::graph_object_store::GraphManifestState::empty(), 0),
+                None => (crate::graph_object_store::GraphManifestState::empty(), 0, 0),
             };
         self.checkpoint.evidence.publication_application_read_bytes = self
             .checkpoint
             .evidence
             .publication_application_read_bytes
-            .saturating_add(manifest_read_bytes);
+            .checked_add(manifest_read_bytes)
+            .ok_or_else(|| storage("publication manifest read byte count overflows"))?;
+        self.checkpoint
+            .evidence
+            .publication_application_read_operations = self
+            .checkpoint
+            .evidence
+            .publication_application_read_operations
+            .checked_add(manifest_read_calls)
+            .ok_or_else(|| storage("publication manifest read call count overflows"))?;
         for retained in &encoding.retained_artifacts {
             let entry = manifest_state
                 .entries()
@@ -1291,27 +1493,36 @@ impl GraphConstructionSession {
             .checkpoint
             .evidence
             .cas_application_read_bytes
-            .saturating_add(cas_evidence.payload_bytes_hashed);
+            .checked_add(cas_evidence.publication_io.totals()?.read_bytes)
+            .ok_or_else(|| storage("CAS read byte count overflows"))?;
         self.checkpoint.evidence.cas_application_read_operations = self
             .checkpoint
             .evidence
             .cas_application_read_operations
-            .saturating_add(cas_evidence.read_calls);
+            .checked_add(cas_evidence.read_calls)
+            .ok_or_else(|| storage("CAS read operation count overflows"))?;
         self.checkpoint.evidence.cas_application_write_bytes = self
             .checkpoint
             .evidence
             .cas_application_write_bytes
-            .saturating_add(cas_evidence.write_bytes);
+            .checked_add(cas_evidence.write_bytes)
+            .ok_or_else(|| storage("CAS write byte count overflows"))?;
         self.checkpoint.evidence.cas_application_write_operations = self
             .checkpoint
             .evidence
             .cas_application_write_operations
-            .saturating_add(cas_evidence.write_calls);
+            .checked_add(cas_evidence.write_calls)
+            .ok_or_else(|| storage("CAS write operation count overflows"))?;
         self.checkpoint.evidence.cas_fsync_operations = self
             .checkpoint
             .evidence
             .cas_fsync_operations
-            .saturating_add(cas_evidence.fsync_calls);
+            .checked_add(cas_evidence.fsync_calls)
+            .ok_or_else(|| storage("CAS fsync count overflows"))?;
+        self.checkpoint
+            .evidence
+            .cas_publication_io
+            .checked_add_assign(&cas_evidence.publication_io)?;
         if graphforge_filesystem::path_identity(&workspace).map_err(storage)?
             != encoded_directory.identity()
         {
@@ -1884,6 +2095,32 @@ impl GraphConstructionSession {
             session_lock,
             _reservation: reservation,
         };
+        for category in crate::ArtifactCategory::ALL {
+            session
+                .checkpoint
+                .evidence
+                .storage_current
+                .entry(category)
+                .or_default();
+            session
+                .checkpoint
+                .evidence
+                .storage_receipt_category_authorities
+                .entry(category)
+                .or_default();
+            session
+                .checkpoint
+                .evidence
+                .storage_transient_peak_allocated_bytes
+                .entry(category)
+                .or_default();
+            session
+                .checkpoint
+                .evidence
+                .storage_receipt_transient_peak_authorities
+                .entry(category)
+                .or_default();
+        }
         recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
         if session
@@ -2028,31 +2265,56 @@ impl GraphConstructionSession {
             .checkpoint
             .evidence
             .hydration_application_read_bytes
-            .saturating_add(hydration.application_read_bytes);
+            .checked_add(hydration.application_read_bytes)
+            .ok_or_else(|| storage("hydration read byte count overflows"))?;
         self.checkpoint
             .evidence
             .hydration_application_read_operations = self
             .checkpoint
             .evidence
             .hydration_application_read_operations
-            .saturating_add(hydration.application_read_calls);
+            .checked_add(hydration.application_read_calls)
+            .ok_or_else(|| storage("hydration read operation count overflows"))?;
         self.checkpoint.evidence.hydration_application_write_bytes = self
             .checkpoint
             .evidence
             .hydration_application_write_bytes
-            .saturating_add(hydration.application_write_bytes);
+            .checked_add(hydration.application_write_bytes)
+            .ok_or_else(|| storage("hydration write byte count overflows"))?;
         self.checkpoint
             .evidence
             .hydration_application_write_operations = self
             .checkpoint
             .evidence
             .hydration_application_write_operations
-            .saturating_add(hydration.application_write_calls);
+            .checked_add(hydration.application_write_calls)
+            .ok_or_else(|| storage("hydration write operation count overflows"))?;
         self.checkpoint.evidence.hydration_fsync_operations = self
             .checkpoint
             .evidence
             .hydration_fsync_operations
-            .saturating_add(hydration.fsync_calls);
+            .checked_add(hydration.fsync_calls)
+            .ok_or_else(|| storage("hydration fsync count overflows"))?;
+        self.checkpoint.evidence.hydration_files_copied = self
+            .checkpoint
+            .evidence
+            .hydration_files_copied
+            .checked_add(hydration.files_copied)
+            .ok_or_else(|| storage("hydration copied-file count overflows"))?;
+        self.checkpoint.evidence.hydration_file_fsync_operations = self
+            .checkpoint
+            .evidence
+            .hydration_file_fsync_operations
+            .checked_add(hydration.file_fsync_calls)
+            .ok_or_else(|| storage("hydration file barrier count overflows"))?;
+        self.checkpoint
+            .evidence
+            .hydration_directory_fsync_operations = self
+            .checkpoint
+            .evidence
+            .hydration_directory_fsync_operations
+            .checked_add(hydration.directory_fsync_calls)
+            .ok_or_else(|| storage("hydration directory barrier count overflows"))?;
         replace_checkpoint_control(&self.root, &self.checkpoint)
     }
 
@@ -2136,14 +2398,20 @@ impl GraphConstructionSession {
                     .checkpoint
                     .evidence
                     .replay_validation_read_bytes
-                    .saturating_add(work.bytes);
+                    .checked_add(work.bytes)
+                    .ok_or_else(|| storage("replay validation byte count overflows"))?;
                 self.checkpoint.evidence.replay_validation_read_operations = self
                     .checkpoint
                     .evidence
                     .replay_validation_read_operations
-                    .saturating_add(work.operations);
-                self.checkpoint.evidence.replayed_chunks =
-                    self.checkpoint.evidence.replayed_chunks.saturating_add(1);
+                    .checked_add(work.operations)
+                    .ok_or_else(|| storage("replay validation operation count overflows"))?;
+                self.checkpoint.evidence.replayed_chunks = self
+                    .checkpoint
+                    .evidence
+                    .replayed_chunks
+                    .checked_add(1)
+                    .ok_or_else(|| storage("replayed chunk count overflows"))?;
                 replace_checkpoint_control(&self.root, &self.checkpoint)?;
                 return Ok(receipt);
             }
@@ -2159,12 +2427,13 @@ impl GraphConstructionSession {
                 &self.checkpoint.node_schema_sha256,
             ),
         };
+        let schema_groups = known_schemas
+            .len()
+            .checked_add(other_schemas.len())
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| storage("construction schema-group count overflow"))?;
         if !known_schemas.contains(&schema_sha256)
-            && known_schemas
-                .len()
-                .saturating_add(other_schemas.len())
-                .saturating_add(1)
-                > self.checkpoint.budgets.max_schema_groups
+            && schema_groups > self.checkpoint.budgets.max_schema_groups
         {
             return Err(storage("construction schema-group budget exhausted"));
         }
@@ -2172,8 +2441,9 @@ impl GraphConstructionSession {
         let run_records = arrays
             .identities
             .len()
-            .saturating_add(arrays.endpoints.len())
-            .saturating_add(batch.num_rows());
+            .checked_add(arrays.endpoints.len())
+            .and_then(|count| count.checked_add(batch.num_rows()))
+            .ok_or_else(|| storage("construction run record count overflow"))?;
         if run_records > self.checkpoint.budgets.max_run_records {
             return Err(storage("construction run window exhausted"));
         }
@@ -2209,18 +2479,39 @@ impl GraphConstructionSession {
         let fixed_bytes = arrays
             .identities
             .len()
-            .saturating_mul(IDENTITY_WIDTH)
-            .saturating_add(arrays.endpoints.len().saturating_mul(ENDPOINT_WIDTH))
-            .saturating_add(match &arrays.details {
-                DetailRuns::Node(records) => records.len().saturating_mul(NODE_DETAIL_WIDTH),
-                DetailRuns::Edge(records) => records.len().saturating_mul(EDGE_DETAIL_WIDTH),
-            });
+            .checked_mul(IDENTITY_WIDTH)
+            .and_then(|bytes| {
+                arrays
+                    .endpoints
+                    .len()
+                    .checked_mul(ENDPOINT_WIDTH)
+                    .and_then(|endpoint_bytes| bytes.checked_add(endpoint_bytes))
+            })
+            .and_then(|bytes| {
+                let detail_bytes = match &arrays.details {
+                    DetailRuns::Node(records) => records.len().checked_mul(NODE_DETAIL_WIDTH),
+                    DetailRuns::Edge(records) => records.len().checked_mul(EDGE_DETAIL_WIDTH),
+                };
+                detail_bytes.and_then(|detail_bytes| bytes.checked_add(detail_bytes))
+            })
+            .ok_or_else(|| storage("construction fixed-width byte count overflow"))?;
         let sorted_bytes = sorted_batch.get_array_memory_size();
-        intent.accounted_live_bytes = input_bytes
-            .saturating_add(fixed_bytes)
-            .saturating_add(sorted_bytes.saturating_mul(2))
-            .saturating_add(BLOCK_BYTES.saturating_mul(2))
-            as u64;
+        intent.accounted_live_bytes = u64::try_from(
+            input_bytes
+                .checked_add(fixed_bytes)
+                .and_then(|bytes| {
+                    sorted_bytes
+                        .checked_mul(2)
+                        .and_then(|sorted| bytes.checked_add(sorted))
+                })
+                .and_then(|bytes| {
+                    BLOCK_BYTES
+                        .checked_mul(2)
+                        .and_then(|blocks| bytes.checked_add(blocks))
+                })
+                .ok_or_else(|| storage("construction live-byte count overflow"))?,
+        )
+        .map_err(storage)?;
         replace_control(&self.root, INTENT, &intent)?;
         intent.parquet = Some(write_parquet(
             &self.root,
@@ -2309,9 +2600,13 @@ impl GraphConstructionSession {
             }
             if authenticate_artifacts {
                 let work = validate_receipt_artifacts(&self.root, &receipt)?;
-                account_cache_release(work.cache_release, &mut self.checkpoint.evidence);
-                read_bytes = read_bytes.saturating_add(work.bytes);
-                read_operations = read_operations.saturating_add(work.operations);
+                account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
+                read_bytes = read_bytes
+                    .checked_add(work.bytes)
+                    .ok_or_else(|| storage("read_bytes overflows"))?;
+                read_operations = read_operations
+                    .checked_add(work.operations)
+                    .ok_or_else(|| storage("read_operations overflows"))?;
             }
             let body = serde_json::to_vec(&receipt).map_err(storage)?;
             prior_digest = Some(sha256(&body));
@@ -2326,17 +2621,20 @@ impl GraphConstructionSession {
             .checkpoint
             .evidence
             .authentication_read_bytes
-            .saturating_add(read_bytes);
+            .checked_add(read_bytes)
+            .ok_or_else(|| storage("authentication read byte count overflows"))?;
         self.checkpoint.evidence.authentication_read_operations = self
             .checkpoint
             .evidence
             .authentication_read_operations
-            .saturating_add(read_operations);
+            .checked_add(read_operations)
+            .ok_or_else(|| storage("authentication read operation count overflows"))?;
         self.checkpoint.evidence.seal_application_read_bytes = self
             .checkpoint
             .evidence
             .seal_application_read_bytes
-            .saturating_add(read_bytes);
+            .checked_add(read_bytes)
+            .ok_or_else(|| storage("seal application read byte count overflows"))?;
         self.checkpoint.state = GraphConstructionState::Sealed;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
         replace_checkpoint_control(&self.root, &self.checkpoint)
@@ -2406,23 +2704,31 @@ impl GraphConstructionSession {
             // decoder cannot establish a whole-file digest, so retain exactly
             // one explicit whole-file authentication pass for that artifact.
             let mut work = authenticate_artifact(&self.root, &receipt.parquet)?;
-            account_cache_release(work.cache_release, &mut self.checkpoint.evidence);
+            account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
             let metadata_work = validate_parquet_metadata(&self.root, &receipt)?;
-            account_cache_release(metadata_work.cache_release, &mut self.checkpoint.evidence);
-            work.bytes = work.bytes.saturating_add(metadata_work.bytes);
-            work.operations = work.operations.saturating_add(metadata_work.operations);
+            account_cache_release(metadata_work.cache_release, &mut self.checkpoint.evidence)?;
+            work.bytes = work
+                .bytes
+                .checked_add(metadata_work.bytes)
+                .ok_or_else(|| storage("bytes overflows"))?;
+            work.operations = work
+                .operations
+                .checked_add(metadata_work.operations)
+                .ok_or_else(|| storage("operations overflows"))?;
             self.checkpoint.evidence.shape_input_validation_read_bytes = self
                 .checkpoint
                 .evidence
                 .shape_input_validation_read_bytes
-                .saturating_add(work.bytes);
+                .checked_add(work.bytes)
+                .ok_or_else(|| storage("shape input validation byte count overflows"))?;
             self.checkpoint
                 .evidence
                 .shape_input_validation_read_operations = self
                 .checkpoint
                 .evidence
                 .shape_input_validation_read_operations
-                .saturating_add(work.operations);
+                .checked_add(work.operations)
+                .ok_or_else(|| storage("shape input validation operation count overflows"))?;
             let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
             catalog_authority.update([kind]);
             catalog_authority.update(receipt.schema_sha256.as_bytes());
@@ -2505,22 +2811,24 @@ impl GraphConstructionSession {
                     )?;
                 }
             }
+            let row_group_names = row_groups
+                .values()
+                .try_fold(0_usize, |count, group| {
+                    count.checked_add(group.slot_count())
+                })
+                .ok_or_else(|| storage("row-group name-slot count overflow"))?;
             let retained_names = unified
                 .slot_count()
-                .saturating_add(node_details.slot_count())
-                .saturating_add(edge_details.slot_count())
-                .saturating_add(endpoints.slot_count())
-                .saturating_add(
-                    row_groups
-                        .values()
-                        .map(RowMergeAccumulator::slot_count)
-                        .sum::<usize>(),
-                );
+                .checked_add(node_details.slot_count())
+                .and_then(|count| count.checked_add(edge_details.slot_count()))
+                .and_then(|count| count.checked_add(endpoints.slot_count()))
+                .and_then(|count| count.checked_add(row_group_names))
+                .ok_or_else(|| storage("merge name-slot count overflow"))?;
             self.checkpoint.evidence.peak_merge_name_slots = self
                 .checkpoint
                 .evidence
                 .peak_merge_name_slots
-                .max(retained_names as u64);
+                .max(u64::try_from(retained_names).map_err(storage)?);
         }
         let staged_identities = unified.finish_optional::<BASE_IDENTITY_WIDTH>(
             &self.root,
@@ -2600,12 +2908,14 @@ impl GraphConstructionSession {
             .checkpoint
             .base_work
             .live_nodes
-            .saturating_add(new_nodes);
+            .checked_add(new_nodes)
+            .ok_or_else(|| storage("node count overflows"))?;
         let edge_count = self
             .checkpoint
             .base_work
             .live_edges
-            .saturating_add(new_edges);
+            .checked_add(new_edges)
+            .ok_or_else(|| storage("edge count overflows"))?;
         let max_node_surrogate = base_max_node
             .checked_add(new_nodes)
             .ok_or_else(|| storage("node surrogate overflow"))?;
@@ -2677,31 +2987,42 @@ impl GraphConstructionSession {
             .chain(std::iter::once(&shape.runtime_catalog))
         {
             let (output, work) = receipt_for_existing_with_work(&self.root, name)?;
-            inventory_work.bytes = inventory_work.bytes.saturating_add(work.bytes);
-            inventory_work.operations = inventory_work.operations.saturating_add(work.operations);
+            inventory_work.bytes = inventory_work
+                .bytes
+                .checked_add(work.bytes)
+                .ok_or_else(|| storage("shape output authentication bytes overflow"))?;
+            inventory_work.operations = inventory_work
+                .operations
+                .checked_add(work.operations)
+                .ok_or_else(|| storage("shape output authentication operations overflow"))?;
             outputs.push(output);
         }
         self.checkpoint.evidence.shaped_output_authentication_bytes = self
             .checkpoint
             .evidence
             .shaped_output_authentication_bytes
-            .saturating_add(inventory_work.bytes);
+            .checked_add(inventory_work.bytes)
+            .ok_or_else(|| storage("shaped output authentication bytes overflow"))?;
         self.checkpoint
             .evidence
             .shaped_output_authentication_operations = self
             .checkpoint
             .evidence
             .shaped_output_authentication_operations
-            .saturating_add(inventory_work.operations);
-        self.checkpoint.evidence.shape_application_read_bytes = self
-            .checkpoint
-            .evidence
-            .shape_input_validation_read_bytes
-            .saturating_add(self.checkpoint.evidence.merge_read_bytes)
-            .saturating_add(self.checkpoint.evidence.parquet_read_bytes)
-            .saturating_add(self.checkpoint.evidence.shaped_output_authentication_bytes)
-            .saturating_add(self.checkpoint.evidence.parent_catalog_read_bytes)
-            .saturating_add(self.checkpoint.evidence.retained_probe_read_bytes);
+            .checked_add(inventory_work.operations)
+            .ok_or_else(|| storage("shaped output authentication operations overflow"))?;
+        self.checkpoint.evidence.shape_application_read_bytes = checked_evidence_sum(
+            "shape application read bytes",
+            0,
+            &[
+                self.checkpoint.evidence.shape_input_validation_read_bytes,
+                self.checkpoint.evidence.merge_read_bytes,
+                self.checkpoint.evidence.parquet_read_bytes,
+                self.checkpoint.evidence.shaped_output_authentication_bytes,
+                self.checkpoint.evidence.parent_catalog_read_bytes,
+                self.checkpoint.evidence.retained_probe_read_bytes,
+            ],
+        )?;
         let shape_authority_sha256 = shape_authority_sha256(&shape, &outputs)?;
         self.checkpoint.shape_authority_sha256 = Some(shape_authority_sha256.clone());
         replace_control(
@@ -2772,11 +3093,14 @@ impl GraphConstructionSession {
             .checkpoint
             .budgets
             .max_chunks
-            .saturating_mul(16)
-            .saturating_add(
-                u64::try_from(self.checkpoint.budgets.max_schema_groups).unwrap_or(u64::MAX),
-            )
-            .saturating_add(4_096);
+            .checked_mul(16)
+            .and_then(|limit| {
+                u64::try_from(self.checkpoint.budgets.max_schema_groups)
+                    .ok()
+                    .and_then(|groups| limit.checked_add(groups))
+            })
+            .and_then(|limit| limit.checked_add(4_096))
+            .ok_or_else(|| storage("construction discard traversal bound overflow"))?;
         crate::file_lock::unlock(&self.session_lock).map_err(storage)?;
         drop(self);
         remove_owned_directory_tree(
@@ -2809,14 +3133,16 @@ impl GraphConstructionSession {
                     .checkpoint
                     .evidence
                     .recovery_application_read_bytes
-                    .saturating_add(recovery_work.bytes);
+                    .checked_add(recovery_work.bytes)
+                    .ok_or_else(|| storage("recovery read byte count overflows"))?;
                 self.checkpoint
                     .evidence
                     .recovery_application_read_operations = self
                     .checkpoint
                     .evidence
                     .recovery_application_read_operations
-                    .saturating_add(recovery_work.operations);
+                    .checked_add(recovery_work.operations)
+                    .ok_or_else(|| storage("recovery read operation count overflows"))?;
                 let body = serde_json::to_vec(&receipt).map_err(storage)?;
                 if intent.sequence < self.checkpoint.next_sequence
                     && self.checkpoint.last_receipt_sha256.as_deref()
@@ -2866,19 +3192,21 @@ impl GraphConstructionSession {
                     account_cache_release(
                         recovery_work.cache_release,
                         &mut self.checkpoint.evidence,
-                    );
+                    )?;
                     self.checkpoint.evidence.recovery_application_read_bytes = self
                         .checkpoint
                         .evidence
                         .recovery_application_read_bytes
-                        .saturating_add(recovery_work.bytes);
+                        .checked_add(recovery_work.bytes)
+                        .ok_or_else(|| storage("recovery read byte count overflows"))?;
                     self.checkpoint
                         .evidence
                         .recovery_application_read_operations = self
                         .checkpoint
                         .evidence
                         .recovery_application_read_operations
-                        .saturating_add(recovery_work.operations);
+                        .checked_add(recovery_work.operations)
+                        .ok_or_else(|| storage("recovery read operation count overflows"))?;
                     unlink_artifact(&self.root, &artifact)?;
                 }
                 let stem = artifact_stem(intent.sequence, intent.kind);
@@ -2958,10 +3286,22 @@ impl GraphConstructionSession {
             return Err(storage("receipt sequence is not checkpoint successor"));
         }
         let evidence = &mut self.checkpoint.evidence;
-        evidence.input_rows = evidence.input_rows.saturating_add(receipt.rows);
-        evidence.input_batches = evidence.input_batches.saturating_add(1);
-        evidence.parquet_shards = evidence.parquet_shards.saturating_add(1);
-        evidence.run_records = evidence.run_records.saturating_add(receipt.run_records);
+        evidence.input_rows = evidence
+            .input_rows
+            .checked_add(receipt.rows)
+            .ok_or_else(|| storage("construction input row count overflows"))?;
+        evidence.input_batches = evidence
+            .input_batches
+            .checked_add(1)
+            .ok_or_else(|| storage("construction input batch count overflows"))?;
+        evidence.parquet_shards = evidence
+            .parquet_shards
+            .checked_add(1)
+            .ok_or_else(|| storage("construction Parquet shard count overflows"))?;
+        evidence.run_records = evidence
+            .run_records
+            .checked_add(receipt.run_records)
+            .ok_or_else(|| storage("construction run record count overflows"))?;
         evidence.peak_batch_rows = evidence.peak_batch_rows.max(receipt.rows);
         evidence.peak_batch_bytes = evidence.peak_batch_bytes.max(receipt.input_bytes);
         evidence.peak_run_records = evidence.peak_run_records.max(receipt.run_records);
@@ -2975,7 +3315,10 @@ impl GraphConstructionSession {
             .into_iter()
             .chain(receipt.endpoints.iter())
         {
-            evidence.immutable_artifacts = evidence.immutable_artifacts.saturating_add(1);
+            evidence.immutable_artifacts = evidence
+                .immutable_artifacts
+                .checked_add(1)
+                .ok_or_else(|| storage("construction artifact count overflows"))?;
             let identity_key = format!(
                 "{:016x}:{}",
                 artifact.identity.volume_serial, artifact.identity.file_id
@@ -2986,41 +3329,25 @@ impl GraphConstructionSession {
                 artifact.allocated_bytes,
                 "construction artifact identity was already active",
             )?;
-            evidence.write_bytes = evidence.write_bytes.saturating_add(artifact.bytes);
+            evidence.write_bytes = evidence
+                .write_bytes
+                .checked_add(artifact.bytes)
+                .ok_or_else(|| storage("construction write byte count overflows"))?;
             evidence.write_operations = evidence
                 .write_operations
-                .saturating_add(artifact.write_operations);
+                .checked_add(artifact.write_operations)
+                .ok_or_else(|| storage("construction write operation count overflows"))?;
             evidence.fsync_operations = evidence
                 .fsync_operations
-                .saturating_add(artifact.fsync_operations);
-            let totals = evidence
-                .storage_current
-                .entry(crate::ArtifactCategory::ConstructionStaging)
-                .or_default();
-            totals.logical_references = totals.logical_references.saturating_add(1);
-            totals.logical_bytes = totals.logical_bytes.saturating_add(artifact.bytes);
-            totals.physical_objects = totals.physical_objects.saturating_add(1);
-            totals.physical_logical_bytes =
-                totals.physical_logical_bytes.saturating_add(artifact.bytes);
-            totals.allocated_bytes = totals
-                .allocated_bytes
-                .saturating_add(artifact.allocated_bytes);
-            evidence
-                .storage_transient_peak_allocated_bytes
-                .entry(crate::ArtifactCategory::ConstructionStaging)
-                .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
-                .or_insert(totals.allocated_bytes);
-            let current_union = evidence
-                .storage_current
-                .values()
-                .fold(0_u64, |total, item| {
-                    total.saturating_add(item.allocated_bytes)
-                });
-            evidence.storage_transient_peak_total_allocated_bytes = evidence
-                .storage_transient_peak_total_allocated_bytes
-                .max(current_union);
+                .checked_add(artifact.fsync_operations)
+                .ok_or_else(|| storage("construction fsync count overflows"))?;
+            record_category_install(evidence, artifact.bytes, artifact.allocated_bytes)?;
         }
-        self.checkpoint.next_sequence = self.checkpoint.next_sequence.saturating_add(1);
+        self.checkpoint.next_sequence = self
+            .checkpoint
+            .next_sequence
+            .checked_add(1)
+            .ok_or_else(|| storage("construction sequence overflows"))?;
         self.checkpoint.saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
         match receipt.kind {
             ConstructionChunkKind::Node => {
@@ -3160,7 +3487,12 @@ fn extract_runs(kind: ConstructionChunkKind, batch: &RecordBatch) -> Result<RunA
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| storage("canonical edge route is not Utf8"))?;
-        endpoints.reserve(batch.num_rows().saturating_mul(2));
+        endpoints.reserve(
+            batch
+                .num_rows()
+                .checked_mul(2)
+                .ok_or_else(|| storage("edge endpoint capacity overflow"))?,
+        );
         let mut details = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
             let edge = uuid_value(edges, row)?;
@@ -3468,13 +3800,16 @@ impl IoCounter {
         }
     }
 
-    fn add_to(&self, evidence: &mut GraphConstructionEvidence) {
+    fn add_to(&self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
         evidence.parquet_read_bytes = evidence
             .parquet_read_bytes
-            .saturating_add(self.bytes.load(Ordering::Relaxed));
+            .checked_add(self.bytes.load(Ordering::Relaxed))
+            .ok_or_else(|| storage("Parquet read byte count overflows"))?;
         evidence.parquet_read_operations = evidence
             .parquet_read_operations
-            .saturating_add(self.operations.load(Ordering::Relaxed));
+            .checked_add(self.operations.load(Ordering::Relaxed))
+            .ok_or_else(|| storage("Parquet read operation count overflows"))?;
+        Ok(())
     }
 
     pub(crate) fn values(&self) -> (u64, u64) {
@@ -3627,8 +3962,13 @@ impl Write for HashingWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(bytes)?;
         self.digest.update(&bytes[..written]);
-        self.bytes = self.bytes.saturating_add(written as u64);
-        self.operations = self.operations.saturating_add(1);
+        self.bytes = self
+            .bytes
+            .checked_add(written as u64)
+            .ok_or_else(|| std::io::Error::other("construction writer byte count overflows"))?;
+        self.operations = self.operations.checked_add(1).ok_or_else(|| {
+            std::io::Error::other("construction writer operation count overflows")
+        })?;
         Ok(written)
     }
 
@@ -3640,37 +3980,45 @@ impl Write for HashingWriter {
 fn account_cache_release(
     released: graphforge_filesystem::FileCacheReleaseEvidence,
     evidence: &mut GraphConstructionEvidence,
-) {
+) -> Result<(), GfError> {
     evidence.cache_release_operations = evidence
         .cache_release_operations
-        .saturating_add(released.release_operations);
+        .checked_add(released.release_operations)
+        .ok_or_else(|| storage("cache release operations overflows"))?;
     evidence.cache_release_unsupported_operations = evidence
         .cache_release_unsupported_operations
-        .saturating_add(released.unsupported_operations);
+        .checked_add(released.unsupported_operations)
+        .ok_or_else(|| storage("cache release unsupported operations overflows"))?;
     evidence.cache_released_bytes = evidence
         .cache_released_bytes
-        .saturating_add(released.released_bytes);
+        .checked_add(released.released_bytes)
+        .ok_or_else(|| storage("cache released bytes overflows"))?;
     evidence.peak_cache_release_window_bytes = evidence
         .peak_cache_release_window_bytes
         .max(released.peak_window_bytes);
+    Ok(())
 }
 
 fn account_encoding_cache_release(
     released: &GraphConstructionEncodingEvidence,
     evidence: &mut GraphConstructionEvidence,
-) {
+) -> Result<(), GfError> {
     evidence.cache_release_operations = evidence
         .cache_release_operations
-        .saturating_add(released.cache_release_operations);
+        .checked_add(released.cache_release_operations)
+        .ok_or_else(|| storage("cache release operations overflows"))?;
     evidence.cache_release_unsupported_operations = evidence
         .cache_release_unsupported_operations
-        .saturating_add(released.cache_release_unsupported_operations);
+        .checked_add(released.cache_release_unsupported_operations)
+        .ok_or_else(|| storage("cache release unsupported operations overflows"))?;
     evidence.cache_released_bytes = evidence
         .cache_released_bytes
-        .saturating_add(released.cache_released_bytes);
+        .checked_add(released.cache_released_bytes)
+        .ok_or_else(|| storage("cache released bytes overflows"))?;
     evidence.peak_cache_release_window_bytes = evidence
         .peak_cache_release_window_bytes
         .max(released.peak_cache_release_window_bytes);
+    Ok(())
 }
 
 fn write_parquet(
@@ -3693,7 +4041,7 @@ fn write_parquet(
     let hashing = parquet.inner_mut().get_mut();
     hashing.inner.sync_all_and_release().map_err(storage)?;
     let cache_release = hashing.inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
     let receipt = ArtifactReceipt {
         name: name.to_owned(),
@@ -3704,7 +4052,10 @@ fn write_parquet(
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
-        fsync_operations: 4_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+        fsync_operations: cache_release
+            .sync_operations
+            .checked_add(3)
+            .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
@@ -3739,7 +4090,7 @@ fn write_fixed_run<const N: usize>(
     writer.flush().map_err(storage)?;
     writer.inner.sync_all_and_release().map_err(storage)?;
     let cache_release = writer.inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     construction_failpoint(&format!("artifact.after_temp_fsync.{name}"));
     let receipt = ArtifactReceipt {
         name: name.to_owned(),
@@ -3750,7 +4101,10 @@ fn write_fixed_run<const N: usize>(
         sha256: hex(&writer.digest.finalize()),
         identity: identity.into(),
         write_operations: writer.operations,
-        fsync_operations: 3_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+        fsync_operations: cache_release
+            .sync_operations
+            .checked_add(2)
+            .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(name))
@@ -3890,8 +4244,12 @@ fn persisted_evidence_equivalent(
 
 fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphConstructionEvidence) {
     target.storage_current = source.storage_current.clone();
+    target.storage_receipt_category_authorities =
+        source.storage_receipt_category_authorities.clone();
     target.storage_transient_peak_allocated_bytes =
         source.storage_transient_peak_allocated_bytes.clone();
+    target.storage_receipt_transient_peak_authorities =
+        source.storage_receipt_transient_peak_authorities.clone();
     target.storage_transient_peak_total_allocated_bytes =
         source.storage_transient_peak_total_allocated_bytes;
     target.storage_active_identity_allocated_bytes =
@@ -3909,7 +4267,19 @@ fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphCons
     target.encode_application_read_operations = source.encode_application_read_operations;
     target.encode_application_write_bytes = source.encode_application_write_bytes;
     target.encode_application_write_operations = source.encode_application_write_operations;
+    target.encode_output_write_operations = source.encode_output_write_operations;
+    target.encode_membership_write_operations = source.encode_membership_write_operations;
+    target.encode_source_spool_write_operations = source.encode_source_spool_write_operations;
+    target.encode_ordinal_artifact_write_operations =
+        source.encode_ordinal_artifact_write_operations;
+    target.encode_ordinal_publication_write_operations =
+        source.encode_ordinal_publication_write_operations;
     target.encode_fsync_operations = source.encode_fsync_operations;
+    target.canonical_artifact_objects = source.canonical_artifact_objects;
+    target.encode_output_fsync_operations = source.encode_output_fsync_operations;
+    target.encode_source_spool_fsync_operations = source.encode_source_spool_fsync_operations;
+    target.encode_membership_fsync_operations = source.encode_membership_fsync_operations;
+    target.encode_ordinal_fsync_operations = source.encode_ordinal_fsync_operations;
     target.publication_application_read_bytes = source.publication_application_read_bytes;
     target.publication_application_read_operations = source.publication_application_read_operations;
     target.cas_application_read_bytes = source.cas_application_read_bytes;
@@ -3917,11 +4287,15 @@ fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphCons
     target.cas_application_write_bytes = source.cas_application_write_bytes;
     target.cas_application_write_operations = source.cas_application_write_operations;
     target.cas_fsync_operations = source.cas_fsync_operations;
+    target.cas_publication_io = source.cas_publication_io.clone();
     target.hydration_application_read_bytes = source.hydration_application_read_bytes;
     target.hydration_application_read_operations = source.hydration_application_read_operations;
     target.hydration_application_write_bytes = source.hydration_application_write_bytes;
     target.hydration_application_write_operations = source.hydration_application_write_operations;
     target.hydration_fsync_operations = source.hydration_fsync_operations;
+    target.hydration_files_copied = source.hydration_files_copied;
+    target.hydration_file_fsync_operations = source.hydration_file_fsync_operations;
+    target.hydration_directory_fsync_operations = source.hydration_directory_fsync_operations;
     target.canonical_output_bytes = source.canonical_output_bytes;
     target.staged_and_retained_disk_bytes = source.staged_and_retained_disk_bytes;
 }
@@ -4296,8 +4670,12 @@ fn receipt_for_existing_with_work(
                 break;
             }
             digest.update(&block[..count]);
-            bytes = bytes.saturating_add(count as u64);
-            operations = operations.saturating_add(1);
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage("bytes overflows"))?;
+            operations = operations
+                .checked_add(1)
+                .ok_or_else(|| storage("operations overflows"))?;
         }
         Ok((
             ArtifactReceipt {
@@ -4511,6 +4889,103 @@ fn record_active_identity_remove(
     Ok(removed)
 }
 
+fn checked_category_install(
+    current: &crate::ArtifactStorageTotals,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+) -> Result<crate::ArtifactStorageTotals, GfError> {
+    Ok(crate::ArtifactStorageTotals {
+        logical_references: current
+            .logical_references
+            .checked_add(1)
+            .ok_or_else(|| storage("category logical-reference authority overflows"))?,
+        logical_bytes: current
+            .logical_bytes
+            .checked_add(logical_bytes)
+            .ok_or_else(|| storage("category logical-byte authority overflows"))?,
+        physical_objects: current
+            .physical_objects
+            .checked_add(1)
+            .ok_or_else(|| storage("category physical-object authority overflows"))?,
+        physical_logical_bytes: current
+            .physical_logical_bytes
+            .checked_add(logical_bytes)
+            .ok_or_else(|| storage("category physical-logical authority overflows"))?,
+        allocated_bytes: current
+            .allocated_bytes
+            .checked_add(allocated_bytes)
+            .ok_or_else(|| storage("category allocated-byte authority overflows"))?,
+    })
+}
+
+fn record_category_install(
+    evidence: &mut GraphConstructionEvidence,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+) -> Result<(), GfError> {
+    let category = crate::ArtifactCategory::ConstructionStaging;
+    let reported = checked_category_install(
+        &evidence.storage_current[&category],
+        logical_bytes,
+        allocated_bytes,
+    )?;
+    let authority = checked_category_install(
+        &evidence.storage_receipt_category_authorities[&category],
+        logical_bytes,
+        allocated_bytes,
+    )?;
+    evidence.storage_current.insert(category, reported.clone());
+    evidence
+        .storage_receipt_category_authorities
+        .insert(category, authority.clone());
+    evidence
+        .storage_transient_peak_allocated_bytes
+        .entry(category)
+        .and_modify(|peak| *peak = (*peak).max(reported.allocated_bytes));
+    evidence
+        .storage_receipt_transient_peak_authorities
+        .entry(category)
+        .and_modify(|peak| *peak = (*peak).max(authority.allocated_bytes));
+    let active_total = evidence
+        .storage_active_identity_allocated_bytes
+        .values()
+        .try_fold(0_u64, |total, value| total.checked_add(*value))
+        .ok_or_else(|| storage("active construction allocation overflows"))?;
+    evidence.storage_transient_peak_total_allocated_bytes = evidence
+        .storage_transient_peak_total_allocated_bytes
+        .max(active_total);
+    Ok(())
+}
+
+fn checked_category_remove(
+    current: &crate::ArtifactStorageTotals,
+    logical_bytes: u64,
+    allocated_bytes: u64,
+) -> Result<crate::ArtifactStorageTotals, GfError> {
+    Ok(crate::ArtifactStorageTotals {
+        logical_references: current
+            .logical_references
+            .checked_sub(1)
+            .ok_or_else(|| storage("category logical-reference authority underflows"))?,
+        logical_bytes: current
+            .logical_bytes
+            .checked_sub(logical_bytes)
+            .ok_or_else(|| storage("category logical-byte authority underflows"))?,
+        physical_objects: current
+            .physical_objects
+            .checked_sub(1)
+            .ok_or_else(|| storage("category physical-object authority underflows"))?,
+        physical_logical_bytes: current
+            .physical_logical_bytes
+            .checked_sub(logical_bytes)
+            .ok_or_else(|| storage("category physical-logical authority underflows"))?,
+        allocated_bytes: current
+            .allocated_bytes
+            .checked_sub(allocated_bytes)
+            .ok_or_else(|| storage("category allocated-byte authority underflows"))?,
+    })
+}
+
 fn record_shape_artifact_install(
     evidence: &mut GraphConstructionEvidence,
     receipt: &ArtifactReceipt,
@@ -4525,38 +5000,157 @@ fn record_shape_artifact_install(
         receipt.allocated_bytes,
         "shape artifact identity installed twice",
     )?;
-    let totals = evidence
-        .storage_current
-        .entry(crate::ArtifactCategory::ConstructionStaging)
-        .or_default();
-    totals.logical_references = totals.logical_references.saturating_add(1);
-    totals.logical_bytes = totals.logical_bytes.saturating_add(receipt.bytes);
-    totals.physical_objects = totals.physical_objects.saturating_add(1);
-    totals.physical_logical_bytes = totals.physical_logical_bytes.saturating_add(receipt.bytes);
-    totals.allocated_bytes = totals
-        .allocated_bytes
-        .saturating_add(receipt.allocated_bytes);
+    record_category_install(evidence, receipt.bytes, receipt.allocated_bytes)?;
     evidence.current_merge_temporary_allocated_bytes = evidence
         .current_merge_temporary_allocated_bytes
-        .saturating_add(receipt.allocated_bytes);
+        .checked_add(receipt.allocated_bytes)
+        .ok_or_else(|| storage("current merge allocation overflows"))?;
     evidence.peak_merge_temporary_bytes = evidence
         .peak_merge_temporary_bytes
         .max(evidence.current_merge_temporary_allocated_bytes);
-    evidence
-        .storage_transient_peak_allocated_bytes
-        .entry(crate::ArtifactCategory::ConstructionStaging)
-        .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
-        .or_insert(totals.allocated_bytes);
-    let union = evidence
-        .storage_current
-        .values()
-        .fold(0_u64, |total, item| {
-            total.saturating_add(item.allocated_bytes)
-        });
-    evidence.storage_transient_peak_total_allocated_bytes = evidence
-        .storage_transient_peak_total_allocated_bytes
-        .max(union);
     Ok(())
+}
+
+fn record_encoding_io_evidence(
+    evidence: &mut GraphConstructionEvidence,
+    encoded: &GraphConstructionEncoding,
+) -> Result<(), GfError> {
+    let measured = &encoded.invocation.evidence;
+    record_encoding_components(evidence, measured)?;
+    evidence.encode_application_read_bytes = checked_evidence_sum(
+        "encoding read bytes",
+        evidence.encode_application_read_bytes,
+        &[measured.input_read_bytes, measured.membership_read_bytes],
+    )?;
+    evidence.encode_application_read_operations = checked_evidence_sum(
+        "encoding read operations",
+        evidence.encode_application_read_operations,
+        &[
+            measured.input_read_operations,
+            measured.membership_read_operations,
+            measured.source_spool_read_operations,
+        ],
+    )?;
+    evidence.encode_application_write_bytes = checked_evidence_sum(
+        "encoding write bytes",
+        evidence.encode_application_write_bytes,
+        &[
+            measured.output_write_bytes,
+            measured.membership_total_write_bytes,
+            measured.source_spool_write_bytes,
+            measured.ordinal_artifact_write_bytes,
+            measured.ordinal_publication_write_bytes,
+        ],
+    )?;
+    evidence.encode_application_write_operations = checked_evidence_sum(
+        "encoding write operations",
+        evidence.encode_application_write_operations,
+        &[
+            measured.output_write_operations,
+            measured.membership_write_operations,
+            measured.source_spool_write_operations,
+            measured.ordinal_artifact_write_operations,
+            measured.ordinal_publication_write_operations,
+        ],
+    )?;
+    evidence.encode_fsync_operations = checked_evidence_sum(
+        "encoding fsync operations",
+        evidence.encode_fsync_operations,
+        &[
+            measured.fsync_operations,
+            measured.membership_fsync_operations,
+            measured.source_spool_fsync_operations,
+            measured.ordinal_fsync_operations,
+        ],
+    )?;
+    evidence.canonical_artifact_objects = u64::try_from(encoded.artifacts.len())
+        .map_err(|_| storage("canonical artifact inventory exceeds u64"))?;
+    evidence.canonical_output_bytes =
+        encoded
+            .artifacts
+            .iter()
+            .try_fold(0_u64, |total, artifact| {
+                total
+                    .checked_add(artifact.bytes)
+                    .ok_or_else(|| storage("canonical output inventory overflows"))
+            })?;
+    let retained_bytes = encoded
+        .retained_artifacts
+        .iter()
+        .try_fold(0_u64, |total, artifact| {
+            total
+                .checked_add(artifact.bytes)
+                .ok_or_else(|| storage("retained artifact inventory overflows"))
+        })?;
+    evidence.staged_and_retained_disk_bytes = evidence
+        .write_bytes
+        .checked_add(retained_bytes)
+        .ok_or_else(|| storage("staged and retained inventory overflows"))?;
+    Ok(())
+}
+
+fn record_encoding_components(
+    evidence: &mut GraphConstructionEvidence,
+    measured: &GraphConstructionEncodingEvidence,
+) -> Result<(), GfError> {
+    for (counter, value, name) in [
+        (
+            &mut evidence.encode_output_write_operations,
+            measured.output_write_operations,
+            "encode_output_write_operations",
+        ),
+        (
+            &mut evidence.encode_membership_write_operations,
+            measured.membership_write_operations,
+            "encode_membership_write_operations",
+        ),
+        (
+            &mut evidence.encode_source_spool_write_operations,
+            measured.source_spool_write_operations,
+            "encode_source_spool_write_operations",
+        ),
+        (
+            &mut evidence.encode_ordinal_artifact_write_operations,
+            measured.ordinal_artifact_write_operations,
+            "encode_ordinal_artifact_write_operations",
+        ),
+        (
+            &mut evidence.encode_ordinal_publication_write_operations,
+            measured.ordinal_publication_write_operations,
+            "encode_ordinal_publication_write_operations",
+        ),
+        (
+            &mut evidence.encode_output_fsync_operations,
+            measured.fsync_operations,
+            "encode_output_fsync_operations",
+        ),
+        (
+            &mut evidence.encode_source_spool_fsync_operations,
+            measured.source_spool_fsync_operations,
+            "encode_source_spool_fsync_operations",
+        ),
+        (
+            &mut evidence.encode_membership_fsync_operations,
+            measured.membership_fsync_operations,
+            "encode_membership_fsync_operations",
+        ),
+        (
+            &mut evidence.encode_ordinal_fsync_operations,
+            measured.ordinal_fsync_operations,
+            "encode_ordinal_fsync_operations",
+        ),
+    ] {
+        *counter = checked_evidence_sum(name, *counter, &[value])?;
+    }
+    Ok(())
+}
+
+fn checked_evidence_sum(name: &str, initial: u64, values: &[u64]) -> Result<u64, GfError> {
+    values.iter().try_fold(initial, |total, value| {
+        total
+            .checked_add(*value)
+            .ok_or_else(|| storage(format!("{name} overflow")))
+    })
 }
 
 fn record_encoded_active_artifacts(
@@ -4606,30 +5200,7 @@ fn record_encoded_active_artifacts(
             usage.allocated_bytes,
             "encoded artifact identity installed twice",
         )?;
-        let totals = evidence
-            .storage_current
-            .entry(crate::ArtifactCategory::ConstructionStaging)
-            .or_default();
-        totals.logical_references = totals.logical_references.saturating_add(1);
-        totals.logical_bytes = totals.logical_bytes.saturating_add(usage.logical_bytes);
-        totals.physical_objects = totals.physical_objects.saturating_add(1);
-        totals.physical_logical_bytes = totals
-            .physical_logical_bytes
-            .saturating_add(usage.logical_bytes);
-        totals.allocated_bytes = totals.allocated_bytes.saturating_add(usage.allocated_bytes);
-        evidence
-            .storage_transient_peak_allocated_bytes
-            .entry(crate::ArtifactCategory::ConstructionStaging)
-            .and_modify(|peak| *peak = (*peak).max(totals.allocated_bytes))
-            .or_insert(totals.allocated_bytes);
-        let active_total = evidence
-            .storage_active_identity_allocated_bytes
-            .values()
-            .try_fold(0_u64, |total, value| total.checked_add(*value))
-            .ok_or_else(|| storage("active construction allocation overflow"))?;
-        evidence.storage_transient_peak_total_allocated_bytes = evidence
-            .storage_transient_peak_total_allocated_bytes
-            .max(active_total);
+        record_category_install(evidence, usage.logical_bytes, usage.allocated_bytes)?;
     }
     Ok(())
 }
@@ -4653,30 +5224,27 @@ fn unlink_shape_artifact(
     if removed != receipt.allocated_bytes {
         return Err(storage("shape active identity allocation changed"));
     }
-    let totals = evidence
-        .storage_current
-        .get_mut(&crate::ArtifactCategory::ConstructionStaging)
-        .ok_or_else(|| storage("shape allocation ledger is absent"))?;
-    totals.logical_references = totals
-        .logical_references
-        .checked_sub(1)
-        .ok_or_else(|| storage("shape logical-reference ledger underflow"))?;
-    totals.logical_bytes = totals
-        .logical_bytes
-        .checked_sub(receipt.bytes)
-        .ok_or_else(|| storage("shape logical-byte ledger underflow"))?;
-    totals.physical_objects = totals
-        .physical_objects
-        .checked_sub(1)
-        .ok_or_else(|| storage("shape physical-object ledger underflow"))?;
-    totals.physical_logical_bytes = totals
-        .physical_logical_bytes
-        .checked_sub(receipt.bytes)
-        .ok_or_else(|| storage("shape physical-logical ledger underflow"))?;
-    totals.allocated_bytes = totals
-        .allocated_bytes
-        .checked_sub(receipt.allocated_bytes)
-        .ok_or_else(|| storage("shape allocated-byte ledger underflow"))?;
+    let category = crate::ArtifactCategory::ConstructionStaging;
+    let reported = checked_category_remove(
+        evidence
+            .storage_current
+            .get(&category)
+            .ok_or_else(|| storage("shape allocation ledger is absent"))?,
+        receipt.bytes,
+        receipt.allocated_bytes,
+    )?;
+    let authority = checked_category_remove(
+        evidence
+            .storage_receipt_category_authorities
+            .get(&category)
+            .ok_or_else(|| storage("shape authority ledger is absent"))?,
+        receipt.bytes,
+        receipt.allocated_bytes,
+    )?;
+    evidence.storage_current.insert(category, reported);
+    evidence
+        .storage_receipt_category_authorities
+        .insert(category, authority);
     evidence.current_merge_temporary_allocated_bytes = evidence
         .current_merge_temporary_allocated_bytes
         .checked_sub(receipt.allocated_bytes)
@@ -4684,30 +5252,55 @@ fn unlink_shape_artifact(
     Ok(())
 }
 
-fn account_merge_read<const N: usize>(evidence: &mut GraphConstructionEvidence) {
+fn account_merge_read<const N: usize>(
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
     let _ = N;
-    evidence.merge_read_records = evidence.merge_read_records.saturating_add(1);
+    evidence.merge_read_records = evidence
+        .merge_read_records
+        .checked_add(1)
+        .ok_or_else(|| storage("merge read record count overflows"))?;
+    Ok(())
 }
 
-fn account_merge_write<const N: usize>(evidence: &mut GraphConstructionEvidence) {
-    evidence.merge_written_records = evidence.merge_written_records.saturating_add(1);
-    evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(N as u64);
+fn account_merge_write<const N: usize>(
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    evidence.merge_written_records = evidence
+        .merge_written_records
+        .checked_add(1)
+        .ok_or_else(|| storage("merge written record count overflows"))?;
+    evidence.merge_written_bytes = evidence
+        .merge_written_bytes
+        .checked_add(N as u64)
+        .ok_or_else(|| storage("merge written byte count overflows"))?;
+    Ok(())
 }
 
-fn account_sequential_read(bytes: u64, evidence: &mut GraphConstructionEvidence) {
+fn account_sequential_read(
+    bytes: u64,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
     if bytes != 0 {
         evidence.merge_read_blocks = evidence
             .merge_read_blocks
-            .saturating_add(bytes.div_ceil(BLOCK_BYTES as u64));
+            .checked_add(bytes.div_ceil(BLOCK_BYTES as u64))
+            .ok_or_else(|| storage("merge read block count overflows"))?;
     }
+    Ok(())
 }
 
-fn account_sequential_write(bytes: u64, evidence: &mut GraphConstructionEvidence) {
+fn account_sequential_write(
+    bytes: u64,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
     if bytes != 0 {
         evidence.merge_write_blocks = evidence
             .merge_write_blocks
-            .saturating_add(bytes.div_ceil(BLOCK_BYTES as u64));
+            .checked_add(bytes.div_ceil(BLOCK_BYTES as u64))
+            .ok_or_else(|| storage("merge write block count overflows"))?;
     }
+    Ok(())
 }
 
 fn account_fixed_read_operations(
@@ -4718,8 +5311,14 @@ fn account_fixed_read_operations(
     if (bytes == 0) != (operations == 0) {
         return Err(storage("fixed-run read bytes and submissions disagree"));
     }
-    evidence.merge_read_bytes = evidence.merge_read_bytes.saturating_add(bytes);
-    evidence.merge_read_operations = evidence.merge_read_operations.saturating_add(operations);
+    evidence.merge_read_bytes = evidence
+        .merge_read_bytes
+        .checked_add(bytes)
+        .ok_or_else(|| storage("merge read byte count overflows"))?;
+    evidence.merge_read_operations = evidence
+        .merge_read_operations
+        .checked_add(operations)
+        .ok_or_else(|| storage("merge read operation count overflows"))?;
     Ok(())
 }
 
@@ -4735,7 +5334,7 @@ fn open_counted_fixed_reader(
     GfError,
 > {
     let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
-    account_sequential_read(file.metadata().map_err(storage)?.len(), evidence);
+    account_sequential_read(file.metadata().map_err(storage)?.len(), evidence)?;
     let counter = IoCounter::default();
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
@@ -4761,7 +5360,7 @@ fn release_counted_reader_cache(
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
     let released = reader.get_mut().inner.finish().map_err(storage)?;
-    account_cache_release(released, evidence);
+    account_cache_release(released, evidence)?;
     #[cfg(test)]
     SHAPE_CLEANUP_FAILURES.with(|failures| {
         if failures.borrow().input_release {
@@ -4815,7 +5414,7 @@ fn cleanup_failed_shape_output(
         .sync_all_and_release()
         .map_err(storage);
     let cache_release = writer.get_ref().inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     let finalized =
         combine_secondary_cleanup(flushed, synchronized, "shape output synchronization");
     drop(writer);
@@ -4913,7 +5512,8 @@ fn account_fixed_write_operations(
     }
     evidence.merge_write_operations = evidence
         .merge_write_operations
-        .saturating_add(receipt.write_operations);
+        .checked_add(receipt.write_operations)
+        .ok_or_else(|| storage("merge write operation count overflows"))?;
     Ok(())
 }
 
@@ -4928,7 +5528,7 @@ fn convert_identity_run(
     let input = root
         .open_child_file(OsStr::new(&receipt.identities.name))
         .map_err(storage)?;
-    account_sequential_read(receipt.identities.bytes, evidence);
+    account_sequential_read(receipt.identities.bytes, evidence)?;
     if !receipt
         .identities
         .identity
@@ -4993,13 +5593,15 @@ fn convert_identity_run(
     let copied = (|| -> Result<(), GfError> {
         while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
             digest.update(uuid);
-            bytes = bytes.saturating_add(IDENTITY_WIDTH as u64);
+            bytes = bytes
+                .checked_add(IDENTITY_WIDTH as u64)
+                .ok_or_else(|| storage("bytes overflows"))?;
             let mut record = [0_u8; BASE_IDENTITY_WIDTH];
             record[..16].copy_from_slice(&uuid);
             record[16] = u8::from(receipt.kind == ConstructionChunkKind::Edge);
             writer.write_all(&record).map_err(storage)?;
-            account_merge_read::<IDENTITY_WIDTH>(evidence);
-            account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+            account_merge_read::<IDENTITY_WIDTH>(evidence)?;
+            account_merge_write::<BASE_IDENTITY_WIDTH>(evidence)?;
             reject_cancelled(cancelled)?;
         }
         if bytes != receipt.identities.bytes || hex(&digest.finalize()) != receipt.identities.sha256
@@ -5029,7 +5631,7 @@ fn convert_identity_run(
     let prepared = (|| -> Result<(_, _), GfError> {
         shape_publication_failure("fsync_evidence_overflow")?;
         let mut committed_evidence = evidence.clone();
-        account_cache_release(cache_release, &mut committed_evidence);
+        account_cache_release(cache_release, &mut committed_evidence)?;
         let aggregate_peak = reader
             .get_ref()
             .inner
@@ -5041,7 +5643,7 @@ fn convert_identity_run(
         committed_evidence.peak_cache_release_window_bytes = committed_evidence
             .peak_cache_release_window_bytes
             .max(aggregate_peak);
-        account_sequential_write(writer.get_ref().bytes, &mut committed_evidence);
+        account_sequential_write(writer.get_ref().bytes, &mut committed_evidence)?;
         shape_publication_failure("final_file_identity")?;
         if file_identity(writer.get_ref().inner.file()).map_err(storage)?
             != publication.identity().map_err(storage)?
@@ -5060,12 +5662,17 @@ fn convert_identity_run(
             sha256: hex(&writer.get_ref().digest.clone().finalize()),
             identity: identity.into(),
             write_operations: writer.get_ref().operations,
-            fsync_operations: 2_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+            fsync_operations: cache_release
+                .sync_operations
+                .checked_add(1)
+                .ok_or_else(|| storage("artifact synchronization count overflows"))?,
         };
         record_shape_artifact_install(&mut committed_evidence, &output_receipt)?;
         account_fixed_write_operations(&output_receipt, &mut committed_evidence)?;
-        committed_evidence.merge_fsync_operations =
-            committed_evidence.merge_fsync_operations.saturating_add(2);
+        committed_evidence.merge_fsync_operations = committed_evidence
+            .merge_fsync_operations
+            .checked_add(output_receipt.fsync_operations)
+            .ok_or_else(|| storage("merge fsync operations overflows"))?;
         Ok((output_receipt, committed_evidence))
     })();
     let (output_receipt, committed_evidence) = match prepared {
@@ -5120,7 +5727,7 @@ fn copy_authenticated_run<const N: usize>(
     let input = root
         .open_child_file(OsStr::new(&receipt.name))
         .map_err(storage)?;
-    account_sequential_read(receipt.bytes, evidence);
+    account_sequential_read(receipt.bytes, evidence)?;
     if !receipt
         .identity
         .matches(file_identity(&input).map_err(storage)?)
@@ -5185,10 +5792,12 @@ fn copy_authenticated_run<const N: usize>(
     let copied = (|| -> Result<(), GfError> {
         while let Some(record) = read_fixed::<N>(&mut reader)? {
             digest.update(record);
-            bytes = bytes.saturating_add(N as u64);
+            bytes = bytes
+                .checked_add(N as u64)
+                .ok_or_else(|| storage("bytes overflows"))?;
             writer.write_all(&record).map_err(storage)?;
-            account_merge_read::<N>(evidence);
-            account_merge_write::<N>(evidence);
+            account_merge_read::<N>(evidence)?;
+            account_merge_write::<N>(evidence)?;
             reject_cancelled(cancelled)?;
         }
         if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
@@ -5217,7 +5826,7 @@ fn copy_authenticated_run<const N: usize>(
     let prepared = (|| -> Result<(_, _), GfError> {
         shape_publication_failure("fsync_evidence_overflow")?;
         let mut committed_evidence = evidence.clone();
-        account_cache_release(cache_release, &mut committed_evidence);
+        account_cache_release(cache_release, &mut committed_evidence)?;
         let aggregate_peak = reader
             .get_ref()
             .inner
@@ -5229,7 +5838,7 @@ fn copy_authenticated_run<const N: usize>(
         committed_evidence.peak_cache_release_window_bytes = committed_evidence
             .peak_cache_release_window_bytes
             .max(aggregate_peak);
-        account_sequential_write(bytes, &mut committed_evidence);
+        account_sequential_write(bytes, &mut committed_evidence)?;
         shape_publication_failure("final_file_identity")?;
         if file_identity(writer.get_ref().inner.file()).map_err(storage)?
             != publication.identity().map_err(storage)?
@@ -5250,12 +5859,17 @@ fn copy_authenticated_run<const N: usize>(
             sha256: receipt.sha256.clone(),
             identity: identity.into(),
             write_operations: writer.get_ref().operations,
-            fsync_operations: 2_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+            fsync_operations: cache_release
+                .sync_operations
+                .checked_add(1)
+                .ok_or_else(|| storage("artifact synchronization count overflows"))?,
         };
         record_shape_artifact_install(&mut committed_evidence, &output_receipt)?;
         account_fixed_write_operations(&output_receipt, &mut committed_evidence)?;
-        committed_evidence.merge_fsync_operations =
-            committed_evidence.merge_fsync_operations.saturating_add(2);
+        committed_evidence.merge_fsync_operations = committed_evidence
+            .merge_fsync_operations
+            .checked_add(output_receipt.fsync_operations)
+            .ok_or_else(|| storage("merge fsync operations overflows"))?;
         Ok((output_receipt, committed_evidence))
     })();
     let (output_receipt, committed_evidence) = match prepared {
@@ -5318,7 +5932,9 @@ fn online_merge_name_slot_bound(mut inputs: u64, fan_in: usize) -> u64 {
     let radix = fan_in as u64;
     let mut slots = 0_u64;
     while inputs != 0 {
-        slots = slots.saturating_add(inputs % radix);
+        slots = slots
+            .checked_add(inputs % radix)
+            .expect("online merge slot bound overflow");
         inputs /= radix;
     }
     slots.max(1)
@@ -5347,7 +5963,10 @@ impl FixedMergeAccumulator {
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<(), GfError> {
-        self.inputs = self.inputs.saturating_add(1);
+        self.inputs = self
+            .inputs
+            .checked_add(1)
+            .ok_or_else(|| storage("fixed merge input count overflow"))?;
         let mut level = 0;
         loop {
             if self.levels.len() <= level {
@@ -5360,8 +5979,15 @@ impl FixedMergeAccumulator {
             }
             let inputs = std::mem::take(&mut self.levels[level]);
             let group = self.groups[level];
-            self.groups[level] = group.saturating_add(1);
-            evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+            self.groups[level] = group
+                .checked_add(1)
+                .ok_or_else(|| storage("fixed merge group count overflow"))?;
+            evidence.merge_passes = evidence.merge_passes.max(
+                u64::try_from(level)
+                    .map_err(storage)?
+                    .checked_add(1)
+                    .ok_or_else(|| storage("fixed merge pass count overflow"))?,
+            );
             name = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
             merge_fixed_group::<N>(
                 root,
@@ -5419,8 +6045,15 @@ impl FixedMergeAccumulator {
                 inputs[0].clone()
             } else {
                 let group = self.groups[level];
-                self.groups[level] = group.saturating_add(1);
-                evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+                self.groups[level] = group
+                    .checked_add(1)
+                    .ok_or_else(|| storage("fixed merge group count overflow"))?;
+                evidence.merge_passes = evidence.merge_passes.max(
+                    u64::try_from(level)
+                        .map_err(storage)?
+                        .checked_add(1)
+                        .ok_or_else(|| storage("fixed merge pass count overflow"))?,
+                );
                 let output = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
                 merge_fixed_group::<N>(
                     root,
@@ -5465,26 +6098,21 @@ fn merge_fixed_group<const N: usize>(
         graphforge_filesystem::cache_release_window_for_streams(active_streams).map_err(storage)?;
     let mut readers = inputs
         .iter()
-        .map(|name| {
-            root.open_child_file(OsStr::new(name))
-                .and_then(|file| {
-                    if let Ok(metadata) = file.metadata() {
-                        account_sequential_read(metadata.len(), evidence);
-                    }
-                    Ok(BufReader::with_capacity(
-                        BLOCK_BYTES,
-                        CountingRead {
-                            inner:
-                                graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-                                    file,
-                                    reader_cache_window,
-                                    graphforge_filesystem::FileCacheReleaseTracker::default(),
-                                )?,
-                            counter: read_counter.clone(),
-                        },
-                    ))
-                })
-                .map_err(storage)
+        .map(|name| -> Result<_, GfError> {
+            let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+            account_sequential_read(file.metadata().map_err(storage)?.len(), evidence)?;
+            Ok(BufReader::with_capacity(
+                BLOCK_BYTES,
+                CountingRead {
+                    inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                        file,
+                        reader_cache_window,
+                        graphforge_filesystem::FileCacheReleaseTracker::default(),
+                    )
+                    .map_err(storage)?,
+                    counter: read_counter.clone(),
+                },
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     evidence.peak_merge_inputs = evidence.peak_merge_inputs.max(readers.len() as u64);
@@ -5499,7 +6127,7 @@ fn merge_fixed_group<const N: usize>(
     for (index, reader) in readers.iter_mut().enumerate() {
         if let Some(record) = read_fixed::<N>(reader)? {
             heap.push(Reverse((record, index)));
-            account_merge_read::<N>(evidence);
+            account_merge_read::<N>(evidence)?;
         }
     }
     let mut previous = None;
@@ -5512,14 +6140,14 @@ fn merge_fixed_group<const N: usize>(
             return Err(storage("duplicate identity across construction runs"));
         }
         writer.write_all(&record).map_err(storage)?;
-        account_merge_write::<N>(evidence);
+        account_merge_write::<N>(evidence)?;
         previous = Some(record);
         if evidence.merge_written_records.is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
         }
         if let Some(next) = read_fixed::<N>(&mut readers[index])? {
             heap.push(Reverse((next, index)));
-            account_merge_read::<N>(evidence);
+            account_merge_read::<N>(evidence)?;
         }
     }
     writer.flush().map_err(storage)?;
@@ -5533,7 +6161,7 @@ fn merge_fixed_group<const N: usize>(
         .sync_all_and_release()
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     let aggregate_peak =
         readers
             .iter()
@@ -5550,7 +6178,7 @@ fn merge_fixed_group<const N: usize>(
             })?;
     evidence.peak_cache_release_window_bytes =
         evidence.peak_cache_release_window_bytes.max(aggregate_peak);
-    account_sequential_write(writer.get_ref().bytes, evidence);
+    account_sequential_write(writer.get_ref().bytes, evidence)?;
     let receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes: writer.get_ref().bytes,
@@ -5560,7 +6188,10 @@ fn merge_fixed_group<const N: usize>(
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
-        fsync_operations: 2_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+        fsync_operations: cache_release
+            .sync_operations
+            .checked_add(1)
+            .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
@@ -5572,8 +6203,12 @@ fn merge_fixed_group<const N: usize>(
     account_fixed_write_operations(&receipt, evidence)?;
     evidence.merge_fsync_operations = evidence
         .merge_fsync_operations
-        .saturating_add(receipt.fsync_operations);
-    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
+        .checked_add(receipt.fsync_operations)
+        .ok_or_else(|| storage("merge fsync operations overflows"))?;
+    evidence.merge_groups = evidence
+        .merge_groups
+        .checked_add(1)
+        .ok_or_else(|| storage("merge groups overflows"))?;
     Ok(receipt)
 }
 
@@ -5617,7 +6252,12 @@ fn materialize_selected_rows(
             let refs = data.iter().collect::<Vec<_>>();
             let mut mutable = MutableArrayData::new(refs, false, selected.len());
             for (source, (_, row)) in selected.iter().enumerate() {
-                mutable.extend(source, *row, row.saturating_add(1));
+                mutable.extend(
+                    source,
+                    *row,
+                    row.checked_add(1)
+                        .ok_or_else(|| storage("selected row bound overflow"))?,
+                );
             }
             Ok(make_array(mutable.freeze()))
         })
@@ -5692,10 +6332,10 @@ fn merge_row_group(
                 tracker.check_error().map_err(storage),
                 "row merge source",
             );
-            account_cache_release(tracker.evidence(), evidence);
+            account_cache_release(tracker.evidence(), evidence)?;
         }
         for counter in counters {
-            counter.add_to(evidence);
+            counter.add_to(evidence)?;
         }
         return result;
     }
@@ -5734,30 +6374,41 @@ fn merge_row_group(
                     .slice(cursor.row, 1)
                     .to_data()
                     .get_slice_memory_size()
-                    .map(|bytes| total.saturating_add(bytes))
-                    .map_err(storage)
+                    .map_err(storage)?
+                    .checked_add(total)
+                    .ok_or_else(|| storage("merge row byte total overflows"))
             })?;
             if row_bytes > output_bytes {
                 return Err(storage("one normalized row exceeds merge byte window"));
             }
             if !selected.is_empty()
                 && (selected.len() == output_rows
-                    || selected_bytes.saturating_add(row_bytes) > output_bytes)
+                    || selected_bytes
+                        .checked_add(row_bytes)
+                        .ok_or_else(|| storage("merge selected bytes overflow"))?
+                        > output_bytes)
             {
                 let output_batch = materialize_selected_rows(schema.clone(), &selected)?;
                 evidence.merge_read_records = evidence
                     .merge_read_records
-                    .saturating_add(output_batch.num_rows() as u64);
+                    .checked_add(output_batch.num_rows() as u64)
+                    .ok_or_else(|| storage("merge read records overflows"))?;
                 writer.write(&output_batch).map_err(storage)?;
                 evidence.merge_written_records = evidence
                     .merge_written_records
-                    .saturating_add(output_batch.num_rows() as u64);
+                    .checked_add(output_batch.num_rows() as u64)
+                    .ok_or_else(|| storage("merge written records overflows"))?;
                 selected.clear();
                 selected_bytes = 0;
             }
             selected.push((batch.clone(), cursor.row));
-            selected_bytes = selected_bytes.saturating_add(row_bytes);
-            cursor.row = cursor.row.saturating_add(1);
+            selected_bytes = selected_bytes
+                .checked_add(row_bytes)
+                .ok_or_else(|| storage("merge selected bytes overflow"))?;
+            cursor.row = cursor
+                .row
+                .checked_add(1)
+                .ok_or_else(|| storage("merge row index overflows"))?;
             if let Some(next) = cursor.advance()? {
                 heap.push((Reverse(next), Reverse(source)));
             }
@@ -5765,11 +6416,13 @@ fn merge_row_group(
                 let batch = materialize_selected_rows(schema.clone(), &selected)?;
                 evidence.merge_read_records = evidence
                     .merge_read_records
-                    .saturating_add(batch.num_rows() as u64);
+                    .checked_add(batch.num_rows() as u64)
+                    .ok_or_else(|| storage("merge read records overflows"))?;
                 writer.write(&batch).map_err(storage)?;
                 evidence.merge_written_records = evidence
                     .merge_written_records
-                    .saturating_add(batch.num_rows() as u64);
+                    .checked_add(batch.num_rows() as u64)
+                    .ok_or_else(|| storage("merge written records overflows"))?;
                 selected.clear();
                 selected_bytes = 0;
             }
@@ -5790,10 +6443,10 @@ fn merge_row_group(
         reader_cache_peak = reader_cache_peak
             .checked_add(cache_release.peak_window_bytes)
             .ok_or_else(|| storage("row merge reader cache window overflow"))?;
-        account_cache_release(cache_release, evidence);
+        account_cache_release(cache_release, evidence)?;
     }
     for counter in counters {
-        counter.add_to(evidence);
+        counter.add_to(evidence)?;
     }
     merged?;
     writer
@@ -5804,7 +6457,7 @@ fn merge_row_group(
         .map_err(storage)?;
     let hashing = writer.inner().get_ref();
     let cache_release = hashing.inner.evidence();
-    account_cache_release(cache_release, evidence);
+    account_cache_release(cache_release, evidence)?;
     let aggregate_peak = reader_cache_peak
         .checked_add(cache_release.peak_window_bytes)
         .ok_or_else(|| storage("row merge aggregate cache window overflow"))?;
@@ -5819,7 +6472,10 @@ fn merge_row_group(
         sha256: hex(&hashing.digest.clone().finalize()),
         identity: identity.into(),
         write_operations: hashing.operations,
-        fsync_operations: 4_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+        fsync_operations: cache_release
+            .sync_operations
+            .checked_add(3)
+            .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
     root.sync().map_err(storage)?;
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
@@ -5830,12 +6486,20 @@ fn merge_row_group(
     record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence
         .merge_fsync_operations
-        .saturating_add(receipt.fsync_operations);
-    evidence.merge_groups = evidence.merge_groups.saturating_add(1);
-    evidence.parquet_write_bytes = evidence.parquet_write_bytes.saturating_add(receipt.bytes);
+        .checked_add(receipt.fsync_operations)
+        .ok_or_else(|| storage("merge fsync operations overflows"))?;
+    evidence.merge_groups = evidence
+        .merge_groups
+        .checked_add(1)
+        .ok_or_else(|| storage("merge groups overflows"))?;
+    evidence.parquet_write_bytes = evidence
+        .parquet_write_bytes
+        .checked_add(receipt.bytes)
+        .ok_or_else(|| storage("parquet write bytes overflows"))?;
     evidence.parquet_write_operations = evidence
         .parquet_write_operations
-        .saturating_add(receipt.write_operations);
+        .checked_add(receipt.write_operations)
+        .ok_or_else(|| storage("parquet write operations overflows"))?;
     Ok(receipt)
 }
 
@@ -5872,7 +6536,10 @@ impl RowMergeAccumulator {
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<(), GfError> {
-        self.inputs = self.inputs.saturating_add(1);
+        self.inputs = self
+            .inputs
+            .checked_add(1)
+            .ok_or_else(|| storage("row merge input count overflow"))?;
         let mut level = 0;
         loop {
             if self.levels.len() <= level {
@@ -5885,8 +6552,15 @@ impl RowMergeAccumulator {
             }
             let inputs = std::mem::take(&mut self.levels[level]);
             let group = self.groups[level];
-            self.groups[level] = group.saturating_add(1);
-            evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+            self.groups[level] = group
+                .checked_add(1)
+                .ok_or_else(|| storage("row merge group count overflow"))?;
+            evidence.merge_passes = evidence.merge_passes.max(
+                u64::try_from(level)
+                    .map_err(storage)?
+                    .checked_add(1)
+                    .ok_or_else(|| storage("row merge pass count overflow"))?,
+            );
             name = format!(
                 "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                 self.namespace
@@ -5956,8 +6630,15 @@ impl RowMergeAccumulator {
                 inputs[0].clone()
             } else {
                 let group = self.groups[level];
-                self.groups[level] = group.saturating_add(1);
-                evidence.merge_passes = evidence.merge_passes.max(level as u64 + 1);
+                self.groups[level] = group
+                    .checked_add(1)
+                    .ok_or_else(|| storage("row merge group count overflow"))?;
+                evidence.merge_passes = evidence.merge_passes.max(
+                    u64::try_from(level)
+                        .map_err(storage)?
+                        .checked_add(1)
+                        .ok_or_else(|| storage("row merge pass count overflow"))?,
+                );
                 let output_name = format!(
                     "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                     self.namespace
@@ -6079,7 +6760,13 @@ fn build_runtime_catalog(
                             if !batch.column(required + offset).is_null(row) {
                                 admit_catalog_identifier(
                                     !catalog.contains_property(field.name(), Some(owner_name)),
-                                    field.name().len().saturating_add(owner_name.len()),
+                                    field
+                                        .name()
+                                        .len()
+                                        .checked_add(owner_name.len())
+                                        .ok_or_else(|| {
+                                            storage("catalog identifier length overflows")
+                                        })?,
                                     &mut catalog_entries,
                                     &mut identifier_bytes,
                                     budgets,
@@ -6107,20 +6794,26 @@ fn build_runtime_catalog(
                     )));
                 }
             }
-            account_cache_release(cache_release.evidence(), evidence);
-            counter.add_to(evidence);
+            account_cache_release(cache_release.evidence(), evidence)?;
+            counter.add_to(evidence)?;
         }
     }
     let output = "shaped-runtime-catalog.parquet";
     let receipt = write_parquet(root, output, &catalog.to_record_batch(), evidence)?;
+    record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence
         .merge_fsync_operations
-        .saturating_add(receipt.fsync_operations);
-    evidence.parquet_write_bytes = evidence.parquet_write_bytes.saturating_add(receipt.bytes);
+        .checked_add(receipt.fsync_operations)
+        .ok_or_else(|| storage("merge fsync count overflows"))?;
+    evidence.parquet_write_bytes = evidence
+        .parquet_write_bytes
+        .checked_add(receipt.bytes)
+        .ok_or_else(|| storage("Parquet write byte count overflows"))?;
     evidence.parquet_write_operations = evidence
         .parquet_write_operations
-        .saturating_add(receipt.write_operations);
-    account_sequential_write(receipt.bytes, evidence);
+        .checked_add(receipt.write_operations)
+        .ok_or_else(|| storage("Parquet write operation count overflows"))?;
+    account_sequential_write(receipt.bytes, evidence)?;
     Ok(output.to_owned())
 }
 
@@ -6196,8 +6889,14 @@ fn load_parent_runtime_catalog(
                 break;
             }
             digest.update(&block[..count]);
-            work.bytes = work.bytes.saturating_add(count as u64);
-            work.operations = work.operations.saturating_add(1);
+            work.bytes = work
+                .bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage("bytes overflows"))?;
+            work.operations = work
+                .operations
+                .checked_add(1)
+                .ok_or_else(|| storage("operations overflows"))?;
         }
         Ok(())
     })();
@@ -6255,13 +6954,15 @@ fn load_parent_runtime_catalog(
         cache_release.check_error().map_err(storage),
         "parent runtime catalog",
     )?;
-    merge_cache_release_evidence(&mut work.cache_release, cache_release.evidence());
+    merge_cache_release_evidence(&mut work.cache_release, cache_release.evidence())?;
     work.bytes = work
         .bytes
-        .saturating_add(counter.bytes.load(Ordering::Relaxed));
+        .checked_add(counter.bytes.load(Ordering::Relaxed))
+        .ok_or_else(|| storage("parent catalog Parquet read bytes overflow"))?;
     work.operations = work
         .operations
-        .saturating_add(counter.operations.load(Ordering::Relaxed));
+        .checked_add(counter.operations.load(Ordering::Relaxed))
+        .ok_or_else(|| storage("parent catalog Parquet read operations overflow"))?;
     let named = topology
         .open_child_file(OsStr::new("runtime_catalog.parquet"))
         .map_err(storage)?;
@@ -6392,12 +7093,24 @@ fn validate_staged_details(
             return Err(storage("staged identity record is not canonical"));
         }
         match record[16] {
-            0 => nodes = nodes.saturating_add(1),
-            1 => edges = edges.saturating_add(1),
+            0 => {
+                nodes = nodes
+                    .checked_add(1)
+                    .ok_or_else(|| storage("staged node count overflows"))?;
+            }
+            1 => {
+                edges = edges
+                    .checked_add(1)
+                    .ok_or_else(|| storage("staged edge count overflows"))?;
+            }
             _ => return Err(storage("invalid staged identity kind")),
         }
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
-        if nodes.saturating_add(edges).is_multiple_of(4096) {
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
+        if nodes
+            .checked_add(edges)
+            .ok_or_else(|| storage("staged identity count overflows"))?
+            .is_multiple_of(4096)
+        {
             reject_cancelled(cancelled)?;
         }
     }
@@ -6454,7 +7167,7 @@ fn reject_staged_base_conflicts(
             let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut reader)? else {
                 break;
             };
-            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
             requested.push(Uuid::from_bytes(
                 record[..16].try_into().expect("fixed UUID"),
             ));
@@ -6464,8 +7177,8 @@ fn reject_staged_base_conflicts(
         }
         let (nodes, node_work) = base.probe(UuidIndexKind::Node, &requested)?;
         let (edges, edge_work) = base.probe(UuidIndexKind::Edge, &requested)?;
-        account_probe_work(&node_work, evidence);
-        account_probe_work(&edge_work, evidence);
+        account_probe_work(&node_work, evidence)?;
+        account_probe_work(&edge_work, evidence)?;
         if nodes
             .into_iter()
             .zip(edges)
@@ -6517,7 +7230,7 @@ fn validate_unified_and_details(
             }
             _ => return Err(storage("invalid identity kind in unified merge")),
         }
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
         if (node_count + edge_count).is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
         }
@@ -6591,7 +7304,7 @@ fn validate_detail_domain<const N: usize>(
     let (mut details, details_counter) = open_counted_fixed_reader(root, details_name, evidence)?;
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
     if identity.is_some() {
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
     }
     let mut count = 0_u64;
     while let Some(detail) = read_fixed::<N>(&mut details)? {
@@ -6600,7 +7313,7 @@ fn validate_detail_domain<const N: usize>(
             .is_some_and(|item| item[17] == 1 || item[16] != kind || item[..16] < detail[..16])
         {
             identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
         }
         if identity
             .as_ref()
@@ -6610,9 +7323,9 @@ fn validate_detail_domain<const N: usize>(
                 "canonical detail UUID differs from identity domain",
             ));
         }
-        account_merge_read::<N>(evidence);
+        account_merge_read::<N>(evidence)?;
         identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
         count += 1;
         if count.is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
@@ -6666,7 +7379,7 @@ fn validate_endpoints(
             .is_some_and(|item| item[..16] < endpoint[..16])
         {
             identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+            account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
         }
         let Some(node) = identity.as_ref() else {
             return Err(storage("edge endpoint UUID does not exist"));
@@ -6677,13 +7390,19 @@ fn validate_endpoints(
         if endpoint[32] > 1 || endpoint[33..].iter().any(|byte| *byte != 0) {
             return Err(storage("endpoint run record is not canonical"));
         }
-        endpoint_count += 1;
-        account_merge_read::<ENDPOINT_WIDTH>(evidence);
+        endpoint_count = endpoint_count
+            .checked_add(1)
+            .ok_or_else(|| storage("endpoint validation count overflow"))?;
+        account_merge_read::<ENDPOINT_WIDTH>(evidence)?;
         if endpoint_count.is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
         }
     }
-    if endpoint_count != new_edges.saturating_mul(2) {
+    if endpoint_count
+        != new_edges
+            .checked_mul(2)
+            .ok_or_else(|| storage("expected endpoint count overflow"))?
+    {
         return Err(storage(
             "edge endpoint cardinality differs from edge domain",
         ));
@@ -6735,8 +7454,8 @@ fn assign_surrogates(
             return Err(storage("invalid retained identity marker during shaping"));
         }
         writer.write_all(&record).map_err(storage)?;
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
-        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence);
+        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
+        account_merge_write::<BASE_IDENTITY_WIDTH>(evidence)?;
         count += 1;
         if count.is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
@@ -6750,8 +7469,8 @@ fn assign_surrogates(
         .sync_all_and_release()
         .map_err(storage)?;
     let cache_release = writer.get_ref().inner.evidence();
-    account_cache_release(cache_release, evidence);
-    account_sequential_write(writer.get_ref().bytes, evidence);
+    account_cache_release(cache_release, evidence)?;
+    account_sequential_write(writer.get_ref().bytes, evidence)?;
     let output_receipt = ArtifactReceipt {
         name: output.to_owned(),
         bytes: writer.get_ref().bytes,
@@ -6761,7 +7480,10 @@ fn assign_surrogates(
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
-        fsync_operations: 2_u64.saturating_add(cache_release.sync_operations.saturating_sub(1)),
+        fsync_operations: cache_release
+            .sync_operations
+            .checked_add(1)
+            .ok_or_else(|| storage("artifact synchronization count overflows"))?,
     };
     drop(writer);
     root.install_child(OsStr::new(&temporary), identity, OsStr::new(output))
@@ -6772,7 +7494,8 @@ fn assign_surrogates(
     account_fixed_write_operations(&output_receipt, evidence)?;
     evidence.merge_fsync_operations = evidence
         .merge_fsync_operations
-        .saturating_add(output_receipt.fsync_operations);
+        .checked_add(output_receipt.fsync_operations)
+        .ok_or_else(|| storage("merge fsync operations overflows"))?;
     Ok(output.to_owned())
 }
 
@@ -6818,7 +7541,7 @@ fn resolve_endpoint_surrogates(
                 .is_some_and(|record| record[..16] < endpoint[..16])
             {
                 identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-                account_merge_read::<BASE_IDENTITY_WIDTH>(evidence);
+                account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
             }
             if let Some(node) = identity
                 .as_ref()
@@ -6838,7 +7561,7 @@ fn resolve_endpoint_surrogates(
                 .as_deref_mut()
                 .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?
                 .lookup_node_surrogates(&base_requests)?;
-            account_probe_work(&probe_work, evidence);
+            account_probe_work(&probe_work, evidence)?;
             for (position, surrogate) in base_positions.into_iter().zip(resolved) {
                 surrogates[position] = surrogate;
             }
@@ -6852,29 +7575,35 @@ fn resolve_endpoint_surrogates(
             resolved[16] = endpoint[32];
             resolved[24..32].copy_from_slice(&surrogate.to_be_bytes());
             window.push(resolved);
-            account_merge_read::<ENDPOINT_WIDTH>(evidence);
+            account_merge_read::<ENDPOINT_WIDTH>(evidence)?;
         }
         if window.len() == window_rows {
             window.sort_unstable();
             let name = format!("merge-resolved-source-{sequence:020}.run");
             let receipt = write_fixed_run(root, &name, &window, evidence)?;
             record_shape_artifact_install(evidence, &receipt)?;
-            evidence.merge_written_bytes =
-                evidence.merge_written_bytes.saturating_add(receipt.bytes);
+            evidence.merge_written_bytes = evidence
+                .merge_written_bytes
+                .checked_add(receipt.bytes)
+                .ok_or_else(|| storage("merge written byte count overflows"))?;
             account_fixed_write_operations(&receipt, evidence)?;
             evidence.merge_written_records = evidence
                 .merge_written_records
-                .saturating_add(window.len() as u64);
+                .checked_add(window.len() as u64)
+                .ok_or_else(|| storage("merge written record count overflows"))?;
             evidence.merge_fsync_operations = evidence
                 .merge_fsync_operations
-                .saturating_add(receipt.fsync_operations);
-            account_sequential_write(receipt.bytes, evidence);
+                .checked_add(receipt.fsync_operations)
+                .ok_or_else(|| storage("merge fsync count overflows"))?;
+            account_sequential_write(receipt.bytes, evidence)?;
             resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
             evidence.peak_resolved_endpoint_name_slots = evidence
                 .peak_resolved_endpoint_name_slots
                 .max(resolved.slot_count() as u64);
             window.clear();
-            sequence = sequence.saturating_add(1);
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| storage("resolved endpoint sequence overflows"))?;
             reject_cancelled(cancelled)?;
         }
     }
@@ -6883,15 +7612,20 @@ fn resolve_endpoint_surrogates(
         let name = format!("merge-resolved-source-{sequence:020}.run");
         let receipt = write_fixed_run(root, &name, &window, evidence)?;
         record_shape_artifact_install(evidence, &receipt)?;
-        evidence.merge_written_bytes = evidence.merge_written_bytes.saturating_add(receipt.bytes);
+        evidence.merge_written_bytes = evidence
+            .merge_written_bytes
+            .checked_add(receipt.bytes)
+            .ok_or_else(|| storage("merge written byte count overflows"))?;
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_written_records = evidence
             .merge_written_records
-            .saturating_add(window.len() as u64);
+            .checked_add(window.len() as u64)
+            .ok_or_else(|| storage("merge written record count overflows"))?;
         evidence.merge_fsync_operations = evidence
             .merge_fsync_operations
-            .saturating_add(receipt.fsync_operations);
-        account_sequential_write(receipt.bytes, evidence);
+            .checked_add(receipt.fsync_operations)
+            .ok_or_else(|| storage("merge fsync count overflows"))?;
+        account_sequential_write(receipt.bytes, evidence)?;
         resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
         evidence.peak_resolved_endpoint_name_slots = evidence
             .peak_resolved_endpoint_name_slots
@@ -6905,15 +7639,18 @@ fn resolve_endpoint_surrogates(
 fn account_probe_work(
     work: &crate::uuid_membership::UuidProbeMetrics,
     evidence: &mut GraphConstructionEvidence,
-) {
-    evidence.retained_probe_read_bytes = evidence
-        .retained_probe_read_bytes
-        .saturating_add(work.identity_bytes_read)
-        .saturating_add(work.surrogate_bytes_read);
-    evidence.retained_probe_block_loads = evidence
-        .retained_probe_block_loads
-        .saturating_add(work.identity_blocks_read)
-        .saturating_add(work.surrogate_blocks_read);
+) -> Result<(), GfError> {
+    evidence.retained_probe_read_bytes = checked_evidence_sum(
+        "retained probe read bytes",
+        evidence.retained_probe_read_bytes,
+        &[work.identity_bytes_read, work.surrogate_bytes_read],
+    )?;
+    evidence.retained_probe_block_loads = checked_evidence_sum(
+        "retained probe block loads",
+        evidence.retained_probe_block_loads,
+        &[work.identity_blocks_read, work.surrogate_blocks_read],
+    )?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -6965,8 +7702,12 @@ fn authenticate_artifact(
                 break;
             }
             digest.update(&block[..count]);
-            bytes = bytes.saturating_add(count as u64);
-            operations = operations.saturating_add(1);
+            bytes = bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage("bytes overflows"))?;
+            operations = operations
+                .checked_add(1)
+                .ok_or_else(|| storage("operations overflows"))?;
             if let Some(width) = width {
                 pending.extend_from_slice(&block[..count]);
                 let complete = pending.len() / width * width;
@@ -7187,29 +7928,47 @@ fn validate_receipt_artifacts(
         .chain(receipt.endpoints.iter())
     {
         let artifact_work = authenticate_artifact(root, artifact)?;
-        work.bytes = work.bytes.saturating_add(artifact_work.bytes);
-        work.operations = work.operations.saturating_add(artifact_work.operations);
-        merge_cache_release_evidence(&mut work.cache_release, artifact_work.cache_release);
+        work.bytes = work
+            .bytes
+            .checked_add(artifact_work.bytes)
+            .ok_or_else(|| storage("bytes overflows"))?;
+        work.operations = work
+            .operations
+            .checked_add(artifact_work.operations)
+            .ok_or_else(|| storage("operations overflows"))?;
+        merge_cache_release_evidence(&mut work.cache_release, artifact_work.cache_release)?;
     }
     let parquet_work = validate_parquet_shape(root, receipt)?;
-    work.bytes = work.bytes.saturating_add(parquet_work.bytes);
-    work.operations = work.operations.saturating_add(parquet_work.operations);
-    merge_cache_release_evidence(&mut work.cache_release, parquet_work.cache_release);
+    work.bytes = work
+        .bytes
+        .checked_add(parquet_work.bytes)
+        .ok_or_else(|| storage("bytes overflows"))?;
+    work.operations = work
+        .operations
+        .checked_add(parquet_work.operations)
+        .ok_or_else(|| storage("operations overflows"))?;
+    merge_cache_release_evidence(&mut work.cache_release, parquet_work.cache_release)?;
     Ok(work)
 }
 
 fn merge_cache_release_evidence(
     target: &mut graphforge_filesystem::FileCacheReleaseEvidence,
     source: graphforge_filesystem::FileCacheReleaseEvidence,
-) {
+) -> Result<(), GfError> {
     target.release_operations = target
         .release_operations
-        .saturating_add(source.release_operations);
+        .checked_add(source.release_operations)
+        .ok_or_else(|| storage("release operations overflows"))?;
     target.unsupported_operations = target
         .unsupported_operations
-        .saturating_add(source.unsupported_operations);
-    target.released_bytes = target.released_bytes.saturating_add(source.released_bytes);
+        .checked_add(source.unsupported_operations)
+        .ok_or_else(|| storage("unsupported operations overflows"))?;
+    target.released_bytes = target
+        .released_bytes
+        .checked_add(source.released_bytes)
+        .ok_or_else(|| storage("released bytes overflows"))?;
     target.peak_window_bytes = target.peak_window_bytes.max(source.peak_window_bytes);
+    Ok(())
 }
 
 fn validate_parquet_shape(
@@ -7326,20 +8085,39 @@ fn validate_parquet_metadata(
 
 fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
     let stem = artifact_stem(intent.sequence, intent.kind);
-    let expected_run_records =
-        intent
-            .rows
-            .saturating_mul(if intent.kind == ConstructionChunkKind::Edge {
-                4
-            } else {
-                2
-            });
+    let expected_run_records = intent
+        .rows
+        .checked_mul(if intent.kind == ConstructionChunkKind::Edge {
+            4
+        } else {
+            2
+        })
+        .ok_or_else(|| storage("intent run record count overflow"))?;
+    let prior_sequence = intent.sequence.checked_add(1);
+    let expected_identity_bytes = intent
+        .rows
+        .checked_mul(IDENTITY_WIDTH as u64)
+        .ok_or_else(|| storage("intent identity byte count overflow"))?;
+    let expected_endpoint_bytes = intent
+        .rows
+        .checked_mul(2)
+        .and_then(|rows| rows.checked_mul(ENDPOINT_WIDTH as u64))
+        .ok_or_else(|| storage("intent endpoint byte count overflow"))?;
+    let detail_width = if intent.kind == ConstructionChunkKind::Node {
+        NODE_DETAIL_WIDTH
+    } else {
+        EDGE_DETAIL_WIDTH
+    };
+    let expected_detail_bytes = intent
+        .rows
+        .checked_mul(detail_width as u64)
+        .ok_or_else(|| storage("intent detail byte count overflow"))?;
     if intent.format_version != FORMAT_VERSION
         || intent.operation_uuid != checkpoint.operation_uuid
         || intent.project_identity != checkpoint.project_identity
         || intent.session_identity != checkpoint.session_identity
         || !(intent.sequence == checkpoint.next_sequence
-            || intent.sequence.saturating_add(1) == checkpoint.next_sequence)
+            || prior_sequence == Some(checkpoint.next_sequence))
         || intent.parent_topology_generation != checkpoint.parent_topology_generation
         || intent.ontology_mode != checkpoint.ontology_mode
         || intent.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
@@ -7360,16 +8138,12 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
             .is_some_and(|artifact| artifact.name != format!("{stem}.parquet"))
         || intent.identities.as_ref().is_some_and(|artifact| {
             artifact.name != format!("{stem}.identities.run")
-                || artifact.bytes != intent.rows.saturating_mul(IDENTITY_WIDTH as u64)
+                || artifact.bytes != expected_identity_bytes
         })
         || intent.endpoints.as_ref().is_some_and(|artifact| {
             intent.kind != ConstructionChunkKind::Edge
                 || artifact.name != format!("{stem}.endpoints.run")
-                || artifact.bytes
-                    != intent
-                        .rows
-                        .saturating_mul(2)
-                        .saturating_mul(ENDPOINT_WIDTH as u64)
+                || artifact.bytes != expected_endpoint_bytes
         })
         || intent.details.as_ref().is_some_and(|artifact| {
             artifact.name
@@ -7381,14 +8155,7 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
                         "edge"
                     }
                 )
-                || artifact.bytes
-                    != intent
-                        .rows
-                        .saturating_mul(if intent.kind == ConstructionChunkKind::Node {
-                            NODE_DETAIL_WIDTH
-                        } else {
-                            EDGE_DETAIL_WIDTH
-                        } as u64)
+                || artifact.bytes != expected_detail_bytes
         })
     {
         return Err(storage("durable intent is inconsistent with checkpoint"));
@@ -7411,6 +8178,19 @@ fn validate_checkpoint(
     parent_generation_uuid: Uuid,
     parent_generation_manifest_sha256: &str,
 ) -> Result<(), GfError> {
+    let minimum_artifacts = checkpoint
+        .next_sequence
+        .checked_mul(3)
+        .ok_or_else(|| storage("checkpoint artifact lower bound overflow"))?;
+    let maximum_artifacts = checkpoint
+        .next_sequence
+        .checked_mul(4)
+        .ok_or_else(|| storage("checkpoint artifact upper bound overflow"))?;
+    let schema_groups = checkpoint
+        .node_schema_sha256
+        .len()
+        .checked_add(checkpoint.edge_schema_sha256.len())
+        .ok_or_else(|| storage("checkpoint schema-group count overflow"))?;
     if checkpoint.format_version != FORMAT_VERSION
         || checkpoint.operation_uuid != operation
         || !checkpoint.project_identity.matches(project)
@@ -7470,10 +8250,8 @@ fn validate_checkpoint(
         || checkpoint.evidence.input_batches != checkpoint.next_sequence
         || checkpoint.evidence.parquet_shards != checkpoint.next_sequence
         || checkpoint.evidence.immutable_artifacts != 0
-            && (checkpoint.evidence.immutable_artifacts
-                < checkpoint.next_sequence.saturating_mul(3)
-                || checkpoint.evidence.immutable_artifacts
-                    > checkpoint.next_sequence.saturating_mul(4))
+            && (checkpoint.evidence.immutable_artifacts < minimum_artifacts
+                || checkpoint.evidence.immutable_artifacts > maximum_artifacts)
         || checkpoint.evidence.peak_batch_rows > budgets.max_batch_rows as u64
         || checkpoint.evidence.peak_batch_bytes > budgets.max_batch_bytes as u64
         || checkpoint.evidence.peak_run_records > budgets.max_run_records as u64
@@ -7487,11 +8265,7 @@ fn validate_checkpoint(
             .edge_schema_sha256
             .iter()
             .any(|digest| !is_canonical_sha256(digest))
-        || checkpoint
-            .node_schema_sha256
-            .len()
-            .saturating_add(checkpoint.edge_schema_sha256.len())
-            > budgets.max_schema_groups
+        || schema_groups > budgets.max_schema_groups
     {
         return Err(storage("checkpoint authority or resume parameters changed"));
     }
@@ -7701,7 +8475,12 @@ struct BoundedControlWriter {
 
 impl Write for BoundedControlWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.body.len().saturating_add(bytes.len()) > self.limit {
+        let new_length = self
+            .body
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("control record length overflow"))?;
+        if new_length > self.limit {
             return Err(std::io::Error::other("control record exceeds bound"));
         }
         self.body.extend_from_slice(bytes);
@@ -7828,12 +8607,15 @@ fn remove_unrecorded_artifact(
             return Err(storage("unrecorded artifact name is not canonical"));
         };
         let expected_records = if width == ENDPOINT_WIDTH {
-            rows.saturating_mul(2)
+            rows.checked_mul(2)
+                .ok_or_else(|| storage("unrecorded endpoint count overflow"))?
         } else {
             rows
         };
-        if file.metadata().map_err(storage)?.len() != expected_records.saturating_mul(width as u64)
-        {
+        let expected_bytes = expected_records
+            .checked_mul(u64::try_from(width).map_err(storage)?)
+            .ok_or_else(|| storage("unrecorded fixed run byte count overflow"))?;
+        if file.metadata().map_err(storage)?.len() != expected_bytes {
             return Err(storage("unrecorded fixed run row count changed"));
         }
         validate_sorted_run(file, width)?;
@@ -7932,7 +8714,13 @@ fn authenticated_receipt_artifact_count(
         {
             return Err(storage("legacy receipt authority or chain changed"));
         }
-        count = count.saturating_add(3 + u64::from(receipt.endpoints.is_some()));
+        count = count
+            .checked_add(
+                3_u64
+                    .checked_add(u64::from(receipt.endpoints.is_some()))
+                    .ok_or_else(|| storage("receipt artifact increment overflow"))?,
+            )
+            .ok_or_else(|| storage("authenticated receipt artifact count overflow"))?;
         let body = serde_json::to_vec(&receipt).map_err(storage)?;
         prior_digest = Some(sha256(&body));
     }
@@ -8852,6 +9640,20 @@ mod tests {
         )
         .unwrap();
         let mut evidence = GraphConstructionEvidence::default();
+        for category in crate::ArtifactCategory::ALL {
+            evidence
+                .storage_current
+                .insert(category, Default::default());
+            evidence
+                .storage_receipt_category_authorities
+                .insert(category, Default::default());
+            evidence
+                .storage_transient_peak_allocated_bytes
+                .insert(category, 0);
+            evidence
+                .storage_receipt_transient_peak_authorities
+                .insert(category, 0);
+        }
         write_parquet(&private, "nodes.parquet", &rows, &mut evidence).unwrap();
         let project_root = StableDirectory::open(project.path()).unwrap();
         let (parent_catalog, parent_catalog_sha256, _) =
@@ -9134,6 +9936,28 @@ mod tests {
                         .len()
                 })
                 .sum::<u64>();
+            let retained_shape_files = session
+                .root
+                .child_names()
+                .unwrap()
+                .into_iter()
+                .filter(|name| name.to_str().is_some_and(is_shape_artifact_name))
+                .collect::<Vec<_>>();
+            let expected_retained_allocation = retained_shape_files
+                .iter()
+                .map(|name| {
+                    let file = session.root.open_child_file(name).unwrap();
+                    graphforge_filesystem::file_space_usage(&file)
+                        .unwrap()
+                        .allocated_bytes
+                })
+                .sum::<u64>();
+            assert!(expected_retained_allocation > 0);
+            assert_eq!(
+                session.evidence().current_merge_temporary_allocated_bytes,
+                expected_retained_allocation,
+                "retained authenticated shape allocation differs from the actual file inventory: {retained_shape_files:?}"
+            );
             let expected_capability_bytes = shaped_outputs
                 .map(|name| {
                     session
@@ -9359,7 +10183,10 @@ mod tests {
             );
             assert!(
                 evidence.shape_input_validation_read_bytes
-                    <= evidence.write_bytes.saturating_mul(3),
+                    <= evidence
+                        .write_bytes
+                        .checked_mul(3)
+                        .expect("shape write-byte bound overflow"),
                 "shape authentication exceeded three staged-byte passes"
             );
             observations.push((rows, evidence.shape_input_validation_read_bytes));
@@ -9370,7 +10197,10 @@ mod tests {
             assert_eq!(larger_rows, smaller_rows * 2);
             assert!(larger_bytes >= smaller_bytes);
             assert!(
-                larger_bytes <= smaller_bytes.saturating_mul(3),
+                larger_bytes
+                    <= smaller_bytes
+                        .checked_mul(3)
+                        .expect("shape growth bound overflow"),
                 "doubling rows exceeded the bounded linear byte envelope"
             );
         }
@@ -9572,7 +10402,8 @@ mod tests {
                 <= retained_endpoints
                     .evidence()
                     .retained_probe_block_loads
-                    .saturating_mul(BLOCK_BYTES as u64)
+                    .checked_mul(BLOCK_BYTES as u64)
+                    .expect("retained probe byte bound overflow")
         );
         let mut resolved = BufReader::new(
             retained_endpoints
@@ -9979,7 +10810,7 @@ mod tests {
                     "nodes",
                     &node_batch(1, 8),
                     || {
-                        polls = polls.saturating_add(1);
+                        polls = polls.checked_add(1).expect("cancellation poll overflow");
                         polls == 2
                     },
                 )
@@ -10512,8 +11343,8 @@ mod tests {
                     || artifact.path.ends_with("ordinal-v4-manifest.json")
                     || artifact.path.ends_with("ordinal-v4.lock")
             })
-            .map(|artifact| artifact.bytes)
-            .sum::<u64>();
+            .try_fold(0_u64, |bytes, artifact| bytes.checked_add(artifact.bytes))
+            .expect("ordinal publication byte sum overflow");
         assert_eq!(
             encoding.evidence.ordinal_publication_write_bytes,
             ordinal_publication_bytes
@@ -10523,7 +11354,8 @@ mod tests {
             encoding
                 .evidence
                 .ordinal_artifact_write_bytes
-                .saturating_add(ordinal_publication_bytes)
+                .checked_add(ordinal_publication_bytes)
+                .expect("ordinal peak byte sum overflow")
         );
 
         let graph = root

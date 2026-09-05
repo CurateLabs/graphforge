@@ -5,6 +5,7 @@ import unittest
 
 from graphforge_bench.scale_parity import (
     Outcome,
+    ParityError,
     assert_no_unexplained_gaps,
     compare_evidence,
     compare_fixture_pair,
@@ -110,9 +111,10 @@ class ScaleParityTests(unittest.TestCase):
         self.assertIn(matrix["overall"], {Outcome.MATCH.value, Outcome.ACCEPTED_DIFFERENCE.value})
         assert_no_unexplained_gaps(matrix)
 
-    def test_historical_legacy_cert_fixture_validates(self) -> None:
+    def test_historical_legacy_cert_fixture_fails_closed_without_provider_anchor(self) -> None:
         fixture = FIXTURES / "legacy" / "cert-s20-minimal.json"
-        validate_historical_legacy_cert(fixture, expected_sha="a" * 40)
+        with self.assertRaisesRegex(ParityError, "external provider-result anchor"):
+            validate_historical_legacy_cert(fixture, expected_sha="a" * 40)
 
     def test_coverage_map_lists_legacy_entrypoints(self) -> None:
         mapping = coverage_map()

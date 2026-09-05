@@ -4,112 +4,1448 @@
   "title": "GraphForge billion-live-edge certification evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "git_sha", "profile_sha256", "run", "host", "tools", "counts", "identities", "package", "authority", "equivalence", "storage_attribution", "phases", "envelope", "result", "first_failure"],
+  "required": [
+    "schema",
+    "git_sha",
+    "profile_sha256",
+    "run",
+    "host",
+    "tools",
+    "counts",
+    "identities",
+    "package",
+    "authority",
+    "equivalence",
+    "storage_attribution",
+    "phases",
+    "envelope",
+    "result",
+    "first_failure"
+  ],
   "properties": {
-    "schema": { "const": "graphforge-billion-edge-certification-evidence/1" },
-    "git_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "profile_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "run": { "type": "object", "additionalProperties": false, "required": ["command", "scale", "edgefactor", "seed", "directionality", "self_loops", "duplicates"], "properties": { "command": { "const": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1" }, "scale": { "enum": [20, 22, 24, 26] }, "edgefactor": { "const": 16 }, "seed": { "const": 1 }, "directionality": { "const": "undirected" }, "self_loops": { "const": "drop" }, "duplicates": { "const": "drop" } } },
-    "host": {
-      "type": "object", "additionalProperties": false,
-      "required": ["provider", "region", "sku", "os_image", "os", "kernel", "filesystem", "memory_bytes", "nvme_bytes"],
+    "schema": {
+      "const": "graphforge-billion-edge-certification-evidence/1"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "profile_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "scale",
+        "edgefactor",
+        "seed",
+        "directionality",
+        "self_loops",
+        "duplicates"
+      ],
       "properties": {
-        "provider": { "type": "string", "minLength": 1, "maxLength": 64, "description": "Provisioned cloud provider; never local or a mutable resource identifier." },
-        "region": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$", "description": "Exact provider region approved for this run." },
-        "sku": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Exact provisioned machine SKU approved for this run." },
-        "os_image": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Immutable Linux image identity including its resolved version; moving aliases are invalid." },
-        "os": { "type": "string", "pattern": "^Linux", "description": "Observed Linux OS family from the provisioned host." },
-        "kernel": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "filesystem": { "enum": ["ext4", "xfs", "btrfs"], "description": "Filesystem of the Rust process temp workspace; provisioning proves it is the same local-NVMe device as RUNNER_TEMP." },
-        "memory_bytes": { "type": "integer", "minimum": 1, "maximum": 137438953472 },
-        "nvme_bytes": { "type": "integer", "minimum": 1 }
+        "command": {
+          "const": "cargo test -p graphforge-api --release --test scale_g500_ladder certification_target_live_full_lifecycle_evidence -- --ignored --exact --nocapture --test-threads=1"
+        },
+        "scale": {
+          "enum": [
+            20,
+            22,
+            24,
+            26
+          ]
+        },
+        "edgefactor": {
+          "const": 16
+        },
+        "seed": {
+          "const": 1
+        },
+        "directionality": {
+          "const": "undirected"
+        },
+        "self_loops": {
+          "const": "drop"
+        },
+        "duplicates": {
+          "const": "drop"
+        }
       }
     },
-    "tools": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 128 } },
-    "counts": {
-      "type": "object", "additionalProperties": false,
-      "required": ["raw_attempts", "self_loops_rejected", "duplicates_rejected", "live_unique_edges", "source_nodes", "source_edges", "imported_nodes", "imported_edges"],
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "region",
+        "sku",
+        "os_image",
+        "os",
+        "kernel",
+        "filesystem",
+        "memory_bytes",
+        "nvme_bytes"
+      ],
       "properties": {
-        "raw_attempts": { "type": "integer", "minimum": 1 },
-        "self_loops_rejected": { "type": "integer", "minimum": 0 },
-        "duplicates_rejected": { "type": "integer", "minimum": 0 },
-        "live_unique_edges": { "type": "integer", "minimum": 1 },
-        "source_nodes": { "type": "integer", "minimum": 1 }, "source_edges": { "type": "integer", "minimum": 1 },
-        "imported_nodes": { "type": "integer", "minimum": 1 }, "imported_edges": { "type": "integer", "minimum": 1 }
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Provisioned cloud provider; never local or a mutable resource identifier."
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "description": "Exact provider region approved for this run."
+        },
+        "sku": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Exact provisioned machine SKU approved for this run."
+        },
+        "os_image": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Immutable Linux image identity including its resolved version; moving aliases are invalid."
+        },
+        "os": {
+          "type": "string",
+          "pattern": "^Linux",
+          "description": "Observed Linux OS family from the provisioned host."
+        },
+        "kernel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "filesystem": {
+          "enum": [
+            "ext4",
+            "xfs",
+            "btrfs"
+          ],
+          "description": "Filesystem of the Rust process temp workspace; provisioning proves it is the same local-NVMe device as RUNNER_TEMP."
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 137438953472
+        },
+        "nvme_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 128
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_attempts",
+        "self_loops_rejected",
+        "duplicates_rejected",
+        "live_unique_edges",
+        "source_nodes",
+        "source_edges",
+        "imported_nodes",
+        "imported_edges"
+      ],
+      "properties": {
+        "raw_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "self_loops_rejected": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "duplicates_rejected": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "live_unique_edges": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "source_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "source_edges": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "imported_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "imported_edges": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
       }
     },
     "identities": {
-      "type": "object", "additionalProperties": false,
-      "required": ["source_export_generation_authenticated", "import_receipt_reopen_authenticated", "source_import_generations_distinct", "package", "transport"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_export_generation_authenticated",
+        "import_receipt_reopen_authenticated",
+        "source_import_generations_distinct",
+        "package",
+        "transport"
+      ],
       "properties": {
-        "source_export_generation_authenticated": { "const": true },
-        "import_receipt_reopen_authenticated": { "const": true },
-        "source_import_generations_distinct": { "const": true },
-        "package": { "$ref": "#/$defs/sha256" }, "transport": { "$ref": "#/$defs/sha256" },
+        "source_export_generation_authenticated": {
+          "const": true
+        },
+        "import_receipt_reopen_authenticated": {
+          "const": true
+        },
+        "source_import_generations_distinct": {
+          "const": true
+        },
+        "package": {
+          "$ref": "#/$defs/sha256"
+        },
+        "transport": {
+          "$ref": "#/$defs/sha256"
+        },
         "generation_uuid": false
       }
     },
-    "package": { "type": "object", "additionalProperties": false, "required": ["contract", "format", "class", "integrity", "compatibility", "policy"], "properties": { "contract": { "const": "graphforge-portable-verify/2" }, "format": { "const": "portable-project-v2-bundle" }, "class": { "const": "complete" }, "integrity": { "const": "verified" }, "compatibility": { "const": "supported" }, "policy": { "const": "complete-current-generation" } } },
-    "authority": { "type": "object", "required": ["source_fingerprint", "imported_fingerprint"], "properties": { "source_fingerprint": { "$ref": "#/$defs/sha256" }, "imported_fingerprint": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
-    "equivalence": { "type": "object", "additionalProperties": false, "required": ["source_project_fingerprint", "imported_project_fingerprint"], "properties": { "source_project_fingerprint": { "$ref": "#/$defs/sha256" }, "imported_project_fingerprint": { "$ref": "#/$defs/sha256" } } },
-    "storage_attribution": { "$ref": "#/$defs/storageAttribution" },
-    "phases": { "type": "array", "minItems": 17, "maxItems": 32, "items": { "$ref": "#/$defs/phase" } },
-    "envelope": { "type": "object", "required": ["peak_rss_bytes", "peak_disk_bytes", "peak_disk_source", "wall_time_s"], "properties": { "peak_rss_bytes": { "type": "integer", "maximum": 137438953472 }, "peak_disk_bytes": { "type": "integer", "maximum": 1099511627776 }, "peak_disk_source": { "const": "storage_owned_active_identity_union" }, "wall_time_s": { "type": "number", "maximum": 14400 } }, "additionalProperties": false },
-    "result": { "enum": ["pass", "fail"] },
-    "first_failure": { "type": ["object", "null"] }
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "format",
+        "class",
+        "integrity",
+        "compatibility",
+        "policy"
+      ],
+      "properties": {
+        "contract": {
+          "const": "graphforge-portable-verify/2"
+        },
+        "format": {
+          "const": "portable-project-v2-bundle"
+        },
+        "class": {
+          "const": "complete"
+        },
+        "integrity": {
+          "const": "verified"
+        },
+        "compatibility": {
+          "const": "supported"
+        },
+        "policy": {
+          "const": "complete-current-generation"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "required": [
+        "source_fingerprint",
+        "imported_fingerprint"
+      ],
+      "properties": {
+        "source_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "imported_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "equivalence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_project_fingerprint",
+        "imported_project_fingerprint"
+      ],
+      "properties": {
+        "source_project_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "imported_project_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "storage_attribution": {
+      "$ref": "#/$defs/storageAttribution"
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/phase"
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "peak_rss_bytes",
+        "peak_disk_bytes",
+        "peak_disk_source",
+        "wall_time_s"
+      ],
+      "properties": {
+        "peak_rss_bytes": {
+          "type": "integer",
+          "maximum": 137438953472
+        },
+        "peak_disk_bytes": {
+          "type": "integer",
+          "maximum": 1099511627776
+        },
+        "peak_disk_source": {
+          "const": "storage_owned_active_identity_union"
+        },
+        "wall_time_s": {
+          "type": "number",
+          "maximum": 14400
+        }
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "first_failure": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
   },
   "$defs": {
-    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "nonNegative": { "type": "integer", "minimum": 0 },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nonNegative": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
     "artifactTotals": {
-      "type": "object", "additionalProperties": false,
-      "required": ["logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
-      "properties": { "logical_references": { "$ref": "#/$defs/nonNegative" }, "logical_bytes": { "$ref": "#/$defs/nonNegative" }, "physical_objects": { "$ref": "#/$defs/nonNegative" }, "physical_logical_bytes": { "$ref": "#/$defs/nonNegative" }, "allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes"
+      ],
+      "properties": {
+        "logical_references": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "logical_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "physical_objects": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "physical_logical_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        }
+      }
     },
     "artifactCategories": {
-      "type": "object", "additionalProperties": false,
-      "required": ["topology_nodes", "topology_edges", "properties", "uuid_and_surrogates", "adjacency", "catalog_and_manifests", "construction_staging", "portable_package", "clean_imported_project", "other"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other"
+      ],
       "properties": {
-        "topology_nodes": { "$ref": "#/$defs/artifactTotals" }, "topology_edges": { "$ref": "#/$defs/artifactTotals" }, "properties": { "$ref": "#/$defs/artifactTotals" }, "uuid_and_surrogates": { "$ref": "#/$defs/artifactTotals" }, "adjacency": { "$ref": "#/$defs/artifactTotals" }, "catalog_and_manifests": { "$ref": "#/$defs/artifactTotals" }, "construction_staging": { "$ref": "#/$defs/artifactTotals" }, "portable_package": { "$ref": "#/$defs/artifactTotals" }, "clean_imported_project": { "$ref": "#/$defs/artifactTotals" }, "other": { "$ref": "#/$defs/artifactTotals" }
+        "topology_nodes": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "topology_edges": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "properties": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "uuid_and_surrogates": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "adjacency": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "catalog_and_manifests": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "construction_staging": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "portable_package": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "clean_imported_project": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "other": {
+          "$ref": "#/$defs/artifactTotals"
+        }
       }
     },
     "snapshot": {
-      "type": "object", "additionalProperties": false,
-      "required": ["generation_manifest_sha256", "categories", "logical_references", "logical_bytes", "physical_objects", "physical_logical_bytes", "allocated_bytes"],
-      "properties": { "generation_manifest_sha256": { "type": "array", "minItems": 32, "maxItems": 32, "items": { "type": "integer", "minimum": 0, "maximum": 255 } }, "categories": { "$ref": "#/$defs/artifactCategories" }, "logical_references": { "$ref": "#/$defs/nonNegative" }, "logical_bytes": { "$ref": "#/$defs/nonNegative" }, "physical_objects": { "$ref": "#/$defs/nonNegative" }, "physical_logical_bytes": { "$ref": "#/$defs/nonNegative" }, "allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_manifest_sha256",
+        "categories",
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes",
+        "category_authorities",
+        "category_authority_sha256",
+        "category_authority_context"
+      ],
+      "properties": {
+        "generation_manifest_sha256": {
+          "type": "array",
+          "minItems": 32,
+          "maxItems": 32,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "categories": {
+          "$ref": "#/$defs/artifactCategories"
+        },
+        "logical_references": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "logical_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "physical_objects": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "physical_logical_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "category_authorities": {
+          "$ref": "#/$defs/artifactCategories"
+        },
+        "category_authority_sha256": {
+          "$ref": "#/$defs/categoryCommitments"
+        },
+        "category_authority_context": {
+          "$ref": "#/$defs/categoryAuthorityContext"
+        }
+      }
     },
     "portableAllocation": {
-      "type": "object", "additionalProperties": false,
-      "required": ["category", "logical_bytes", "allocated_bytes", "logical_references", "physical_objects", "source"],
-      "properties": { "category": { "const": "portable_package" }, "logical_bytes": { "$ref": "#/$defs/nonNegative" }, "allocated_bytes": { "$ref": "#/$defs/nonNegative" }, "logical_references": { "$ref": "#/$defs/nonNegative" }, "physical_objects": { "$ref": "#/$defs/nonNegative" }, "source": { "const": "portable_writer_receipt" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "logical_bytes",
+        "allocated_bytes",
+        "logical_references",
+        "physical_objects",
+        "source",
+        "category_authority",
+        "category_authority_sha256",
+        "category_authority_context"
+      ],
+      "properties": {
+        "category": {
+          "const": "portable_package"
+        },
+        "logical_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "logical_references": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "physical_objects": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "source": {
+          "const": "portable_writer_receipt"
+        },
+        "category_authority": {
+          "$ref": "#/$defs/artifactTotals"
+        },
+        "category_authority_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "category_authority_context": {
+          "$ref": "#/$defs/categoryAuthorityContext"
+        }
+      }
     },
     "phaseTotals": {
-      "type": "object", "additionalProperties": false,
-      "required": ["read_bytes", "write_bytes", "read_calls", "write_calls", "object_count", "block_count", "fsync_calls"],
-      "properties": { "read_bytes": { "$ref": "#/$defs/nonNegative" }, "write_bytes": { "$ref": "#/$defs/nonNegative" }, "read_calls": { "$ref": "#/$defs/nonNegative" }, "write_calls": { "$ref": "#/$defs/nonNegative" }, "object_count": { "$ref": "#/$defs/nonNegative" }, "block_count": { "$ref": "#/$defs/nonNegative" }, "fsync_calls": { "$ref": "#/$defs/nonNegative" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls"
+      ],
+      "properties": {
+        "read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "read_calls": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "write_calls": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "object_count": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "block_count": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "fsync_calls": {
+          "$ref": "#/$defs/nonNegative"
+        }
+      }
     },
     "phaseMap": {
-      "type": "object", "additionalProperties": false,
-      "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication"],
-      "properties": { "append_merge": { "$ref": "#/$defs/phaseTotals" }, "seal_authentication": { "$ref": "#/$defs/phaseTotals" }, "shape_consume_reauthentication": { "$ref": "#/$defs/phaseTotals" }, "encode_write_postwrite_authentication": { "$ref": "#/$defs/phaseTotals" }, "publication_preauthentication": { "$ref": "#/$defs/phaseTotals" }, "cas_install_read_write": { "$ref": "#/$defs/phaseTotals" }, "hydration_verification": { "$ref": "#/$defs/phaseTotals" }, "fsync_synchronization": { "$ref": "#/$defs/phaseTotals" }, "recovery_reauthentication": { "$ref": "#/$defs/phaseTotals" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "append_merge",
+        "seal_authentication",
+        "shape_consume_reauthentication",
+        "encode_write_postwrite_authentication",
+        "publication_preauthentication",
+        "cas_install_read_write",
+        "hydration_verification",
+        "fsync_synchronization",
+        "recovery_reauthentication"
+      ],
+      "properties": {
+        "append_merge": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "seal_authentication": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "shape_consume_reauthentication": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "encode_write_postwrite_authentication": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "publication_preauthentication": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "cas_install_read_write": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "hydration_verification": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "fsync_synchronization": {
+          "$ref": "#/$defs/phaseTotals"
+        },
+        "recovery_reauthentication": {
+          "$ref": "#/$defs/phaseTotals"
+        }
+      }
     },
     "phaseAttribution": {
-      "type": "object", "additionalProperties": false, "required": ["phases", "totals"],
-      "properties": { "phases": { "$ref": "#/$defs/phaseMap" }, "totals": { "$ref": "#/$defs/phaseTotals" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phases",
+        "totals"
+      ],
+      "properties": {
+        "phases": {
+          "$ref": "#/$defs/phaseMap"
+        },
+        "totals": {
+          "$ref": "#/$defs/phaseTotals"
+        }
+      }
     },
     "construction": {
-      "type": "object", "additionalProperties": false,
-      "required": ["seal_application_read_bytes", "shape_application_read_bytes", "encode_application_read_bytes", "encode_application_read_operations", "encode_application_write_bytes", "encode_application_write_operations", "encode_fsync_operations", "publication_application_read_bytes", "publication_application_read_operations", "cas_application_read_bytes", "cas_application_read_operations", "cas_application_write_bytes", "cas_application_write_operations", "cas_fsync_operations", "hydration_application_read_bytes", "hydration_application_read_operations", "hydration_application_write_bytes", "hydration_application_write_operations", "hydration_fsync_operations", "recovery_application_read_bytes", "recovery_application_read_operations", "canonical_output_bytes", "staged_and_retained_disk_bytes", "storage_current", "storage_transient_peak_allocated_bytes", "storage_transient_peak_total_allocated_bytes", "input_rows", "input_batches", "parquet_shards", "write_bytes", "write_operations", "fsync_operations", "authentication_read_bytes", "authentication_read_operations", "parent_catalog_read_bytes", "parent_catalog_read_operations", "retained_probe_read_bytes", "retained_probe_block_loads", "shaped_output_authentication_bytes", "shaped_output_authentication_operations", "replay_validation_read_bytes", "replay_validation_read_operations", "shape_input_validation_read_bytes", "shape_input_validation_read_operations", "run_records", "peak_batch_rows", "peak_batch_bytes", "peak_run_records", "prior_topology_rows_decoded", "current_transitions", "replayed_chunks", "merge_read_records", "merge_read_operations", "merge_written_records", "merge_write_operations", "merge_groups", "peak_merge_inputs", "merge_read_bytes", "merge_written_bytes", "merge_read_blocks", "merge_write_blocks", "merge_passes", "peak_merge_temporary_bytes", "current_merge_temporary_allocated_bytes", "peak_accounted_live_bytes", "peak_merge_name_slots", "peak_resolved_endpoint_name_slots", "peak_catalog_entries", "peak_catalog_identifier_bytes", "peak_catalog_decoded_batch_bytes", "merge_fsync_operations", "parquet_read_bytes", "parquet_read_operations", "parquet_write_bytes", "parquet_write_operations"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seal_application_read_bytes",
+        "shape_application_read_bytes",
+        "encode_application_read_bytes",
+        "encode_application_read_operations",
+        "encode_application_write_bytes",
+        "encode_application_write_operations",
+        "encode_fsync_operations",
+        "publication_application_read_bytes",
+        "publication_application_read_operations",
+        "cas_application_read_bytes",
+        "cas_application_read_operations",
+        "cas_application_write_bytes",
+        "cas_application_write_operations",
+        "cas_fsync_operations",
+        "hydration_application_read_bytes",
+        "hydration_application_read_operations",
+        "hydration_application_write_bytes",
+        "hydration_application_write_operations",
+        "hydration_fsync_operations",
+        "recovery_application_read_bytes",
+        "recovery_application_read_operations",
+        "canonical_output_bytes",
+        "staged_and_retained_disk_bytes",
+        "storage_current",
+        "storage_transient_peak_allocated_bytes",
+        "storage_transient_peak_total_allocated_bytes",
+        "input_rows",
+        "input_batches",
+        "parquet_shards",
+        "write_bytes",
+        "write_operations",
+        "fsync_operations",
+        "authentication_read_bytes",
+        "authentication_read_operations",
+        "parent_catalog_read_bytes",
+        "parent_catalog_read_operations",
+        "retained_probe_read_bytes",
+        "retained_probe_block_loads",
+        "shaped_output_authentication_bytes",
+        "shaped_output_authentication_operations",
+        "replay_validation_read_bytes",
+        "replay_validation_read_operations",
+        "shape_input_validation_read_bytes",
+        "shape_input_validation_read_operations",
+        "run_records",
+        "peak_batch_rows",
+        "peak_batch_bytes",
+        "peak_run_records",
+        "prior_topology_rows_decoded",
+        "current_transitions",
+        "replayed_chunks",
+        "merge_read_records",
+        "merge_read_operations",
+        "merge_written_records",
+        "merge_write_operations",
+        "merge_groups",
+        "peak_merge_inputs",
+        "merge_read_bytes",
+        "merge_written_bytes",
+        "merge_read_blocks",
+        "merge_write_blocks",
+        "merge_passes",
+        "peak_merge_temporary_bytes",
+        "current_merge_temporary_allocated_bytes",
+        "peak_accounted_live_bytes",
+        "peak_merge_name_slots",
+        "peak_resolved_endpoint_name_slots",
+        "peak_catalog_entries",
+        "peak_catalog_identifier_bytes",
+        "peak_catalog_decoded_batch_bytes",
+        "merge_fsync_operations",
+        "parquet_read_bytes",
+        "parquet_read_operations",
+        "parquet_write_bytes",
+        "parquet_write_operations",
+        "canonical_artifact_objects",
+        "encode_output_fsync_operations",
+        "encode_source_spool_fsync_operations",
+        "encode_membership_fsync_operations",
+        "encode_ordinal_fsync_operations",
+        "hydration_files_copied",
+        "hydration_file_fsync_operations",
+        "hydration_directory_fsync_operations",
+        "encode_output_write_operations",
+        "encode_membership_write_operations",
+        "encode_source_spool_write_operations",
+        "encode_ordinal_artifact_write_operations",
+        "encode_ordinal_publication_write_operations",
+        "storage_category_authorities",
+        "storage_transient_peak_authorities",
+        "storage_category_authority_sha256",
+        "storage_transient_peak_authority_sha256",
+        "storage_category_authority_context",
+        "cas_publication_io"
+      ],
       "properties": {
-        "seal_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "shape_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "encode_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "encode_application_read_operations": { "$ref": "#/$defs/nonNegative" }, "encode_application_write_bytes": { "$ref": "#/$defs/nonNegative" }, "encode_application_write_operations": { "$ref": "#/$defs/nonNegative" }, "encode_fsync_operations": { "$ref": "#/$defs/nonNegative" }, "publication_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "publication_application_read_operations": { "$ref": "#/$defs/nonNegative" }, "cas_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "cas_application_read_operations": { "$ref": "#/$defs/nonNegative" }, "cas_application_write_bytes": { "$ref": "#/$defs/nonNegative" }, "cas_application_write_operations": { "$ref": "#/$defs/nonNegative" }, "cas_fsync_operations": { "$ref": "#/$defs/nonNegative" }, "hydration_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "hydration_application_read_operations": { "$ref": "#/$defs/nonNegative" }, "hydration_application_write_bytes": { "$ref": "#/$defs/nonNegative" }, "hydration_application_write_operations": { "$ref": "#/$defs/nonNegative" }, "hydration_fsync_operations": { "$ref": "#/$defs/nonNegative" }, "recovery_application_read_bytes": { "$ref": "#/$defs/nonNegative" }, "recovery_application_read_operations": { "$ref": "#/$defs/nonNegative" }, "canonical_output_bytes": { "$ref": "#/$defs/nonNegative" }, "staged_and_retained_disk_bytes": { "$ref": "#/$defs/nonNegative" }, "storage_current": { "$ref": "#/$defs/artifactCategories" }, "storage_transient_peak_allocated_bytes": { "type": "object", "additionalProperties": false, "required": ["topology_nodes", "topology_edges", "properties", "uuid_and_surrogates", "adjacency", "catalog_and_manifests", "construction_staging", "portable_package", "clean_imported_project", "other"], "properties": { "topology_nodes": { "$ref": "#/$defs/nonNegative" }, "topology_edges": { "$ref": "#/$defs/nonNegative" }, "properties": { "$ref": "#/$defs/nonNegative" }, "uuid_and_surrogates": { "$ref": "#/$defs/nonNegative" }, "adjacency": { "$ref": "#/$defs/nonNegative" }, "catalog_and_manifests": { "$ref": "#/$defs/nonNegative" }, "construction_staging": { "$ref": "#/$defs/nonNegative" }, "portable_package": { "$ref": "#/$defs/nonNegative" }, "clean_imported_project": { "$ref": "#/$defs/nonNegative" }, "other": { "$ref": "#/$defs/nonNegative" } } }, "storage_transient_peak_total_allocated_bytes": { "$ref": "#/$defs/nonNegative" },
-        "input_rows": { "$ref": "#/$defs/nonNegative" }, "input_batches": { "$ref": "#/$defs/nonNegative" }, "parquet_shards": { "$ref": "#/$defs/nonNegative" }, "write_bytes": { "$ref": "#/$defs/nonNegative" }, "write_operations": { "$ref": "#/$defs/nonNegative" }, "fsync_operations": { "$ref": "#/$defs/nonNegative" }, "authentication_read_bytes": { "$ref": "#/$defs/nonNegative" }, "authentication_read_operations": { "$ref": "#/$defs/nonNegative" }, "parent_catalog_read_bytes": { "$ref": "#/$defs/nonNegative" }, "parent_catalog_read_operations": { "$ref": "#/$defs/nonNegative" }, "retained_probe_read_bytes": { "$ref": "#/$defs/nonNegative" }, "retained_probe_block_loads": { "$ref": "#/$defs/nonNegative" }, "shaped_output_authentication_bytes": { "$ref": "#/$defs/nonNegative" }, "shaped_output_authentication_operations": { "$ref": "#/$defs/nonNegative" }, "replay_validation_read_bytes": { "$ref": "#/$defs/nonNegative" }, "replay_validation_read_operations": { "$ref": "#/$defs/nonNegative" }, "shape_input_validation_read_bytes": { "$ref": "#/$defs/nonNegative" }, "shape_input_validation_read_operations": { "$ref": "#/$defs/nonNegative" }, "run_records": { "$ref": "#/$defs/nonNegative" }, "peak_batch_rows": { "$ref": "#/$defs/nonNegative" }, "peak_batch_bytes": { "$ref": "#/$defs/nonNegative" }, "peak_run_records": { "$ref": "#/$defs/nonNegative" }, "prior_topology_rows_decoded": { "$ref": "#/$defs/nonNegative" }, "current_transitions": { "$ref": "#/$defs/nonNegative" }, "replayed_chunks": { "$ref": "#/$defs/nonNegative" }, "merge_read_records": { "$ref": "#/$defs/nonNegative" }, "merge_read_operations": { "$ref": "#/$defs/nonNegative" }, "merge_written_records": { "$ref": "#/$defs/nonNegative" }, "merge_write_operations": { "$ref": "#/$defs/nonNegative" }, "merge_groups": { "$ref": "#/$defs/nonNegative" }, "peak_merge_inputs": { "$ref": "#/$defs/nonNegative" }, "merge_read_bytes": { "$ref": "#/$defs/nonNegative" }, "merge_written_bytes": { "$ref": "#/$defs/nonNegative" }, "merge_read_blocks": { "$ref": "#/$defs/nonNegative" }, "merge_write_blocks": { "$ref": "#/$defs/nonNegative" }, "merge_passes": { "$ref": "#/$defs/nonNegative" }, "peak_merge_temporary_bytes": { "$ref": "#/$defs/nonNegative" }, "current_merge_temporary_allocated_bytes": { "$ref": "#/$defs/nonNegative" }, "peak_accounted_live_bytes": { "$ref": "#/$defs/nonNegative" }, "peak_merge_name_slots": { "$ref": "#/$defs/nonNegative" }, "peak_resolved_endpoint_name_slots": { "$ref": "#/$defs/nonNegative" }, "peak_catalog_entries": { "$ref": "#/$defs/nonNegative" }, "peak_catalog_identifier_bytes": { "$ref": "#/$defs/nonNegative" }, "peak_catalog_decoded_batch_bytes": { "$ref": "#/$defs/nonNegative" }, "merge_fsync_operations": { "$ref": "#/$defs/nonNegative" }, "parquet_read_bytes": { "$ref": "#/$defs/nonNegative" }, "parquet_read_operations": { "$ref": "#/$defs/nonNegative" }, "parquet_write_bytes": { "$ref": "#/$defs/nonNegative" }, "parquet_write_operations": { "$ref": "#/$defs/nonNegative" }
+        "seal_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "shape_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_application_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_application_write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_application_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "publication_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "publication_application_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "cas_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "cas_application_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "cas_application_write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "cas_application_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "cas_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_application_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_application_write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_application_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "recovery_application_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "recovery_application_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "canonical_output_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "staged_and_retained_disk_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "storage_current": {
+          "$ref": "#/$defs/artifactCategories"
+        },
+        "storage_transient_peak_allocated_bytes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other"
+          ],
+          "properties": {
+            "topology_nodes": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "topology_edges": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "properties": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "uuid_and_surrogates": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "adjacency": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "catalog_and_manifests": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "construction_staging": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "portable_package": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "clean_imported_project": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "other": {
+              "$ref": "#/$defs/nonNegative"
+            }
+          }
+        },
+        "storage_transient_peak_total_allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "input_rows": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "input_batches": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parquet_shards": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "authentication_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "authentication_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parent_catalog_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parent_catalog_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "retained_probe_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "retained_probe_block_loads": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "shaped_output_authentication_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "shaped_output_authentication_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "replay_validation_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "replay_validation_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "shape_input_validation_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "shape_input_validation_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "run_records": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_batch_rows": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_batch_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_run_records": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "prior_topology_rows_decoded": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "current_transitions": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "replayed_chunks": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_read_records": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_written_records": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_groups": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_merge_inputs": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_written_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_read_blocks": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_write_blocks": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_passes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_merge_temporary_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "current_merge_temporary_allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_accounted_live_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_merge_name_slots": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_resolved_endpoint_name_slots": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_catalog_entries": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_catalog_identifier_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "peak_catalog_decoded_batch_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "merge_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parquet_read_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parquet_read_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parquet_write_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "parquet_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "canonical_artifact_objects": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_output_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_source_spool_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_membership_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_ordinal_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_files_copied": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_file_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "hydration_directory_fsync_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_output_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_membership_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_source_spool_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_ordinal_artifact_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "encode_ordinal_publication_write_operations": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "storage_category_authorities": {
+          "$ref": "#/$defs/artifactCategories"
+        },
+        "storage_transient_peak_authorities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "topology_nodes",
+            "topology_edges",
+            "properties",
+            "uuid_and_surrogates",
+            "adjacency",
+            "catalog_and_manifests",
+            "construction_staging",
+            "portable_package",
+            "clean_imported_project",
+            "other"
+          ],
+          "properties": {
+            "topology_nodes": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "topology_edges": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "properties": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "uuid_and_surrogates": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "adjacency": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "catalog_and_manifests": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "construction_staging": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "portable_package": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "clean_imported_project": {
+              "$ref": "#/$defs/nonNegative"
+            },
+            "other": {
+              "$ref": "#/$defs/nonNegative"
+            }
+          }
+        },
+        "storage_category_authority_sha256": {
+          "$ref": "#/$defs/categoryCommitments"
+        },
+        "storage_transient_peak_authority_sha256": {
+          "$ref": "#/$defs/categoryCommitments"
+        },
+        "storage_category_authority_context": {
+          "$ref": "#/$defs/categoryAuthorityContext"
+        },
+        "cas_publication_io": {
+          "$ref": "#/$defs/casPublicationIo"
+        }
       }
     },
     "storageAttribution": {
-      "type": "object", "additionalProperties": false,
-      "required": ["source", "source_project_current_allocated_bytes", "portable_package", "clean_import", "construction", "application_io_phases", "workspace_current_allocated_bytes"],
-      "properties": { "source": { "$ref": "#/$defs/snapshot" }, "source_project_current_allocated_bytes": { "$ref": "#/$defs/nonNegative" }, "portable_package": { "$ref": "#/$defs/portableAllocation" }, "clean_import": { "$ref": "#/$defs/snapshot" }, "construction": { "$ref": "#/$defs/construction" }, "application_io_phases": { "$ref": "#/$defs/phaseAttribution" }, "workspace_current_allocated_bytes": { "$ref": "#/$defs/nonNegative" } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "source_project_current_allocated_bytes",
+        "portable_package",
+        "clean_import",
+        "construction",
+        "application_io_phases",
+        "workspace_current_allocated_bytes",
+        "workspace_peak_allocated_bytes",
+        "workspace_components"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "source_project_current_allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "portable_package": {
+          "$ref": "#/$defs/portableAllocation"
+        },
+        "clean_import": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "construction": {
+          "$ref": "#/$defs/construction"
+        },
+        "application_io_phases": {
+          "$ref": "#/$defs/phaseAttribution"
+        },
+        "workspace_current_allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "workspace_peak_allocated_bytes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "workspace_components": {
+          "$ref": "#/$defs/workspaceComponents"
+        }
+      }
     },
-    "phase": { "type": "object", "additionalProperties": false, "required": ["id", "status", "elapsed_ms", "rss_peak_bytes", "disk_peak_bytes"], "properties": { "id": { "type": "string", "pattern": "^[a-z0-9_-]+$" }, "status": { "enum": ["pass", "fail", "cancelled"] }, "elapsed_ms": { "type": "integer", "minimum": 0 }, "rss_peak_bytes": { "type": "integer", "minimum": 0 }, "disk_peak_bytes": { "type": "integer", "minimum": 0 }, "fingerprint": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] }, "failure_code": { "type": ["string", "null"], "maxLength": 96 } } }
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "elapsed_ms",
+        "rss_peak_bytes",
+        "disk_peak_bytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "cancelled"
+          ]
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "rss_peak_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "disk_peak_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "fingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 96
+        }
+      }
+    },
+    "workspaceComponents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_project_and_construction",
+        "portable_package",
+        "clean_import_project",
+        "drill_project_and_construction",
+        "drill_package",
+        "corrupt_drill_package"
+      ],
+      "properties": {
+        "source_project_and_construction": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "portable_package": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "clean_import_project": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "drill_project_and_construction": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "drill_package": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "corrupt_drill_package": {
+          "$ref": "#/$defs/nonNegative"
+        }
+      }
+    },
+    "categoryCommitments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topology_nodes",
+        "topology_edges",
+        "properties",
+        "uuid_and_surrogates",
+        "adjacency",
+        "catalog_and_manifests",
+        "construction_staging",
+        "portable_package",
+        "clean_imported_project",
+        "other"
+      ],
+      "properties": {
+        "topology_nodes": {
+          "$ref": "#/$defs/sha256"
+        },
+        "topology_edges": {
+          "$ref": "#/$defs/sha256"
+        },
+        "properties": {
+          "$ref": "#/$defs/sha256"
+        },
+        "uuid_and_surrogates": {
+          "$ref": "#/$defs/sha256"
+        },
+        "adjacency": {
+          "$ref": "#/$defs/sha256"
+        },
+        "catalog_and_manifests": {
+          "$ref": "#/$defs/sha256"
+        },
+        "construction_staging": {
+          "$ref": "#/$defs/sha256"
+        },
+        "portable_package": {
+          "$ref": "#/$defs/sha256"
+        },
+        "clean_imported_project": {
+          "$ref": "#/$defs/sha256"
+        },
+        "other": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "categoryAuthorityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "version",
+        "rung",
+        "generation_sha256",
+        "owner",
+        "receipt_authority_sha256",
+        "native_identity_authority_sha256",
+        "native_category_identity_authority_sha256",
+        "live_nodes",
+        "live_edges"
+      ],
+      "properties": {
+        "contract": {
+          "const": "graphforge-lifecycle-category-authority/2"
+        },
+        "version": {
+          "const": 1
+        },
+        "rung": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "generation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "owner": {
+          "enum": [
+            "source",
+            "clean_import",
+            "construction",
+            "portable_package"
+          ]
+        },
+        "receipt_authority_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "native_identity_authority_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "live_nodes": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "live_edges": {
+          "$ref": "#/$defs/nonNegative"
+        },
+        "native_category_identity_authority_sha256": {
+          "$ref": "#/$defs/categoryCommitments"
+        }
+      },
+      "description": "Sanitized storage-owned context derived while native receipt identities are authenticated. It binds category commitments to receipt and identity-membership roots without exposing identities. These fields provide internal consistency only: certification authority comes from the externally authenticated provider-result SHA-256, whose graphforge_sha256 artifact member binds the exact ordinary evidence bytes."
+    },
+    "casIoTotals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_bytes",
+        "read_calls",
+        "write_bytes",
+        "write_calls",
+        "file_fsync_calls",
+        "directory_fsync_calls",
+        "installed_objects",
+        "reused_objects",
+        "installed_bytes",
+        "install_attempts"
+      ],
+      "properties": {
+        "read_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "read_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "write_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "write_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "file_fsync_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "directory_fsync_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "installed_objects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "reused_objects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "installed_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "install_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "casPublicationIo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload",
+        "manifest",
+        "manifest_reads",
+        "publications",
+        "initial_entries",
+        "changed_paths"
+      ],
+      "properties": {
+        "payload": {
+          "$ref": "#/$defs/casIoTotals"
+        },
+        "manifest": {
+          "$ref": "#/$defs/casIoTotals"
+        },
+        "manifest_reads": {
+          "$ref": "#/$defs/casIoTotals"
+        },
+        "publications": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "initial_entries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "changed_paths": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    }
   }
 }

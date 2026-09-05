@@ -16,6 +16,12 @@ pub const GRAPH_MANIFEST_NODE_FORMAT: &str = "graphforge-graph-manifest-radix-no
 pub const GRAPH_MANIFEST_NODE_VERSION: u32 = 2;
 /// Number of SHA-256 nibbles consumed by the Patricia trie.
 pub const GRAPH_RADIX_DEPTH: u8 = 64;
+/// Largest canonical branch: 16 references, a 63-nibble prefix, JSON header and newline.
+#[cfg(any(test, feature = "test-support"))]
+pub const GRAPH_MANIFEST_BRANCH_MAX_BYTES: u64 = 1319;
+/// Maximum extra JSON bytes per manifest entry over its canonical encoding artifact.
+#[cfg(any(test, feature = "test-support"))]
+pub const GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES: u64 = 43;
 
 /// Generation participant root naming one immutable radix root and its totals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +107,8 @@ pub struct GraphManifestResolveEvidence {
     pub entries_examined: u64,
     /// Aggregate encoded bytes admitted for decoding.
     pub decoded_bytes: u64,
+    /// Nonempty reads performed by a storage-backed resolver; zero for in-memory resolution.
+    pub application_read_calls: u64,
     /// Aggregate node, child-reference, and entry work performed.
     pub work_units: u64,
 }
@@ -623,6 +631,77 @@ fn validation(message: impl Into<String>) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_control_byte_bounds_cover_maximal_branches_and_escaped_entries() {
+        let mut largest_branch = 0;
+        for depth in 0..GRAPH_RADIX_DEPTH {
+            let mut node = branch(
+                depth,
+                (0..16)
+                    .map(|nibble| (format!("{nibble:x}"), format!("{nibble:064x}")))
+                    .collect(),
+            );
+            node.prefix = "f".repeat(usize::from(GRAPH_RADIX_DEPTH - depth - 1));
+            largest_branch = largest_branch.max(encode_node(&node).unwrap().len() as u64);
+        }
+        assert_eq!(largest_branch, GRAPH_MANIFEST_BRANCH_MAX_BYTES);
+        let mut largest_entry_overhead = 0;
+        for path in [
+            "plain.parquet",
+            "nested/quote\"and\u{0001}control.parquet",
+            "unicode/雪.parquet",
+        ] {
+            for role in [
+                GraphFileRole::Topology,
+                GraphFileRole::Properties,
+                GraphFileRole::Index,
+                GraphFileRole::Delta,
+                GraphFileRole::Catalog,
+                GraphFileRole::Other,
+            ] {
+                for bytes in [0, u64::MAX] {
+                    let entry = GraphFileEntry {
+                        relative_path: path.into(),
+                        byte_length: bytes,
+                        content_sha256: "0".repeat(64),
+                        role,
+                    };
+                    let artifact =
+                        crate::graph_construction_encoding::ConstructionEncodedArtifact {
+                            path: path.into(),
+                            bytes,
+                            sha256: entry.content_sha256.clone(),
+                        };
+                    let entry_bytes = serde_json::to_vec(&entry).unwrap().len() as u64;
+                    let artifact_bytes = serde_json::to_vec(&artifact).unwrap().len() as u64;
+                    largest_entry_overhead =
+                        largest_entry_overhead.max(entry_bytes - artifact_bytes);
+                    let digest = hex_digest(logical_path_digest(path));
+                    let leaf = GraphManifestNode {
+                        format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+                        format_version: GRAPH_MANIFEST_NODE_VERSION,
+                        depth: 0,
+                        prefix: digest.clone(),
+                        kind: GraphManifestNodeKind::Leaf {
+                            path_sha256: digest,
+                            entries: vec![entry],
+                        },
+                    };
+                    assert!(
+                        encode_node(&leaf).unwrap().len() as u64
+                            <= GRAPH_MANIFEST_BRANCH_MAX_BYTES
+                                + artifact_bytes
+                                + GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            largest_entry_overhead,
+            GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES
+        );
+    }
 
     fn branch(depth: u8, children: BTreeMap<String, String>) -> GraphManifestNode {
         GraphManifestNode {

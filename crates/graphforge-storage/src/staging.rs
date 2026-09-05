@@ -37,7 +37,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 
-pub(crate) const STAGE_FILE_BLOCK_BYTES: usize = 1024 * 1024;
+/// Fixed staging block used for bounded construction reads and writes.
+pub const STAGE_FILE_BLOCK_BYTES: usize = 1024 * 1024;
 
 use graphforge_core::GfError;
 

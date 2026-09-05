@@ -140,6 +140,77 @@ shards, accepted rows/batches, writes, and authentication reads. Adjacent
 1x/2x/4x observations must show bounded resident windows and topology work that
 scales with rows; continued material RSS growth with edge count is a failure.
 
+The deterministic 1x/2x/4x check retains raw, independently reopened node and
+edge denominators. CAS read/write bytes keep the aggregate affine-growth check;
+payload call counts keep the buffered-growth check. The CAS phase is also the
+exact sum of payload installation, immutable manifest installation, and manifest
+path reads. Fresh and reused objects have separate counts. File synchronization
+includes actual cache-window rollovers; each completed temporary installation
+attempt additionally has two namespace barriers. Early reuse performs only
+authentication. A concurrent losing publisher retains its actual temporary
+writes and barriers while reporting zero newly installed bytes and one reused
+object. Opening a prior manifest records its actual read submissions.
+
+Manifest control work is bounded by the native Patricia protocol, rather than
+requiring every content-dependent path length to increase between rungs. This
+qualification accepts exactly one publication from an empty manifest, with its
+measured changed-path count equal to the canonical payload inventory `P`.
+Repeated publications, prior entries, and additional tombstones cannot borrow
+this bound. Each recursive branch consumes at least one of 64 digest nibbles;
+a split installs at most three nodes and a collapse reads at most one extra
+child per level. Thus install requests are at most `67P + 1` (including the
+empty bootstrap root), and update reads at most `130P`.
+The bootstrap and every changed path also require at least `P + 1` manifest
+install-or-reuse requests and at least `P` existing-root reads. A coherent
+omission of all metadata work therefore fails even if its reduced totals agree.
+
+The authenticated encoding-inventory byte count `I` bounds the shared path,
+digest and length values for all entries, including a hash-collision leaf.
+Changing its artifact keys to manifest-entry keys adds 23 bytes; the longest
+role member adds 20, for 43 bytes per entry. JSON escaping of the shared values
+is identical in both encodings. The largest valid branch, with 16 digest
+references and a 63-nibble compressed prefix, is 1319 bytes including its
+newline; this also exceeds the leaf header. A node is therefore bounded by
+`I + 43P + 1319` bytes. Native maximal-encoding tests check every depth, role,
+escaped and Unicode paths, and zero/u64-maximum lengths. Manifest bytes are
+bounded by this node ceiling times the request bounds, and nonempty reads by
+the actual 64 KiB buffer limits. Coherent component overcounts fail even when
+their aggregate totals agree. Metadata remains in the aggregate byte-growth
+check and every synchronization total.
+
+The controlled ladder varies nodes by adding isolated nodes while keeping its
+edge set fixed. Its sparse CSR adjacency therefore bears the edge axis; this is
+a fixture-specific rule, not a claim that arbitrary added nodes never change
+adjacency storage. Hydration authenticates all objects but copies only the
+private ordinal-V4 node maps; other immutable files are hardlinked. Hydration
+write bytes consequently bear the node axis and remain positive and constant
+on this fixture's edge axis. Read, submission, and barrier checks remain tied
+to actual native work. Catalog object counts remain fixed, while decimal
+lengths in their manifests can gain digits. Catalog bytes must remain positive
+and below the existing normalized denominator ceiling; allocated bytes retain
+the filesystem quantization checks. Source/import categories still reconcile
+field-for-field with storage-owned authorities. Coherently changing those
+ledgers to zero or excessive growth does not bypass the policy tests.
+
+Completed construction retains authenticated shape/merge files for replay.
+Their current allocated bytes are measured against the retained native file
+inventory and checked with filesystem allocation quantization, alongside the
+other retained outputs; this counter is not structurally zero. Intermediate
+merge input removals subtract their actual allocations.
+
+Ordered query admission recognizes the explicit `ordered_one_hop` and
+`ordered_two_hop` leaf families alongside the existing Expand/sort paths. The
+leaves report zero Arrow input batches and rows, actual candidate visits,
+positive bounded identity reads, and their own RSS samples. Destination-degree
+probes include empty rows and are bounded by the authoritative reopened node
+count, independently of the output limit. For the fixture's unrestricted
+directed one-hop query, actual result rows and emitted/candidate counts equal
+`min(K, reopened live edges)`: a small graph cannot supply K distinct edge
+matches. The provider ladder still requires its full K-row outcome. One-hop
+emits exactly its counted candidates; two-hop retains the existing candidate-overhead ceiling. Missing
+RSS, fake input work, omitted probes or reads, and materializing scans fail the
+optimized-family regression checks.
+
 Fingerprint reconciliation is explicit: source and imported durable generation
 IDs are distinct; semantic package and transport digests are distinct;
 ontology/capability authority fingerprints match; canonical source/imported
@@ -153,6 +224,19 @@ mismatches, query-fingerprint drift, identity collapse, unsafe paths, sensitive
 fields, insufficient hosts, and envelope overruns. Project payloads, bundles,
 spills, secrets, credentials, absolute host paths, and mutable runner state are
 not evidence and must never be committed.
+
+Category authority follows one closed provenance chain. Storage derives the
+per-category aggregate ledger and identity-membership roots while authenticating
+native receipt identities. The ordinary GraphForge evidence preserves only
+those aggregates, roots, denominators, and domain-separated commitments. The
+provider result records SHA-256 of the exact ordinary evidence bytes in
+`artifacts.graphforge_sha256`; trusted transport or an immutable manifest
+supplies SHA-256 of that provider result independently of the evidence bundle.
+`validate-g500-certification.py` first verifies this external provider-result
+anchor and artifact binding, then validates the sanitized category proof. A
+category map, commitment map, or authority context supplied beside the evidence
+is never an independent trust anchor. Without the externally anchored provider
+result, category certification fails closed.
 
 Local developer runs validate the small lifecycle and hostile fixtures only;
 they are not certification evidence and cannot close #745.

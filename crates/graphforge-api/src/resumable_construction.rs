@@ -749,14 +749,18 @@ mod tests {
             assert!(evidence.publication_application_read_bytes > 0);
             assert!(evidence.cas_application_read_bytes > 0);
             assert!(evidence.hydration_application_read_bytes > 0);
-            let reconciled = evidence
-                .seal_application_read_bytes
-                .saturating_add(evidence.shape_application_read_bytes)
-                .saturating_add(evidence.encode_application_read_bytes)
-                .saturating_add(evidence.publication_application_read_bytes)
-                .saturating_add(evidence.cas_application_read_bytes)
-                .saturating_add(evidence.hydration_application_read_bytes);
-            assert_eq!(evidence.total_application_read_bytes(), reconciled);
+            let reconciled = [
+                evidence.seal_application_read_bytes,
+                evidence.shape_application_read_bytes,
+                evidence.encode_application_read_bytes,
+                evidence.publication_application_read_bytes,
+                evidence.cas_application_read_bytes,
+                evidence.hydration_application_read_bytes,
+            ]
+            .into_iter()
+            .try_fold(0_u64, u64::checked_add)
+            .unwrap();
+            assert_eq!(evidence.total_application_read_bytes().unwrap(), reconciled);
             let payload = evidence.write_bytes;
             assert!(
                 payload > 100_000,

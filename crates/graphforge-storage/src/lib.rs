@@ -26,10 +26,12 @@ pub mod adjacency_delta;
 
 pub mod storage_attribution;
 pub use storage_attribution::{
-    ArtifactCategory, ArtifactStorageTotals, ConstructionPhaseAttribution, PhaseIoTotals,
-    ProjectStorageIdentityUnion, StorageAllocationLifecycle, StorageAllocationTransition,
-    StorageAttributionReceipt, StorageAttributionSnapshot, StorageIoPhase,
-    capture_project_storage_identity_union, capture_storage_attribution, classify_graph_artifact,
+    ArtifactCategory, ArtifactCategoryAuthorityContext, ArtifactStorageTotals,
+    ConstructionPhaseAttribution, PhaseIoTotals, ProjectStorageIdentityUnion,
+    StorageAllocationLifecycle, StorageAllocationTransition, StorageAttributionReceipt,
+    StorageAttributionSnapshot, StorageIoPhase, artifact_category_authority_commitment,
+    artifact_category_peak_authority_commitment, capture_project_storage_identity_union,
+    capture_storage_attribution, classify_graph_artifact,
 };
 
 pub mod generation;
@@ -49,20 +51,22 @@ mod graph_construction_encoding;
 pub use graph_construction::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionRetainedArtifact, ConstructionSemanticAuthority,
-    ConstructionShape, GraphConstructionBudgets, GraphConstructionEncoding,
-    GraphConstructionEncodingEvidence, GraphConstructionEncodingInvocationEvidence,
-    GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState,
+    ConstructionShape, GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES, GraphConstructionBudgets,
+    GraphConstructionEncoding, GraphConstructionEncodingEvidence,
+    GraphConstructionEncodingInvocationEvidence, GraphConstructionEvidence,
+    GraphConstructionSession, GraphConstructionState,
 };
 
 pub mod graph_files;
 #[cfg(test)]
 pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
-    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
-    GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole,
-    GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy, capture_graph_files,
-    decode_inventory, encode_inventory, graph_tree_root, inventory_participant,
-    materialize_graph_tree, pinned_open_evidence, stage_graph_tree, verify_graph_tree,
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
+    GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
+    GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
+    capture_graph_files, decode_inventory, encode_inventory, graph_tree_root,
+    inventory_participant, materialize_graph_tree, pinned_open_evidence, stage_graph_tree,
+    verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 
@@ -80,13 +84,20 @@ pub(crate) use graph_manifest::{
     decode_node as decode_graph_manifest_node, decode_root as decode_graph_files_root_v2,
     encode_node as encode_graph_manifest_node, resolve_manifest as resolve_graph_manifest,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_manifest::{
+    GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES,
+};
 
 #[allow(
     dead_code,
     reason = "private CAS construction is consumed by the staged #932 integration"
 )]
 mod graph_object_store;
-pub use graph_object_store::materialize_graph_objects;
+pub use graph_object_store::{
+    GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals, GraphPublicationIo,
+    materialize_graph_objects,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{
     GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
@@ -445,7 +456,7 @@ pub use mutator::{
 };
 
 pub mod staging;
-pub use staging::{RewriteBatch, remove_stale_temps};
+pub use staging::{RewriteBatch, STAGE_FILE_BLOCK_BYTES, remove_stale_temps};
 
 pub use graphforge_core::GfError;
 

@@ -35,7 +35,9 @@ pub const GRAPH_TREE_DIR: &str = "graph";
 const GRAPH_FILES_FORMAT: &str = "graphforge-graph-files";
 const GRAPH_FILES_FORMAT_VERSION: u32 = 1;
 const MAX_GRAPH_FILES: usize = 100_000;
-const HASH_BUFFER_BYTES: usize = 64 * 1024;
+/// Maximum bytes consumed by one instrumented graph-file copy/hash operation.
+pub const GRAPH_FILES_IO_BUFFER_BYTES: usize = 64 * 1024;
+const HASH_BUFFER_BYTES: usize = GRAPH_FILES_IO_BUFFER_BYTES;
 const GRAPH_FILES_SCHEMA_CANONICAL_BYTES: &[u8] =
     b"graphforge-graph-files/1|relative_path|byte_length|content_sha256|role";
 const GRAPH_FILES_V2_SCHEMA_CANONICAL_BYTES: &[u8] =
@@ -125,6 +127,10 @@ pub struct GraphFilesOpenEvidence {
     pub application_write_calls: u64,
     /// File and directory durability barriers completed while hydrating.
     pub fsync_calls: u64,
+    /// Durability barriers completed on materialized files.
+    pub file_fsync_calls: u64,
+    /// Durability barriers completed on containing directories.
+    pub directory_fsync_calls: u64,
 }
 
 /// Open/materialization strategy for a file-backed graph.
@@ -345,26 +351,49 @@ pub fn stage_graph_tree(
         let digest = copied.digest;
         evidence.application_read_bytes = evidence
             .application_read_bytes
-            .saturating_add(copied.read_bytes);
+            .checked_add(copied.read_bytes)
+            .ok_or_else(|| validation("graph staging read byte count overflows"))?;
         evidence.application_read_calls = evidence
             .application_read_calls
-            .saturating_add(copied.read_calls);
+            .checked_add(copied.read_calls)
+            .ok_or_else(|| validation("graph staging read call count overflows"))?;
         evidence.application_write_bytes = evidence
             .application_write_bytes
-            .saturating_add(copied.write_bytes);
+            .checked_add(copied.write_bytes)
+            .ok_or_else(|| validation("graph staging write byte count overflows"))?;
         evidence.application_write_calls = evidence
             .application_write_calls
-            .saturating_add(copied.write_calls);
-        evidence.fsync_calls = evidence.fsync_calls.saturating_add(copied.fsync_calls);
+            .checked_add(copied.write_calls)
+            .ok_or_else(|| validation("graph staging write call count overflows"))?;
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(copied.fsync_calls)
+            .ok_or_else(|| validation("graph staging fsync count overflows"))?;
+        evidence.file_fsync_calls = evidence
+            .file_fsync_calls
+            .checked_add(copied.fsync_calls)
+            .ok_or_else(|| validation("graph staging file barrier count overflows"))?;
         if hex_digest(digest) != entry.content_sha256 {
             return Err(validation(
                 "graph tree source digest does not match inventory",
             ));
         }
-        evidence.files_validated = evidence.files_validated.saturating_add(1);
-        evidence.bytes_validated = evidence.bytes_validated.saturating_add(entry.byte_length);
-        evidence.files_copied = evidence.files_copied.saturating_add(1);
-        evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        evidence.files_validated = evidence
+            .files_validated
+            .checked_add(1)
+            .ok_or_else(|| validation("graph staging validated-file count overflows"))?;
+        evidence.bytes_validated = evidence
+            .bytes_validated
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| validation("graph staging validated-byte count overflows"))?;
+        evidence.files_copied = evidence
+            .files_copied
+            .checked_add(1)
+            .ok_or_else(|| validation("graph staging copied-file count overflows"))?;
+        evidence.bytes_copied = evidence
+            .bytes_copied
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| validation("graph staging copied-byte count overflows"))?;
         // Fail after at least one graph file is durable so interrupted staging
         // can prove CURRENT remains on the prior complete generation.
         project_failpoint::hit(
@@ -375,9 +404,15 @@ pub fn stage_graph_tree(
             false,
         )?;
     }
+    let directory_fsync_calls = sync_directory_tree(&destination_root)?;
+    evidence.directory_fsync_calls = evidence
+        .directory_fsync_calls
+        .checked_add(directory_fsync_calls)
+        .ok_or_else(|| validation("graph staging directory barrier count overflows"))?;
     evidence.fsync_calls = evidence
         .fsync_calls
-        .saturating_add(sync_directory_tree(&destination_root)?);
+        .checked_add(directory_fsync_calls)
+        .ok_or_else(|| validation("graph staging fsync count overflows"))?;
     verify_graph_tree(&destination_root, inventory)?;
     Ok(evidence)
 }
@@ -459,7 +494,8 @@ pub fn materialize_graph_tree(
     verify_graph_tree(graph_root, inventory)?;
     let mut evidence = GraphFilesOpenEvidence {
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
-        files_validated: u64::try_from(inventory.files.len()).unwrap_or(u64::MAX),
+        files_validated: u64::try_from(inventory.files.len())
+            .map_err(|_| validation("graph hydration file inventory exceeds u64"))?,
         bytes_validated: inventory.total_byte_length,
         ..GraphFilesOpenEvidence::default()
     };
@@ -474,21 +510,45 @@ pub fn materialize_graph_tree(
         let copied = copy_regular_file(&source, &destination)?;
         evidence.application_read_bytes = evidence
             .application_read_bytes
-            .saturating_add(copied.read_bytes);
+            .checked_add(copied.read_bytes)
+            .ok_or_else(|| validation("graph hydration read byte count overflows"))?;
         evidence.application_read_calls = evidence
             .application_read_calls
-            .saturating_add(copied.read_calls);
+            .checked_add(copied.read_calls)
+            .ok_or_else(|| validation("graph hydration read call count overflows"))?;
         evidence.application_write_bytes = evidence
             .application_write_bytes
-            .saturating_add(copied.write_bytes);
+            .checked_add(copied.write_bytes)
+            .ok_or_else(|| validation("graph hydration write byte count overflows"))?;
         evidence.application_write_calls = evidence
             .application_write_calls
-            .saturating_add(copied.write_calls);
-        evidence.fsync_calls = evidence.fsync_calls.saturating_add(copied.fsync_calls);
+            .checked_add(copied.write_calls)
+            .ok_or_else(|| validation("graph hydration write call count overflows"))?;
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(copied.fsync_calls)
+            .ok_or_else(|| validation("graph hydration fsync count overflows"))?;
+        evidence.file_fsync_calls = evidence
+            .file_fsync_calls
+            .checked_add(copied.fsync_calls)
+            .ok_or_else(|| validation("graph hydration file barrier count overflows"))?;
         make_private_copy_owner_writable(&destination)?;
-        evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
-        evidence.files_copied = evidence.files_copied.saturating_add(1);
-        evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        evidence.fsync_calls = evidence
+            .fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("graph hydration fsync count overflows"))?;
+        evidence.file_fsync_calls = evidence
+            .file_fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("graph hydration file barrier count overflows"))?;
+        evidence.files_copied = evidence
+            .files_copied
+            .checked_add(1)
+            .ok_or_else(|| validation("graph hydration copied-file count overflows"))?;
+        evidence.bytes_copied = evidence
+            .bytes_copied
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| validation("graph hydration copied-byte count overflows"))?;
     }
     Ok(evidence)
 }
@@ -870,8 +930,12 @@ fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
             break;
         }
         digest.update(&buffer[..read]);
-        bytes = bytes.saturating_add(read as u64);
-        calls = calls.saturating_add(1);
+        bytes = bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| validation("graph file hash byte count overflows"))?;
+        calls = calls
+            .checked_add(1)
+            .ok_or_else(|| validation("graph file hash call count overflows"))?;
     }
     Ok((digest.finalize().into(), bytes, calls))
 }
@@ -1599,6 +1663,8 @@ mod tests {
         );
         assert_eq!(evidence.application_write_calls, 2);
         assert_eq!(evidence.fsync_calls, 4);
+        assert_eq!(evidence.file_fsync_calls, 2);
+        assert_eq!(evidence.directory_fsync_calls, 2);
 
         let sealed_source = graph_tree_root(generation.path()).join("properties/Person.parquet");
         let mut sealed_permissions = fs::metadata(&sealed_source).unwrap().permissions();
@@ -1619,6 +1685,8 @@ mod tests {
         assert_eq!(opened.application_write_bytes, inventory.total_byte_length);
         assert_eq!(opened.application_write_calls, 2);
         assert_eq!(opened.fsync_calls, 4);
+        assert_eq!(opened.file_fsync_calls, 4);
+        assert_eq!(opened.directory_fsync_calls, 0);
         let private_copy = private.path().join("properties/Person.parquet");
         assert!(
             fs::metadata(&sealed_source)

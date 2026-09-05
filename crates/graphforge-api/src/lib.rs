@@ -4102,10 +4102,12 @@ fn materialize_compact_graph_target(
         strategy: graphforge_storage::GraphFilesOpenStrategy::PrivateMaterialize,
         files_validated: reused
             .files_validated
-            .saturating_add(copied.files_validated),
+            .checked_add(copied.files_validated)
+            .ok_or_else(|| GfError::Storage("hydration validated-file count overflows".into()))?,
         bytes_validated: reused
             .bytes_validated
-            .saturating_add(copied.bytes_validated),
+            .checked_add(copied.bytes_validated)
+            .ok_or_else(|| GfError::Storage("hydration validated-byte count overflows".into()))?,
         files_copied: copied.files_copied,
         bytes_copied: copied.bytes_copied,
         files_opened_in_place: 0,
@@ -4113,17 +4115,34 @@ fn materialize_compact_graph_target(
         bytes_reused: reused.bytes_reused,
         application_read_bytes: reused
             .application_read_bytes
-            .saturating_add(copied.application_read_bytes),
+            .checked_add(copied.application_read_bytes)
+            .ok_or_else(|| GfError::Storage("hydration read byte count overflows".into()))?,
         application_read_calls: reused
             .application_read_calls
-            .saturating_add(copied.application_read_calls),
+            .checked_add(copied.application_read_calls)
+            .ok_or_else(|| GfError::Storage("hydration read call count overflows".into()))?,
         application_write_bytes: reused
             .application_write_bytes
-            .saturating_add(copied.application_write_bytes),
+            .checked_add(copied.application_write_bytes)
+            .ok_or_else(|| GfError::Storage("hydration write byte count overflows".into()))?,
         application_write_calls: reused
             .application_write_calls
-            .saturating_add(copied.application_write_calls),
-        fsync_calls: reused.fsync_calls.saturating_add(copied.fsync_calls),
+            .checked_add(copied.application_write_calls)
+            .ok_or_else(|| GfError::Storage("hydration write call count overflows".into()))?,
+        fsync_calls: reused
+            .fsync_calls
+            .checked_add(copied.fsync_calls)
+            .ok_or_else(|| GfError::Storage("hydration fsync count overflows".into()))?,
+        file_fsync_calls: reused
+            .file_fsync_calls
+            .checked_add(copied.file_fsync_calls)
+            .ok_or_else(|| GfError::Storage("hydration file barrier count overflows".into()))?,
+        directory_fsync_calls: reused
+            .directory_fsync_calls
+            .checked_add(copied.directory_fsync_calls)
+            .ok_or_else(|| {
+                GfError::Storage("hydration directory barrier count overflows".into())
+            })?,
     };
     Ok(evidence)
 }

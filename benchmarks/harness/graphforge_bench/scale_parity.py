@@ -301,8 +301,18 @@ def coverage_map() -> dict[str, str]:
     }
 
 
-def validate_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -> None:
-    """Ensure preserved legacy certification evidence still passes the historical validator."""
+def validate_historical_legacy_cert(
+    evidence_path: Path,
+    *,
+    expected_sha: str,
+    provider_result_path: Path | None = None,
+    provider_result_sha256: str | None = None,
+) -> None:
+    """Validate legacy evidence only when an external provider result authenticates it."""
+    if provider_result_path is None or provider_result_sha256 is None:
+        raise ParityError(
+            "historical certification evidence requires an external provider-result anchor"
+        )
     import importlib.util
 
     script = workspace_root().parent / "scripts" / "ci" / "validate-g500-certification.py"
@@ -311,10 +321,17 @@ def validate_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -
         raise ParityError("unable to load validate-g500-certification.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    document = json.loads(evidence_path.read_text(encoding="utf-8"))
-    if not isinstance(document, dict):
-        raise ParityError("legacy certification fixture must be a JSON object")
-    module.validate(document, expected_sha)
+    try:
+        module.validate(
+            evidence_path.read_bytes(),
+            expected_sha,
+            provider_result_path.read_bytes(),
+            provider_result_sha256,
+        )
+    except (OSError, ValueError) as error:
+        raise ParityError(
+            "legacy certification evidence is not externally authenticated"
+        ) from error
 
 
 def compare_ladder_bundle(bundle_root: Path) -> list[dict[str, Any]]:
