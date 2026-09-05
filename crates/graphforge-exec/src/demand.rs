@@ -21,6 +21,7 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_expr::utils::collect_columns;
 use datafusion::physical_expr::{PhysicalExpr, ScalarFunctionExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
@@ -45,6 +46,8 @@ pub struct HopSnapshot {
     pub input_rows: u64,
     /// Adjacency candidates selected before record materialization.
     pub candidates_generated: u64,
+    /// Destination adjacency rows probed by an ordered shortcut, including empty rows.
+    pub adjacency_rows_examined: u64,
     /// Rows emitted by the hop.
     pub rows_emitted: u64,
     /// Edge filtered reads scheduled.
@@ -451,6 +454,12 @@ pub(crate) fn record_input(epoch: u64, edge_var: u32, rows: usize) {
     });
 }
 
+pub(crate) fn record_adjacency_row(epoch: u64, edge_var: u32) {
+    with_hop(epoch, edge_var, |hop| {
+        hop.adjacency_rows_examined += 1;
+    });
+}
+
 pub(crate) fn record_candidates(epoch: u64, edge_var: u32, rows: usize) {
     with_hop(epoch, edge_var, |hop| {
         hop.candidates_generated += rows as u64;
@@ -758,6 +767,8 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
             plan
         };
         let plan = crate::ordered_two_hop::try_rewrite_ordered_two_hop(plan)?;
+        let plan = crate::ordered_one_hop::try_rewrite_ordered_one_hop(plan)?;
+        let plan = crate::edge_count::try_rewrite_edge_count(plan)?;
         let Some(terminal) = find_terminal_demand(&plan) else {
             // RSS probes are diagnostics only; skip when this thread is not the
             // capturing session so concurrent executes cannot append operator_rss.
@@ -827,6 +838,21 @@ fn instrument_operator_rss(
     };
     let operator = if rebuilt.downcast_ref::<ExpandExec>().is_some() {
         Some("expand")
+    } else if rebuilt
+        .downcast_ref::<crate::edge_count::EdgeCountExec>()
+        .is_some()
+    {
+        Some("edge_count")
+    } else if rebuilt
+        .downcast_ref::<crate::ordered_one_hop::OrderedOneHopExec>()
+        .is_some()
+    {
+        Some("ordered_one_hop")
+    } else if rebuilt
+        .downcast_ref::<crate::ordered_two_hop::OrderedTwoHopPathCountExec>()
+        .is_some()
+    {
+        Some("ordered_two_hop")
     } else if rebuilt.downcast_ref::<SortExec>().is_some() {
         Some("sort")
     } else {
@@ -929,9 +955,9 @@ impl ExecutionPlan for RssProbeExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let stream = self.input.execute(partition, context)?;
         let epoch = self.capture_epoch;
         let before = current_rss_bytes();
+        let stream = self.input.execute(partition, context)?;
         {
             let mut state = CAPTURE
                 .lock()
@@ -959,6 +985,7 @@ impl ExecutionPlan for RssProbeExec {
                 }
             }
         }
+        record_operator_rss(epoch, self.ordinal, false);
         Ok(Box::pin(RssProbeStream {
             schema: stream.schema(),
             inner: stream,
@@ -1102,6 +1129,34 @@ fn rewrite_materialization(
             .map(|index| required.contains(&index))
             .collect();
         return Ok(expand.with_required_output(mask));
+    }
+
+    if let Some(aggregate) = plan.downcast_ref::<AggregateExec>() {
+        let mut child_required = BTreeSet::new();
+        if aggregate.group_expr().is_empty()
+            && matches!(
+                aggregate.mode(),
+                datafusion::physical_plan::aggregates::AggregateMode::Single
+                    | datafusion::physical_plan::aggregates::AggregateMode::SinglePartitioned
+                    | datafusion::physical_plan::aggregates::AggregateMode::Partial
+            )
+        {
+            for aggr in aggregate.aggr_expr() {
+                for expr in aggr.expressions() {
+                    collect_expr_columns(&expr, &mut child_required);
+                }
+                for order in aggr.order_bys() {
+                    collect_expr_columns(&order.expr, &mut child_required);
+                }
+            }
+            for filter in aggregate.filter_expr().iter().flatten() {
+                collect_expr_columns(filter, &mut child_required);
+            }
+        } else {
+            child_required = (0..aggregate.input().schema().fields().len()).collect();
+        }
+        let child = rewrite_materialization(Arc::clone(aggregate.input()), &child_required)?;
+        return plan.with_new_children(vec![child]);
     }
 
     let children = plan.children();

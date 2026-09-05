@@ -219,16 +219,83 @@ impl ShardedCsrIndex {
         }
         let mut output = Vec::new();
         for record in &self.manifest.shards[start..end] {
-            output.extend(self.read_record_row(record, node_id)?);
+            output.extend(
+                self.map_record_row(record, node_id, |row| row.iter().collect::<Vec<_>>())?,
+            );
         }
         Ok(output)
     }
 
-    fn read_record_row(
+    /// Count a logical row without concatenating its neighbor payload. A hub can
+    /// span many shards; only one authenticated bounded shard is retained.
+    pub fn row_len(&self, node_id: u64) -> Result<u64, GfError> {
+        if node_id >= self.manifest.node_count {
+            return Ok(0);
+        }
+        let end = self
+            .manifest
+            .shards
+            .partition_point(|record| record.first_node <= node_id);
+        let mut total = 0_u64;
+        for record in self.manifest.shards[..end].iter().rev() {
+            if node_id >= record.first_node.saturating_add(record.node_count) {
+                break;
+            }
+            let count = self.map_record_row(record, node_id, |row| row.len() as u64)?;
+            total = total
+                .checked_add(count)
+                .ok_or_else(|| GfError::Storage("CSR degree exceeds u64".into()))?;
+        }
+        Ok(total)
+    }
+
+    /// Copy at most `limit` entries after a logical row offset. This preserves
+    /// shard order and never concatenates a whole high-degree row.
+    pub fn row_chunk(
+        &self,
+        node_id: u64,
+        mut skip: usize,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64)>, GfError> {
+        if node_id >= self.manifest.node_count || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let end = self
+            .manifest
+            .shards
+            .partition_point(|record| record.first_node <= node_id);
+        let mut start = end;
+        while start > 0
+            && node_id
+                < self.manifest.shards[start - 1]
+                    .first_node
+                    .saturating_add(self.manifest.shards[start - 1].node_count)
+        {
+            start -= 1;
+        }
+        let mut output = Vec::new();
+        for record in &self.manifest.shards[start..end] {
+            self.map_record_row(record, node_id, |row| {
+                if skip >= row.len() {
+                    skip -= row.len();
+                    return;
+                }
+                output.extend(row.iter().skip(skip).take(limit - output.len()));
+                skip = 0;
+            })?;
+            if output.len() == limit {
+                break;
+            }
+        }
+        Ok(output)
+    }
+
+    fn map_record_row<T>(
         &self,
         record: &CsrShardRecord,
         node_id: u64,
-    ) -> Result<Vec<(u64, u64)>, GfError> {
+        map: impl FnOnce(CsrRow<'_>) -> T,
+    ) -> Result<T, GfError> {
         let mut cache = self
             .cache
             .lock()
@@ -236,7 +303,7 @@ impl ShardedCsrIndex {
         if let Some((file, csr)) = cache.as_ref()
             && file == &record.file
         {
-            return Ok(csr.row(node_id - record.first_node).iter().collect());
+            return Ok(map(csr.row(node_id - record.first_node)));
         }
         let path = self.root.join(&record.file);
         let bytes = std::fs::read(&path).map_err(|error| {
@@ -255,7 +322,7 @@ impl ShardedCsrIndex {
                 record.file
             )));
         }
-        let output = csr.row(node_id - record.first_node).iter().collect();
+        let output = map(csr.row(node_id - record.first_node));
         *cache = Some((record.file.clone(), csr));
         Ok(output)
     }
@@ -2488,11 +2555,39 @@ mod tests {
         let original = std::fs::read(&first).unwrap();
         std::fs::write(&first, b"corrupt").unwrap();
         assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
+        assert!(
+            reader
+                .row_len(0)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum")
+        );
+        assert!(
+            reader
+                .row_chunk(0, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum")
+        );
         std::fs::write(&first, original).unwrap();
         std::fs::remove_file(&first).unwrap();
         assert!(
             reader
                 .row(0)
+                .unwrap_err()
+                .to_string()
+                .contains("missing CSR shard")
+        );
+        assert!(
+            reader
+                .row_len(0)
+                .unwrap_err()
+                .to_string()
+                .contains("missing CSR shard")
+        );
+        assert!(
+            reader
+                .row_chunk(0, 0, 1)
                 .unwrap_err()
                 .to_string()
                 .contains("missing CSR shard")
@@ -2575,6 +2670,18 @@ mod tests {
             reader.row(0).unwrap(),
             expected.row(0).iter().collect::<Vec<_>>()
         );
+        assert_eq!(reader.row_len(0).unwrap(), 7);
+        assert_eq!(reader.row_len(1).unwrap(), 0);
+        let mut chunks = Vec::new();
+        for offset in (0..7).step_by(3) {
+            let chunk = reader.row_chunk(0, offset, 3).unwrap();
+            assert!(chunk.len() <= 3);
+            chunks.extend(chunk);
+            let cache = reader.cache.lock().unwrap();
+            assert!(cache.as_ref().unwrap().1.edge_count() <= 2);
+        }
+        assert_eq!(chunks, expected.row(0).iter().collect::<Vec<_>>());
+        assert!(reader.row_chunk(0, 7, 3).unwrap().is_empty());
     }
 
     #[test]

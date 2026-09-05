@@ -51,6 +51,8 @@ pub struct QueryHopEvidence {
     pub input_rows: u64,
     /// Adjacency candidates examined before projection.
     pub candidates_generated: u64,
+    /// Adjacency degree probes, including empty destinations, in ordered shortcuts.
+    pub adjacency_rows_examined: u64,
     /// Rows emitted by the hop.
     pub rows_emitted: u64,
     /// Chunks served by destination-only projection.
@@ -261,6 +263,7 @@ impl From<graphforge_exec::demand::DemandSnapshot> for QueryExecutionEvidence {
                 input_batches: hop.input_batches,
                 input_rows: hop.input_rows,
                 candidates_generated: hop.candidates_generated,
+                adjacency_rows_examined: hop.adjacency_rows_examined,
                 rows_emitted: hop.rows_emitted,
                 projected_chunks: hop.projected_chunks,
                 projected_rows: hop.projected_rows,

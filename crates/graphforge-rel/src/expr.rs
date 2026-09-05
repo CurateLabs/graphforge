@@ -5855,6 +5855,13 @@ static CYPHER_SIZE: LazyLock<ScalarUDF> =
 pub(crate) static CYPHER_ROW_MARKER: LazyLock<ScalarUDF> =
     LazyLock::new(|| ScalarUDF::new_from_impl(CypherRowMarker::new()));
 
+/// Identify the compiler-owned, always-true per-row marker by implementation.
+/// Execution rewrites must not accept a user function with the same name.
+#[must_use]
+pub fn is_cypher_row_marker(function: &ScalarUDF) -> bool {
+    function.inner().downcast_ref::<CypherRowMarker>().is_some()
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CypherRowMarker {
     signature: Signature,
