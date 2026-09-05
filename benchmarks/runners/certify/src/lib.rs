@@ -527,7 +527,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 };
                 peak_rss_bytes = max_optional(peak_rss_bytes, execution.peak_rss_bytes);
                 receipts.extend(execution.receipts);
-                if execution.exit_code != Some(0) {
+                if execution.exit_code != Some(0) || execution.failure.is_some() {
                     return Ok(Execution {
                         exit_code: execution.exit_code,
                         duration_ms: millis(started.elapsed()),
@@ -2382,6 +2382,60 @@ mod tests {
         assert_eq!(fs::read_to_string(state).unwrap().trim(), "5");
         drop(fixture_writer);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_workflow_preserves_zero_exit_receipt_failures() {
+        for reject_second in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let script = root.path().join("command.sh");
+            let calls = root.path().join("calls");
+            fs::write(
+                &script,
+                format!(
+                    r#"state="$1"
+n=0
+[ ! -f "$state" ] || n=$(cat "$state")
+n=$((n + 1))
+printf '%s\n' "$n" > "$state"
+if [ "{reject_second}" = true ] && [ "$n" = 2 ]; then
+    printf '%s\n' '{{"contract":"unknown/1"}}'
+else
+    printf '%s\n' '{{"contract":"graphforge-import-session/1","outcome":"begun"}}'
+fi
+"#
+                ),
+            )
+            .unwrap();
+            let mut profile = shell_ingest_profile(&script);
+            let PhaseAction::GraphForgeCliWorkflow { commands } = &mut profile.phases[2].action
+            else {
+                panic!("ingest workflow");
+            };
+            for args in commands {
+                args.insert(1, calls.to_string_lossy().into_owned());
+                args.insert(2, "--json".into());
+            }
+            let execution = PublicProcessExecutor::default()
+                .execute(&profile, &profile.phases[2])
+                .unwrap();
+            assert_eq!(execution.exit_code, Some(0));
+            assert_eq!(
+                execution.failure,
+                reject_second.then_some(FailureKind::EvidenceInvalid)
+            );
+            assert_eq!(execution.receipts.len(), if reject_second { 1 } else { 5 });
+            assert!(execution.receipts.iter().all(|receipt| {
+                receipt["contract"] == "graphforge-import-session/1"
+                    && receipt["outcome"] == "begun"
+            }));
+            assert_eq!(
+                fs::read_to_string(calls).unwrap().trim(),
+                if reject_second { "2" } else { "5" },
+                "a rejected receipt must prevent all later child commands"
+            );
+        }
     }
 
     #[cfg(unix)]
