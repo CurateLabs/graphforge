@@ -1,5 +1,20 @@
 # Bounded billion-edge scale ladder (#736)
 
+For the current #900 release ladder on **OVHC-AGENCY**, use the
+[native host commands](../../benchmarks/README.md) and
+[streaming input contract](../../benchmarks/runners/graph500-generator/README.md).
+The claim is **Graph500-compliant generated input; GraphForge lifecycle
+measurements; no Graph500 performance/TEPS claim**. Exactly `16 × 2^SCALE`
+raw tuples are stored as distinct edge records, retaining self-loops and
+duplicate endpoint pairs. There is no deduplication or target-live
+replenishment; directed GraphForge queries use the emitted endpoint order.
+
+## Historical #736 reference client
+
+The external-sort/deduplication client and cloud envelope described below are
+historical reference tests. They do not define the current native #900 input
+policy or host requirements.
+
 This is the M5 ([#735](https://github.com/DecisionNerd/graphforge/issues/735))
 **root gate**: a versioned, **bounded-memory** Graph500-parameter (`edgefactor=16`
 undirected Kronecker/R-MAT) scale ladder that measures the *first real
@@ -165,7 +180,7 @@ Use `make -C benchmarks progressive-host-ladder-run` with an ext4 work root
 under the process-root filesystem. Prefer that path over disposable Fly
 provider execution. See `benchmarks/README.md` (OVHC-AGENCY host ladder).
 
-## Commands
+## Historical reference-client commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /
 first-fail unit tests):

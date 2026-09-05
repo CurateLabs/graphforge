@@ -1,30 +1,37 @@
 # Scale Evaluation (harness contract)
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-09-05
 
-This document is the **evaluation harness contract** for GraphForge scale work.
+This document distinguishes GraphForge lifecycle scale tests, derived input
+experiments, and official benchmark performance claims. The current release
+uses the in-tree `benchmarks/` harness on **OVHC-AGENCY**: **Graph500-compliant
+generated input; GraphForge lifecycle measurements; no Graph500 performance/TEPS
+claim**. See the [native host runbook](../../benchmarks/README.md).
 Size labeling uses the [Graph Scale Index (GSI)](graph-scale-index.md). Product
 envelopes and the canonical disk-limited DataFusion statement live in
 [Scale Limits](scale-limits.md).
 
 ---
 
-## Spec vs execution (boundary)
+## Evaluation scope and execution
 
 | Track | Spec home | Role |
 |---|---|---|
 | **GSI** | [Graph Scale Index](graph-scale-index.md) | Size axis (node band + density) |
-| **Official Graph500** | [Track 1](#1-official-graph500-gsi-size-ladder) | Standard ef=16 Kronecker/R-MAT notches for GSI size ladder / community comparability |
+| **GraphForge lifecycle with compliant Graph500 input** | [Size ladder](#1-graph500-compliant-input-for-the-gsi-size-ladder) | Current native EF16 input and public-lifecycle scale tests; no official performance claim |
+| **Official Graph500 performance** | [Graph500 specification](https://graph500.org/?page_id=12) | Separate BFS/SSSP kernel, validation, timing, and reporting obligations; outside this release scope |
 | **Graph500-derived matrix** | [Track 2](#2-graph500-derived-scale--density-matrix) | Same generator family, parameterized `edgefactor` to hit GSI density tiers — **not** official Graph500 submissions |
 | **LDBC suite** | [LDBC full suite](../guide/datasets/ldbc.md) | Official workload completeness (SNB, Graphalytics, FinBench, SPB) |
 
-**Execution is not a GraphForge core CI or Makefile product.** An **external
-scale harness** (separate repository) owns generators, drivers, orchestration,
-evidence packaging, and progressive / first-fail reporting for **both** Graph500
-tracks and LDBC suite runs. This repo may ship thin **reference clients** only
-when useful; it must **not** bulk-add Graph500 or LDBC generators.
+The in-tree benchmark harness owns the streaming generator, lifecycle driver,
+profiles, native host commands, and evidence consumption. Rust owns product
+behavior; benchmark orchestration calls the public CLI/API. Ordinary CI runs a
+bounded tiny lifecycle and generator regressions, while the large host ladder
+runs separately. Benchmark tools are not a new engine or public product API.
 
-See [External scale harness](#external-scale-harness-contract).
+The [historical external harness contract](#historical-external-scale-harness-contract)
+below documents an older integration format; it does not override the active
+native producer schemas or require another harness repository.
 
 ---
 
@@ -33,24 +40,27 @@ See [External scale harness](#external-scale-harness-contract).
 **One size axis (GSI).** Graph500 generators supply synthetic instances; they do
 **not** invent a parallel size taxonomy. GSI still labels every instance.
 
-There are **two distinct tracks**. Label evidence with the track name — never
+The compliant-input lifecycle and derived density matrix are distinct. Label
+evidence by its actual scope; never
 treat a parameterized-`edgefactor` density cell as an official Graph500
 submission.
 
 | Track | Parameters | Purpose | Official Graph500? |
 |---|---|---|---|
-| **Official Graph500** | Spec-default generator with **`edgefactor = 16`** (normative), undirected Kronecker / R-MAT | GSI size-ladder notches; comparability with Graph500 community / ranking classes | **Yes** (when run per [Graph500 spec](https://graph500.org/?page_id=12)) |
+| **Compliant-input lifecycle** | Graph500 input rules with **`edgefactor = 16`**, undirected raw tuples and scrambled labels | GraphForge native lifecycle size notches | **No performance claim**; input compliance alone is insufficient |
+| **Official Graph500 performance** | Compliant input plus the applicable benchmark kernels, validation, timing, and reporting | Separate benchmark performance evaluation | Only when those complete specification requirements are met; not this release ladder |
 | **Graph500-derived SCALE×density matrix** | Same generator **family**, free `SCALE` + `edgefactor` to hit GSI density tiers | Probe GSI density bands (D00–09 … D90–100) at feasible SCALEs | **No** — derived only |
 
 Shared generator math ([Graph500 specification](https://graph500.org/?page_id=12)):
 
 - `V = 2^SCALE`
-- `E = edgefactor × V` (denote `edgefactor` as `ef`)
+- `M = edgefactor × V` raw tuples (denote `edgefactor` as `ef`)
 - Kronecker / R-MAT-style undirected edge list
-- Profile instances with `GU-…` (undirected)
+- Raw tuples have undirected semantics; record the actual stored graph interpretation when assigning GSI
 
-**Harness-elsewhere:** both tracks are executed in the external scale harness.
-This repo is **spec only** — no Graph500 generator as product surface.
+The current in-tree generator supports EF16 only. A parameterized density
+matrix is a separate derived workload, not an alternate setting of the current
+release generator.
 
 ### Density ↔ edgefactor (GU)
 
@@ -58,58 +68,68 @@ Undirected GSI density (see [Density quantification](graph-scale-index.md#densit
 
 - `d = 2|E| / (|V| × (|V| − 1))`
 
-With Graph500’s `E = ef × V` and `V = 2^SCALE`:
+For a simple undirected graph with `E = ef × V` and `V = 2^SCALE`:
 
 - `ef ≈ d · (V − 1) / 2`
 
-Exact when the generator emits exactly `ef × V` undirected edges after
-dedup/self-loop policy; harnesses should re-profile `|E|` and emit the measured
-GSI. Representative SCALE → GSI band mapping:
+This relation uses unique non-loop pairs, not raw Graph500 tuples. Since
+`M = ef × V` retains duplicates and self-loops, do not substitute raw tuple or
+stored multigraph counts into a simple-graph density claim. A derived
+simple-graph projection must measure its own `|E|` and report that interpretation
+separately; it must not modify or replenish the compliant raw input. Representative SCALE → GSI band mapping:
 [Graph500 SCALE notches](graph-scale-index.md#graph500-scale--gsi-band-mapping).
 
 ---
 
-## 1. Official Graph500 (GSI size ladder)
+## 1. Graph500-compliant input for the GSI size ladder
 
-Use **standard Graph500 parameters** with normative **`ef = 16`**, undirected
-Kronecker/R-MAT as specified by Graph500 — for bottom→top **size** notches on
-GSI and for community-comparable runs (including ranking classes when the
-harness opts in). Any other `edgefactor` is **Derived track**, not Official.
+Use the Graph500 input rules, including **`ef = 16`**, to evaluate ascending
+GraphForge size notches. A different edge factor belongs to a derived workload.
+Neither EF16 alone nor successful lifecycle execution establishes an official
+Graph500 benchmark performance result.
 
-### Progressive / first-fail policy (Official Graph500 × GSI)
+### Progressive / first-fail policy (native lifecycle)
 
-Applies when the harness escalates **Official** Graph500 SCALE notches on the
-GSI axis:
+The native release ladder uses canonical S18/S19/S20/S22/S24/S25/S26 inputs
+and stops at the first failed rung:
 
 1. Attempt representative notches in ascending GSI Scale Code order
    (`01`→`**`, or the subset declared for the run).
-2. A larger notch may start only after every earlier attempted notch is green
-   (or explicitly skipped as out-of-envelope with recorded rationale).
+2. A larger notch may start only after every earlier canonical rung is green.
+   A skipped or out-of-envelope rung does not authorize advancing.
 3. On the **first** red notch, **stop** — do not attempt larger notches.
 4. Record failed SCALE, failure class, GSI, disk/RSS/time.
-5. Official ranking classes (Toy+) remain on the ladder; first-fail — not
-   pretend pass — governs whether they run.
+5. Report the largest completed rung without implying a higher-scale or official
+   benchmark performance result.
 
-### Official track — required workloads (green)
+### GraphForge size-ladder lifecycle
 
-For each attempted Official SCALE notch, the harness **must** complete this
-pipeline under the declared machine envelope:
+The current release uses **Graph500-compliant generated input; GraphForge
+lifecycle measurements; no Graph500 performance/TEPS claim**. Its
+[streaming generator](../../benchmarks/runners/graph500-generator/README.md)
+emits exactly `16 × 2^SCALE` raw tuples with globally scrambled labels and
+retains duplicate endpoint pairs and self-loops. The adapter stores one
+distinct edge per tuple; directed Cypher follows the emitted orientation.
+No target-live replenishment or simple-graph deduplication is applied.
+
+For each attempted SCALE notch, the harness completes this pipeline under the
+declared machine envelope:
 
 | Step | Required? | Contract |
 |---|---|---|
 | Generate edge list (Graph500 generator, `ef = 16`) | **Required** | Disclose generator identity ([Pinned identity](#pinned-generator--driver-identity)) |
 | Ingest into a GraphForge project (Parquet/Arrow path) | **Required** | Via published GraphForge APIs |
-| Reopen / recount | **Required** | Loaded `V`/`E` match expected band (post unique-edge / self-loop policy); emit measured GSI |
+| Reopen / recount | **Required** | Reconcile all generated nodes and raw edge tuples with stored records and clean-imported results; emit measured GSI |
 | Fixed-hop Cypher with `LIMIT` | **Required** | At least one one-hop and one two-hop `MATCH … RETURN … LIMIT N` (N ≥ 1000 recommended) that finish green — GraphForge product scale signal |
-| Graph500 **BFS** kernel + validation | **Optional** for Official-track **engineering green** | Required only when claiming Graph500 community / ranking-class comparability or reporting TEPS |
-| TEPS / Graph500 result file fields | **Optional** | Report when BFS kernel runs; not required for GraphForge-only Official size-ladder green |
+| Graph500 **BFS/SSSP** kernels + validation | Outside this release's lifecycle scope | Required as applicable for a separate official Graph500 performance claim |
+| TEPS / Graph500 performance result fields | Not claimed | Do not infer them from GraphForge lifecycle timings |
 
-**Official-track engineering green** = generate → ingest → reopen → required
-LIMIT Cypher, all within envelope, with correct counts. **Official-track
-Graph500-comparable green** additionally requires the reference BFS kernel path
-(validation on, TEPS disclosed per Graph500 reporting rules).
+Lifecycle success means generate → ingest → reopen → required LIMIT Cypher,
+with correct source/imported results under the host envelope. It establishes
+GraphForge behavior on compliant input; it is not an official Graph500
+performance result.
 
-### Failure classes → red / stop (Official)
+### Failure classes → red / stop (native lifecycle)
 
 | `error_class` | Meaning | Notch disposition | Ladder policy |
 |---|---|---|---|
@@ -121,7 +141,7 @@ Graph500-comparable green** additionally requires the reference BFS kernel path
 | `out_of_envelope_skip` | Operator pre-declares notch beyond machine envelope | **Skipped** (not green) with rationale | Larger notches remain blocked unless earlier notches are green |
 
 Progressive first-fail on SCALE notches remains **authoritative** for the
-Official size ladder.
+native lifecycle size ladder.
 
 ---
 
@@ -171,12 +191,12 @@ Harnesses may round `ef` to convenient integers; always emit measured GSI.
 
 ### Feasibility / in-scope cells
 
-Edge count for a fixed density grows as Θ(V²). Official `ef = 16` already
+Edge count for a fixed density grows as Θ(V²). Standard `ef = 16` already
 yields `D00` by SCALE **15–18**. Hitting mid/high density at those SCALEs means
 tens of millions to billions of edges — usually **out-of-scope** for the
 progressive harness.
 
-| SCALE band | Official ef=16 | Derived D00–09 (d≈0.05) | Derived D10+ (d≥0.20) |
+| SCALE band | Standard ef=16 | Derived D00–09 (d≈0.05) | Derived D10+ (d≥0.20) |
 |---|---|---|---|
 | ≤ 12 (XS demos) | In-scope (size ladder) | **In-scope** (demo matrix) | **In-scope** (demo matrix) |
 | 13–14 | In-scope | Marginal — declare disk/time envelope | Usually **out-of-scope** unless envelope allows |
@@ -188,7 +208,7 @@ tiers at **XS / small** SCALEs (e.g. 6 and 12, optionally a few neighbors). Do
 **not** require a full SCALE×density cartesian product at SM+ bands. Document
 any cell attempted outside that default as an explicit envelope exception.
 
-The derived matrix does **not** use Official first-fail across SCALEs or across
+The derived matrix does **not** use the native ladder’s first-fail across SCALEs or across
 density tiers. Each in-scope `(SCALE, density-tier)` cell is an **independent**
 pass/fail unit.
 
@@ -199,10 +219,10 @@ SCALE 6 and 12):
 
 | Step | Required? | Contract |
 |---|---|---|
-| Generate with parameterized `edgefactor` for target `d` | **Required** | Same generator family as Official; disclose identity |
+| Generate with parameterized `edgefactor` for target `d` | **Required** | Same R-MAT family; disclose the distinct derived generator identity |
 | Unique-edge / self-loop filtering | **Required** | Apply generator/harness dedup policy, then **re-profile** `|V|`, `|E|`, density → measured `Dxx` / full GSI (target `d` is aspirational) |
 | Ingest + reopen | **Required** | Via GraphForge APIs; counts match post-filter edge list |
-| Fixed-hop Cypher with `LIMIT` | **Required** | Same minimum as Official engineering green |
+| Fixed-hop Cypher with `LIMIT` | **Required** | Same fixed-hop lifecycle checks as the size ladder |
 | Graph500 BFS / TEPS | **Optional** | Never claim as official Graph500 submission |
 
 ### Derived cell — pass / fail
@@ -234,13 +254,13 @@ Two independent control policies:
 
 | Policy | Applies to | Rule |
 |---|---|---|
-| **Progressive / first-fail on GSI** | **Official** Graph500 SCALE notches (ef=16) | Stop at first red size notch ([policy](#progressive--first-fail-policy-official-graph500--gsi)) |
+| **Progressive / first-fail on GSI** | Native lifecycle SCALE notches (ef=16) | Stop at first red size notch ([policy](#progressive--first-fail-policy-native-lifecycle)) |
 | **Derived density matrix** | Graph500-derived `(SCALE, ef)` cells | Independent XS/small density probes — not official submissions ([matrix](#2-graph500-derived-scale--density-matrix)) |
 | **Workload completeness** | LDBC benchmarks | At a declared SF/dataset, run the **full** query/algorithm set for that workload (or label the run as a partial engineering subset) |
 
 A harness may:
 
-1. Climb **Official** Graph500 notches under first-fail for **size** evidence,
+1. Climb compliant-input GraphForge notches under first-fail for **size** evidence,
 2. Optionally run the **Derived** SCALE×density matrix at feasible SCALEs, and
 3. Separately require complete SNB Interactive / BI / Graphalytics / FinBench
    Transaction coverage at chosen SFs.
@@ -250,18 +270,21 @@ plan explicitly widens that gate.
 
 ---
 
-## External scale harness (contract)
+## Historical external scale harness contract
 
-**Owner:** an external scale harness repository (not GraphForge core). This
-section is the interface the harness should implement against the docs in this
-repo. No harness repo name is fixed here — treat the name as operator-local
-until published.
+This section preserves the former external-harness proposal and its JSON
+format for interpreting historical material. Its external ownership, spec-only
+repository boundary, and `track: "official"` parameter label are superseded for
+the native release lifecycle. That old label never substitutes for actual
+Graph500 performance validation. Current host evidence is emitted by the
+in-tree harness under `benchmarks/schemas/`; do not manufacture the legacy
+example below or add another publication step to consume native results.
 
-### Responsibilities (external)
+### Historical responsibility split
 
 | Concern | External harness | GraphForge core |
 |---|---|---|
-| Orchestrate **Official** Graph500 SCALE notches (ef=16) on GSI | Yes | Spec only |
+| Orchestrate EF16 SCALE notches on GSI | Yes | Spec only |
 | Run **Derived** SCALE×density matrix cells (parameterized ef) | Yes | Spec only |
 | Run LDBC generators / drivers / validation | Yes | Spec only ([LDBC](../guide/datasets/ldbc.md)) |
 | Progressive / first-fail stop + evidence artifacts (Official track) | Yes | Spec + issue links for product claims |
@@ -270,7 +293,7 @@ until published.
 | Thin reference clients | May call | Optional only; no bulk generators. In-tree Official-parameter client: [perf-g500-scale20.md](../development/perf-g500-scale20.md) (SCALE-6 CI smoke + ignored SCALE-20; not `track: official`) and bounded first-fail ladder [perf-g500-ladder.md](../development/perf-g500-ladder.md) (#736; SCALE-10 CI + ignored SCALE-20→26) |
 | Chunked ingest / CSR / Cypher via GraphForge APIs | Invokes published APIs | Engine + thin bindings |
 
-### Expected inputs
+### Historical expected inputs
 
 | Input | Role |
 |---|---|
@@ -281,17 +304,17 @@ until published.
 | LDBC benchmark id + SF / dataset name | Workload suite instance |
 | Machine envelope | Pre-declared disk/RSS/time stop conditions |
 
-### Expected outputs (per attempted step)
+### Historical expected outputs (per attempted step)
 
-See [Evidence artifact schema](#evidence-artifact-schema) — field table is
-normative; path layout is harness-defined.
+See the [historical artifact schema](#historical-evidence-artifact-schema).
+It is not the current native producer/consumer contract.
 
-### Evidence artifact schema
+### Historical evidence artifact schema
 
-Harnesses **must** emit one JSON object per attempted step (Official notch,
-Derived cell, or LDBC workload instance). Directory layout is
-**harness-defined**; field names below are **normative** for GraphForge scale
-evidence consumers.
+The former proposal described one object per step and a harness-defined
+layout. This example is historical, including its `official` label for an EF16
+engineering workload. It is not an official Graph500 result or a template for
+current native evidence.
 
 ```json
 {
@@ -358,10 +381,17 @@ evidence consumers.
 **Where reports land:** harness-chosen path (e.g. `evidence/<run_id>/<step>.json`).
 This repo does not prescribe object-storage layout — only the fields above.
 
-### Pinned generator / driver identity
+## Pinned generator / driver identity
 
-Upstream Graph500 and LDBC tooling moves; GraphForge does **not** invent fake
-frozen pins that bit-rot. Normative rule: **must disclose exact identity used**.
+Native results record the actual generator source and executable hashes,
+profile identities, and engine executable hashes automatically. Active profiles
+pin the current generator source; historical receipts retain their original
+identities. The [generator provenance](../../benchmarks/runners/graph500-generator/README.md#reference-provenance-and-verification)
+identifies the copied Graph500 helper and the independently verified tuple
+contract. No historical external manifest is required for native results.
+
+When an evaluation uses upstream tools directly, disclose their actual release
+or commit and relevant configuration:
 
 | Tooling | Official home | Disclosure required in evidence |
 |---|---|---|
@@ -376,25 +406,28 @@ claim. Prefer tags when available; if only `main`, record the commit SHA.
 Re-runs that change generator/driver identity are different evidence — do not
 silently mix.
 
-### What this repo must not do
+## Current product boundary
 
-- Add Graph500 or LDBC generators/drivers as product surface
-- Wire full Graph500 / LDBC suites (Official or Derived) into normal CI
-- Present Derived density-matrix cells as official Graph500 submissions
+- Benchmark generators and drivers remain outside the public product API.
+- Full Graph500 and LDBC scale runs remain outside ordinary CI; bounded tiny
+  lifecycle and generator regressions run in CI.
+- Derived density-matrix results are labeled derived, without official Graph500
+  submission claims.
 
-### In-tree Official-parameter reference client
+### Historical SCALE-20 reference client
 
-[perf-g500-scale20.md](../development/perf-g500-scale20.md) runs Graph500
+[perf-g500-scale20.md](../development/perf-g500-scale20.md) describes the older client using Graph500
 **parameters** (SCALE / ef=16, undirected Kronecker) through published
 `GraphForge` bulk ingest, reopen, measured GSI, and `LIMIT 1000` Cypher. It is
 **not** Official-track: the generator is bench-local, evidence must not set
 `track: "official"`, and `teps` stays null. SCALE-6 is CI; SCALE-20 is
 `make bench-g500-scale20` only.
 
-### In-tree bounded billion-edge scale ladder (#736)
+### Historical bounded scale client (#736)
 
-[perf-g500-ladder.md](../development/perf-g500-ladder.md) extends the
-Official-parameter client with a versioned, **bounded-memory** ladder
+The historical #736 client in
+[perf-g500-ladder.md](../development/perf-g500-ladder.md) extended the SCALE-20
+client with a versioned, **bounded-memory** ladder
 (SCALE-20 → SCALE-26). Unlike the SCALE-20 client it does **not** retain raw
 tuples in memory: it spills sorted runs and k-way merges, so peak resident
 edges are independent of total edge count. Every attempted rung reconciles
@@ -405,14 +438,18 @@ capacity is 128 GiB RSS / 1 TiB NVMe with a provisional **4 h** wall-clock
 fail-safe (#745; not a laptop SLA). Still **not** Official-track and **not**
 TEPS, and it does **not** certify one billion live edges (that is #745).
 SCALE-10 is CI; larger rungs are provisioned cloud / `make bench-g500-ladder`
-only.
+only. This external-sort/deduplication path is not the current #900 native
+streaming generator; its discarded-edge accounting and cloud envelope must not
+be applied to the current raw-tuple lifecycle.
 
 ---
 
 ## Further reading
 
-- [Official-parameter SCALE-20 client](../development/perf-g500-scale20.md) — public-facade engineering green (not Official-track)
-- [Bounded billion-edge scale ladder](../development/perf-g500-ladder.md) — M5 #736 first-fail contract (bounded memory, not a billion-edge claim)
+- [Native lifecycle host runbook](../../benchmarks/README.md) — current in-tree execution and evidence
+- [Graph500 input generator](../../benchmarks/runners/graph500-generator/README.md) — current raw tuples, scrambling, and independent vectors
+- [Historical SCALE-20 client](../development/perf-g500-scale20.md) — public-facade engineering green (not Official-track)
+- [Native host and historical scale clients](../development/perf-g500-ladder.md) — M5 #736 first-fail contract (bounded memory, not a billion-edge claim)
 - [Graph Scale Index](graph-scale-index.md) — size axis (node band + density)
 - [Scale Limits](scale-limits.md) — product envelopes; disk-limited DataFusion framing
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB

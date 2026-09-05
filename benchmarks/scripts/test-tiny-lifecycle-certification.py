@@ -135,6 +135,32 @@ def main() -> None:
         jsonschema.Draft202012Validator(schema).validate(evidence)
         if evidence["status"] != "passed" or len(evidence["phases"]) != 10:
             raise SystemExit("tiny lifecycle did not assemble complete passed evidence")
+        queries = {
+            phase["phase"]: [
+                receipt
+                for receipt in phase.get("receipts", [])
+                if receipt.get("contract") == "graphforge-result-sink/2"
+            ]
+            for phase in evidence["phases"]
+        }
+        if [len(queries[name]) for name in ("recount", "query", "reopen_proof")] != [2, 2, 4]:
+            raise SystemExit("tiny lifecycle omitted ordinary source/imported query receipts")
+        for index, expected in enumerate((2, 32)):
+            if (
+                queries["recount"][index].get("scalar_u64") != expected
+                or queries["reopen_proof"][index].get("scalar_u64") != expected
+            ):
+                raise SystemExit("tiny stored/imported counts differ from SCALE1 raw input")
+        for source, imported in zip(
+            queries["recount"] + queries["query"], queries["reopen_proof"], strict=True
+        ):
+            if (
+                source.get("complete") is not True
+                or imported.get("complete") is not True
+                or not source.get("result_sha256")
+                or source.get("result_sha256") != imported.get("result_sha256")
+            ):
+                raise SystemExit("tiny source/imported result fingerprints differ")
         receipts = [
             (phase["phase"], receipt)
             for phase in evidence["phases"]

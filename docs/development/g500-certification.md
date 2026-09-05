@@ -1,5 +1,19 @@
 # Billion-live-edge certification
 
+The current #745 release outcome reuses the #900 native **OVHC-AGENCY** ladder
+and its [host runbook](../../benchmarks/README.md).
+Use the [streaming generator](../../benchmarks/runners/graph500-generator/README.md):
+**Graph500-compliant generated input; GraphForge lifecycle measurements; no
+Graph500 performance/TEPS claim.** SCALE26 emits exactly 1,073,741,824 raw
+tuples, including self-loops and repeated endpoint pairs, and GraphForge stores
+each as a distinct edge record. These are not unique undirected edges. The
+generator never filters or replenishes tuples to reach a target-live count.
+
+## Historical cloud certification workflow
+
+The cloud workflow and target-live client below are retained for historical
+reference. They do not authorize or define the current native host run.
+
 Issue #745 certifies the complete persisted GraphForge lifecycle on an explicitly
 provisioned Linux evidence host. The workflow is manual, protected by the
 `scale-certification` GitHub environment, and never provisions infrastructure.
@@ -29,7 +43,7 @@ the exact ephemeral resources. Spot/low-priority capacity is not valid: an
 uncontrolled eviction cannot be distinguished from the required cancellation
 and interrupted-finalization drills.
 
-The committed profile fixes SCALE 26, seed 1, the Graph500/R-MAT initiator,
+The historical client profile fixes SCALE 26, seed 1, the R-MAT initiator,
 undirected canonicalization, and a **target-live** stopping rule. Deterministic
 attempt windows are externally sorted and merged until a complete merge proves
 at least one billion unique canonical live edges. Raw attempts are never called

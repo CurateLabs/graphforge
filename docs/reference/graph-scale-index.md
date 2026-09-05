@@ -80,7 +80,7 @@ decade boundary; `**` / BIG starts at V ≥ 10,000,000,000,000 (10T).
 
 Product notebook posture remains roughly GSI Levels **01–06** (`XS`–`MD`,
 V &lt; 10M). Levels **07+** are stretch / progressive-scale territory under the
-[external harness](scale-evaluation.md#external-scale-harness-contract).
+[native scale evaluation harness](scale-evaluation.md#evaluation-scope-and-execution).
 
 ---
 

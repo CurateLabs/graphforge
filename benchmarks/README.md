@@ -341,8 +341,18 @@ make -C benchmarks progressive-host-ladder-inventory   OUTPUT_DIR=$OUTPUT_DIR WO
 
 ## Progressive Graph500 qualification
 
+**Graph500-compliant generated input; GraphForge lifecycle measurements; no
+Graph500 performance/TEPS claim.** The
+[streaming generator contract](runners/graph500-generator/README.md) preserves
+exactly `16 × 2^SCALE` raw tuples, including self-loops and repeated endpoint
+pairs, with scrambled vertex labels. GraphForge stores one distinct `EDGE`
+record per tuple and its directed queries use the emitted source/target
+orientation. Stored edge counts are not unique undirected-pair counts.
+Corrected-generator runs need fresh comparable baseline rungs; older S18/S19
+receipts remain diagnostic evidence, not evidence for the corrected input.
+
 `profiles/graph500/` contains distinct declarative S18 and S19 local profiles
-and S20, S22, S24, S25, and S26 provider profiles. They pin the reference generator,
+and S20, S22, S24, S25, and S26 provider profiles. They pin the GraphForge generator,
 edge factor 16, seed, the same ten-phase public certification lifecycle, and a
 closed sanitized evidence contract. Provider profiles describe environment
 classes only; they contain no app, machine, volume, account, region, or secret
