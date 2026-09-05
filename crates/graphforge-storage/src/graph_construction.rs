@@ -367,13 +367,13 @@ pub struct GraphConstructionEvidence {
     /// Actual non-empty durable-control reads immediately before publication.
     #[serde(default)]
     pub publication_application_read_operations: u64,
-    /// Application-observed source or reused-object payload bytes read by CAS adoption.
+    /// Application-observed CAS payload, manifest-install and manifest-path read bytes.
     #[serde(default)]
     pub cas_application_read_bytes: u64,
-    /// Actual non-empty CAS source/authentication reads.
+    /// Actual non-empty CAS payload and manifest source/authentication reads.
     #[serde(default)]
     pub cas_application_read_operations: u64,
-    /// Payload bytes submitted to CAS temporary-object writers.
+    /// Payload and manifest bytes submitted to CAS temporary-object writers.
     #[serde(default)]
     pub cas_application_write_bytes: u64,
     /// Actual CAS temporary-object write submissions.
