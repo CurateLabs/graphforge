@@ -29,7 +29,9 @@ async fn given_any_graph(world: &mut GraphForgeWorld) {
     crate::fixture::replace_with_fresh(&mut world.forge);
     world.nodes.clear();
     world.last_error = None;
-    world.last_result = None;
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     world.last_exec = None;
     world.params.clear();
 }
@@ -49,7 +51,9 @@ fn seed_graph(world: &mut GraphForgeWorld, create: &str) {
     world.forge = Some(forge);
     world.nodes.clear();
     world.last_error = None;
-    world.last_result = None;
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     world.last_exec = None;
     world.params.clear();
 }

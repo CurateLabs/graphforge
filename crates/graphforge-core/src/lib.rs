@@ -979,10 +979,9 @@ pub enum ExplainStage {
 // GraphForge — public facade
 // ---------------------------------------------------------------------------
 //
-// The `GraphForge` engine facade and its interim `RecordBatch` result type live
-// in the top-level `graphforge-api` crate, not here: `graphforge-core` is the foundation crate
-// that every other crate depends on, so it cannot depend on the pipeline crates
-// (`graphforge-cypher`/`graphforge-rel`/`graphforge-exec`) the facade needs without a dependency cycle.
+// The `GraphForge` engine facade lives in the top-level `graphforge-api` crate.
+// Pipeline crates depend on `graphforge-core`, so core cannot depend on the
+// compiler and execution crates the facade needs without a dependency cycle.
 // See #716 / #583. `graphforge-core` keeps the shared value types below
 // ([`GfError`], [`OntologyMode`], [`NodeHandle`], [`RankOptions`], …) that the
 // facade composes.

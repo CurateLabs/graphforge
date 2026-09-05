@@ -39,8 +39,12 @@ pub struct GraphForgeWorld {
     pub last_error: Option<String>,
     /// Stable public code for the last typed Rust facade error.
     pub last_error_code: Option<&'static str>,
-    /// Last interim `RecordBatch` returned by a stubbed When step (schema()/etc.).
-    pub last_result: Option<graphforge_api::RecordBatch>,
+    /// Last metadata collection returned by labels or relationship_types.
+    pub last_names: Option<Vec<String>>,
+    /// Last scalar returned by node_count.
+    pub last_count: Option<u64>,
+    /// Last explanation returned by explain.
+    pub last_explanation: Option<String>,
     /// Last Arrow-backed result returned by `execute()`.
     pub last_exec: Option<graphforge_api::ExecutionResult>,
     /// Most recent Arrow result returned by an analyst verb.

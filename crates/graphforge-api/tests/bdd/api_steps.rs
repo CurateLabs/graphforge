@@ -18,7 +18,9 @@ async fn given_empty_graph(world: &mut GraphForgeWorld) {
     world.index_calls = 0;
     world.last_error = None;
     world.last_error_code = None;
-    world.last_result = None;
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     world.last_algorithm_result = None;
 }
 
@@ -1247,13 +1249,13 @@ async fn when_schema(world: &mut GraphForgeWorld) {
 
 #[when(regex = r#"^I call labels$"#)]
 async fn when_labels(world: &mut GraphForgeWorld) {
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     if let Some(forge) = &world.forge {
         match forge.labels() {
             Ok(labels) => {
-                world.last_result = Some(graphforge_api::RecordBatch {
-                    schema: vec!["label".into()],
-                    columns: vec![labels],
-                });
+                world.last_names = Some(labels);
             }
             Err(error) => world.last_error = Some(error.to_string()),
         }
@@ -1262,13 +1264,13 @@ async fn when_labels(world: &mut GraphForgeWorld) {
 
 #[when(regex = r#"^I call relationship_types$"#)]
 async fn when_rel_types(world: &mut GraphForgeWorld) {
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     if let Some(forge) = &world.forge {
         match forge.relationship_types() {
             Ok(relationship_types) => {
-                world.last_result = Some(graphforge_api::RecordBatch {
-                    schema: vec!["relationship_type".into()],
-                    columns: vec![relationship_types],
-                });
+                world.last_names = Some(relationship_types);
             }
             Err(error) => world.last_error = Some(error.to_string()),
         }
@@ -1277,13 +1279,13 @@ async fn when_rel_types(world: &mut GraphForgeWorld) {
 
 #[when(regex = r#"^I call node_count for label "([^"]+)"$"#)]
 async fn when_node_count(world: &mut GraphForgeWorld, label: String) {
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     if let Some(forge) = &world.forge {
         match forge.node_count(&label) {
             Ok(count) => {
-                world.last_result = Some(graphforge_api::RecordBatch {
-                    schema: vec!["node_count".into()],
-                    columns: vec![vec![count.to_string()]],
-                });
+                world.last_count = Some(count);
             }
             Err(error) => world.last_error = Some(error.to_string()),
         }
@@ -1346,12 +1348,12 @@ async fn when_neighbourhood(
 
 #[when(regex = r#"^I call explain on "([^"]+)"$"#)]
 async fn when_explain(world: &mut GraphForgeWorld, query: String) {
+    world.last_names = None;
+    world.last_count = None;
+    world.last_explanation = None;
     match graphforge_cypher::explain(&query) {
         Ok(s) => {
-            world.last_result = Some(graphforge_api::RecordBatch {
-                schema: vec!["plan".to_string()],
-                columns: vec![vec![s]],
-            });
+            world.last_explanation = Some(s);
         }
         Err(e) => world.last_error = Some(e.to_string()),
     }
@@ -1876,32 +1878,17 @@ async fn then_path_reaches_dispatch(world: &mut GraphForgeWorld) {
 }
 
 #[then(regex = r#"^the result is (\d+)$"#)]
-async fn then_result_is_n(world: &mut GraphForgeWorld, n: i64) {
-    let value = world
-        .last_result
-        .as_ref()
-        .and_then(|result| result.columns.first())
-        .and_then(|column| column.first())
-        .expect("integer result");
-    assert_eq!(value.parse::<i64>().unwrap(), n);
+async fn then_result_is_n(world: &mut GraphForgeWorld, n: u64) {
+    assert_eq!(world.last_count.expect("integer result"), n);
 }
 
 #[then(regex = r#"^the result is a non-empty string$"#)]
 async fn then_nonempty_string(world: &mut GraphForgeWorld) {
-    if let Some(rb) = &world.last_result {
-        let val = rb
-            .columns
-            .first()
-            .and_then(|c| c.first())
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        assert!(!val.is_empty(), "expected non-empty string result");
-    } else {
-        panic!(
-            "no result stored — step failed? error: {:?}",
-            world.last_error
-        );
-    }
+    let explanation = world
+        .last_explanation
+        .as_deref()
+        .expect("explanation result");
+    assert!(!explanation.is_empty(), "expected non-empty string result");
 
     #[then(regex = r#"^a structured selector error is raised$"#)]
     async fn then_structured_selector_error(world: &mut GraphForgeWorld) {
@@ -1967,35 +1954,24 @@ async fn then_result_contains_title(world: &mut GraphForgeWorld, title: String) 
 
 #[then(regex = r#"^the result contains "([^"]+)"$"#)]
 async fn then_result_contains_text(world: &mut GraphForgeWorld, text: String) {
-    if let Some(rb) = &world.last_result {
-        let values = rb.columns.iter().flatten().collect::<Vec<_>>();
-        assert!(
-            values.iter().any(|value| value.contains(&text)),
-            "expected result to contain {text:?}\ngot:\n{}",
-            values
-                .iter()
-                .map(|value| value.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+    let values: Vec<&str> = if let Some(names) = &world.last_names {
+        names.iter().map(String::as_str).collect()
     } else {
-        panic!(
-            "no result stored — step failed? error: {:?}",
-            world.last_error
-        );
-    }
+        vec![world.last_explanation.as_deref().expect("text result")]
+    };
+    assert!(
+        values.iter().any(|value| value.contains(&text)),
+        "expected result to contain {text:?}\ngot:\n{}",
+        values.join("\n")
+    );
 }
 
 #[then(regex = r#"^the result is an empty list$"#)]
 async fn then_empty_list(world: &mut GraphForgeWorld) {
     assert!(
-        world
-            .last_result
-            .as_ref()
-            .and_then(|result| result.columns.first())
-            .is_some_and(Vec::is_empty),
+        world.last_names.as_ref().is_some_and(Vec::is_empty),
         "expected empty list, got {:?}",
-        world.last_result
+        world.last_names
     );
 }
 
