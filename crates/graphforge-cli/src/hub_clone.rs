@@ -1177,14 +1177,9 @@ fn run_clone_job(
             .map(|verified| (verified, Some(object.length), None))
         },
     )?;
-    let operation_id = OperationId(uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!(
-            "{}:{}",
-            canonical_name(&identity),
-            verified.immutable_version
-        )
-        .as_bytes(),
+    let operation_id = OperationId(graphforge_api::hub_clone_operation(
+        &canonical_name(&identity),
+        &verified.immutable_version,
     ));
     profile.handoff(
         ComponentKind::PortableVerify,

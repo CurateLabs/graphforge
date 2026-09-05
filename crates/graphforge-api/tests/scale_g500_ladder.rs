@@ -3299,10 +3299,8 @@ fn run_integrated_certification_with_edge_factor(
     let phase = Instant::now();
     let interrupted = root.join("interrupted-target");
     let interrupted_operation = uuidv7(0x746);
-    let interrupted_generation = Uuid::new_v5(
-        &interrupted_operation,
-        b"graphforge-portable-v2-import-generation/1",
-    );
+    let interrupted_generation =
+        graphforge_core::uuid::portable_v2_import_generation(&interrupted_operation);
     let interrupted_cancelled = AtomicBool::new(false);
     let supported_capabilities = [
         "epistemic",

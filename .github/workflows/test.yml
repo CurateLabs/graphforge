@@ -240,6 +240,7 @@ jobs:
         run: |
           scripts/ci/check-domain-dependencies.py
           scripts/ci/test-domain-dependencies.py
+          python3 scripts/ci/test-uuid-derivation-policy.py
 
       - name: Test crates.io publish plan helper
         if: steps.policy-suites.outputs.crate_publish == 'true'
