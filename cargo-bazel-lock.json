@@ -1,5 +1,5 @@
 {
-  "checksum": "7c859f51d46c760db444076d608ec0dfd2143f694233968bab5e5a995296e66c",
+  "checksum": "9664e703795c68762a5780ac35f5403e3e1054d6cab57793f55eb960c44a3116",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -1041,14 +1041,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "arrow 58.3.0": {
+    "arrow 58.4.0": {
       "name": "arrow",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow/58.3.0/download",
-          "sha256": "378530e55cd479eda3c14eb345310799717e6f76d0c332041e8487022166b471"
+          "url": "https://static.crates.io/crates/arrow/58.4.0/download",
+          "sha256": "6cfdd0833e32a9874d2b55089333ad310c0be208aafa277385ce2461dec90be3"
         }
       },
       "targets": [
@@ -1090,66 +1090,66 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-arith 58.3.0",
+              "id": "arrow-arith 58.4.0",
               "target": "arrow_arith"
             },
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-cast 58.3.0",
+              "id": "arrow-cast 58.4.0",
               "target": "arrow_cast"
             },
             {
-              "id": "arrow-csv 58.3.0",
+              "id": "arrow-csv 58.4.0",
               "target": "arrow_csv"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-ipc 58.3.0",
+              "id": "arrow-ipc 58.4.0",
               "target": "arrow_ipc"
             },
             {
-              "id": "arrow-json 58.3.0",
+              "id": "arrow-json 58.4.0",
               "target": "arrow_json"
             },
             {
-              "id": "arrow-ord 58.3.0",
+              "id": "arrow-ord 58.4.0",
               "target": "arrow_ord"
             },
             {
-              "id": "arrow-pyarrow 58.3.0",
+              "id": "arrow-pyarrow 58.4.0",
               "target": "arrow_pyarrow"
             },
             {
-              "id": "arrow-row 58.3.0",
+              "id": "arrow-row 58.4.0",
               "target": "arrow_row"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
-              "id": "arrow-string 58.3.0",
+              "id": "arrow-string 58.4.0",
               "target": "arrow_string"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1157,14 +1157,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-arith 58.3.0": {
+    "arrow-arith 58.4.0": {
       "name": "arrow-arith",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-arith/58.3.0/download",
-          "sha256": "a0ab212d2c1886e802f51c5212d78ebbcbb0bec980fff9dadc1eb8d45cd0b738"
+          "url": "https://static.crates.io/crates/arrow-arith/58.4.0/download",
+          "sha256": "0a41203398f0eaa6f7ec8e62c0da742a21abf282c148fc157f6c35c90e29981a"
         }
       },
       "targets": [
@@ -1189,19 +1189,19 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -1216,7 +1216,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1224,14 +1224,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-array 58.3.0": {
+    "arrow-array 58.4.0": {
       "name": "arrow-array",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-array/58.3.0/download",
-          "sha256": "cfd33d3e92f207444098c75b42de99d329562be0cf686b307b097cc52b4e999e"
+          "url": "https://static.crates.io/crates/arrow-array/58.4.0/download",
+          "sha256": "ae33dad492b7df00a217563a7b0ef2874df68a0deea1b1a3acf628152f7f7a69"
         }
       },
       "targets": [
@@ -1263,15 +1263,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -1319,7 +1319,7 @@
           }
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0 AND MIT",
       "license_ids": [
@@ -1328,14 +1328,14 @@
       ],
       "license_file": "LICENSE-MIT"
     },
-    "arrow-buffer 58.3.0": {
+    "arrow-buffer 58.4.0": {
       "name": "arrow-buffer",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-buffer/58.3.0/download",
-          "sha256": "0c6cd424c2693bcdbc150d843dc9d4d137dd2de4782ce6df491ad11a3a0416c0"
+          "url": "https://static.crates.io/crates/arrow-buffer/58.4.0/download",
+          "sha256": "b9552f96391c005e6ab449fa941420935e7e062489b12b8b1b08879b2163f5b5"
         }
       },
       "targets": [
@@ -1360,7 +1360,7 @@
         "deps": {
           "common": [
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -1379,7 +1379,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1387,14 +1387,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-cast 58.3.0": {
+    "arrow-cast 58.4.0": {
       "name": "arrow-cast",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-cast/58.3.0/download",
-          "sha256": "4c5aefb56a2c02e9e2b30746241058b85f8983f0fcff2ba0c6d09006e1cded7f"
+          "url": "https://static.crates.io/crates/arrow-cast/58.4.0/download",
+          "sha256": "3a8a327c9649f30d8406995f27642b68df354713cca3baaaf100f076f18d5f34"
         }
       },
       "targets": [
@@ -1426,27 +1426,27 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-ord 58.3.0",
+              "id": "arrow-ord 58.4.0",
               "target": "arrow_ord"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
@@ -1485,7 +1485,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1493,14 +1493,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-csv 58.3.0": {
+    "arrow-csv 58.4.0": {
       "name": "arrow-csv",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-csv/58.3.0/download",
-          "sha256": "e94e8cf7e517657a52b91ea1263acf38c4ca62a84655d72458a3359b12ab97de"
+          "url": "https://static.crates.io/crates/arrow-csv/58.4.0/download",
+          "sha256": "af0dd6d90d1955e9f9a014c1e563ee8aeffc21909085d25623e1da44d96eca26"
         }
       },
       "targets": [
@@ -1525,15 +1525,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-cast 58.3.0",
+              "id": "arrow-cast 58.4.0",
               "target": "arrow_cast"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -1556,7 +1556,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1564,14 +1564,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-data 58.3.0": {
+    "arrow-data 58.4.0": {
       "name": "arrow-data",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-data/58.3.0/download",
-          "sha256": "3c88210023a2bfee1896af366309a3028fc3bcbd6515fa29a7990ee1baa08ee0"
+          "url": "https://static.crates.io/crates/arrow-data/58.4.0/download",
+          "sha256": "2b24852db04738907e06c04ea61e42fe7fda962a34513022dc0d0e754fb7976b"
         }
       },
       "targets": [
@@ -1602,11 +1602,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -1625,7 +1625,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1633,14 +1633,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-ipc 58.3.0": {
+    "arrow-ipc 58.4.0": {
       "name": "arrow-ipc",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-ipc/58.3.0/download",
-          "sha256": "238438f0834483703d88896db6fe5a7138b2230debc31b34c0336c2996e3c64f"
+          "url": "https://static.crates.io/crates/arrow-ipc/58.4.0/download",
+          "sha256": "29a908a11fcfb3fb2f6730f4ac15e367bc644e419155e96238f68cf3adde572b"
         }
       },
       "targets": [
@@ -1674,23 +1674,23 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
@@ -1709,7 +1709,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1717,14 +1717,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-json 58.3.0": {
+    "arrow-json 58.4.0": {
       "name": "arrow-json",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-json/58.3.0/download",
-          "sha256": "205ca2119e6d679d5c133c6f30e68f027738d95ed948cf77677ea69c7800036b"
+          "url": "https://static.crates.io/crates/arrow-json/58.4.0/download",
+          "sha256": "b8a96aed3931c076adee39ec2a40d8219fc7f09e79bcdaca1df16272993e1e14"
         }
       },
       "targets": [
@@ -1749,27 +1749,27 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-cast 58.3.0",
+              "id": "arrow-cast 58.4.0",
               "target": "arrow_cast"
             },
             {
-              "id": "arrow-ord 58.3.0",
+              "id": "arrow-ord 58.4.0",
               "target": "arrow_ord"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
@@ -1805,7 +1805,7 @@
               "target": "ryu"
             },
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -1820,7 +1820,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1828,14 +1828,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-ord 58.3.0": {
+    "arrow-ord 58.4.0": {
       "name": "arrow-ord",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-ord/58.3.0/download",
-          "sha256": "1bffd8fd2579286a5d63bac898159873e5094a79009940bcb42bbfce4f19f1d0"
+          "url": "https://static.crates.io/crates/arrow-ord/58.4.0/download",
+          "sha256": "63a083ec750f5c043f02946b4baf05fcdbb55f4560a3277055caca5cc99f3eb0"
         }
       },
       "targets": [
@@ -1860,30 +1860,30 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1891,14 +1891,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-pyarrow 58.3.0": {
+    "arrow-pyarrow 58.4.0": {
       "name": "arrow-pyarrow",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-pyarrow/58.3.0/download",
-          "sha256": "d29abdf672a81c1aeb57fd2661457f9918964d49aed0e9f18932535f2a9e49ce"
+          "url": "https://static.crates.io/crates/arrow-pyarrow/58.4.0/download",
+          "sha256": "3ffb9be5a873590f825aef50df20e0f8dff5fd42a77058e28bbe7bd44bb53dec"
         }
       },
       "targets": [
@@ -1923,15 +1923,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -1942,7 +1942,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -1950,14 +1950,14 @@
       ],
       "license_file": null
     },
-    "arrow-row 58.3.0": {
+    "arrow-row 58.4.0": {
       "name": "arrow-row",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-row/58.3.0/download",
-          "sha256": "bab5994731204603c73ba69267616c50f80780774c6bb0476f1f830625115e0c"
+          "url": "https://static.crates.io/crates/arrow-row/58.4.0/download",
+          "sha256": "514ba0ef0d4c5896202dae736251ce415abb43a950bed570fb7981b8716c0e4c"
         }
       },
       "targets": [
@@ -1982,19 +1982,19 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -2005,7 +2005,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -2013,14 +2013,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-schema 58.3.0": {
+    "arrow-schema 58.4.0": {
       "name": "arrow-schema",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-schema/58.3.0/download",
-          "sha256": "f633dbfdf39c039ada1bf9e34c694816eb71fbb7dc78f613993b7245e078a1ed"
+          "url": "https://static.crates.io/crates/arrow-schema/58.4.0/download",
+          "sha256": "21ca356ad6425cecb6eb7b28e4f659f1ee7880fbb1a16127de7dd62901efee9e"
         }
       },
       "targets": [
@@ -2057,7 +2057,7 @@
               "target": "bitflags"
             },
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -2068,7 +2068,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -2076,14 +2076,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-select 58.3.0": {
+    "arrow-select 58.4.0": {
       "name": "arrow-select",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-select/58.3.0/download",
-          "sha256": "8cd065c54172ac787cf3f2f8d4107e0d3fdc26edba76fdf4f4cc170258942222"
+          "url": "https://static.crates.io/crates/arrow-select/58.4.0/download",
+          "sha256": "c58da39eb3d8350ad4a549e5c2bc49284dac554016c69829310350f1731b0aad"
         }
       },
       "targets": [
@@ -2112,19 +2112,19 @@
               "target": "ahash"
             },
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -2135,7 +2135,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -2143,14 +2143,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "arrow-string 58.3.0": {
+    "arrow-string 58.4.0": {
       "name": "arrow-string",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/arrow-string/58.3.0/download",
-          "sha256": "29dd7cda3ab9692f43a2e4acc444d760cc17b12bb6d8232ddf64e9bab7c06b42"
+          "url": "https://static.crates.io/crates/arrow-string/58.4.0/download",
+          "sha256": "b6789b388467525e3271326b6b4915666ecfdf5142aef09779445c954b67543c"
         }
       },
       "targets": [
@@ -2175,23 +2175,23 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
@@ -2214,7 +2214,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -3531,14 +3531,14 @@
       ],
       "license_file": "LICENSE-MIT"
     },
-    "bytes 1.11.1": {
+    "bytes 1.12.1": {
       "name": "bytes",
-      "version": "1.11.1",
+      "version": "1.12.1",
       "package_url": "https://github.com/tokio-rs/bytes",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/bytes/1.11.1/download",
-          "sha256": "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+          "url": "https://static.crates.io/crates/bytes/1.12.1/download",
+          "sha256": "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
         }
       },
       "targets": [
@@ -3568,7 +3568,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.11.1"
+        "version": "1.12.1"
       },
       "license": "MIT",
       "license_ids": [
@@ -4348,7 +4348,7 @@
               "target": "nix"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -4732,7 +4732,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -6004,7 +6004,7 @@
               "target": "ryu"
             },
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             }
           ],
@@ -6176,7 +6176,7 @@
               "target": "either"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -6720,11 +6720,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -6840,7 +6840,7 @@
               "target": "flate2"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -6868,7 +6868,7 @@
               "target": "parking_lot"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -6888,7 +6888,7 @@
               "target": "url"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             },
             {
@@ -6948,7 +6948,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -6988,7 +6988,7 @@
               "target": "datafusion_session"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7064,7 +7064,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -7104,7 +7104,7 @@
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7182,15 +7182,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-ipc 58.3.0",
+              "id": "arrow-ipc 58.4.0",
               "target": "arrow_ipc"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -7230,7 +7230,7 @@
               "target": "object_store"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -7246,7 +7246,7 @@
               "target": "tokio"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -7300,7 +7300,7 @@
         "deps": {
           "common": [
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7368,7 +7368,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -7376,7 +7376,7 @@
               "target": "async_compression"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -7428,7 +7428,7 @@
               "target": "flate2"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7534,15 +7534,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-ipc 58.3.0",
+              "id": "arrow-ipc 58.4.0",
               "target": "arrow_ipc"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -7578,7 +7578,7 @@
               "target": "datafusion_session"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7646,11 +7646,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -7686,7 +7686,7 @@
               "target": "datafusion_session"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7754,11 +7754,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -7794,7 +7794,7 @@
               "target": "datafusion_session"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7862,11 +7862,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -7922,7 +7922,7 @@
               "target": "datafusion_session"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -7942,7 +7942,7 @@
               "target": "parking_lot"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -8040,11 +8040,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
@@ -8064,7 +8064,7 @@
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -8152,11 +8152,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -8260,7 +8260,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -8341,11 +8341,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
@@ -8429,7 +8429,7 @@
               "target": "sha2"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -8485,7 +8485,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -8585,7 +8585,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -8650,11 +8650,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-ord 58.3.0",
+              "id": "arrow-ord 58.4.0",
               "target": "arrow_ord"
             },
             {
@@ -8766,7 +8766,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -8846,7 +8846,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9042,7 +9042,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9139,7 +9139,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9238,7 +9238,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9309,7 +9309,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9394,7 +9394,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9481,23 +9481,23 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-ipc 58.3.0",
+              "id": "arrow-ipc 58.4.0",
               "target": "arrow_ipc"
             },
             {
-              "id": "arrow-ord 58.3.0",
+              "id": "arrow-ord 58.4.0",
               "target": "arrow_ord"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
@@ -9537,7 +9537,7 @@
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -9629,7 +9629,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9785,7 +9785,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -9917,7 +9917,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             }
           ],
@@ -10515,7 +10515,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -10526,7 +10526,7 @@
           "selects": {
             "cfg(any())": [
               {
-                "id": "serde 1.0.228",
+                "id": "serde 1.0.229",
                 "target": "serde"
               }
             ]
@@ -10630,7 +10630,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -11272,14 +11272,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures 0.3.32": {
+    "futures 0.3.34": {
       "name": "futures",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures/0.3.32/download",
-          "sha256": "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+          "url": "https://static.crates.io/crates/futures/0.3.34/download",
+          "sha256": "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
         }
       },
       "targets": [
@@ -11315,38 +11315,38 @@
         "deps": {
           "common": [
             {
-              "id": "futures-channel 0.3.32",
+              "id": "futures-channel 0.3.34",
               "target": "futures_channel"
             },
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-executor 0.3.32",
+              "id": "futures-executor 0.3.34",
               "target": "futures_executor"
             },
             {
-              "id": "futures-io 0.3.32",
+              "id": "futures-io 0.3.34",
               "target": "futures_io"
             },
             {
-              "id": "futures-sink 0.3.32",
+              "id": "futures-sink 0.3.34",
               "target": "futures_sink"
             },
             {
-              "id": "futures-task 0.3.32",
+              "id": "futures-task 0.3.34",
               "target": "futures_task"
             },
             {
-              "id": "futures-util 0.3.32",
+              "id": "futures-util 0.3.34",
               "target": "futures_util"
             }
           ],
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11355,14 +11355,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-channel 0.3.32": {
+    "futures-channel 0.3.34": {
       "name": "futures-channel",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-channel/0.3.32/download",
-          "sha256": "07bbe89c50d7a535e539b8c17bc0b49bdb77747034daa8087407d655f3f7cc1d"
+          "url": "https://static.crates.io/crates/futures-channel/0.3.34/download",
+          "sha256": "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
         }
       },
       "targets": [
@@ -11400,18 +11400,18 @@
         "deps": {
           "common": [
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-sink 0.3.32",
+              "id": "futures-sink 0.3.34",
               "target": "futures_sink"
             }
           ],
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11420,14 +11420,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-core 0.3.32": {
+    "futures-core 0.3.34": {
       "name": "futures-core",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-core/0.3.32/download",
-          "sha256": "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+          "url": "https://static.crates.io/crates/futures-core/0.3.34/download",
+          "sha256": "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
         }
       },
       "targets": [
@@ -11458,7 +11458,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11467,14 +11467,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-executor 0.3.32": {
+    "futures-executor 0.3.34": {
       "name": "futures-executor",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-executor/0.3.32/download",
-          "sha256": "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+          "url": "https://static.crates.io/crates/futures-executor/0.3.34/download",
+          "sha256": "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
         }
       },
       "targets": [
@@ -11505,22 +11505,22 @@
         "deps": {
           "common": [
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-task 0.3.32",
+              "id": "futures-task 0.3.34",
               "target": "futures_task"
             },
             {
-              "id": "futures-util 0.3.32",
+              "id": "futures-util 0.3.34",
               "target": "futures_util"
             }
           ],
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11529,14 +11529,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-io 0.3.32": {
+    "futures-io 0.3.34": {
       "name": "futures-io",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-io/0.3.32/download",
-          "sha256": "cecba35d7ad927e23624b22ad55235f2239cfa44fd10428eecbeba6d6a717718"
+          "url": "https://static.crates.io/crates/futures-io/0.3.34/download",
+          "sha256": "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
         }
       },
       "targets": [
@@ -11565,7 +11565,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11574,14 +11574,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-macro 0.3.32": {
+    "futures-macro 0.3.34": {
       "name": "futures-macro",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-macro/0.3.32/download",
-          "sha256": "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+          "url": "https://static.crates.io/crates/futures-macro/0.3.34/download",
+          "sha256": "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
         }
       },
       "targets": [
@@ -11614,14 +11614,14 @@
               "target": "quote"
             },
             {
-              "id": "syn 2.0.117",
+              "id": "syn 3.0.2",
               "target": "syn"
             }
           ],
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11630,14 +11630,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-sink 0.3.32": {
+    "futures-sink 0.3.34": {
       "name": "futures-sink",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-sink/0.3.32/download",
-          "sha256": "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
+          "url": "https://static.crates.io/crates/futures-sink/0.3.34/download",
+          "sha256": "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
         }
       },
       "targets": [
@@ -11668,7 +11668,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11677,14 +11677,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-task 0.3.32": {
+    "futures-task 0.3.34": {
       "name": "futures-task",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-task/0.3.32/download",
-          "sha256": "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
+          "url": "https://static.crates.io/crates/futures-task/0.3.34/download",
+          "sha256": "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
         }
       },
       "targets": [
@@ -11714,7 +11714,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11723,14 +11723,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "futures-util 0.3.32": {
+    "futures-util 0.3.34": {
       "name": "futures-util",
-      "version": "0.3.32",
+      "version": "0.3.34",
       "package_url": "https://github.com/rust-lang/futures-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/futures-util/0.3.32/download",
-          "sha256": "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
+          "url": "https://static.crates.io/crates/futures-util/0.3.34/download",
+          "sha256": "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
         }
       },
       "targets": [
@@ -11774,23 +11774,23 @@
         "deps": {
           "common": [
             {
-              "id": "futures-channel 0.3.32",
+              "id": "futures-channel 0.3.34",
               "target": "futures_channel"
             },
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-io 0.3.32",
+              "id": "futures-io 0.3.34",
               "target": "futures_io"
             },
             {
-              "id": "futures-sink 0.3.32",
+              "id": "futures-sink 0.3.34",
               "target": "futures_sink"
             },
             {
-              "id": "futures-task 0.3.32",
+              "id": "futures-task 0.3.34",
               "target": "futures_task"
             },
             {
@@ -11812,13 +11812,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "futures-macro 0.3.32",
+              "id": "futures-macro 0.3.34",
               "target": "futures_macro"
             }
           ],
           "selects": {}
         },
-        "version": "0.3.32"
+        "version": "0.3.34"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -12366,7 +12366,7 @@
               "target": "quote"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12580,8 +12580,12 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
+            },
+            {
+              "id": "bytes 1.12.1",
+              "target": "bytes"
             },
             {
               "id": "datafusion 54.1.0",
@@ -12592,15 +12596,15 @@
               "target": "fs4"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12629,7 +12633,7 @@
               "target": "tokio"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -12680,7 +12684,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12735,15 +12739,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "napi 3.12.1",
+              "id": "napi 3.12.2",
               "target": "napi"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12751,7 +12755,7 @@
               "target": "serde_json"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -12815,11 +12819,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -12827,7 +12831,7 @@
               "target": "pyo3"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12835,7 +12839,7 @@
               "target": "serde_json"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -12889,7 +12893,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -12905,7 +12909,7 @@
               "target": "libc"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -12934,7 +12938,7 @@
               "target": "url"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -12949,7 +12953,7 @@
         "deps_dev": {
           "common": [
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             }
           ],
@@ -13002,7 +13006,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13019,7 +13023,7 @@
               "target": "thiserror"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -13127,7 +13131,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13185,7 +13189,7 @@
               "target": "anyhow"
             },
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -13197,7 +13201,7 @@
               "target": "datafusion_datasource"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -13222,7 +13226,7 @@
               "target": "insta"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -13345,15 +13349,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -13403,11 +13407,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13466,11 +13470,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13486,7 +13490,7 @@
               "target": "unicode_normalization"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -13528,7 +13532,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13586,15 +13590,15 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13712,11 +13716,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13724,7 +13728,7 @@
               "target": "thiserror"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -13766,7 +13770,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
@@ -13845,11 +13849,11 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -13865,7 +13869,7 @@
               "target": "ureq"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -13874,7 +13878,7 @@
         "deps_dev": {
           "common": [
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
@@ -13928,7 +13932,7 @@
         "deps": {
           "common": [
             {
-              "id": "arrow 58.3.0",
+              "id": "arrow 58.4.0",
               "target": "arrow"
             },
             {
@@ -13936,7 +13940,7 @@
               "target": "atomicwrites"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -13952,15 +13956,15 @@
               "target": "fs4"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
-              "id": "parquet 58.3.0",
+              "id": "parquet 58.4.0",
               "target": "parquet"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -14000,7 +14004,7 @@
               "target": "ureq"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -14607,7 +14611,7 @@
         "deps": {
           "common": [
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -15803,31 +15807,31 @@
           "selects": {
             "aarch64-apple-darwin": [
               {
-                "id": "serde_core 1.0.228",
+                "id": "serde_core 1.0.229",
                 "target": "serde_core"
               }
             ],
             "aarch64-unknown-linux-gnu": [
               {
-                "id": "serde_core 1.0.228",
+                "id": "serde_core 1.0.229",
                 "target": "serde_core"
               }
             ],
             "x86_64-pc-windows-msvc": [
               {
-                "id": "serde_core 1.0.228",
+                "id": "serde_core 1.0.229",
                 "target": "serde_core"
               }
             ],
             "x86_64-unknown-linux-gnu": [
               {
-                "id": "serde_core 1.0.228",
+                "id": "serde_core 1.0.229",
                 "target": "serde_core"
               }
             ],
             "x86_64-unknown-nixos-gnu": [
               {
-                "id": "serde_core 1.0.228",
+                "id": "serde_core 1.0.229",
                 "target": "serde_core"
               }
             ]
@@ -15938,7 +15942,7 @@
               "target": "regex"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -16349,7 +16353,7 @@
               "target": "cfg_if"
             },
             {
-              "id": "futures-util 0.3.32",
+              "id": "futures-util 0.3.34",
               "target": "futures_util"
             },
             {
@@ -18179,14 +18183,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "napi 3.12.1": {
+    "napi 3.12.2": {
       "name": "napi",
-      "version": "3.12.1",
+      "version": "3.12.2",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi/3.12.1/download",
-          "sha256": "459197f1592f4c3dbbf9c1b13f5a4599a343e4ef66b96bc340e2a518b36a6662"
+          "url": "https://static.crates.io/crates/napi/3.12.2/download",
+          "sha256": "58c5f4d5375213fdb7be2655e152386e82f026f9a5ba36a75556e11359aafe09"
         }
       },
       "targets": [
@@ -18253,7 +18257,7 @@
               "target": "ctor"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -18269,7 +18273,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -18297,7 +18301,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.12.1"
+        "version": "3.12.2"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -19458,7 +19462,7 @@
         "deps": {
           "common": [
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -19466,11 +19470,11 @@
               "target": "chrono"
             },
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-util 0.3.32",
+              "id": "futures-util 0.3.34",
               "target": "futures_util"
             },
             {
@@ -19517,7 +19521,7 @@
           "selects": {
             "cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))": [
               {
-                "id": "futures-channel 0.3.32",
+                "id": "futures-channel 0.3.34",
                 "target": "futures_channel"
               },
               {
@@ -20008,14 +20012,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "parquet 58.3.0": {
+    "parquet 58.4.0": {
       "name": "parquet",
-      "version": "58.3.0",
+      "version": "58.4.0",
       "package_url": "https://github.com/apache/arrow-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/parquet/58.3.0/download",
-          "sha256": "5dafa7d01085b62a47dd0c1829550a0a36710ea9c4fe358a05a85477cec8a908"
+          "url": "https://static.crates.io/crates/parquet/58.4.0/download",
+          "sha256": "d298093b2dec60289dce0684c986d0f7679e9dd15771c2c65406e1aaf604a704"
         }
       },
       "targets": [
@@ -20066,27 +20070,27 @@
         "deps": {
           "common": [
             {
-              "id": "arrow-array 58.3.0",
+              "id": "arrow-array 58.4.0",
               "target": "arrow_array"
             },
             {
-              "id": "arrow-buffer 58.3.0",
+              "id": "arrow-buffer 58.4.0",
               "target": "arrow_buffer"
             },
             {
-              "id": "arrow-data 58.3.0",
+              "id": "arrow-data 58.4.0",
               "target": "arrow_data"
             },
             {
-              "id": "arrow-ipc 58.3.0",
+              "id": "arrow-ipc 58.4.0",
               "target": "arrow_ipc"
             },
             {
-              "id": "arrow-schema 58.3.0",
+              "id": "arrow-schema 58.4.0",
               "target": "arrow_schema"
             },
             {
-              "id": "arrow-select 58.3.0",
+              "id": "arrow-select 58.4.0",
               "target": "arrow_select"
             },
             {
@@ -20098,7 +20102,7 @@
               "target": "brotli"
             },
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -20110,7 +20114,7 @@
               "target": "flate2"
             },
             {
-              "id": "futures 0.3.32",
+              "id": "futures 0.3.34",
               "target": "futures"
             },
             {
@@ -20195,7 +20199,7 @@
           ],
           "selects": {}
         },
-        "version": "58.3.0"
+        "version": "58.4.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -23242,7 +23246,7 @@
                 "alias": "libc_errno"
               },
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
@@ -23880,14 +23884,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "serde 1.0.228": {
+    "serde 1.0.229": {
       "name": "serde",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "package_url": "https://github.com/serde-rs/serde",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/serde/1.0.228/download",
-          "sha256": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+          "url": "https://static.crates.io/crates/serde/1.0.229/download",
+          "sha256": "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
         }
       },
       "targets": [
@@ -23934,7 +23938,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             }
           ],
@@ -23950,13 +23954,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "serde_derive 1.0.228",
+              "id": "serde_derive 1.0.229",
               "target": "serde_derive"
             }
           ],
           "selects": {}
         },
-        "version": "1.0.228"
+        "version": "1.0.229"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -23976,14 +23980,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "serde_core 1.0.228": {
+    "serde_core 1.0.229": {
       "name": "serde_core",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "package_url": "https://github.com/serde-rs/serde",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/serde_core/1.0.228/download",
-          "sha256": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+          "url": "https://static.crates.io/crates/serde_core/1.0.229/download",
+          "sha256": "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
         }
       },
       "targets": [
@@ -24039,13 +24043,13 @@
           "selects": {
             "cfg(any())": [
               {
-                "id": "serde_derive 1.0.228",
+                "id": "serde_derive 1.0.229",
                 "target": "serde_derive"
               }
             ]
           }
         },
-        "version": "1.0.228"
+        "version": "1.0.229"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -24065,14 +24069,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "serde_derive 1.0.228": {
+    "serde_derive 1.0.229": {
       "name": "serde_derive",
-      "version": "1.0.228",
+      "version": "1.0.229",
       "package_url": "https://github.com/serde-rs/serde",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/serde_derive/1.0.228/download",
-          "sha256": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+          "url": "https://static.crates.io/crates/serde_derive/1.0.229/download",
+          "sha256": "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
         }
       },
       "targets": [
@@ -24111,14 +24115,14 @@
               "target": "quote"
             },
             {
-              "id": "syn 2.0.117",
+              "id": "syn 3.0.2",
               "target": "syn"
             }
           ],
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.0.228"
+        "version": "1.0.229"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -24186,7 +24190,7 @@
               "target": "memchr"
             },
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -24197,7 +24201,7 @@
           "selects": {
             "cfg(any())": [
               {
-                "id": "serde 1.0.228",
+                "id": "serde 1.0.229",
                 "target": "serde"
               }
             ]
@@ -24274,7 +24278,7 @@
               "target": "ryu"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -24705,7 +24709,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             }
           ],
@@ -26085,7 +26089,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -26150,7 +26154,7 @@
               "target": "typetag"
             },
             {
-              "id": "uuid 1.24.1",
+              "id": "uuid 1.26.0",
               "target": "uuid"
             }
           ],
@@ -26263,7 +26267,7 @@
               "target": "itertools"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -26337,7 +26341,7 @@
               "target": "ownedbytes"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -26473,7 +26477,7 @@
               "target": "ordered_float"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -26524,7 +26528,7 @@
         "deps": {
           "common": [
             {
-              "id": "futures-util 0.3.32",
+              "id": "futures-util 0.3.34",
               "target": "futures_util"
             },
             {
@@ -26640,7 +26644,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             }
           ],
@@ -26778,13 +26782,13 @@
           "selects": {
             "aarch64-apple-darwin": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ],
             "aarch64-unknown-linux-gnu": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ],
@@ -26796,31 +26800,31 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
             "wasm32-wasip1": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ],
             "x86_64-pc-windows-msvc": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ],
             "x86_64-unknown-linux-gnu": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ],
             "x86_64-unknown-nixos-gnu": [
               {
-                "id": "getrandom 0.3.4",
+                "id": "getrandom 0.4.2",
                 "target": "getrandom"
               }
             ]
@@ -26876,7 +26880,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -27405,7 +27409,7 @@
               "target": "powerfmt"
             },
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -27819,7 +27823,7 @@
         "deps": {
           "common": [
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
@@ -28024,7 +28028,7 @@
         "deps": {
           "common": [
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
@@ -28090,15 +28094,15 @@
         "deps": {
           "common": [
             {
-              "id": "bytes 1.11.1",
+              "id": "bytes 1.12.1",
               "target": "bytes"
             },
             {
-              "id": "futures-core 0.3.32",
+              "id": "futures-core 0.3.34",
               "target": "futures_core"
             },
             {
-              "id": "futures-sink 0.3.32",
+              "id": "futures-sink 0.3.34",
               "target": "futures_sink"
             },
             {
@@ -28786,7 +28790,7 @@
               "target": "once_cell"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             }
           ],
@@ -29428,7 +29432,7 @@
               "target": "percent_encoding"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             }
           ],
@@ -29438,7 +29442,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "serde_derive 1.0.228",
+              "id": "serde_derive 1.0.229",
               "target": "serde_derive"
             }
           ],
@@ -29622,14 +29626,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "uuid 1.24.1": {
+    "uuid 1.26.0": {
       "name": "uuid",
-      "version": "1.24.1",
+      "version": "1.26.0",
       "package_url": "https://github.com/uuid-rs/uuid",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/uuid/1.24.1/download",
-          "sha256": "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+          "url": "https://static.crates.io/crates/uuid/1.26.0/download",
+          "sha256": "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
         }
       },
       "targets": [
@@ -29668,7 +29672,7 @@
         "deps": {
           "common": [
             {
-              "id": "serde_core 1.0.228",
+              "id": "serde_core 1.0.229",
               "target": "serde_core"
             },
             {
@@ -29722,7 +29726,7 @@
           }
         },
         "edition": "2021",
-        "version": "1.24.1"
+        "version": "1.26.0"
       },
       "license": "Apache-2.0 OR MIT",
       "license_ids": [
@@ -30918,7 +30922,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -31859,7 +31863,6 @@
             "Win32_System",
             "Win32_System_Console",
             "Win32_System_IO",
-            "Win32_System_SystemInformation",
             "Win32_UI",
             "Win32_UI_Input",
             "Win32_UI_Input_KeyboardAndMouse",
@@ -31937,6 +31940,7 @@
             "Win32_System_Ioctl",
             "Win32_System_Memory",
             "Win32_System_Pipes",
+            "Win32_System_SystemInformation",
             "Win32_System_SystemServices",
             "Win32_System_Threading",
             "Win32_System_WindowsProgramming",
@@ -33163,7 +33167,7 @@
               "target": "log"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -33193,7 +33197,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "serde_derive 1.0.228",
+              "id": "serde_derive 1.0.229",
               "target": "serde_derive"
             }
           ],
@@ -33269,7 +33273,7 @@
               "target": "semver"
             },
             {
-              "id": "serde 1.0.228",
+              "id": "serde 1.0.229",
               "target": "serde"
             },
             {
@@ -33291,7 +33295,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "serde_derive 1.0.228",
+              "id": "serde_derive 1.0.229",
               "target": "serde_derive"
             }
           ],
@@ -34518,11 +34522,11 @@
   },
   "direct_deps": [
     "anyhow 1.0.104",
-    "arrow 58.3.0",
-    "arrow-data 58.3.0",
+    "arrow 58.4.0",
+    "arrow-data 58.4.0",
     "async-trait 0.1.92",
     "atomicwrites 0.4.4",
-    "bytes 1.11.1",
+    "bytes 1.12.1",
     "chrono 0.4.45",
     "chrono-tz 0.10.4",
     "clap 4.6.6",
@@ -34531,17 +34535,17 @@
     "datafusion-datasource 54.1.0",
     "datafusion-functions-aggregate 54.1.0",
     "fs4 1.1.0",
-    "futures 0.3.32",
+    "futures 0.3.34",
     "libc 0.2.189",
     "named-lock 0.4.1",
-    "napi 3.12.1",
+    "napi 3.12.2",
     "napi-build 2.4.1",
     "napi-derive 3.6.3",
-    "parquet 58.3.0",
+    "parquet 58.4.0",
     "pyo3 0.28.3",
     "rayon 1.12.0",
     "rustix 1.1.4",
-    "serde 1.0.228",
+    "serde 1.0.229",
     "serde_json 1.0.151",
     "serde_yaml_ng 0.9.36",
     "sha2 0.11.0",
@@ -34554,7 +34558,7 @@
     "unicode-normalization 0.1.25",
     "ureq 3.4.0",
     "url 2.5.8",
-    "uuid 1.24.1",
+    "uuid 1.26.0",
     "windows-sys 0.61.2"
   ],
   "direct_dev_deps": [

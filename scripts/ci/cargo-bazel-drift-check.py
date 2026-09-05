@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed Cargo ↔ Bazel migration drift check (#11).
 
-Computes a deterministic fingerprint of workspace package dependency/feature
-graphs from `cargo metadata --locked` and compares it to the checked-in
-fingerprint under tools/bazel/drift/.
+Checks exact registry package versions/download checksums in both lockfiles,
+then compares workspace dependency/features from `cargo metadata --locked`
+with the checked-in fingerprint under tools/bazel/drift/.
 
 Ordinary Bazel compilation must not shell out to Cargo; this inventory tool is
 allowed to read Cargo metadata so silent Cargo.toml/Cargo.lock feature drift
@@ -16,12 +16,61 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
 
+import tomllib
+
 SCHEMA = "graphforge.cargo-feature-fingerprint.v1"
 DEFAULT_FINGERPRINT = Path("tools/bazel/drift/cargo_feature_fingerprint.json")
+
+
+def validate_locked_crates(root: Path) -> None:
+    """Require Bazel to use Cargo's exact registry package versions and bytes."""
+    cargo_lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
+    bazel_lock = json.loads((root / "cargo-bazel-lock.json").read_text(encoding="utf-8"))
+    expected = {}
+    for package in cargo_lock["package"]:
+        source = package.get("source")
+        if source is None:
+            continue
+        if source != "registry+https://github.com/rust-lang/crates.io-index":
+            raise ValueError(f"unsupported Cargo dependency source: {source}")
+        name, version = package["name"], package["version"]
+        checksum = package.get("checksum")
+        if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+            raise ValueError(f"invalid Cargo checksum for {name} {version}")
+        key = f"{name} {version}"
+        if key in expected:
+            raise ValueError(f"duplicate Cargo package: {key}")
+        expected[key] = {
+            "url": f"https://static.crates.io/crates/{name}/{version}/download",
+            "sha256": checksum,
+        }
+
+    observed = {}
+    for key, package in bazel_lock["crates"].items():
+        repository = package.get("repository")
+        if repository is None:
+            continue
+        if key != f"{package['name']} {package['version']}":
+            raise ValueError(f"Bazel package key disagrees with its identity: {key}")
+        if not isinstance(repository, dict) or set(repository) != {"Http"}:
+            raise ValueError(f"unsupported Bazel dependency source for {key}")
+        observed[key] = repository["Http"]
+
+    missing = sorted(expected.keys() - observed.keys())
+    extra = sorted(observed.keys() - expected.keys())
+    changed = sorted(
+        key for key in expected.keys() & observed.keys() if expected[key] != observed[key]
+    )
+    if missing or extra or changed:
+        raise ValueError(
+            f"missing Bazel packages={missing}; stale/extra Bazel packages={extra}; "
+            f"source/checksum mismatches={changed}"
+        )
 
 
 def repo_root() -> Path:
@@ -116,6 +165,16 @@ def main(argv: list[str] | None = None) -> int:
         write_fingerprint(fingerprint_path, payload)
         print(f"wrote {fingerprint_path} sha256={payload['sha256']}")
         return 0
+
+    try:
+        validate_locked_crates(root)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"Cargo/Bazel locked dependency drift: {error}", file=sys.stderr)
+        print(
+            "Repin with: CARGO_BAZEL_REPIN=1 bazelisk mod deps --repo_env=CARGO_BAZEL_REPIN=1",
+            file=sys.stderr,
+        )
+        return 1
 
     if not fingerprint_path.is_file():
         print(f"missing fingerprint: {fingerprint_path}", file=sys.stderr)

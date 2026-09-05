@@ -78,8 +78,9 @@ bazelisk test //:bdd_tests
 # Fail-closed inventory / drift / parity diagnostics
 python3 scripts/ci/cargo-bazel-drift-check.py
 # After Cargo.lock bumps (including Dependabot cargo PRs), repin Bazel:
-#   CARGO_BAZEL_REPIN=1 bazelisk sync --only=crate_index
-# then re-run the drift check and commit MODULE.bazel.lock / fingerprint outputs.
+#   CARGO_BAZEL_REPIN=1 bazelisk mod deps --repo_env=CARGO_BAZEL_REPIN=1
+# then re-run the drift check and commit the generated cargo-bazel-lock.json
+# (and MODULE.bazel.lock if it changed).
 python3 scripts/ci/bazel-migration-ledger-check.py
 python3 scripts/ci/cargo-bazel-parity-check.py --mode all \
   --write-evidence dist/cargo-bazel-parity-evidence.json
@@ -107,7 +108,8 @@ Repo flags live in `.bazelrc` (Bzlmod on; **no** `--remote_cache`).
 
 ```bash
 python3 scripts/ci/cargo-bazel-drift-check.py --write
-CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party_libs
+CARGO_BAZEL_REPIN=1 bazelisk mod deps --repo_env=CARGO_BAZEL_REPIN=1
+python3 scripts/ci/cargo-bazel-drift-check.py
 python3 scripts/ci/bazel-migration-ledger-check.py
 ```
 
@@ -117,6 +119,10 @@ python3 scripts/ci/bazel-migration-ledger-check.py
   `cargo-bazel-lock.json` / fingerprint via the commands above.
 - Do not hand-edit `@crates` labels to diverge from lock state — the drift
   check must stay green.
+- The drift check compares registry package versions, download sources and
+  checksums across both lockfiles, in addition to first-party features.
+  Rewriting the feature fingerprint alone cannot accept stale Bazel packages.
+  New registry or Git source kinds require explicit checker support.
 
 ### Python test and extension build modes
 
