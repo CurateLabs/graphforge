@@ -75,6 +75,15 @@ class ParityGateTests(unittest.TestCase):
         )
         self.assertTrue(historical["met"])
 
+    def test_unreadable_history_blocks_structure_without_changing_ladder_parity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base = _temporary_fixture_root(temp_name)
+            (base / "fixtures/parity/legacy/cert-s20-minimal.json").unlink()
+            status = parity_gate_status(base)
+        self.assertFalse(status["structural_retirement_ready"])
+        self.assertTrue(status["prefix_parity_ready"])
+        self.assertFalse(status["full_ladder_evidence_complete"])
+
     def test_ingested_ladder_bundle_runs_comparisons(self) -> None:
         comparisons = compare_ladder_bundle(ladder_bundle_root())
         self.assertEqual(len(comparisons), 2)

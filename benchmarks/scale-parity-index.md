@@ -2,7 +2,7 @@
 
 Maps retired legacy Graph500 scale orchestration to the isolated `benchmarks/` harness.
 Retirement is complete in-tree; the parity gate remains blocked on ingested #900 ladder
-bundles until Fly execution evidence is checked in (see `fixtures/parity/ladder-bundle/README.md`).
+bundles until native host execution evidence is ingested (see `fixtures/parity/ladder-bundle/README.md`).
 
 ## Coverage map
 
@@ -12,8 +12,8 @@ bundles until Fly execution evidence is checked in (see `fixtures/parity/ladder-
 | `make bench-g500-scale20` | `profiles/graph500/s20-*.json` + progressive qualification | tiny shadow OK; ladder bundle pending #900 |
 | `make g500-ladder-qualification` | progressive qualification schemas + controller | retired; harness authoritative |
 | `cargo test -p graphforge-api --test scale_g500_ladder` (S10 CI) | `benchmarks/scripts/test-tiny-lifecycle-certification.py` | bounded correctness retained in product CI |
-| `cargo test … certification_target_live…` (retired) | `qualification-operator GATE=progressive-ladder` | blocked on #900 Fly execution |
-| `scripts/ci/validate-g500-certification.py` | `graphforge_bench.scale_parity` + progressive schemas | historical fixture validates |
+| `cargo test … certification_target_live…` (retired) | `qualification-operator GATE=progressive-ladder` | blocked on #900 native host execution |
+| `scripts/ci/validate-g500-certification.py` | `graphforge_bench.scale_parity` + progressive schemas | historical lifecycle fixture remains readable |
 | `docs/development/perf-g500-ladder.md` | `benchmarks/README.md` | historical reference retained |
 | `.github/workflows/g500-certification.yml` | `.github/workflows/progressive-ladder.yml` | retired; progressive-ladder handoff wired |
 
@@ -38,12 +38,18 @@ PYTHONPATH=harness uv run --locked python -m unittest tests.test_scale_parity te
 # Historical legacy certification fixture readability
 PYTHONPATH=harness uv run --locked python -c "
 from pathlib import Path
-from graphforge_bench.scale_parity import validate_historical_legacy_cert, workspace_root
+from graphforge_bench.scale_parity import read_historical_legacy_cert, workspace_root
 fixture = workspace_root() / 'fixtures/parity/legacy/cert-s20-minimal.json'
-validate_historical_legacy_cert(fixture, expected_sha='a' * 40)
+historical = read_historical_legacy_cert(fixture, expected_sha='a' * 40)
+assert historical.status == 'passed' and len(historical.phases) == 10
 print('legacy cert fixture readable')
 "
 ```
+
+The historical reader checks the preserved fixture and lifecycle mapping only.
+It does not authenticate a benchmark result or satisfy full-ladder certification.
+`validate_historical_legacy_cert` separately requires an externally authenticated
+provider-result anchor before validating certification evidence.
 
 ## Retirement gate (#959 acceptance)
 

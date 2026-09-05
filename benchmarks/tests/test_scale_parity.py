@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from graphforge_bench.scale_parity import (
@@ -15,6 +17,7 @@ from graphforge_bench.scale_parity import (
     normalize_legacy_evidence,
     normalize_new_evidence,
     normalize_rung_evidence,
+    read_historical_legacy_cert,
     validate_historical_legacy_cert,
     workspace_root,
 )
@@ -115,6 +118,48 @@ class ScaleParityTests(unittest.TestCase):
         fixture = FIXTURES / "legacy" / "cert-s20-minimal.json"
         with self.assertRaisesRegex(ParityError, "external provider-result anchor"):
             validate_historical_legacy_cert(fixture, expected_sha="a" * 40)
+
+    def test_historical_fixture_readability_does_not_authenticate_certification(self) -> None:
+        fixture = FIXTURES / "legacy" / "cert-s20-minimal.json"
+        historical = read_historical_legacy_cert(fixture, expected_sha="a" * 40)
+        self.assertEqual(historical.status, "passed")
+        self.assertEqual(len(historical.phases), 10)
+        with self.assertRaisesRegex(ParityError, "external provider-result anchor"):
+            validate_historical_legacy_cert(fixture, expected_sha="a" * 40)
+
+    def test_historical_reader_rejects_malformed_or_incomplete_lifecycles(self) -> None:
+        original = (FIXTURES / "legacy" / "cert-s20-minimal.json").read_text()
+        mutations = {
+            "wrong_schema": lambda d: d.update(schema="unknown"),
+            "wrong_sha": lambda d: d.update(git_sha="b" * 40),
+            "invalid_result": lambda d: d.update(result=[]),
+            "invalid_scale": lambda d: d["run"].update(scale=True),
+            "missing_phase": lambda d: d["phases"].pop(),
+            "duplicate_phase": lambda d: d["phases"].__setitem__(0, d["phases"][1]),
+            "invalid_phase": lambda d: d["phases"].__setitem__(0, None),
+            "invalid_id": lambda d: d["phases"][0].update(id=[]),
+            "invalid_status": lambda d: d["phases"][0].update(status=[]),
+            "invalid_elapsed": lambda d: d["phases"][0].update(elapsed_ms=True),
+            "negative_rss": lambda d: d["phases"][0].update(rss_peak_bytes=-1),
+            "failed_unmapped_drill": lambda d: d["phases"][-1].update(status="fail"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "historical.json"
+            for name, mutate in mutations.items():
+                with self.subTest(name=name):
+                    document = json.loads(original)
+                    mutate(document)
+                    fixture.write_text(json.dumps(document))
+                    with self.assertRaises(ParityError):
+                        read_historical_legacy_cert(fixture, expected_sha="a" * 40)
+            for encoded in ("{", "[]"):
+                with self.subTest(encoded=encoded):
+                    fixture.write_text(encoded)
+                    with self.assertRaises(ParityError):
+                        read_historical_legacy_cert(fixture, expected_sha="a" * 40)
+            fixture.unlink()
+            with self.assertRaises(ParityError):
+                read_historical_legacy_cert(fixture, expected_sha="a" * 40)
 
     def test_coverage_map_lists_legacy_entrypoints(self) -> None:
         mapping = coverage_map()

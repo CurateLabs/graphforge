@@ -9,12 +9,13 @@ from typing import Any
 from graphforge_bench.ladder_bundle_ingest import validate_ladder_bundle
 from graphforge_bench.native_ladder_bundle import NativeBundleError, validate_native_bundle
 from graphforge_bench.progressive_provider_attempt import CANONICAL_RUNGS
+from graphforge_bench.progressive_qualification import PHASES
 from graphforge_bench.scale_parity import (
     compare_fixture_pair,
     compare_ladder_bundle,
     coverage_map,
     load_accepted_differences,
-    validate_historical_legacy_cert,
+    read_historical_legacy_cert,
     workspace_root,
 )
 
@@ -119,8 +120,11 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
     historical_ok = False
     if historical_path.is_file():
         try:
-            validate_historical_legacy_cert(historical_path, expected_sha="a" * 40)
-            historical_ok = True
+            historical = read_historical_legacy_cert(historical_path, expected_sha="a" * 40)
+            historical_ok = (
+                historical.status == "passed"
+                and tuple(phase.phase for phase in historical.phases) == PHASES
+            )
         except Exception:
             historical_ok = False
 
