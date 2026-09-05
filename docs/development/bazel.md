@@ -113,6 +113,22 @@ python3 scripts/ci/cargo-bazel-drift-check.py
 python3 scripts/ci/bazel-migration-ledger-check.py
 ```
 
+### Differential traversal oracle
+
+Ordinary builds of `graphforge-rel` and `graphforge-exec` do not expose a
+reference-mode switch. The independent relational fixed-hop oracle requires the
+non-default `differential-testing` feature. Run its existing three-way corpus with:
+
+```bash
+cargo test -p graphforge-exec --features differential-testing --test differential_traversal
+bazelisk test //crates/graphforge-exec:differential_traversal
+```
+
+The Bazel target uses private/test-only feature variants and remains in
+`//:ci_rust_tests`. It verifies indexed and scan-built provider execution against
+the relational oracle, including physical-plan differences and result equality.
+Cargo selects this integration target when the explicit feature is enabled.
+
 ### Dependencies and features
 
 - Declare deps/features in Cargo manifests only; regenerate

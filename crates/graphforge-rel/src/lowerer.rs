@@ -117,8 +117,8 @@ pub struct GraphPlanLowerer<'a> {
     /// non-empty, so the no-ontology TCK plan is byte-identical.
     inference_rules: HashMap<u32, Vec<(String, String)>>,
     /// Test-only escape hatch that retains the relational fixed-hop lowering
-    /// as an independent semantic oracle. Production constructors leave this
-    /// disabled, so provider-backed expansion remains the sole default.
+    /// as an independent semantic oracle. Absent from ordinary builds.
+    #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
 }
 
@@ -206,13 +206,14 @@ impl<'a> GraphPlanLowerer<'a> {
             read_dir,
             node_shapes: std::sync::RwLock::new(HashMap::new()),
             inference_rules: build_inference_rules(ontology),
+            #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
         }
     }
 
     /// Select the legacy relational fixed-hop lowering as a differential-test
-    /// oracle. This is deliberately doc-hidden and never enabled by production
-    /// API paths.
+    /// oracle. Available only with the non-default `differential-testing` feature.
+    #[cfg(feature = "differential-testing")]
     #[doc(hidden)]
     #[must_use]
     pub fn with_relational_fixed_hop_reference(mut self) -> Self {
@@ -899,6 +900,7 @@ impl<'a> GraphPlanLowerer<'a> {
                     &self.type_id_to_rel_name,
                     &self.inference_rules,
                     self.read_dir,
+                    #[cfg(feature = "differential-testing")]
                     self.relational_fixed_hop_reference,
                 );
             }
@@ -3729,7 +3731,7 @@ fn lower_expand(
     type_id_to_rel_name: &HashMap<u32, String>,
     inference_rules: &HashMap<u32, Vec<(String, String)>>,
     target: Option<(&Path, OntologyMode)>,
-    relational_reference: bool,
+    #[cfg(feature = "differential-testing")] relational_reference: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     // Variable-length expand cannot be expressed in relational algebra; emit
     // the graphforge-plan Extension node whose physical execution (physical execution) performs an
@@ -3762,6 +3764,8 @@ fn lower_expand(
     // A project-backed fixed hop always uses the provider-backed Extension
     // node (#1248). The provider owns hit/miss/building fallback, keeping the
     // physical shape stable so a terminal LIMIT can cancel traversal work.
+    #[cfg(not(feature = "differential-testing"))]
+    let relational_reference = false;
     if !relational_reference
         && let Some(plan) = try_lower_provider_expand(
             src,

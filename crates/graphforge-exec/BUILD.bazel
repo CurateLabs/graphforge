@@ -25,6 +25,21 @@ gf_rust_library(
     deps = _EXEC_DEPS,
 )
 
+_EXEC_DIFFERENTIAL_DEPS = [
+    dep
+    for dep in _EXEC_DEPS
+    if dep != "//crates/graphforge-rel:graphforge_rel"
+] + ["//crates/graphforge-rel:graphforge_rel_differential"]
+
+gf_rust_library(
+    name = "graphforge_exec_differential",
+    crate_name = "graphforge_exec",
+    crate_features = ["differential-testing"],
+    testonly = True,
+    visibility = ["//visibility:private"],
+    deps = _EXEC_DIFFERENTIAL_DEPS,
+)
+
 gf_rust_test(
     name = "graphforge_exec_test",
     crate = ":graphforge_exec",
@@ -84,10 +99,12 @@ gf_rust_integration_test(
 gf_rust_integration_test(
     name = "differential_traversal",
     srcs = ["tests/differential_traversal.rs"],
-    crate = ":graphforge_exec",
+    crate = ":graphforge_exec_differential",
     data = _EXEC_TEST_DATA,
     size = "medium",
-    deps = _EXEC_TEST_DEPS,
+    deps = _EXEC_DIFFERENTIAL_DEPS + [
+        "//crates/graphforge-cypher:graphforge_cypher",
+    ],
 )
 
 gf_rust_integration_test(

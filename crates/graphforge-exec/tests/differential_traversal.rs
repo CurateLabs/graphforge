@@ -135,26 +135,29 @@ async fn differential(
     query: &str,
     shape: PlanShape,
 ) -> Vec<String> {
-    let plan = bind(query, rc);
+    let bound_query = bind(query, rc);
 
     build_adjacency_index(dir, TS).unwrap();
     let indexed_session = session(dir, rc);
-    let indexed_plan = indexed_session.explain_physical(&plan).await.unwrap();
-    let indexed = indexed_session.execute_plan(&plan).await.unwrap();
+    let indexed_plan = indexed_session
+        .explain_physical(&bound_query)
+        .await
+        .unwrap();
+    let indexed = indexed_session.execute_plan(&bound_query).await.unwrap();
 
     std::fs::remove_dir_all(dir.join("indexes")).unwrap();
     let plain_session = session(dir, rc);
-    let plain_plan = plain_session.explain_physical(&plan).await.unwrap();
-    let plain = plain_session.execute_plan(&plan).await.unwrap();
+    let plain_plan = plain_session.explain_physical(&bound_query).await.unwrap();
+    let plain = plain_session.execute_plan(&bound_query).await.unwrap();
 
     let relational = if matches!(shape, PlanShape::FixedHopProvider { .. }) {
         let reference = session(dir, rc).with_relational_fixed_hop_reference();
-        let reference_plan = reference.explain_physical(&plan).await.unwrap();
+        let reference_plan = reference.explain_physical(&bound_query).await.unwrap();
         assert!(
             !reference_plan.contains("ExpandExec"),
             "{query}: relational oracle unexpectedly used provider expansion:\n{reference_plan}"
         );
-        Some(reference.execute_plan(&plan).await.unwrap())
+        Some(reference.execute_plan(&bound_query).await.unwrap())
     } else {
         None
     };

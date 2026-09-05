@@ -7,6 +7,10 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+# Explicit opt-in for the independent fixed-hop differential oracle.
+differential-testing = []
+
 [dependencies]
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
