@@ -329,8 +329,8 @@ make -C benchmarks smoke
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
 checks the Rust runners and their public-facade dependency boundary. This includes
-the bounded in-memory Graphalytics fixture through the real GraphForge API. It
-does not start a provider or execute the host scale ladder.
+the bounded in-memory Graphalytics and SNB BI2 fixtures through the real GraphForge
+API. It does not start a provider or execute the host scale ladder.
 
 ## Native local admission
 
