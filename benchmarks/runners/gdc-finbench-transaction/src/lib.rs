@@ -748,13 +748,29 @@ pub struct SuiteEvidence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuiteError {
     InvalidDocument(String),
+    LiveExecution {
+        phase: String,
+        resource: bool,
+        detail: String,
+    },
     ReferenceMismatch(String),
-    SemanticIncompatibility { cause: String, detail: String },
+    SemanticIncompatibility {
+        cause: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for SuiteError {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LiveExecution {
+                phase,
+                resource,
+                detail,
+            } => write!(
+                output,
+                "live_execution:phase={phase}:resource={resource}: {detail}"
+            ),
             Self::InvalidDocument(message) => write!(output, "invalid_document: {message}"),
             Self::ReferenceMismatch(message) => write!(output, "reference_mismatch: {message}"),
             Self::SemanticIncompatibility { cause, detail } => {
@@ -1354,8 +1370,12 @@ fn independently_derived_jaccard(seed: &LiveSeed, bindings: &LiveBindings) -> St
     format!("{similarity:.3}")
 }
 
-fn api_error(context: &str, error: impl fmt::Display) -> SuiteError {
-    SuiteError::InvalidDocument(format!("live_api_execution_failed:{context}: {error}"))
+fn api_error(context: &str, error: graphforge_api::GfError) -> SuiteError {
+    SuiteError::LiveExecution {
+        phase: context.into(),
+        resource: error.code() == "GF_RESOURCE_LIMIT",
+        detail: error.to_string(),
+    }
 }
 
 fn execute_with_params(
@@ -1421,7 +1441,7 @@ fn execute_live_tcr10(
     ]);
     let result = forge
         .execute_with_params(LIVE_TCR10_QUERY, &params)
-        .map_err(|error| api_error("query", error))?;
+        .map_err(|error| api_error("execution", error))?;
     if result.schema.fields().len() != 1 || result.schema.field(0).name() != "jaccardSimilarity" {
         return Err(SuiteError::InvalidDocument(format!(
             "TCR10 result schema drifted: expected [jaccardSimilarity], got {:?}",
@@ -1472,6 +1492,29 @@ fn live_identities(identity: &LiveIdentity, executable_sha256: String) -> serde_
     })
 }
 
+fn live_tcr10_outcome(
+    reference: &ResultRows,
+    rows: Result<ResultRows, SuiteError>,
+    mapping: PublicApiMapping,
+) -> OperationOutcome {
+    let validation = rows.and_then(|rows| {
+        RustReferenceValidator.validate(ValidationMode::Normalized, reference, &rows)
+    });
+    let status = match &validation {
+        Ok(()) => OperationStatus::Passed,
+        Err(SuiteError::ReferenceMismatch(_)) => OperationStatus::CorrectnessFailed,
+        Err(SuiteError::LiveExecution { resource: true, .. }) => OperationStatus::ResourceExceeded,
+        Err(_) => OperationStatus::HarnessError,
+    };
+    outcome(
+        Operation::Tcr10,
+        status,
+        ValidationMode::Normalized.name(),
+        validation.err().map(|error| error.to_string()),
+        Some(mapping),
+    )
+}
+
 pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEvidence, SuiteError> {
     if fixture.is_file() {
         return Err(SuiteError::InvalidDocument(
@@ -1481,16 +1524,17 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
     }
     let context = validate_live_context(fixture)?;
     let executable_sha256 = sha256_bytes(&read_bytes(executable, "runner executable")?);
-    let forge =
-        graphforge_api::GraphForge::new(None).map_err(|error| api_error("initialize", error))?;
-
-    let load_started = Instant::now();
-    let _rows_loaded = load_live_seed(&forge, &context.seed)?;
-    let _load_ms = u64::try_from(load_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    let query_started = Instant::now();
-    let rows = execute_live_tcr10(&forge, &context.parameters.bindings)?;
-    let _query_ms = u64::try_from(query_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let rows = (|| {
+        let forge =
+            graphforge_api::GraphForge::new(None).map_err(|error| api_error("load", error))?;
+        let load_started = Instant::now();
+        let _rows_loaded = load_live_seed(&forge, &context.seed)?;
+        let _load_ms = u64::try_from(load_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let query_started = Instant::now();
+        let rows = execute_live_tcr10(&forge, &context.parameters.bindings);
+        let _query_ms = u64::try_from(query_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        rows
+    })();
 
     let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
         return Err(SuiteError::InvalidDocument(
@@ -1504,20 +1548,12 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
     }
 
     let validator = RustReferenceValidator;
-    let validation = validator.validate(ValidationMode::Normalized, &context.reference, &rows);
-    let status = match &validation {
-        Ok(()) => OperationStatus::Passed,
-        Err(SuiteError::ReferenceMismatch(_)) => OperationStatus::CorrectnessFailed,
-        Err(error) => return Err(error.clone()),
+    let failure_phase = match &rows {
+        Err(SuiteError::LiveExecution { phase, .. }) => Some(phase.clone()),
+        Err(_) => Some("execution".into()),
+        Ok(_) => None,
     };
-    let cause = validation.err().map(|error| error.to_string());
-    let tcr10 = outcome(
-        Operation::Tcr10,
-        status,
-        ValidationMode::Normalized.name(),
-        cause,
-        Some(mapping),
-    );
+    let tcr10 = live_tcr10_outcome(&context.reference, rows, mapping);
     let tcr1 = run_job(
         &OperationJob {
             schema: JOB_SCHEMA.into(),
@@ -1538,7 +1574,7 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
         None,
         None,
     );
-    Ok(assemble_evidence_with_context(
+    let mut evidence = assemble_evidence_with_context(
         LIVE_DATASET_ID,
         live_identities(&context.identity, executable_sha256),
         vec![tcr10, tcr1, tw1],
@@ -1547,7 +1583,16 @@ pub fn run_live_fixture(fixture: &Path, executable: &Path) -> Result<SuiteEviden
             interface: validator.interface().into(),
             reference_derivation: context.identity.reference.authority.clone(),
         },
-    ))
+    );
+    if let Some(phase) = failure_phase {
+        for event in &mut evidence.resource_events {
+            event.phase = phase.clone();
+        }
+        for failure in &mut evidence.harness_failures {
+            failure.phase = phase.clone();
+        }
+    }
+    Ok(evidence)
 }
 
 /// Aggregate per-operation outcomes into the suite evidence, projecting the
@@ -1671,6 +1716,50 @@ mod tests {
             suite_id: SUITE_ID.into(),
             dataset_id: BOUNDED_TINY_DATASET.into(),
             operation,
+        }
+    }
+
+    #[test]
+    fn live_public_api_errors_retain_resource_and_harness_classification() {
+        use graphforge_api::{ApiErrorCode, GfError, ProjectErrorCode};
+        let errors = [
+            (
+                GfError::Api {
+                    code: ApiErrorCode::ResourceLimit,
+                    message: "test budget".into(),
+                },
+                OperationStatus::ResourceExceeded,
+            ),
+            (
+                GfError::Project {
+                    code: ProjectErrorCode::ResourceLimit,
+                    message: "test budget".into(),
+                },
+                OperationStatus::ResourceExceeded,
+            ),
+            (
+                GfError::Execution("test runtime failure".into()),
+                OperationStatus::HarnessError,
+            ),
+        ];
+        for (error, expected) in errors {
+            let MappingOutcome::Compatible(mapping) = map_operation(Operation::Tcr10) else {
+                panic!("TCR10 mapping")
+            };
+            let translated = api_error("execution", error);
+            let result = live_tcr10_outcome(&vec![], Err(translated), mapping);
+            let evidence = assemble_evidence(LIVE_DATASET_ID, serde_json::json!({}), vec![result]);
+            assert_eq!(evidence.status, expected);
+            assert_eq!(
+                evidence.resource_events.len(),
+                usize::from(expected == OperationStatus::ResourceExceeded)
+            );
+            assert_eq!(
+                evidence.harness_failures.len(),
+                usize::from(expected == OperationStatus::HarnessError)
+            );
+            let json = serde_json::to_string(&evidence).unwrap();
+            assert!(json.contains(expected.name()));
         }
     }
 
@@ -1875,14 +1964,18 @@ mod tests {
         assert_eq!(evidence.harness_failures.len(), 1);
         assert_eq!(evidence.harness_failures[0].operation, Operation::Tsr3);
         // Correctness failures are never projected into the other two lanes.
-        assert!(!evidence
-            .resource_events
-            .iter()
-            .any(|item| item.operation == Operation::Tsr1));
-        assert!(!evidence
-            .harness_failures
-            .iter()
-            .any(|item| item.operation == Operation::Tsr1));
+        assert!(
+            !evidence
+                .resource_events
+                .iter()
+                .any(|item| item.operation == Operation::Tsr1)
+        );
+        assert!(
+            !evidence
+                .harness_failures
+                .iter()
+                .any(|item| item.operation == Operation::Tsr1)
+        );
         // Harness error is the worst class and drives the top-level status.
         assert_eq!(evidence.status, OperationStatus::HarnessError);
     }
