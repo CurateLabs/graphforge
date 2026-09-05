@@ -78,7 +78,7 @@ jobs:
 
       - name: Mount shared Linux Cargo build disk
         if: matrix.sticky_target == 'true'
-        uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
         with:
           # Retained for maturin lanes that still compile into workspace target/.
           key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
@@ -328,7 +328,7 @@ jobs:
 
       - name: Mount shared Linux Cargo build disk
         if: matrix.sticky_target == 'true'
-        uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
         with:
           # Retained for napi/cross lanes that still compile into workspace target/.
           key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
@@ -577,7 +577,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Mount release assembly Cargo build disk
-        uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
         with:
           key: ${{ github.repository }}-release_candidate-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
           path: target
