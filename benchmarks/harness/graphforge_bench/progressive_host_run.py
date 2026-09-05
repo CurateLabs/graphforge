@@ -87,8 +87,37 @@ def producer_files(root: Path) -> list[Path]:
 
 def producer_digest(root: Path, *, commit: str | None = None) -> str:
     """Bind producer behavior automatically; documentation changes are excluded."""
+    paths = set(producer_files(root))
+    if commit is not None:
+        package = root / "harness/graphforge_bench"
+        recorded_paths = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root.parent),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                commit,
+                "--",
+                "benchmarks/harness/graphforge_bench",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if recorded_paths.returncode:
+            raise HostRunError("host_prefix_producer_identity_mismatch")
+        # Legacy receipts have no stored producer digest. Enumerate their tree,
+        # not today's files, so deleted runtime helpers remain part of the hash.
+        paths = {path for path in paths if not path.is_relative_to(package)}
+        paths.update(
+            root.parent / name.decode("utf-8")
+            for name in recorded_paths.stdout.split(b"\0")
+            if name.endswith(b".py")
+        )
     digest = hashlib.sha256()
-    for path in producer_files(root):
+    for path in sorted(paths):
         relative = path.relative_to(root).as_posix()
         if commit is None:
             content = path.read_bytes()

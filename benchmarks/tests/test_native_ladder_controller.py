@@ -19,6 +19,75 @@ from tests.test_progressive_host_run import COMMIT, WORK_PARENT, sha256
 
 
 class NativeLadderControllerTests(unittest.TestCase):
+    def test_legacy_resume_detects_deleted_runtime_helper(self) -> None:
+        import shutil
+        import subprocess
+
+        from graphforge_bench.progressive_host_run import producer_digest, producer_files
+
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            base = Path(temporary)
+            work = base / "work"
+            output = work / "evidence"
+            write_host_bundle(output, 18)
+            tools = executables(work)
+            repository = base / "checkout"
+            copied_root = repository / "benchmarks"
+            for source in [
+                *producer_files(ROOT),
+                ROOT / "profiles/local-linux-cgroups-v2.json",
+                ROOT / "profiles/graph500/s18-local.json",
+                ROOT / "runners/graph500-generator/src/main.rs",
+            ]:
+                destination = copied_root / source.relative_to(ROOT)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            helper = copied_root / "harness/graphforge_bench/retired_runtime.py"
+            helper.write_text("value = 1\n")
+
+            def git(*arguments: str) -> str:
+                return (
+                    subprocess.check_output(
+                        ["git", "-C", str(repository), *arguments], stderr=subprocess.STDOUT
+                    )
+                    .decode()
+                    .strip()
+                )
+
+            git("init", "-q")
+            git("add", ".")
+            git(
+                "-c",
+                "user.name=Codex",
+                "-c",
+                "user.email=codex@openai.com",
+                "commit",
+                "-qm",
+                "original producer",
+            )
+            commit = git("rev-parse", "HEAD")
+            original = producer_digest(copied_root)
+            plan = json.loads((output / "s18-plan.json").read_text())
+            plan["identities"].pop("producer_sha256")
+            plan["identities"]["commit"] = commit
+            write_host_bundle(output, 18, plan)
+            options = {
+                "root": copied_root,
+                "output_dir": output,
+                "work_root": work,
+                "maximum_scale": 18,
+                "executables": tools,
+                "commit": commit,
+                "reserved_headroom_bytes": 1,
+            }
+            (copied_root / "README.md").write_text("Documentation-only change.\n")
+            self.assertEqual(execute_ladder(**options), [])
+            helper.unlink()
+            self.assertEqual(producer_digest(copied_root, commit=commit), original)
+            self.assertNotEqual(producer_digest(copied_root), original)
+            with self.assertRaisesRegex(HostRunError, "host_prefix_producer_identity_mismatch"):
+                execute_ladder(**options)
+
     def test_plan_then_run_same_directory_and_automatic_advance(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             work = Path(temporary)
