@@ -1,30 +1,31 @@
 {
   "schema": "graphforge-gdc-acquisition/1",
   "suite_id": "graphalytics",
+  "identity_profile": "static",
   "recorded_spec": {
-    "name": "ldbc-graphalytics",
-    "source": "https://ldbcouncil.org/benchmarks/graphalytics/",
-    "release": "1.0.0-engineering-pin",
+    "name": "graphforge-gdc-graphalytics-historical-engineering-spec",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc",
+    "release": "historical-wiki-Talk-marker-v1",
     "commit": null
   },
   "recorded_generator": {
-    "name": "graphalytics-datasets",
-    "source": "https://repository.surfsara.nl/datasets/cwi/graphalytics",
-    "release": "wiki-Talk-fixture-pin",
+    "name": "graphforge-wiki-Talk-marker-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc",
+    "release": "historical-wiki-Talk-marker-v1",
     "commit": null
   },
   "recorded_driver": {
-    "name": "ldbc_graphalytics",
-    "source": "https://github.com/ldbc/ldbc_graphalytics",
-    "release": null,
-    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "name": "graphforge-gdc-graphalytics-static-engineering-driver",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-graphalytics",
+    "release": "drifted-engineering-driver-v1",
+    "commit": null
   },
   "assets": [
     {
       "id": "wiki-Talk",
       "path": "wiki-Talk.txt",
       "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "Graphalytics-dataset-terms",
+      "license": "Apache-2.0",
       "acquisition": "fixture"
     }
   ],

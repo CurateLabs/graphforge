@@ -5,7 +5,7 @@
   "spec": {
     "name": "graphforge-gdc-graphalytics-historical-engineering-spec",
     "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc",
-    "release": null,
+    "release": "historical-wiki-Talk-marker-v1",
     "commit": null
   },
   "generator": {
@@ -25,10 +25,17 @@
       "id": "wiki-Talk",
       "role": "dataset",
       "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "",
+      "license": "Apache-2.0",
       "acquisition": "fixture",
       "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc"
     }
   ],
-  "references": []
+  "references": [
+    {
+      "dataset_id": "wiki-Talk",
+      "workload_key": "bfs",
+      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db",
+      "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc"
+    }
+  ]
 }

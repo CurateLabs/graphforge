@@ -1,6 +1,7 @@
 use graphforge_benchmark_gdc_graphalytics::{
-    Algorithm, AlgorithmJob, DatasetLadder, JOB_SCHEMA, LADDER_SCHEMA, MappingOutcome,
-    assemble_evidence, determinism_rules, load_vertex_value_file, map_algorithm, run_job,
+    Algorithm, AlgorithmJob, DatasetLadder, ExecutionMode, JOB_SCHEMA, LADDER_SCHEMA,
+    MappingOutcome, assemble_evidence, determinism_rules, load_live_graph, load_vertex_value_file,
+    map_algorithm, run_job, run_live_job,
 };
 use std::env;
 use std::fs;
@@ -11,7 +12,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-graphalytics <list-algorithms|list-ladder|map-job|run-suite> ..."
+            "usage: graphforge-benchmark-gdc-graphalytics <list-algorithms|list-ladder|map-job|run-suite|run-live> ..."
         );
         return ExitCode::from(2);
     };
@@ -106,6 +107,28 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "run-live" => {
+            let arguments = args.collect::<Vec<_>>();
+            if arguments.len() != 5 {
+                eprintln!(
+                    "usage: run-live EDGES_FILE JOBS_DIR REFERENCE_DIR IDENTITIES.json EVIDENCE.json"
+                );
+                return ExitCode::from(2);
+            }
+            match run_live_suite(
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                &arguments[3],
+                &arguments[4],
+            ) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
             ExitCode::from(2)
@@ -143,6 +166,143 @@ fn run_suite(
         &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    let jobs = load_jobs(jobs_dir)?;
+    let dataset_id = jobs[0].dataset_id.clone();
+    let mut outcomes = Vec::new();
+    for job in &jobs {
+        let reference_path =
+            PathBuf::from(reference_dir).join(format!("{}-{}.ref", dataset_id, job.algorithm));
+        let reference =
+            load_vertex_value_file(&reference_path).map_err(|error| error.to_string())?;
+        let output_path =
+            PathBuf::from(output_dir).join(format!("{}-{}.out", dataset_id, job.algorithm));
+        let system = if output_path.is_file() {
+            Some(load_vertex_value_file(&output_path).map_err(|error| error.to_string())?)
+        } else {
+            None
+        };
+        outcomes.push(run_job(job, &reference, system.as_ref()));
+    }
+    write_evidence(
+        &dataset_id,
+        identities,
+        ExecutionMode::StaticReplay,
+        outcomes,
+        evidence_path,
+    )
+}
+
+fn run_live_suite(
+    edges_path: &str,
+    jobs_dir: &str,
+    reference_dir: &str,
+    identities_path: &str,
+    evidence_path: &str,
+) -> Result<ExitCode, String> {
+    let identities: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(identities_path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let jobs = load_jobs(jobs_dir)?;
+    validate_live_inputs(edges_path, reference_dir, &identities, &jobs)?;
+    let dataset_id = jobs[0].dataset_id.clone();
+    let live =
+        load_live_graph(PathBuf::from(edges_path).as_path()).map_err(|error| error.to_string())?;
+    let mut outcomes = Vec::new();
+    for job in &jobs {
+        let reference_path =
+            PathBuf::from(reference_dir).join(format!("{}-{}.ref", dataset_id, job.algorithm));
+        let reference =
+            load_vertex_value_file(&reference_path).map_err(|error| error.to_string())?;
+        outcomes.push(run_live_job(&live, job, &reference));
+    }
+    write_evidence(
+        &dataset_id,
+        identities,
+        ExecutionMode::LivePublicApi,
+        outcomes,
+        evidence_path,
+    )
+}
+
+fn validate_live_inputs(
+    edges_path: &str,
+    reference_dir: &str,
+    identities: &serde_json::Value,
+    jobs: &[AlgorithmJob],
+) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let pin: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../profiles/gdc/graphalytics-live-identity.json"
+    ))
+    .map_err(|error| error.to_string())?;
+    let datasets = pin["datasets"].as_array().unwrap().iter().map(|item| serde_json::json!({
+        "id": item["id"], "checksum_sha256": item["checksum_sha256"], "license": item["license"]
+    })).collect::<Vec<_>>();
+    let references = pin["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "dataset_id": item["dataset_id"], "workload_key": item["workload_key"],
+                "checksum_sha256": item["checksum_sha256"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected = serde_json::json!({
+        "spec": pin["spec"], "generator": pin["generator"], "driver": pin["driver"],
+        "datasets": datasets, "references": references
+    });
+    if identities != &expected {
+        return Err("live_identity_mismatch".into());
+    }
+    let check = |path: &std::path::Path, digest: &serde_json::Value| -> Result<(), String> {
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let actual = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if Some(actual.as_str()) != digest.as_str() {
+            return Err(format!("live_asset_checksum_mismatch:{}", path.display()));
+        }
+        Ok(())
+    };
+    check(
+        std::path::Path::new(edges_path),
+        &pin["datasets"][0]["checksum_sha256"],
+    )?;
+    for reference in pin["references"].as_array().unwrap() {
+        check(
+            &PathBuf::from(reference_dir).join(format!(
+                "ga-tiny-{}.ref",
+                reference["workload_key"].as_str().unwrap()
+            )),
+            &reference["checksum_sha256"],
+        )?;
+    }
+    let pinned_jobs = [
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/bfs.json"),
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/pr.json"),
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/wcc.json"),
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/cdlp.json"),
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/lcc.json"),
+        include_str!("../../../fixtures/gdc/graphalytics-tiny/compatible/jobs/sssp.json"),
+    ];
+    for job in jobs {
+        let expected = pinned_jobs
+            .iter()
+            .map(|text| serde_json::from_str::<AlgorithmJob>(text).unwrap())
+            .find(|expected| expected.algorithm == job.algorithm)
+            .unwrap();
+        if serde_json::to_value(job).unwrap() != serde_json::to_value(expected).unwrap() {
+            return Err(format!("live_job_context_mismatch:{}", job.algorithm));
+        }
+    }
+    Ok(())
+}
+
+fn load_jobs(jobs_dir: &str) -> Result<Vec<AlgorithmJob>, String> {
     let mut jobs = Vec::new();
     for entry in fs::read_dir(jobs_dir).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -159,26 +319,29 @@ fn run_suite(
             jobs.len()
         ));
     }
+    if jobs
+        .iter()
+        .map(|job| job.algorithm)
+        .collect::<std::collections::BTreeSet<_>>()
+        != Algorithm::ALL.into_iter().collect()
+    {
+        return Err("suite requires each of the six algorithms exactly once".into());
+    }
     let dataset_id = jobs[0].dataset_id.clone();
     if jobs.iter().any(|job| job.dataset_id != dataset_id) {
         return Err("suite jobs must share one dataset_id".into());
     }
-    let mut outcomes = Vec::new();
-    for job in &jobs {
-        let reference_path =
-            PathBuf::from(reference_dir).join(format!("{}-{}.ref", dataset_id, job.algorithm));
-        let reference =
-            load_vertex_value_file(&reference_path).map_err(|error| error.to_string())?;
-        let output_path =
-            PathBuf::from(output_dir).join(format!("{}-{}.out", dataset_id, job.algorithm));
-        let system = if output_path.is_file() {
-            Some(load_vertex_value_file(&output_path).map_err(|error| error.to_string())?)
-        } else {
-            None
-        };
-        outcomes.push(run_job(job, &reference, system.as_ref()));
-    }
-    let evidence = assemble_evidence(&dataset_id, identities, outcomes);
+    Ok(jobs)
+}
+
+fn write_evidence(
+    dataset_id: &str,
+    identities: serde_json::Value,
+    execution_mode: ExecutionMode,
+    outcomes: Vec<graphforge_benchmark_gdc_graphalytics::AlgorithmOutcome>,
+    evidence_path: &str,
+) -> Result<ExitCode, String> {
+    let evidence = assemble_evidence(dataset_id, identities, execution_mode, outcomes);
     let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
     fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
     let failed = evidence.algorithms.iter().any(|outcome| {

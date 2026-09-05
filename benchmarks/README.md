@@ -12,6 +12,14 @@ repository root. Benchmark-only dependencies must never be added to GraphForge
 product crates or bindings. Product-only behavior, feature flags, and benchmark
 hooks are prohibited.
 
+Live Rust runners may depend on this checkout's `graphforge-api` public facade.
+The Rust dependency check permits its transitive engine dependencies under
+`crates/` and keeps benchmark packages unpublishable. Workload runners cannot
+depend directly on engine internals. The existing certification runner retains
+its storage-attribution and filesystem primitives, and the generator retains
+its filesystem test helper; those dependencies are allowed only for their
+specific package and manifest paths. Unrelated local paths are rejected.
+
 The existing `algorithms/` scripts and benchmark documents predate this
 workspace and remain unchanged. Migration or retirement of that legacy harness
 belongs to issue #959, after parity is proven.
@@ -47,9 +55,25 @@ The harness index is [`gdc-suite-index.md`](gdc-suite-index.md). SPB remains
 Graphalytics (#961) is a separate executable suite: Rust owns six-algorithm
 parameter mapping, Graphalytics tolerance rules, and reference validation in
 `runners/gdc-graphalytics`, while Python orchestration reuses shared GDC
-identity contracts. Unsupported official semantics (fixed-iteration PageRank,
-synchronous CDLP) fail closed with typed `semantic_incompatibility` instead of
-approximating. Bounded fixtures start the ordered dataset ladder at `ga-tiny`.
+identity contracts. Graphalytics keeps two pinned identity profiles:
+`static` for historical `wiki-Talk` marker fixtures and `live` for the
+checksummed synthetic `ga-tiny` proof. Suite declarations and acquisitions
+select the matching profile; the generic validator checks each pairing and
+rejects cross-use. The Rust live runner independently checks the compiled live
+identity, actual edge/reference checksums, and all six pinned job contexts;
+relocated identical assets remain valid. Both jobs and evidence require each
+algorithm exactly once. `run-live` loads the `ga-tiny` edge fixture into
+`GraphForge::new(None)` and invokes the published Rust analyst surface; the
+separate `run-suite` command remains explicitly classified as static replay. The fixture is edges-only (no official Graphalytics `.v` vertex
+file); isolated vertices are outside this synthetic engineering scope.
+Unsupported official semantics (fixed-iteration PageRank,
+synchronous CDLP, and GraphForge's non-Graphalytics directed-LCC normalization)
+fail closed with typed `semantic_incompatibility` instead of approximating.
+PageRank remains typed incompatible; the committed `ga-tiny` PR reference is the
+independently computed official v1.0.5 2-iteration `d=0.85` vector, not the
+uniform `PR_0=1/|V|` initialization. Evidence is engineering proof with
+`certification: false`. The retained
+`wiki-Talk` file is a legacy stub and is neither executed nor proof authority.
 
 The SNB Interactive suite adapter is `graphforge_bench.gdc_snb_interactive`
 (runner `graphforge-benchmark-gdc-snb-interactive`). It maps LDBC SNB Interactive
@@ -284,8 +308,9 @@ make -C benchmarks smoke
 
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
-checks the dependency-free Rust smoke runner. It does not run a benchmark,
-start a provider, or open a GraphForge project.
+checks the Rust runners and their public-facade dependency boundary. This includes
+the bounded in-memory Graphalytics fixture through the real GraphForge API. It
+does not start a provider or execute the host scale ladder.
 
 ## Native local admission
 

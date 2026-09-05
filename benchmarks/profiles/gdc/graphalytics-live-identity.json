@@ -1,0 +1,71 @@
+{
+  "schema": "graphforge-gdc-pinned-identity/1",
+  "suite_id": "graphalytics",
+  "disposition": "executable",
+  "spec": {
+    "name": "ldbc-graphalytics-specification",
+    "source": "https://github.com/ldbc/ldbc_graphalytics_docs",
+    "release": "v1.0.5",
+    "commit": "5cf6ae65d26c809f2e3e0dac4716f153c71dc639"
+  },
+  "generator": {
+    "name": "graphforge-ga-tiny-synthetic-fixture",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/graphalytics-tiny",
+    "release": "ga-tiny-v1",
+    "commit": null
+  },
+  "driver": {
+    "name": "graphforge-gdc-graphalytics-live-runner",
+    "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/runners/gdc-graphalytics",
+    "release": "engineering-driver-v1",
+    "commit": null
+  },
+  "datasets": [
+    {
+      "id": "ga-tiny",
+      "role": "dataset",
+      "checksum_sha256": "101e94eed764c6b0a4bbedf9c90a53aec9864fd7ef4942265fb0fb9dce21d5a3",
+      "license": "Apache-2.0",
+      "acquisition": "fixture",
+      "source": "https://github.com/CurateLabs/graphforge/tree/main/benchmarks/fixtures/gdc/graphalytics-tiny"
+    }
+  ],
+  "references": [
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "bfs",
+      "checksum_sha256": "8c6fd018d6cdb482d5edd68ffec860c8a4065eb8284da9f1ae90a30d357dda04",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "pr",
+      "checksum_sha256": "f8b42dd58525241fec37f72346fcda0e471161de27528b2a1c3128d032c7a4a8",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "wcc",
+      "checksum_sha256": "0449fd11607f93959951bd5b9aac26ae249eb55311517d61a0b0f8c9b39fdb71",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "cdlp",
+      "checksum_sha256": "0449fd11607f93959951bd5b9aac26ae249eb55311517d61a0b0f8c9b39fdb71",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "lcc",
+      "checksum_sha256": "84805d8f5da9f5e33d3a5f4ae57eb317789a2b329d92de343572703041ead0c6",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    },
+    {
+      "dataset_id": "ga-tiny",
+      "workload_key": "sssp",
+      "checksum_sha256": "c9ad60ede2c4d3ad1ff802c79d6ad36fcb339f754cab601596a75e6924fc8b51",
+      "source": "https://github.com/ldbc/ldbc_graphalytics_docs/blob/v1.0.5/tex/definition.tex"
+    }
+  ]
+}
