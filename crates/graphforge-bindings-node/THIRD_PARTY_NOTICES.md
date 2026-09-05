@@ -458,22 +458,22 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- arrow 58.3.0
-- arrow-arith 58.3.0
-- arrow-array 58.3.0
-- arrow-buffer 58.3.0
-- arrow-cast 58.3.0
-- arrow-csv 58.3.0
-- arrow-data 58.3.0
-- arrow-ipc 58.3.0
-- arrow-json 58.3.0
-- arrow-ord 58.3.0
-- arrow-row 58.3.0
-- arrow-schema 58.3.0
-- arrow-select 58.3.0
-- arrow-string 58.3.0
+- arrow 58.4.0
+- arrow-arith 58.4.0
+- arrow-array 58.4.0
+- arrow-buffer 58.4.0
+- arrow-cast 58.4.0
+- arrow-csv 58.4.0
+- arrow-data 58.4.0
+- arrow-ipc 58.4.0
+- arrow-json 58.4.0
+- arrow-ord 58.4.0
+- arrow-row 58.4.0
+- arrow-schema 58.4.0
+- arrow-select 58.4.0
+- arrow-string 58.4.0
 - nohash-hasher 0.2.0
-- parquet 58.3.0
+- parquet 58.4.0
 - tinyvec 1.12.0
 - ureq-proto 0.6.1
 - utf8_iter 1.0.4
@@ -3338,15 +3338,15 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- futures 0.3.32
-- futures-channel 0.3.32
-- futures-core 0.3.32
-- futures-executor 0.3.32
-- futures-io 0.3.32
-- futures-macro 0.3.32
-- futures-sink 0.3.32
-- futures-task 0.3.32
-- futures-util 0.3.32
+- futures 0.3.34
+- futures-channel 0.3.34
+- futures-core 0.3.34
+- futures-executor 0.3.34
+- futures-io 0.3.34
+- futures-macro 0.3.34
+- futures-sink 0.3.34
+- futures-task 0.3.34
+- futures-util 0.3.34
 
 ```
                               Apache License
@@ -5126,7 +5126,7 @@ Used by:
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2
 - url 2.5.8
-- uuid 1.24.1
+- uuid 1.26.0
 - version_check 0.9.5
 - wasi 0.11.1+wasi-snapshot-preview1
 - wasip2 1.0.3+wasi-0.2.9
@@ -6622,7 +6622,7 @@ Used by:
 - allocator-api2 0.2.21
 - android_system_properties 0.1.5
 - anyhow 1.0.104
-- arrow-pyarrow 58.3.0
+- arrow-pyarrow 58.4.0
 - async-trait 0.1.92
 - blake3 1.8.5
 - bon 3.9.3
@@ -6664,9 +6664,9 @@ Used by:
 - ryu 1.0.23
 - semver 1.0.28
 - seq-macro 0.3.6
-- serde 1.0.228
-- serde_core 1.0.228
-- serde_derive 1.0.228
+- serde 1.0.229
+- serde_core 1.0.229
+- serde_derive 1.0.229
 - serde_json 1.0.151
 - serde_yaml_ng 0.9.36
 - shlex 2.0.1
@@ -7942,7 +7942,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- bytes 1.11.1
+- bytes 1.12.1
 
 ```
 Copyright (c) 2018 Carl Lerche
@@ -8418,7 +8418,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- arrow-array 58.3.0
+- arrow-array 58.4.0
 
 ```
 MIT License
@@ -8481,7 +8481,7 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.12.1
+- napi 3.12.2
 - napi-build 2.4.1
 - napi-derive 3.6.3
 - napi-derive-backend 6.1.2
