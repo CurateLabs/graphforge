@@ -1630,6 +1630,7 @@ fn install_graph_object_file_with_lease(
     }
     let read_calls = std::cell::Cell::new(0_u64);
     let write_calls = std::cell::Cell::new(0_u64);
+    let file_sync_calls = std::cell::Cell::new(0_u64);
     let result = install_object(
         &lease.cas,
         expected_digest,
@@ -1728,21 +1729,27 @@ fn install_graph_object_file_with_lease(
                 }
             };
             #[cfg(unix)]
-            bounded_output.sync_all_and_release().map_err(|error| {
-                storage(
-                    "fsync temporary graph object",
-                    &lease.cas.diagnostic_root,
-                    error,
-                )
-            })?;
+            {
+                bounded_output.sync_all_and_release().map_err(|error| {
+                    storage(
+                        "fsync temporary graph object",
+                        &lease.cas.diagnostic_root,
+                        error,
+                    )
+                })?;
+                file_sync_calls.set(bounded_output.evidence().sync_operations);
+            }
             #[cfg(windows)]
-            output.sync_all().map_err(|error| {
-                storage(
-                    "fsync temporary graph object",
-                    &lease.cas.diagnostic_root,
-                    error,
-                )
-            })?;
+            {
+                output.sync_all().map_err(|error| {
+                    storage(
+                        "fsync temporary graph object",
+                        &lease.cas.diagnostic_root,
+                        error,
+                    )
+                })?;
+                file_sync_calls.set(1);
+            }
             Ok(total)
         },
     );
@@ -1751,7 +1758,7 @@ fn install_graph_object_file_with_lease(
             evidence.read_calls = evidence.read_calls.saturating_add(read_calls.get());
             evidence.write_calls = evidence.write_calls.saturating_add(write_calls.get());
             evidence.write_bytes = evidence.write_bytes.saturating_add(expected_length);
-            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+            evidence.fsync_calls = evidence.fsync_calls.saturating_add(file_sync_calls.get());
         }
         evidence
     })
@@ -4246,6 +4253,51 @@ mod tests {
         let directory = open_empty_materialization_target(&second_target).unwrap();
         assert!(link_materialized_object(&directory, &source, "payload.bin", &digest, 7).is_err());
         assert!(!second_target.join("payload.bin").exists());
+    }
+
+    #[test]
+    fn file_install_receipts_count_actual_cache_window_synchronizations() {
+        let window = graphforge_filesystem::cache_release_window_for_streams(2)
+            .unwrap()
+            .get();
+        assert_eq!(window, 32 * 1024 * 1024);
+        for bytes in [window - 1, window, window + 1] {
+            let root = tempfile::tempdir().unwrap();
+            let source_root = tempfile::tempdir().unwrap();
+            let source = source_root.path().join("source");
+            let payload = vec![0x5a_u8; usize::try_from(bytes).unwrap()];
+            fs::write(&source, &payload).unwrap();
+            let digest = hex_digest(Sha256::digest(&payload).into());
+
+            let installed =
+                install_graph_object_file(root.path(), &source, &digest, bytes).unwrap();
+            let rollovers = u64::from(cfg!(target_os = "linux") && bytes > window);
+            assert_eq!(
+                installed.fsync_calls,
+                3 + rollovers,
+                "payload bytes {bytes}"
+            );
+            assert!(!installed.reused_existing);
+            assert_eq!(installed.bytes_installed, bytes);
+            assert_eq!(
+                read_graph_object(root.path(), &digest, bytes).unwrap(),
+                payload
+            );
+
+            let reused = install_graph_object_file(root.path(), &source, &digest, bytes).unwrap();
+            assert!(reused.reused_existing);
+            assert_eq!(reused.fsync_calls, 0);
+            assert_eq!(reused.write_bytes, 0);
+            assert!(
+                root.path()
+                    .join(GRAPH_OBJECTS_DIR)
+                    .join(TEMP_DIR)
+                    .read_dir()
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

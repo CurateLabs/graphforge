@@ -1047,6 +1047,14 @@ jobs:
           cargo test -p graphforge-storage --features test-failpoints
           project_certification --lib --no-fail-fast
 
+      - name: Run Windows read-only certifier cache cleanup regression
+        shell: bash
+        run: >-
+          cargo test --locked --manifest-path benchmarks/Cargo.toml --target-dir target
+          -p graphforge-benchmark-certify --lib
+          tests::command_owned_cache_direct_files_preserve_read_only_inputs
+          -- --exact --nocapture
+
   macos-graphforge-storage-durability:
     name: macOS graphforge-storage Durability
     runs-on: blacksmith-12vcpu-macos-15

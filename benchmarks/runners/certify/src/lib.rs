@@ -764,9 +764,15 @@ fn release_open_file_cache(
         .metadata()
         .map_err(|_| "command-owned cache file could not be inspected".to_owned())?
         .len();
-    file.sync_all()
-        .map_err(|_| "command-owned cache file synchronization failed".to_owned())?;
-    evidence.sync_operations = evidence.sync_operations.saturating_add(1);
+    // Unix synchronizes before attempting cache advice. Windows does not support
+    // this advice, and these retained input handles are read-only: attempting
+    // FlushFileBuffers would require write access and fail a completed command.
+    #[cfg(unix)]
+    {
+        file.sync_all()
+            .map_err(|_| "command-owned cache file synchronization failed".to_owned())?;
+        evidence.sync_operations = evidence.sync_operations.saturating_add(1);
+    }
     evidence.files = evidence.files.saturating_add(1);
     let mut offset = 0_u64;
     while offset < bytes {
@@ -1454,9 +1460,7 @@ pub fn certify_with_events(
                     } else {
                         execution.failure.or(Some(FailureKind::CommandFailed))
                     },
-                    cleanup_failure: sanitize_cleanup_failure(
-                        execution.cleanup_failure.as_deref(),
-                    ),
+                    cleanup_failure: sanitize_cleanup_failure(execution.cleanup_failure.as_deref()),
                     receipts: execution.receipts,
                 }
             }
@@ -1782,8 +1786,6 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn child_receipts_are_bounded_allowlisted_and_strip_content_bearing_paths() {
@@ -2238,10 +2240,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(evidence.failed_phase, Some(Phase::Admission));
-        assert_eq!(
-            evidence.phases[0].failure,
-            Some(FailureKind::CommandFailed)
-        );
+        assert_eq!(evidence.phases[0].failure, Some(FailureKind::CommandFailed));
         assert_eq!(
             evidence.phases[0].cleanup_failure,
             Some(CleanupFailureKind::CommandOwnedCacheReleaseFailed)
@@ -2341,6 +2340,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn shell_ingest_profile(script: &Path) -> Profile {
+        let mut profile = tiny_profile();
+        profile.executable = "/bin/sh".to_owned();
+        let PhaseAction::GraphForgeCliWorkflow { commands } = &mut profile.phases[2].action else {
+            panic!("ingest fixture must be a command workflow");
+        };
+        for args in commands {
+            args.insert(0, script.to_string_lossy().into_owned());
+        }
+        profile
+    }
+
+    #[cfg(unix)]
     #[test]
     fn public_executor_runs_ingest_transaction_in_order() {
         let root = std::env::temp_dir().join(format!("gf-certify-{}", std::process::id()));
@@ -2356,13 +2368,19 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut profile = tiny_profile();
-        profile.executable = executable.to_string_lossy().into_owned();
+        // Model a write descriptor inherited by another concurrent child until
+        // its exec closes the descriptor. The stable shell reads the fixture;
+        // executing this newly written inode directly would be ETXTBSY.
+        let fixture_writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .unwrap();
+        let profile = shell_ingest_profile(&executable);
         let mut executor = PublicProcessExecutor::default();
         let result = executor.execute(&profile, &profile.phases[2]).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(fs::read_to_string(state).unwrap().trim(), "5");
+        drop(fixture_writer);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2382,9 +2400,7 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut profile = tiny_profile();
-        profile.executable = executable.to_string_lossy().into_owned();
+        let profile = shell_ingest_profile(&executable);
         let result = PublicProcessExecutor::default()
             .execute(&profile, &profile.phases[2])
             .unwrap();
@@ -2408,8 +2424,14 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' '{\"contract\":\"graphforge-portable-import/2\"}'\n",
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let result = execute_process(executable.to_str().unwrap(), &["--json".to_owned()]).unwrap();
+        let result = execute_process(
+            "/bin/sh",
+            &[
+                executable.to_string_lossy().into_owned(),
+                "--json".to_owned(),
+            ],
+        )
+        .unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(result.failure, Some(FailureKind::EvidenceInvalid));
         fs::remove_dir_all(root).unwrap();
@@ -2625,6 +2647,41 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn command_owned_cache_direct_files_preserve_read_only_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input.parquet");
+        let payload = b"completed command input";
+        fs::write(&path, payload).unwrap();
+        for flag in ["--input", "--nodes", "--edges", "--path", "--output"] {
+            // StableDirectory opens the existing regular file with read access
+            // only, including on Windows. Each public flag must finish cleanup
+            // without requiring write authority over that input.
+            let evidence = release_command_owned_file_cache(&[
+                flag.to_owned(),
+                path.to_string_lossy().into_owned(),
+            ])
+            .unwrap();
+            assert_eq!(evidence.files, 1, "{flag}");
+            assert_eq!(evidence.sync_operations, u64::from(cfg!(unix)), "{flag}");
+            assert_eq!(evidence.unsupported_traversals, 0, "{flag}");
+            let supported = cfg!(target_os = "linux");
+            assert_eq!(evidence.release_operations, u64::from(supported), "{flag}");
+            assert_eq!(
+                evidence.unsupported_operations,
+                u64::from(!supported),
+                "{flag}"
+            );
+            assert_eq!(
+                evidence.released_bytes,
+                u64::from(supported) * payload.len() as u64,
+                "{flag}"
+            );
+            assert_eq!(evidence.peak_window_bytes, payload.len() as u64, "{flag}");
+            assert_eq!(fs::read(&path).unwrap(), payload, "{flag}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_owned_cache_fallback_covers_s18_generator_and_register_shapes() {
@@ -2704,10 +2761,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let executable = root.path().join("fails");
         fs::write(&executable, "#!/bin/sh\nexit 7\n").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         inject_command_cache_release_failure();
 
-        let execution = execute_process(executable.to_str().unwrap(), &[]).unwrap();
+        let execution =
+            execute_process("/bin/sh", &[executable.to_string_lossy().into_owned()]).unwrap();
         assert_eq!(execution.exit_code, Some(7));
         assert_eq!(execution.failure, Some(FailureKind::CommandFailed));
         assert_eq!(
