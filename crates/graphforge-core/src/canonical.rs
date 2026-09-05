@@ -3,6 +3,12 @@
 //! Domain owners define their registered schemas and logical-value encoders.
 //! This module owns the common bounded byte writer, closed fingerprint domains,
 //! SHA-256 envelope, and UUIDv8 projection.
+//!
+//! Ontology document `/1` digests intentionally retain their separate sorted-JSON
+//! grammar and domain prefixes in `graphforge-ontology::composition`. They must
+//! not be wrapped in this envelope: doing so changes persisted module, bridge,
+//! and composition identities. The compatibility decision is documented in
+//! `docs/book/architecture/canonical-fingerprints-v1.md`.
 
 use sha2::{Digest, Sha256};
 

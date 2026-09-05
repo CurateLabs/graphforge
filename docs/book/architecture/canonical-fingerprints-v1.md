@@ -363,3 +363,87 @@ version:
 
 The epistemic layer adds record domains and schemas but continues to reference frozen knowledge-layer
 fingerprints by `(domain, version, sha256)`.
+
+## Ontology document compatibility boundary
+
+**Decision for v0.6.0 (#1014): retain the two existing byte grammars intentionally.**
+`graphforge-core::canonical` owns the bounded binary writer and `GFFP` envelope
+described above. `graphforge-ontology::composition::canonical` owns the existing
+sorted-JSON document grammar. Ontology module, bridge, and composition identities
+are not registered `graphforge-canonical/1` domains; they MUST NOT acquire a
+`GFFP` envelope or be re-encoded as Arrow records implicitly.
+
+Ontology `/1` digests are lowercase hexadecimal SHA-256 over the exact prefix
+followed immediately by the sorted-JSON bytes, with no additional lengths,
+envelope, or trailing delimiter:
+
+| Identity | Exact prefix (`\0` denotes one NUL byte) |
+|---|---|
+| Authored module document | `graphforge-ontology-module/1\0` |
+| Authored bridge document | `graphforge-ontology-bridge/1\0` |
+| Composition semantic document | `graphforge-ontology-composition/1\0` |
+
+Module and bridge documents are first serialized to `serde_json::Value` using
+their Rust document schemas, including the schemas' field omission/default
+rules. Composition builds the semantic object specified in the
+[multi-ontology contract](composable-multi-ontology.md#inventory-closure-and-composition-identity).
+The existing JSON encoder then applies these frozen rules recursively:
+
+- Objects sort keys by Rust string order, equivalent to lexicographic UTF-8 byte
+  order; they use `{`, `}`, `:`, and `,` without whitespace.
+- Arrays retain element order and use `[`, `]`, and `,` without whitespace.
+- Strings and keys use `serde_json` JSON escaping, preserving Unicode bytes
+  without normalization. Null and booleans use `null`, `true`, and `false`.
+- Numbers use `serde_json::Number` display spelling. Integer and floating-point
+  representations remain distinct: `1` differs from `1.0`, and `-0.0` is retained.
+  The pinned exponent spellings include `1e+30` and `1e-7`.
+
+Earlier descriptions called this grammar "JCS" or an "RFC 8785 subset". Those
+labels do not authorize changing the existing bytes to full RFC 8785 JCS. In
+particular, JCS sorts UTF-16 code units, which orders U+10000 before U+E000;
+ontology `/1` sorts U+E000 first. JCS number normalization also differs from the
+existing float spellings. Changing either rule changes document identities.
+
+The separation is required for compatibility, not a second implementation of
+the same contract. Ontology digests identify authored documents and qualified
+references, while core fingerprints encode typed logical values with explicit
+schema, lengths, versions, and bounds. Replacing the JSON encoder with core's
+writer/envelope would invalidate module and bridge references, compiled
+composition fingerprints, and portable import/export integrity checks. The
+core writer's limits also MUST NOT silently become new document admission
+rules. Domain owners retain their existing validation and limits.
+
+### Compatibility evidence and release impact
+
+The following executable vectors freeze the existing behavior:
+
+- `graphforge-core/src/canonical.rs`:
+  `envelope_hash_and_uuid_match_the_frozen_vector` checks exact core payload,
+  envelope, SHA-256, and UUIDv8 bytes.
+- `graphforge-ontology/src/composition/canonical.rs`:
+  `ontology_json_bytes_and_all_three_domains_match_frozen_vectors` checks exact
+  JSON bytes and all three ontology domain hashes, including empty objects,
+  nesting, escaping, Unicode ordering/non-normalization, float spelling, and
+  the maximum `u64`.
+- `graphforge-ontology/tests/composition_inventory.rs`:
+  `fingerprint_stable_under_inventory_reorder` pins two existing authored module
+  digests and the compiled composition fingerprint across inventory reordering.
+- `graphforge-ontology/tests/bridge_sets.rs`:
+  `deterministic_export_and_reopen` pins the existing bridge document digest
+  across registration/adoption, JSON and YAML export/import, and inventory
+  snapshot reopen. This is an inventory test, not disk recovery certification.
+
+The ontology hash constants were independently calculated with Python
+`hashlib.sha256` over literal canonical UTF-8 JSON and NUL-terminated prefixes,
+then verified against the unchanged Rust encoders. Together with the existing
+core vector, these are identity compatibility gates for encoder, schema, and
+serialization dependency changes; do not regenerate them merely to accept drift.
+
+This decision changes no identity or durable format and requires no migration
+for v0.6.0. A future convergence that changes bytes MUST first specify new
+domain/version identifiers, coexistence with `/1` readers, explicit migration of
+module and bridge references and dependent composition identities, portable
+format compatibility, and release impact. It MUST preserve reproduction of old
+digests and MUST NOT relabel old identities as the new contract. Sharing
+implementation primitives is permissible only if both grammars, prefixes,
+accepted inputs, and pinned outputs remain unchanged.

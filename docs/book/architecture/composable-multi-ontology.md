@@ -10,6 +10,9 @@ This document is normative. **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, an
 opaque NFC string interpreted only by that ontology's declared version scheme;
 `canonical_digest` is lowercase SHA-256 over the domain-separated canonical
 module document. Two modules are the same only when all three fields match.
+The exact `/1` sorted-JSON grammar and intentional separation from the core
+binary fingerprint envelope are specified in the
+[ontology document compatibility boundary](canonical-fingerprints-v1.md#ontology-document-compatibility-boundary).
 
 `QualifiedSymbol` is `{ module, kind, local_id }`, where `kind` is exactly
 `entity`, `relation`, `property`, `constraint`, or `migration`, and `local_id`
@@ -37,7 +40,7 @@ dependencies fail before activation.
 `CompositionFingerprint` is lowercase SHA-256 of:
 
 ```text
-"graphforge-ontology-composition/1\0" || JCS({
+"graphforge-ontology-composition/1\0" || ontology_sorted_json_v1({
   modules: [exact module identities in closure order],
   bridges: [exact bridge identities in identity order],
   activation: [sorted scoped activation records]

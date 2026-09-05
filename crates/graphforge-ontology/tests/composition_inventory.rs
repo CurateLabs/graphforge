@@ -60,6 +60,16 @@ fn fingerprint_stable_under_inventory_reorder() {
         ),
         vec![],
     );
+    // Pin existing authored documents as well as relative reorder stability.
+    // These hashes were independently computed over literal canonical JSON.
+    assert_eq!(
+        genealogy.id.canonical_digest,
+        "cdfae1502134b6ac5509efb01b1711d04ac0d7f3a6504de46628dca860609363"
+    );
+    assert_eq!(
+        provenance.id.canonical_digest,
+        "c3b7b56a3d1ae2c60c7de427865c68e963652bd363e9672fdc993ec98a56a3e9"
+    );
     let bridges = [BridgeSetId {
         bridge_id: "https://graphforge.dev/bridge/research-document".into(),
         authored_version: "1.0.0".into(),
@@ -91,6 +101,10 @@ fn fingerprint_stable_under_inventory_reorder() {
     .expect("reverse");
 
     assert_eq!(forward.fingerprint, reverse.fingerprint);
+    assert_eq!(
+        forward.fingerprint,
+        "82a22a7bb3512ea90074fb4ac100cdeef50ebfbf4c351c46e51a81aff715612c"
+    );
     assert_eq!(
         forward.modules.iter().map(|m| &m.id).collect::<Vec<_>>(),
         reverse.modules.iter().map(|m| &m.id).collect::<Vec<_>>()
