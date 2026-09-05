@@ -18,7 +18,7 @@
     "name": "graphforge_benchmark_gdc_snb_bi",
     "source": "https://github.com/CurateLabs/graphforge",
     "provenance_kind": "repository_source",
-    "content_sha256": "b2759b99f60e395c541bf8d42cac8189b5e174cbc85d2e6d845017e1b0b791d4",
+    "content_sha256": "377f162c73b34c877420bc860b6c0a349de78bdbea4ccf2548bbc50612e808d2",
     "content_description": "sha256 of sorted runner Cargo.toml and src path-content framing"
   },
   "assets": [

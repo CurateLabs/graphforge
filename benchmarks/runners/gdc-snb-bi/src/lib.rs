@@ -1890,9 +1890,11 @@ mod tests {
             assert!(nullable[index].1.is_null(0));
             let batch = RecordBatch::try_from_iter(nullable).unwrap();
             let error = extract_live_bi2_rows(&[batch]).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains(&format!("BI2 {} contains null values", columns[index].0)));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("BI2 {} contains null values", columns[index].0))
+            );
         }
     }
 
@@ -1949,19 +1951,23 @@ mod tests {
 
         let insert = run_job(&sample_job(Operation::Ins1), None, None);
         assert_eq!(insert.status, OperationStatus::SemanticIncompatibility);
-        assert!(insert
-            .cause
-            .as_deref()
-            .unwrap()
-            .contains("bi_batch_update_stream_not_exposed"));
+        assert!(
+            insert
+                .cause
+                .as_deref()
+                .unwrap()
+                .contains("bi_batch_update_stream_not_exposed")
+        );
 
         let weighted = run_job(&sample_job(Operation::Bi15), None, None);
         assert_eq!(weighted.status, OperationStatus::SemanticIncompatibility);
-        assert!(weighted
-            .cause
-            .as_deref()
-            .unwrap()
-            .contains("weighted_shortest_path_not_exposed"));
+        assert!(
+            weighted
+                .cause
+                .as_deref()
+                .unwrap()
+                .contains("weighted_shortest_path_not_exposed")
+        );
 
         let missing_output = run_job(&sample_job(Operation::Bi1), Some(&reference), None);
         assert_eq!(missing_output.status, OperationStatus::Failed);
@@ -1977,11 +1983,12 @@ mod tests {
         let system = parse_result_rows("1 WRONG\n");
         let read = run_job(&sample_job(Operation::Bi1), Some(&reference), Some(&system));
         assert_eq!(read.status, OperationStatus::Failed);
-        assert!(read
-            .cause
-            .as_deref()
-            .unwrap()
-            .contains("reference_mismatch"));
+        assert!(
+            read.cause
+                .as_deref()
+                .unwrap()
+                .contains("reference_mismatch")
+        );
     }
 
     #[test]
