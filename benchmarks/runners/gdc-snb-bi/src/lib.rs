@@ -1274,7 +1274,6 @@ fn execute_live_bi2(
     forge: &graphforge_api::GraphForge,
     bindings: &LiveBindings,
 ) -> Result<ResultRows, SuiteError> {
-    use arrow::array::{Int64Array, StringArray};
     use graphforge_api::IrLiteral;
     use std::collections::HashMap;
 
@@ -1299,8 +1298,16 @@ fn execute_live_bi2(
     let result = forge
         .execute_with_params(LIVE_BI2_QUERY, &params)
         .map_err(|error| api_error("query", error))?;
+    extract_live_bi2_rows(&result.batches)
+}
+
+fn extract_live_bi2_rows(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> Result<ResultRows, SuiteError> {
+    use arrow::array::{Array, Int64Array, StringArray};
+
     let mut rows = Vec::new();
-    for batch in result.batches {
+    for batch in batches {
         let tags = batch
             .column_by_name("tagName")
             .and_then(|column| column.as_any().downcast_ref::<StringArray>())
@@ -1317,6 +1324,18 @@ fn execute_live_bi2(
             .column_by_name("diff")
             .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
             .ok_or_else(|| SuiteError::InvalidDocument("BI2 diff is not Int64".into()))?;
+        for (name, column) in [
+            ("tagName", tags as &dyn Array),
+            ("countWindow1", count_1 as &dyn Array),
+            ("countWindow2", count_2 as &dyn Array),
+            ("diff", diff as &dyn Array),
+        ] {
+            if column.null_count() != 0 {
+                return Err(SuiteError::InvalidDocument(format!(
+                    "BI2 {name} contains null values"
+                )));
+            }
+        }
         for row in 0..batch.num_rows() {
             rows.push(format!(
                 "{} {} {} {}",
@@ -1841,6 +1860,40 @@ mod tests {
         );
         assert!(context.identity.upstream_spec.release.starts_with('v'));
         assert_eq!(context.identity.upstream_query.release, "v1.0.0");
+    }
+
+    #[test]
+    fn live_bi2_rejects_nulls_with_reference_matching_payloads() {
+        use arrow::array::{ArrayRef, Int64Array, StringArray};
+        use arrow::buffer::Buffer;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let columns: Vec<(&str, ArrayRef)> = vec![
+            ("tagName", Arc::new(StringArray::from(vec!["Beta"]))),
+            ("countWindow1", Arc::new(Int64Array::from(vec![1]))),
+            ("countWindow2", Arc::new(Int64Array::from(vec![3]))),
+            ("diff", Arc::new(Int64Array::from(vec![2]))),
+        ];
+        let valid = RecordBatch::try_from_iter(columns.clone()).unwrap();
+        assert_eq!(extract_live_bi2_rows(&[valid]).unwrap(), vec!["Beta 1 3 2"]);
+        for index in 0..columns.len() {
+            let mut nullable = columns.clone();
+            let data = nullable[index]
+                .1
+                .to_data()
+                .into_builder()
+                .null_bit_buffer(Some(Buffer::from([0_u8])))
+                .build()
+                .unwrap();
+            nullable[index].1 = arrow::array::make_array(data);
+            assert!(nullable[index].1.is_null(0));
+            let batch = RecordBatch::try_from_iter(nullable).unwrap();
+            let error = extract_live_bi2_rows(&[batch]).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(&format!("BI2 {} contains null values", columns[index].0)));
+        }
     }
 
     #[test]
