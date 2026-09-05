@@ -453,20 +453,11 @@ def reclaim_rung_workspace(work_root: Path, scale: int) -> None:
         shutil.rmtree(target)
 
 
-def inventory_work_root(work_root: Path) -> dict[str, Any]:
-    """Return a sanitized inventory proving temporary debris state."""
-    workspace = work_root / "workspace"
-    remaining: list[str] = []
-    if workspace.is_dir():
-        for path in sorted(workspace.rglob("*")):
-            if path.is_file() or path.is_dir():
-                remaining.append(path.relative_to(work_root).as_posix())
-    return {
-        "schema": "graphforge-host-work-root-inventory/1",
-        "host_profile_id": HOST_PROFILE_ID,
-        "workspace_entries": remaining,
-        "empty": remaining == [],
-    }
+def inventory_work_root(work_root: Path, output_dir: Path | None = None) -> dict[str, Any]:
+    """Inventory real work-root debris, binding evidence to native results when supplied."""
+    from graphforge_bench.native_ladder_bundle import collect_inventory
+
+    return collect_inventory(work_root, output_dir)
 
 
 def run(
@@ -700,7 +691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         work_root = require_work_root(args.work_root)
         if args.inventory:
-            document = inventory_work_root(work_root)
+            document = inventory_work_root(work_root, args.output_dir)
             publish_json_no_clobber(args.output_dir / "work-root-inventory.json", document)
             print(json.dumps(document, sort_keys=True))
             return 0 if document["empty"] else 2

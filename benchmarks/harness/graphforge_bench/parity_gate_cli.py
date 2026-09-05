@@ -3,24 +3,15 @@
 from __future__ import annotations
 
 import json
-import sys
 
-from graphforge_bench.parity_gate import assert_tiny_parity_ready, parity_gate_status
+from graphforge_bench.parity_gate import parity_gate_status
 
 
 def main() -> int:
     status = parity_gate_status()
     print(json.dumps(status, indent=2, sort_keys=True))
-    try:
-        assert_tiny_parity_ready()
-    except ValueError as error:
-        print(str(error), file=sys.stderr)
+    if not (status["structural_retirement_ready"] and status["prefix_parity_ready"]):
         return 1
-    if not status["ready_for_retirement"]:
-        print(
-            "parity gate: tiny shadow OK; retirement blocked on #900 ladder bundles",
-            file=sys.stderr,
-        )
     return 0
 
 

@@ -356,6 +356,27 @@ Terminal teardown proof:
 make -C benchmarks progressive-host-ladder-inventory   OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
 ```
 
+This emits `graphforge-host-work-root-inventory/2` from an actual filesystem
+inventory and binds it automatically to the existing native result receipts.
+It checks the whole work root, including `tmp/`, failed staging directories,
+unexpected files, and dangling links. Only the explicitly retained evidence
+directory and empty `workspace/` / `tmp/` scaffolding are excluded; the scope is
+recorded in the document. Keep evidence outside the work root or in one direct
+child directory. An unreadable tree is an error, never an empty inventory.
+
+Ingest that same output directory with `ingest-ladder-bundle`; native receipts
+need no Fly image, provider teardown, or additional manifest. Plans, results,
+phase artifacts, admission projections, and cleanup inventory must agree by
+identity and digest. Historical provider bundles remain readable as migration
+fixtures. Legacy unbound native inventory v1 cannot establish full completion.
+
+`parity-gate` reports structural retirement, accepted prefix parity, and
+`full_ladder_evidence_complete` separately. A valid S18/S19 prefix is useful
+engineering evidence but does not establish full harness authority or complete
+#959. Full completion requires all seven native rungs through S26 and empty
+terminal work-root inventory; it does not claim an official Graph500 submission
+or replace independent review of the actual #900 lifecycle/parity evidence.
+
 ## Progressive Graph500 qualification
 
 **Graph500-compliant generated input; GraphForge lifecycle measurements; no

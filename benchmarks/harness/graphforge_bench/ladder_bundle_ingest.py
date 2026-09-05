@@ -11,7 +11,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from graphforge_bench.parity_gate import ladder_bundle_root
+from graphforge_bench.native_ladder_bundle import NativeBundleError, validate_native_bundle
 from graphforge_bench.scale_parity import compare_ladder_bundle
 
 RUNG_NAME = re.compile(r"^s(\d+)-rung\.json$")
@@ -57,10 +57,40 @@ def _validate_manifest(document: Any) -> None:
         raise LadderBundleIngestError("manifest.json commit must be a lowercase Git object ID")
 
 
+def _has_native_receipts(source: Path) -> bool:
+    for path in (*source.glob("*-result.json"), *source.glob("*-plan.json")):
+        document = _read_json(path, f"{path.name} is malformed")
+        if isinstance(document, dict) and document.get("schema") in {
+            "graphforge-progressive-host-run-plan/1",
+            "graphforge-progressive-host-run-result/1",
+        }:
+            return True
+    return False
+
+
 def validate_ladder_bundle(source: Path) -> dict[str, Any]:
     """Validate a completed #900 bundle directory without copying it."""
     if not source.is_dir():
         raise LadderBundleIngestError("source ladder bundle directory is missing")
+
+    if (
+        not (source / "manifest.json").exists()
+        or (source / "work-root-inventory.json").exists()
+        or _has_native_receipts(source)
+    ):
+        try:
+            native = validate_native_bundle(source)
+        except (NativeBundleError, OSError) as error:
+            raise LadderBundleIngestError(str(error)) from error
+        return {
+            "schema": INGEST_SCHEMA,
+            "source": str(source),
+            "manifest_commit": native["commit"],
+            "rung_files": [f"s{scale}-rung.json" for scale in native["scales"]],
+            "rung_scales": native["scales"],
+            "teardown_status": "empty" if native["empty"] else "failed",
+            "evidence_files": native["files"],
+        }
 
     manifest_path = source / "manifest.json"
     teardown_path = source / "teardown-inventory.json"
@@ -104,12 +134,14 @@ def validate_ladder_bundle(source: Path) -> dict[str, Any]:
 def ingest_ladder_bundle(source: Path, destination: Path | None = None) -> dict[str, Any]:
     """Validate a #900 bundle and copy it into the parity fixture tree."""
     report = validate_ladder_bundle(source)
-    target = destination or ladder_bundle_root()
+    target = destination or Path(__file__).resolve().parents[2] / "fixtures/parity/ladder-bundle"
     if target.exists() and any(target.glob("*-rung.json")):
         raise LadderBundleIngestError("destination already contains ingested rung bundles")
 
     target.mkdir(parents=True, exist_ok=True)
-    for name in ("manifest.json", "teardown-inventory.json", *report["rung_files"]):
+    for name in report.get(
+        "evidence_files", ("manifest.json", "teardown-inventory.json", *report["rung_files"])
+    ):
         shutil.copy2(source / name, target / name)
 
     parity = compare_ladder_bundle(target)
