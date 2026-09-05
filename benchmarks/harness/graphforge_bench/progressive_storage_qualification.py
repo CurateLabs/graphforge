@@ -493,6 +493,52 @@ def build(
     )
 
 
+def build_native(
+    source_paths: Sequence[Path],
+    *,
+    work_root: Path,
+    reserved_headroom_bytes: int,
+) -> dict[str, Any]:
+    """Use retained ordinary host results and measured remaining work-root space."""
+    from graphforge_bench.progressive_host_run import (
+        measure_host_capacity,
+        require_work_root,
+        validated_host_rung,
+    )
+
+    if len(source_paths) != 2:
+        raise StorageQualificationError("exactly two adjacent observations are required")
+    work_root = require_work_root(work_root)
+    rungs = []
+    shared = None
+    for path in source_paths:
+        rung, _ = _read_digest(path)
+        scale = _integer(rung.get("scale"), "scale", positive=True)
+        if path.name != f"s{scale}-rung.json":
+            raise StorageQualificationError("native rung filename contradicts scale")
+        bound = validated_host_rung(BENCHMARK_ROOT, path.parent, scale)
+        result, _ = _read_digest(path.parent / f"s{scale}-result.json")
+        identities = {
+            key: value
+            for key, value in result["identities"].items()
+            if key not in {"profile_id", "profile_sha256", "admitted_projection_sha256"}
+        }
+        if shared is not None and identities != shared:
+            raise StorageQualificationError(
+                "native observations have different execution identities"
+            )
+        shared = identities
+        if (work_root / "workspace" / f"s{scale}").exists():
+            raise StorageQualificationError("native rung workspace has not been reclaimed")
+        rungs.append(bound)
+    capacity = measure_host_capacity(work_root, reserved_headroom_bytes)
+    return _build_qualification(
+        rungs,
+        volume_bytes=capacity["free_bytes"],
+        reserved_headroom_bytes=capacity["reserved_headroom_bytes"],
+    )
+
+
 def _build_qualification(
     source_rungs: Sequence[Mapping[str, Any]],
     *,
@@ -710,14 +756,14 @@ def validate(evidence: Mapping[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("low", type=Path, help="lower-scale provider rung path")
-    parser.add_argument("high", type=Path, help="higher-scale provider rung path")
+    parser.add_argument("low", type=Path, help="lower-scale rung path")
+    parser.add_argument("high", type=Path, help="higher-scale rung path")
     parser.add_argument("output", type=Path)
-    parser.add_argument("--commit", required=True)
-    parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--work-root", type=Path, help="native mode: measure this work root")
+    parser.add_argument("--commit")
+    parser.add_argument("--image-digest")
     parser.add_argument(
         "--low-result-sha256",
-        required=True,
         help=(
             "SHA-256 of the low provider result from trusted transport or an immutable "
             "manifest outside the evidence bundle"
@@ -725,30 +771,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--high-result-sha256",
-        required=True,
         help=(
             "SHA-256 of the high provider result from trusted transport or an immutable "
             "manifest outside the evidence bundle"
         ),
     )
-    parser.add_argument("--volume-bytes", type=int, required=True)
+    parser.add_argument("--volume-bytes", type=int)
     parser.add_argument("--reserved-headroom-bytes", type=int, required=True)
     args = parser.parse_args(argv)
     try:
-        qualification = build(
-            [args.low, args.high],
-            provider_result_sha256=[
-                args.low_result_sha256,
-                args.high_result_sha256,
-            ],
-            expected_commit=args.commit,
-            expected_image_digest=args.image_digest,
-            volume_bytes=args.volume_bytes,
-            reserved_headroom_bytes=args.reserved_headroom_bytes,
-        )
+        if args.work_root is not None:
+            qualification = build_native(
+                [args.low, args.high],
+                work_root=args.work_root,
+                reserved_headroom_bytes=args.reserved_headroom_bytes,
+            )
+        else:
+            if not all(
+                (
+                    args.commit,
+                    args.image_digest,
+                    args.low_result_sha256,
+                    args.high_result_sha256,
+                    args.volume_bytes,
+                )
+            ):
+                raise StorageQualificationError(
+                    "provider mode requires commit/image/result anchors and volume"
+                )
+            qualification = build(
+                [args.low, args.high],
+                provider_result_sha256=[
+                    args.low_result_sha256,
+                    args.high_result_sha256,
+                ],
+                expected_commit=args.commit,
+                expected_image_digest=args.image_digest,
+                volume_bytes=args.volume_bytes,
+                reserved_headroom_bytes=args.reserved_headroom_bytes,
+            )
         publish_json_no_clobber(args.output, qualification)
         return 0
-    except (OSError, StorageQualificationError) as error:
+    except (OSError, ValueError) as error:
         parser.error(str(error))
 
 

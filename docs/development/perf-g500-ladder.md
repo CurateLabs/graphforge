@@ -176,9 +176,14 @@ grow as expansion chunks multiplied by graph size.
 ## OVHC-AGENCY host execution (#900 / #1087)
 
 The designated SUT is **OVHC-AGENCY** under profile `local-linux-cgroups-v2`.
-Use `make -C benchmarks progressive-host-ladder-run` with an ext4 work root
-under the process-root filesystem. Prefer that path over disposable Fly
-provider execution. See `benchmarks/README.md` (OVHC-AGENCY host ladder).
+Use `make -C benchmarks progressive-host-ladder-run MAXIMUM_SCALE=26
+WORK_ROOT=... OUTPUT_DIR=... RESERVED_HEADROOM_BYTES=80530636800` on the
+admitted ext4 work root. It builds/resolves once, advances sequentially, stops
+on the first typed failure, and reclaims accepted rung data. Planning is
+read-only. S20+ uses measured free disk space and adjacent-rung throughput;
+manual capacity rates and Fly image identities are not required. RSS limits
+and plateau checks remain unchanged. See the native command and terminal
+inventory in `benchmarks/README.md`.
 
 ## Historical reference-client commands
 
@@ -323,15 +328,10 @@ rung documents with:
 
 ```bash
 make -C benchmarks progressive-storage-qualification \
-  LOW_RUNG=build/s20-rung.json \
-  HIGH_RUNG=build/s22-rung.json \
-  EVIDENCE=build/g500-ladder-qualification.json \
-  COMMIT=$(git rev-parse HEAD) \
-  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
-  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
-  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
-  VOLUME_BYTES=536870912000 \
-  RESERVED_HEADROOM_BYTES=53687091200
+  LOW_RUNG="$OUTPUT_DIR/s20-rung.json" \
+  HIGH_RUNG="$OUTPUT_DIR/s22-rung.json" \
+  EVIDENCE="$OUTPUT_DIR/g500-ladder-qualification.json" \
+  WORK_ROOT="$WORK_ROOT" RESERVED_HEADROOM_BYTES=80530636800
 ```
 
 ## CI placement

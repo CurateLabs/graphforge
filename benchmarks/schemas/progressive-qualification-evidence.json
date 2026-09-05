@@ -28,14 +28,43 @@
         "correctness": {"const": true}
       }
     },
+    "native_capacity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["free_bytes", "reserved_headroom_bytes", "rate_source", "observed_rates"],
+      "properties": {
+        "free_bytes": {"type": "integer", "minimum": 1},
+        "reserved_headroom_bytes": {"type": "integer", "minimum": 0},
+        "rate_source": {"const": "completed_adjacent_rungs"},
+        "observed_rates": {
+          "type": "object", "additionalProperties": false,
+          "required": ["physical_read_bytes_per_second", "physical_write_bytes_per_second", "reader_calls_per_second", "publication_work_per_second"],
+          "properties": {
+            "physical_read_bytes_per_second": {"$ref": "#/$defs/observation"},
+            "physical_write_bytes_per_second": {"$ref": "#/$defs/observation"},
+            "reader_calls_per_second": {"$ref": "#/$defs/observation"},
+            "publication_work_per_second": {"$ref": "#/$defs/observation"}
+          }
+        }
+      }
+    },
     "claim": {"const": "engineering_evidence_only"}
   },
   "allOf": [
     {
+      "if": {"not": {"required": ["native_capacity"]}},
+      "then": {"properties": {
+        "limits": {"properties": {"volume_bytes": {"const": 536870912000}}},
+        "headroom": {"properties": {"storage_fraction": {"const": 0.15}}}
+      }, "allOf": [{
+        "if": {"properties": {"decision": {"const": "admitted"}}},
+        "then": {"properties": {"provider_capacity": {"$ref": "#/$defs/rates"}}}
+      }]
+      }
+    },
+    {
       "if": {"properties": {"decision": {"const": "admitted"}}, "required": ["decision"]},
       "then": {
         "properties": {
-          "provider_capacity": {"$ref": "#/$defs/rates"},
           "checks": {
             "properties": {
               "time_headroom": {"const": true}, "rss_headroom": {"const": true},
@@ -70,14 +99,19 @@
     }
   ],
   "$defs": {
+    "observation": {"oneOf": [
+      {"type": "null"},
+      {"type": "object", "additionalProperties": false, "required": ["work_units", "wall_seconds"],
+       "properties": {"work_units": {"type": "integer", "minimum": 1}, "wall_seconds": {"type": "integer", "minimum": 1}}}
+    ]},
     "nonnegative": {"type": "integer", "minimum": 0},
     "limits": {
       "type": "object", "additionalProperties": false, "required": ["wall_seconds", "rss_bytes", "volume_bytes"],
-      "properties": {"wall_seconds": {"const": 14400}, "rss_bytes": {"const": 4294967296}, "volume_bytes": {"const": 536870912000}}
+      "properties": {"wall_seconds": {"const": 14400}, "rss_bytes": {"const": 4294967296}, "volume_bytes": {"type": "integer", "minimum": 1}}
     },
     "headroom": {
       "type": "object", "additionalProperties": false, "required": ["time_fraction", "rss_fraction", "storage_fraction"],
-      "properties": {"time_fraction": {"const": 0.2}, "rss_fraction": {"const": 0.2}, "storage_fraction": {"const": 0.15}}
+      "properties": {"time_fraction": {"const": 0.2}, "rss_fraction": {"const": 0.2}, "storage_fraction": {"type": "number", "minimum": 0, "maximum": 1}}
     },
     "projected": {
       "type": "object", "additionalProperties": false,
