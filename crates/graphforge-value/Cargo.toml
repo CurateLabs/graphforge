@@ -1,6 +1,6 @@
 [package]
-name = "graphforge-plan"
-description = "GraphForge DataFusion logical extension nodes and mutation specifications"
+name = "graphforge-value"
+description = "GraphForge checked identity and persisted value contracts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,13 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
-datafusion = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

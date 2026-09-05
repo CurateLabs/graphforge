@@ -13,6 +13,7 @@ filegroup(
 
 _REL_DEPS = [
     "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     "//crates/graphforge-ir:graphforge_ir",
     "//crates/graphforge-ontology:graphforge_ontology",
     "//crates/graphforge-plan:graphforge_plan",

@@ -16,10 +16,10 @@ pub mod binder;
 pub use binder::{BindError, BindErrorKind, Binder};
 
 pub mod catalog;
-pub use catalog::{
-    RUNTIME_ENTITY_TYPE_TAG, RUNTIME_RELATION_TYPE_TAG, RuntimeCatalog, RuntimePropId,
-    RuntimeTypeId, is_runtime_entity_type_id, runtime_entity_type_id, runtime_relation_type_id,
-    runtime_type_id_from_entity_plan_id,
+pub use catalog::RuntimeCatalog;
+pub use graphforge_value::{
+    EntityTypeId, EntityTypeSelection, PropertyId, RelationTypeId, RelationTypeSelection,
+    RuntimeEntityId, RuntimePropId, RuntimeRelationId, TaggedTypeId,
 };
 
 pub mod composition_binding;
@@ -64,7 +64,7 @@ pub struct ExprId(pub u32);
 /// Semver-like version for the Graph IR wire format.
 ///
 /// Breaking changes bump `major`; new operators bump `minor`; bug fixes bump
-/// `patch`.  Serialised as `"major.minor.patch"`.
+/// `patch`. Serialized as an object with `major`, `minor`, and `patch` fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IrVersion {
     /// Major version — incremented on breaking IR changes.
@@ -78,10 +78,41 @@ pub struct IrVersion {
 impl IrVersion {
     /// The current IR version shipped with this build.
     pub const CURRENT: Self = Self {
-        major: 0,
-        minor: 3,
+        major: 1,
+        minor: 0,
         patch: 0,
     };
+
+    /// Check whether this build can consume the declared compiler wire contract.
+    /// This negotiation does not apply to durable project formats or opening.
+    pub fn require_supported(self) -> Result<(), IrWireError> {
+        if self.major != Self::CURRENT.major || self.minor > Self::CURRENT.minor {
+            Err(IrWireError::UnsupportedVersion {
+                found: self,
+                supported: Self::CURRENT,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Failure to negotiate or decode a serialized compiler IR plan.
+#[derive(Debug, thiserror::Error)]
+pub enum IrWireError {
+    /// The input's identity representation belongs to an unsupported wire version.
+    #[error(
+        "unsupported Graph IR version {found}; this build supports {supported} (recompile the query from source)"
+    )]
+    UnsupportedVersion {
+        /// Declared input version.
+        found: IrVersion,
+        /// This build's supported version.
+        supported: IrVersion,
+    },
+    /// Malformed JSON or invalid checked identities within a supported plan.
+    #[error("invalid Graph IR: {0}")]
+    InvalidJson(#[from] serde_json::Error),
 }
 
 impl fmt::Display for IrVersion {
@@ -233,7 +264,7 @@ pub struct CreateNodeSpec {
     /// The pattern variable bound to this node.
     pub var: VarId,
     /// The node's complete label set, resolved to [`TypeId`] values.
-    pub labels: Vec<TypeId>,
+    pub labels: Vec<EntityTypeId>,
     /// Property map expression (an [`IrExpr::MapLiteral`](crate::IrExpr)), or
     /// `None` when no `{…}` was given.
     pub properties: Option<ExprId>,
@@ -254,7 +285,7 @@ pub struct CreateEdgeSpec {
     /// Destination node variable.
     pub dst: VarId,
     /// The relation type, resolved to a [`TypeId`] (or `None` if untyped).
-    pub rel_type: Option<TypeId>,
+    pub rel_type: Option<RelationTypeId>,
     /// Edge direction.
     pub direction: Direction,
     /// Property map expression, or `None`.
@@ -293,7 +324,7 @@ pub struct SetPropItem {
     /// The bound variable whose property is written.
     pub target: VarId,
     /// The property, resolved to a [`PropId`].
-    pub prop: PropId,
+    pub prop: PropertyId,
     /// The property name (carried so the lowering layer needs no `PropId →
     /// name` catalog round-trip — mirrors how [`CreateNodeSpec`] carries
     /// resolved names alongside ids).
@@ -319,7 +350,7 @@ pub struct LabelItem {
     /// Bound node variable.
     pub target: VarId,
     /// Labels resolved through the runtime/ontology catalog.
-    pub labels: Vec<TypeId>,
+    pub labels: Vec<EntityTypeId>,
 }
 
 /// One branch-specific action attached to a `MERGE` clause (#959).
@@ -334,7 +365,7 @@ pub enum MergeSetItem {
         /// Bound node variable.
         target: VarId,
         /// Labels resolved through the runtime/ontology catalog.
-        labels: Vec<TypeId>,
+        labels: Vec<EntityTypeId>,
     },
 }
 
@@ -346,7 +377,7 @@ pub struct RemovePropItem {
     /// The bound variable whose property is removed.
     pub target: VarId,
     /// The property, resolved to a [`PropId`].
-    pub prop: PropId,
+    pub prop: PropertyId,
     /// The property name (see [`SetPropItem::prop_name`]).
     pub prop_name: String,
 }

@@ -18,10 +18,10 @@ use datafusion::logical_expr::{
 };
 use datafusion::scalar::ScalarValue;
 
-use graphforge_core::PropId;
 use graphforge_ir::expr::{BinaryOpKind, IrExpr, IrLiteral, UnaryOpKind};
 use graphforge_ir::{ExprArena, ExprId, VarId};
 use graphforge_ontology::OntologyHandle;
+use graphforge_value::PropertyId;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -125,7 +125,7 @@ pub struct ExprLowerer<'a> {
     /// Reverse map `PropId.0` → property column name. Built from the ontology
     /// and/or the runtime catalog. Falls back to `"prop_<id>"` for any `PropId`
     /// not present (e.g. a strict-mode unresolved property).
-    prop_names: HashMap<u32, String>,
+    prop_names: HashMap<PropertyId, String>,
     /// `VarId.0` → node shape, for materializing a bare `RETURN n` as a whole
     /// node value (#785). Empty unless the plan projects a node var by value.
     node_shapes: HashMap<u32, NodeShape>,
@@ -215,7 +215,7 @@ impl<'a> ExprLowerer<'a> {
     pub fn with_prop_names(
         arena: &'a ExprArena,
         var_map: &'a VarMap,
-        prop_names: HashMap<u32, String>,
+        prop_names: HashMap<PropertyId, String>,
     ) -> Self {
         Self {
             arena,
@@ -242,7 +242,7 @@ impl<'a> ExprLowerer<'a> {
     pub fn with_prop_names_and_nodes(
         arena: &'a ExprArena,
         var_map: &'a VarMap,
-        prop_names: HashMap<u32, String>,
+        prop_names: HashMap<PropertyId, String>,
         node_shapes: HashMap<u32, NodeShape>,
         type_id_to_entity_name: HashMap<u32, String>,
         props_authoritative: bool,
@@ -348,7 +348,7 @@ impl<'a> ExprLowerer<'a> {
             }
 
             IrExpr::PropertyAccess { base, prop } => {
-                if let Some(prop_name) = self.prop_names.get(&prop.0).cloned()
+                if let Some(prop_name) = self.prop_names.get(prop).cloned()
                     && let Some(out) = self.lower_static_value_access(*base, &prop_name)?
                 {
                     return Ok(out);
@@ -373,9 +373,9 @@ impl<'a> ExprLowerer<'a> {
                 {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     let is_topology = graphforge_storage::TOPOLOGY_NODES_SCHEMA
                         .field_with_name(&prop_name)
                         .is_ok();
@@ -391,7 +391,7 @@ impl<'a> ExprLowerer<'a> {
                 // accessors follow once those types are typed.)
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && crate::temporal::is_date_accessor(prop_name)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
@@ -404,7 +404,7 @@ impl<'a> ExprLowerer<'a> {
                 // `d` is a typed `duration` struct column.
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && crate::temporal::is_duration_accessor(prop_name)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
@@ -421,7 +421,7 @@ impl<'a> ExprLowerer<'a> {
                 // `Int64`; the UDFs inspect the column's Arrow type to pick the field.
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
                     && temporal_accessor_valid(field.data_type(), prop_name)
@@ -448,9 +448,9 @@ impl<'a> ExprLowerer<'a> {
                 {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     return Ok(datafusion::functions::core::expr_fn::get_field(
                         col_literal(col_name),
                         prop_name,
@@ -468,9 +468,9 @@ impl<'a> ExprLowerer<'a> {
                 if self.is_known_non_value_access_container(&base_expr) {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     return Err(LoweringError::InvalidType(format!(
                         "property access `{prop_name}` requires a map or graph element"
                     )));
@@ -3168,12 +3168,12 @@ impl<'a> ExprLowerer<'a> {
     /// If `base` resolved to a plain `col("a")`, the property column is
     /// `col("a.prop_name")`.  Falls back to `"prop_<id>"` for runtime-catalog
     /// properties not present in the ontology.
-    fn resolve_prop_col(&self, base_expr: DfExpr, prop: PropId) -> DfExpr {
+    fn resolve_prop_col(&self, base_expr: DfExpr, prop: PropertyId) -> DfExpr {
         let prop_name = self
             .prop_names
-            .get(&prop.0)
+            .get(&prop)
             .cloned()
-            .unwrap_or_else(|| format!("prop_{}", prop.0));
+            .unwrap_or_else(|| format!("prop_{prop}"));
 
         // If the base is a plain column, compose a dotted column name — UNLESS it
         // is a synthetic quantifier/comprehension element column (#1004) at any
@@ -3270,7 +3270,7 @@ pub(crate) fn qualified_col(relation: &str, name: &str) -> DfExpr {
 /// [`with_prop_names`](ExprLowerer::with_prop_names). This ontology-only
 /// constructor path has no runtime catalog, so it returns an empty map and
 /// property accesses fall back to `"prop_<id>"`.
-fn build_prop_names(_ontology: Option<&OntologyHandle>) -> HashMap<u32, String> {
+fn build_prop_names(_ontology: Option<&OntologyHandle>) -> HashMap<PropertyId, String> {
     HashMap::new()
 }
 
@@ -12723,9 +12723,9 @@ mod path_hydration_stats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graphforge_core::PropId;
     use graphforge_ir::expr::{BinaryOpKind, IrExpr, IrLiteral, UnaryOpKind};
     use graphforge_ir::{ExprArena, VarId};
+    use graphforge_value::PropertyId;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static VOLATILE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -13917,7 +13917,7 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropId(0),
+            prop: PropertyId(0),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "__gf_elem");
@@ -13971,7 +13971,7 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropId(0),
+            prop: PropertyId(0),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "input");
@@ -16080,7 +16080,7 @@ mod tests {
         let var = arena.push(IrExpr::VarRef(VarId(0)));
         let age = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: PropId(0),
+            prop: PropertyId(0),
         });
         let one = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
         let id = arena.push(IrExpr::ListLiteral(vec![age, one]));

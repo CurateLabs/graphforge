@@ -127,7 +127,7 @@ pub struct CompositionBindingContext {
     composition: Arc<CompiledComposition>,
     bridges: Vec<BridgeDocument>,
     limits: CompositionBindingLimits,
-    storage_ids: HashMap<QualifiedSymbol, u32>,
+    storage_ids: HashMap<QualifiedSymbol, graphforge_value::TaggedTypeId>,
 }
 
 impl CompositionBindingContext {
@@ -192,13 +192,12 @@ impl CompositionBindingContext {
 
     /// Attach generation-pinned storage IDs. The caller must authenticate the
     /// mapping against this context's exact composition before construction.
-    #[must_use]
     pub fn with_storage_ids(
         mut self,
         storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
-    ) -> Self {
-        self.storage_ids = storage_ids.into_iter().collect();
-        self
+    ) -> Result<Self, graphforge_core::GfError> {
+        self.storage_ids = checked_storage_ids(storage_ids)?;
+        Ok(self)
     }
 
     /// Exact composition fingerprint.
@@ -220,14 +219,13 @@ impl CompositionBindingContext {
     }
 
     /// Return a copy carrying authenticated generation storage IDs.
-    #[must_use]
     pub fn with_generation_storage_ids(
         &self,
         storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
-    ) -> Self {
+    ) -> Result<Self, graphforge_core::GfError> {
         let mut value = self.clone();
-        value.storage_ids = storage_ids.into_iter().collect();
-        value
+        value.storage_ids = checked_storage_ids(storage_ids)?;
+        Ok(value)
     }
 
     /// Deterministic composition-local semantic ID for a qualified symbol.
@@ -235,10 +233,16 @@ impl CompositionBindingContext {
     /// IDs are plan-local projections only; exact semantic identity remains in
     /// the fingerprint and binding receipt and is never confused with a runtime
     /// catalog ID.
-    #[must_use]
-    pub fn semantic_id(&self, symbol: &QualifiedSymbol) -> u32 {
+    pub fn semantic_id(
+        &self,
+        symbol: &QualifiedSymbol,
+    ) -> Result<graphforge_core::TypeId, graphforge_core::GfError> {
         if let Some(id) = self.storage_ids.get(symbol) {
-            return *id;
+            return id.ontology_id().ok_or_else(|| {
+                graphforge_core::GfError::Validation(
+                    "generation semantic identity has a runtime domain".into(),
+                )
+            });
         }
         let mut symbols = self
             .composition
@@ -253,11 +257,19 @@ impl CompositionBindingContext {
                 candidate.local_id.as_bytes().to_vec(),
             )
         });
-        symbols
+        let raw = symbols
             .iter()
             .position(|candidate| *candidate == symbol)
             .and_then(|index| u32::try_from(index).ok())
-            .expect("compiled composition symbol count is bounded to u32")
+            .ok_or_else(|| {
+                graphforge_core::GfError::Validation(
+                    "composition symbol has no representable semantic identity".into(),
+                )
+            })?;
+        let id = graphforge_core::TypeId(raw);
+        graphforge_value::TaggedTypeId::ontology(id)
+            .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?;
+        Ok(id)
     }
 
     /// Resolve `local_id`, accepting `module-short:local` as an explicit qualifier.
@@ -674,4 +686,20 @@ impl CompositionBindingContext {
             },
         ))
     }
+}
+
+fn checked_storage_ids(
+    storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
+) -> Result<HashMap<QualifiedSymbol, graphforge_value::TaggedTypeId>, graphforge_core::GfError> {
+    let mut checked = HashMap::new();
+    for (symbol, raw) in storage_ids {
+        let id = graphforge_value::TaggedTypeId::ontology(graphforge_core::TypeId(raw))
+            .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?;
+        if checked.insert(symbol, id).is_some() {
+            return Err(graphforge_core::GfError::Validation(
+                "duplicate generation semantic symbol identity".into(),
+            ));
+        }
+    }
+    Ok(checked)
 }

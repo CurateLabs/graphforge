@@ -299,7 +299,7 @@ fn facade_rejects_ambiguity_without_publishing_runtime_observations() {
         .runtime_catalog()
         .lock()
         .expect("catalog")
-        .intern_label("after_failed_bind");
+        .intern_label("after_failed_bind")?;
     assert_eq!(first.0, 0, "failed bind published a catalog observation");
 }
 

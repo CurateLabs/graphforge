@@ -12,6 +12,7 @@ repository.workspace = true
 differential-testing = ["graphforge-rel/differential-testing"]
 
 [dependencies]
+graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }

@@ -1,5 +1,6 @@
 //! Rust-owned path handlers registered under the shared algorithm dispatch contract.
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -1161,7 +1162,7 @@ pub fn paths_algorithm_with_compute(
         dir,
         mode,
         AdjacencySelection {
-            label: None,
+            label: EntityTypeSelection::All,
             via,
             direction: if options.directed {
                 Direction::Out
@@ -1215,7 +1216,7 @@ pub fn paths_algorithm_with_compute(
             dir,
             mode,
             AdjacencySelection {
-                label: None,
+                label: EntityTypeSelection::All,
                 via: via.as_deref().unwrap_or("*"),
                 direction: if directed {
                     Direction::Out
@@ -1270,7 +1271,7 @@ pub fn paths_projection_fingerprint(
         dir,
         mode,
         AdjacencySelection {
-            label: None,
+            label: EntityTypeSelection::All,
             via,
             direction: if options.directed {
                 Direction::Out
@@ -1300,7 +1301,7 @@ pub fn paths_projection_fingerprint(
             dir,
             mode,
             AdjacencySelection {
-                label: None,
+                label: EntityTypeSelection::All,
                 via,
                 direction: if options.directed {
                     Direction::Out

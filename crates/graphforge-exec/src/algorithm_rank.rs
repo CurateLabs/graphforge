@@ -26,6 +26,7 @@
 //! each source keeps the accepted algebraic missing-link formula.
 //! Total-neighbors aggregates (#514) may partition independent work across the same private pool while preserving serial contribution order and checked arithmetic.
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -34,7 +35,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, RankAlgorithm};
-use graphforge_core::{GfError, OntologyMode, RankOptions, TypeId};
+use graphforge_core::{GfError, OntologyMode, RankOptions};
 use graphforge_ir::Direction;
 use rayon::prelude::*;
 
@@ -4163,7 +4164,7 @@ pub fn rank_algorithm(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &RankOptions,
 ) -> Result<RecordBatch, GfError> {
@@ -4183,7 +4184,7 @@ pub fn rank_algorithm_with_limits(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &RankOptions,
     limits: AlgorithmLimits,
@@ -4209,7 +4210,7 @@ pub fn rank_algorithm_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &RankOptions,
     limits: AlgorithmLimits,
@@ -4231,7 +4232,7 @@ pub fn rank_projection_fingerprint(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     options: &RankOptions,
 ) -> Result<[u8; 32], GfError> {
     rank_projection(provider, dir, mode, label, options)
@@ -4243,7 +4244,7 @@ fn rank_projection(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     options: &RankOptions,
 ) -> Result<AdjacencyGraph, GfError> {
     let via = options.via.as_deref().unwrap_or("*");
@@ -4262,7 +4263,7 @@ fn rank_projection(
         dir,
         mode,
         AdjacencySelection {
-            label: Some(label),
+            label,
             via,
             direction,
             weight: None,

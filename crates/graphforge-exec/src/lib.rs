@@ -998,7 +998,7 @@ pub(crate) fn distinct_created_labels(nodes: &[ResolvedNodeSpec], nodes_created:
         .iter()
         .filter(|n| !n.is_reference)
         .flat_map(|n| n.label_ids.iter().copied())
-        .collect::<HashSet<u32>>()
+        .collect::<HashSet<graphforge_value::EntityTypeId>>()
         .len() as u64
 }
 
@@ -1136,7 +1136,7 @@ fn write_batch_creates(
                     )?;
                 }
                 if let Some(rec) = extras.recorder.as_deref_mut() {
-                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id.0);
+                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id);
                 }
                 tally.nodes_created += 1;
             }
@@ -1191,17 +1191,15 @@ fn write_batch_creates(
 
 fn resolved_node_labels(
     spec: &ResolvedNodeSpec,
-) -> (Vec<graphforge_core::TypeId>, graphforge_core::TypeId) {
-    let labels: Vec<_> = spec
-        .label_ids
-        .iter()
-        .copied()
-        .map(graphforge_core::TypeId)
-        .collect();
-    let primary = labels
-        .first()
-        .copied()
-        .unwrap_or(graphforge_core::TypeId(u32::MAX));
+) -> (
+    Vec<graphforge_value::EntityTypeId>,
+    graphforge_value::PrimaryEntityTypeId,
+) {
+    let labels = spec.label_ids.clone();
+    let primary = labels.first().copied().map_or_else(
+        graphforge_value::PrimaryEntityTypeId::absent,
+        graphforge_value::PrimaryEntityTypeId::known,
+    );
     (labels, primary)
 }
 

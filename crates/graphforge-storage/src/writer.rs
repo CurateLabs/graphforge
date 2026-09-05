@@ -68,7 +68,15 @@ use graphforge_core::{
 use graphforge_ir::IrLiteral;
 
 /// Identity, labels, and properties of a buffered node matched by MERGE.
-pub type PendingNodeMatch = ([u8; 16], u64, u32, Vec<u32>, HashMap<String, IrLiteral>);
+pub type PendingNodeMatch = (
+    [u8; 16],
+    u64,
+    PrimaryEntityTypeId,
+    Vec<EntityTypeId>,
+    HashMap<String, IrLiteral>,
+);
+
+use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 
 use crate::schemas::{
     EXPLORATORY_EDGE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, uuid_field,
@@ -242,8 +250,8 @@ fn admit_replay_writer(
 struct NodeRow {
     node_uuid: [u8; 16],
     node_id: u64,
-    type_id: u32,
-    type_ids: Vec<u32>,
+    type_id: PrimaryEntityTypeId,
+    type_ids: Vec<EntityTypeId>,
 }
 
 struct EdgeRow {
@@ -2178,7 +2186,7 @@ impl GraphWriter {
     ///
     /// # Errors
     /// Currently infallible; returns `Result` for forward compatibility.
-    pub fn create_node(&mut self, node_uuid: Uuid, type_id: TypeId) -> Result<u64, GfError> {
+    pub fn create_node(&mut self, node_uuid: Uuid, type_id: EntityTypeId) -> Result<u64, GfError> {
         self.create_node_with_labels(node_uuid, &[type_id])
     }
 
@@ -2190,7 +2198,7 @@ impl GraphWriter {
     pub fn create_node_with_labels(
         &mut self,
         node_uuid: Uuid,
-        type_ids: &[TypeId],
+        type_ids: &[EntityTypeId],
     ) -> Result<u64, GfError> {
         let bytes = to_bytes(&node_uuid);
         if self.uuid_to_node_id.contains_key(&bytes)
@@ -2220,8 +2228,11 @@ impl GraphWriter {
         self.nodes.push(NodeRow {
             node_uuid: bytes,
             node_id,
-            type_id: type_ids.first().map_or(u32::MAX, |id| id.0),
-            type_ids: type_ids.iter().map(|id| id.0).collect(),
+            type_id: type_ids
+                .first()
+                .copied()
+                .map_or_else(PrimaryEntityTypeId::absent, PrimaryEntityTypeId::known),
+            type_ids: type_ids.to_vec(),
         });
         self.pending_index_nodes.push((node_uuid, node_id));
         Ok(node_id)
@@ -2505,7 +2516,7 @@ impl GraphWriter {
 
     /// Return distinct label tokens on buffered nodes selected by UUID.
     #[must_use]
-    pub fn pending_node_labels(&self, targets: &HashSet<[u8; 16]>) -> HashSet<u32> {
+    pub fn pending_node_labels(&self, targets: &HashSet<[u8; 16]>) -> HashSet<EntityTypeId> {
         self.nodes
             .iter()
             .filter(|row| targets.contains(&row.node_uuid))
@@ -2528,12 +2539,17 @@ impl GraphWriter {
             FixedSizeBinaryArray::try_from_iter(self.nodes.iter().map(|r| r.node_uuid.to_vec()))
                 .map_err(pq_err)?;
         let node_ids = UInt64Array::from(self.nodes.iter().map(|r| r.node_id).collect::<Vec<_>>());
-        let type_ids = UInt32Array::from(self.nodes.iter().map(|r| r.type_id).collect::<Vec<_>>());
+        let type_ids = UInt32Array::from(
+            self.nodes
+                .iter()
+                .map(|r| r.type_id.encode())
+                .collect::<Vec<_>>(),
+        );
         let nullable_label_sets =
             arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
                 self.nodes
                     .iter()
-                    .map(|row| Some(row.type_ids.iter().copied().map(Some))),
+                    .map(|row| Some(row.type_ids.iter().map(|id| Some(id.encode())))),
             );
         let label_sets = arrow::array::ListArray::new(
             Arc::new(Field::new("item", DataType::UInt32, false)),
@@ -2561,7 +2577,7 @@ impl GraphWriter {
     #[allow(clippy::type_complexity)]
     pub fn find_pending_node(
         &self,
-        labels: &[u32],
+        labels: &[EntityTypeId],
         properties: &[(String, IrLiteral)],
     ) -> Option<PendingNodeMatch> {
         self.find_pending_nodes(labels, properties)
@@ -2573,7 +2589,7 @@ impl GraphWriter {
     #[must_use]
     pub fn find_pending_nodes(
         &self,
-        labels: &[u32],
+        labels: &[EntityTypeId],
         properties: &[(String, IrLiteral)],
     ) -> Vec<PendingNodeMatch> {
         self.nodes
@@ -2766,7 +2782,11 @@ impl GraphWriter {
     }
 
     /// Add labels to a node buffered by this writer, preserving its primary label.
-    pub fn add_pending_node_labels(&mut self, node_uuid: &[u8; 16], labels: &[u32]) -> u64 {
+    pub fn add_pending_node_labels(
+        &mut self,
+        node_uuid: &[u8; 16],
+        labels: &[EntityTypeId],
+    ) -> u64 {
         let Some(row) = self
             .nodes
             .iter_mut()
@@ -2776,7 +2796,7 @@ impl GraphWriter {
         };
         let before = row.type_ids.len();
         row.type_ids.extend(labels.iter().copied());
-        row.type_ids.sort_unstable();
+        row.type_ids.sort_unstable_by_key(|id| id.encode());
         row.type_ids.dedup();
         (row.type_ids.len() - before) as u64
     }
@@ -2784,7 +2804,11 @@ impl GraphWriter {
     /// Remove labels from a node buffered by this writer. The immutable scalar
     /// `type_id` remains only as the property-file routing key; `type_ids` is
     /// the authoritative membership set.
-    pub fn remove_pending_node_labels(&mut self, node_uuid: &[u8; 16], labels: &[u32]) -> u64 {
+    pub fn remove_pending_node_labels(
+        &mut self,
+        node_uuid: &[u8; 16],
+        labels: &[EntityTypeId],
+    ) -> u64 {
         let Some(row) = self
             .nodes
             .iter_mut()

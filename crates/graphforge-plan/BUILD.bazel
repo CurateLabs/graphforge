@@ -10,6 +10,7 @@ gf_rust_library(
     name = "graphforge_plan",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-ir:graphforge_ir",
     ],
 )
@@ -19,6 +20,7 @@ gf_rust_test(
     crate = ":graphforge_plan",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-ir:graphforge_ir",
     ],
 )

@@ -8,6 +8,7 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
+graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ast = { version = "0.5.2", path = "../graphforge-ast" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }

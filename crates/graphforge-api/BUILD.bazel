@@ -24,6 +24,7 @@ _API_COMPILE_DATA = [
 _API_DEPS = [
     "@crates//:bytes",
     "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     "//crates/graphforge-cypher:graphforge_cypher",
     "//crates/graphforge-exec:graphforge_exec",
     "//crates/graphforge-filesystem:graphforge_filesystem",

@@ -851,24 +851,17 @@ fn portable_runtime_entity_names(root: &Path) -> Result<BTreeMap<u32, String>, G
 }
 
 fn portable_type_name(id: u32, runtime: &BTreeMap<u32, String>) -> Result<String, GfError> {
-    let id = graphforge_core::TypeId(id);
-    if graphforge_ir::is_runtime_entity_type_id(id) {
-        let local = graphforge_ir::runtime_type_id_from_entity_plan_id(id)
-            .expect("runtime entity tag checked")
-            .0;
+    let id = graphforge_value::EntityTypeId::decode(id)
+        .map_err(|error| validation(format!("invalid node type: {error}")))?;
+    if let Some(local) = id.tagged().runtime_entity_id() {
         return runtime
-            .get(&local)
+            .get(&local.get())
             .map(|name| format!("runtime-entity:{name}"))
             .ok_or_else(|| validation("node runtime type ID has no catalog name"));
     }
-    if id.0 & graphforge_ir::RUNTIME_RELATION_TYPE_TAG != 0 {
-        return Err(validation("node type carries a runtime relation tag"));
-    }
-    // Untagged IDs are generation-bound semantic storage IDs. Their stable
-    // namespace is deliberately distinct from runtime names; #872 validates
-    // these IDs against the authenticated semantic-binding participant when a
-    // generation is admitted.
-    Ok(format!("semantic-storage-id:{}", id.0))
+    // Admission authenticates this semantic identity against its generation's
+    // composition. Encoding a checked ID does not reinterpret a runtime domain.
+    Ok(format!("semantic-storage-id:{}", id.encode()))
 }
 
 fn portable_node_type_column(
@@ -886,7 +879,12 @@ fn portable_node_type_column(
             if values.is_null(row) {
                 builder.append_null();
             } else {
-                builder.append_value(portable_type_name(values.value(row), runtime)?);
+                let primary = graphforge_value::PrimaryEntityTypeId::decode(values.value(row))
+                    .map_err(|error| validation(format!("invalid primary node route: {error}")))?;
+                match primary.label() {
+                    Some(id) => builder.append_value(portable_type_name(id.encode(), runtime)?),
+                    None => builder.append_null(),
+                }
             }
         }
         return Ok((
@@ -1563,9 +1561,9 @@ mod tests {
         writer.flush().unwrap();
 
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Person");
-        catalog.intern_relation_type("KNOWS");
-        catalog.intern_property("value", Some("Person"));
+        catalog.intern_label("Person").unwrap();
+        catalog.intern_relation_type("KNOWS").unwrap();
+        catalog.intern_property("value", Some("Person")).unwrap();
         write_parquet(
             &source.path().join("topology/runtime_catalog.parquet"),
             &catalog.to_record_batch(),
@@ -1856,9 +1854,9 @@ mod tests {
         let catalog_path = source.path().join("topology/runtime_catalog.parquet");
         let batch = read_parquet(&catalog_path).unwrap().remove(0);
         let mut catalog = RuntimeCatalog::from_record_batch(&batch).unwrap();
-        catalog.intern_label("Unrelated");
-        catalog.intern_relation_type("IGNORES");
-        catalog.intern_property("noise", Some("Unrelated"));
+        catalog.intern_label("Unrelated").unwrap();
+        catalog.intern_relation_type("IGNORES").unwrap();
+        catalog.intern_property("noise", Some("Unrelated")).unwrap();
         write_parquet(&catalog_path, &catalog.to_record_batch()).unwrap();
 
         let with_noise =
@@ -1886,14 +1884,14 @@ mod tests {
         let (alice, bob, excluded) = (uuid(31), uuid(32), uuid(33));
         let (knows, ignores) = (uuid(41), uuid(42));
         let mut catalog = RuntimeCatalog::new();
-        let person = catalog.intern_label("Person");
-        let company = catalog.intern_label("Company");
-        catalog.intern_relation_type("KNOWS");
-        catalog.intern_relation_type("IGNORES");
-        catalog.intern_property("name", Some("Person"));
-        catalog.intern_property("global", None);
-        catalog.intern_property("since", Some("KNOWS"));
-        catalog.intern_property("noise", Some("Company"));
+        let person = catalog.intern_label("Person").unwrap();
+        let company = catalog.intern_label("Company").unwrap();
+        catalog.intern_relation_type("KNOWS").unwrap();
+        catalog.intern_relation_type("IGNORES").unwrap();
+        catalog.intern_property("name", Some("Person")).unwrap();
+        catalog.intern_property("global", None).unwrap();
+        catalog.intern_property("since", Some("KNOWS")).unwrap();
+        catalog.intern_property("noise", Some("Company")).unwrap();
 
         let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
         writer.create_node(alice, TypeId(person.0)).unwrap();
@@ -2637,9 +2635,9 @@ mod tests {
         let root = TempDir::new().unwrap();
         let mut catalog = RuntimeCatalog::new();
         if let Some(prefix) = catalog_prefix {
-            catalog.intern_label(prefix);
+            catalog.intern_label(prefix).unwrap();
         }
-        let runtime_id = catalog.intern_label(label);
+        let runtime_id = catalog.intern_label(label).unwrap();
         let storage_id = graphforge_ir::runtime_entity_type_id(runtime_id);
         let mut writer = GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
         writer.create_node(uuid(91), storage_id).unwrap();
@@ -2716,7 +2714,8 @@ mod tests {
         fn graph(split: bool) -> TempDir {
             let root = TempDir::new().unwrap();
             let mut catalog = RuntimeCatalog::new();
-            let storage_id = graphforge_ir::runtime_entity_type_id(catalog.intern_label("Person"));
+            let storage_id =
+                graphforge_ir::runtime_entity_type_id(catalog.intern_label("Person").unwrap());
             let mut writer =
                 GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
             writer.create_node(uuid(91), storage_id).unwrap();

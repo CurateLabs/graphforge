@@ -1172,10 +1172,14 @@ fn computed_array(
 struct NodeIdentities {
     uuids: Vec<[u8; 16]>,
     node_ids: Vec<u64>,
-    type_ids: Vec<u32>,
+    type_ids: Vec<graphforge_value::PrimaryEntityTypeId>,
 }
 
-type NodeIdentitySlices<'a> = (&'a [[u8; 16]], &'a [u64], &'a [u32]);
+type NodeIdentitySlices<'a> = (
+    &'a [[u8; 16]],
+    &'a [u64],
+    &'a [graphforge_value::PrimaryEntityTypeId],
+);
 
 /// One created edge variable's per-row identities, in frontier row order.
 #[derive(Default)]
@@ -1196,7 +1200,13 @@ pub(crate) struct CreateRecorder {
 }
 
 impl CreateRecorder {
-    pub(crate) fn record_node(&mut self, var: u32, uuid: [u8; 16], node_id: u64, type_id: u32) {
+    pub(crate) fn record_node(
+        &mut self,
+        var: u32,
+        uuid: [u8; 16],
+        node_id: u64,
+        type_id: graphforge_value::PrimaryEntityTypeId,
+    ) {
         let n = self.nodes.entry(var).or_default();
         n.uuids.push(uuid);
         n.node_ids.push(node_id);
@@ -1728,12 +1738,7 @@ fn create_single_merge_node(
     ctx: &mut StatementWriteContext,
 ) -> Result<MatchedMergeNode, GfError> {
     let uuid = graphforge_core::uuid::new_v7();
-    let labels = spec
-        .label_ids
-        .iter()
-        .copied()
-        .map(TypeId)
-        .collect::<Vec<_>>();
+    let labels = spec.label_ids.clone();
     let node_id = ctx.writer.create_node_with_labels(uuid, &labels)?;
     ctx.writer.set_properties(
         &uuid,
@@ -1743,7 +1748,10 @@ fn create_single_merge_node(
     ctx.counters.nodes_created += 1;
     ctx.counters.properties_set += spec.properties.len() as u64;
     ctx.record_label_tokens(spec.label_ids.iter().copied());
-    let type_id = spec.label_ids.first().copied().unwrap_or(u32::MAX);
+    let type_id = spec.label_ids.first().copied().map_or_else(
+        graphforge_value::PrimaryEntityTypeId::absent,
+        graphforge_value::PrimaryEntityTypeId::known,
+    );
     Ok(MatchedMergeNode {
         uuid: to_bytes(&uuid),
         node_id,
@@ -1844,8 +1852,8 @@ fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSc
 struct MatchedMergeNode {
     uuid: [u8; 16],
     node_id: u64,
-    type_id: u32,
-    label_ids: Vec<u32>,
+    type_id: graphforge_value::PrimaryEntityTypeId,
+    label_ids: Vec<graphforge_value::EntityTypeId>,
     properties: HashMap<String, graphforge_ir::IrLiteral>,
 }
 

@@ -1,5 +1,6 @@
 //! Rust-owned graph analysis handlers registered under the shared algorithm dispatch contract.
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +9,7 @@ use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, AnalyzeAlgorithm};
 use graphforge_core::embedding_options::{EmbeddingAnalyzeOptions, EmbeddingOptions};
-use graphforge_core::{AnalyzeOptions, GfError, OntologyMode, TypeId};
+use graphforge_core::{AnalyzeOptions, GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
 use sha2::{Digest, Sha256};
 
@@ -1820,7 +1821,7 @@ pub fn analyze_algorithm(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     options: &AnalyzeOptions,
 ) -> Result<RecordBatch, GfError> {
     analyze_algorithm_with_compute(
@@ -1848,7 +1849,7 @@ pub fn analyze_algorithm_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     options: &AnalyzeOptions,
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
@@ -1874,7 +1875,7 @@ pub fn analyze_projection_fingerprint(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     options: &AnalyzeOptions,
 ) -> Result<[u8; 32], GfError> {
     let prepared = prepare_analyze_projection(provider, dir, mode, label, options)?;
@@ -1916,7 +1917,7 @@ fn prepare_analyze_projection(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     options: &AnalyzeOptions,
 ) -> Result<PreparedAnalyzeProjection, GfError> {
     let options = normalize_analyze_options(options)?;
@@ -2031,7 +2032,7 @@ pub fn embedding_algorithm(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     invocation: &EmbeddingAnalyzeOptions,
 ) -> Result<RecordBatch, GfError> {
     embedding_algorithm_execution(provider, dir, mode, label, None, invocation)
@@ -2046,7 +2047,7 @@ pub fn embedding_algorithm_execution(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
 ) -> Result<EmbeddingExecution, GfError> {
@@ -2071,7 +2072,7 @@ pub fn embedding_algorithm_execution_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
     limits: AlgorithmLimits,
@@ -2107,7 +2108,7 @@ fn prepare_embedding_projection(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     invocation: &EmbeddingAnalyzeOptions,
     limits: AlgorithmLimits,
     compute: Option<crate::SharedComputePool>,
@@ -2192,7 +2193,7 @@ pub fn prepare_embedding_invocation_descriptor(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
 ) -> Result<EmbeddingInvocationDescriptor, GfError> {
@@ -2217,7 +2218,7 @@ pub fn prepare_embedding_invocation_descriptor_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
     limits: AlgorithmLimits,
@@ -2307,7 +2308,7 @@ pub(crate) fn embedding_algorithm_with_controls(
         graph,
         invocation,
         EmbeddingProjectionSelector {
-            label: None,
+            label: EntityTypeSelection::All,
             via: invocation.via.clone(),
             directed: invocation.directed,
             weight: invocation.weight.clone(),

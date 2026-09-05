@@ -22,6 +22,7 @@ gf_rust_library(
     deps = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-ontology:graphforge_ontology",
     ],
 )
@@ -29,9 +30,11 @@ gf_rust_library(
 gf_rust_test(
     name = "graphforge_ir_test",
     crate = ":graphforge_ir",
+    compile_data = ["//crates/graphforge-value:tests/fixtures/catalog_ids_v1.json"],
     deps = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         # Cargo [dev-dependencies]; unit tests call graphforge_cypher::parse.
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-ontology:graphforge_ontology",
@@ -44,6 +47,7 @@ gf_rust_doc_test(
     deps = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-ontology:graphforge_ontology",
     ],
@@ -60,6 +64,7 @@ gf_rust_integration_test(
     deps = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-ontology:graphforge_ontology",
     ],

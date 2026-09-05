@@ -15,7 +15,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{ExprId, PropId, VarId};
+use crate::{ExprId, PropertyId, VarId};
 
 // ---------------------------------------------------------------------------
 // IrLiteral
@@ -452,7 +452,7 @@ pub enum IrExpr {
         /// The expression whose property is read.
         base: ExprId,
         /// The property type ID (resolved by the binder).
-        prop: PropId,
+        prop: PropertyId,
     },
     /// A binary infix expression.
     BinaryOp {

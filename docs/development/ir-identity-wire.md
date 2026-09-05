@@ -1,0 +1,7 @@
+# Graph IR identity wire contract
+
+Graph IR 1.0.0 separates runtime property references from ontology property references. A property numbered 7 is encoded as `{"Runtime":7}` or `{"Ontology":7}` inside `PropertyAccess`, `SetPropItem`, and `RemovePropItem`. Equal local integers in these two domains are distinct keys throughout binding and lowering. Type references keep their original checked UInt32 encoding, with context-specific entity and relation decoding. An omitted optional scan or expansion restriction is `null`; a failed name binding rejects the query and never produces an unrestricted scan.
+
+`GraphPlan::from_json` negotiates the declared version before decoding the plan and returns `IrWireError::UnsupportedVersion` for older major versions or newer unsupported minor versions. Direct serde decoding also enforces version compatibility. Graph IR 0.x numeric property references are ambiguous and must be recompiled from their query source. They are never silently interpreted as ontology properties. The serialized `ir_version` remains an object containing `major`, `minor`, and `patch`.
+
+This is a compiler and explanation wire-contract change for the 0.6.0 release. It does not change catalog Arrow columns, topology type integers, property files, GFDR durable bytes, or project format versions, and it introduces no project-open migration or latest-build requirement. The topology primary-routing scalar still preserves its existing absent value independently of current label membership.

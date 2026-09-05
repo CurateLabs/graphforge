@@ -953,13 +953,15 @@ fn apply_graph_mutations(
             node_uuid, label, ..
         } = mutation
         {
-            let type_id = graph
+            let type_id = match graph
                 .ontology
                 .as_ref()
                 .and_then(|ontology| ontology.entity_type_id(label))
-                .unwrap_or_else(|| {
-                    graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
-                });
+            {
+                Some(id) => graphforge_value::EntityTypeId::ontology(id)
+                    .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?,
+                None => graphforge_value::EntityTypeId::runtime(catalog.intern_label(label)?),
+            };
             writer.create_node(*node_uuid, type_id)?;
         }
     }
@@ -975,7 +977,7 @@ fn apply_graph_mutations(
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(label));
+                            catalog.intern_property(name, Some(label)).unwrap();
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -996,13 +998,13 @@ fn apply_graph_mutations(
                 target_uuid,
                 properties,
             } => {
-                catalog.intern_relation_type(rel_type);
+                catalog.intern_relation_type(rel_type).unwrap();
                 writer.create_edge(*edge_uuid, rel_type, source_uuid, target_uuid)?;
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(rel_type));
+                            catalog.intern_property(name, Some(rel_type)).unwrap();
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -1017,7 +1019,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None);
+                catalog.intern_property(property, None).unwrap();
                 let literal = prop_literal(value)?;
                 node_sets
                     .entry("_untyped".into())
@@ -1031,7 +1033,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None);
+                catalog.intern_property(property, None).unwrap();
                 let literal = prop_literal(value)?;
                 edge_sets
                     .entry("_untyped".into())

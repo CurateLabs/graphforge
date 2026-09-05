@@ -39,7 +39,7 @@ use datafusion::logical_expr::{
     SortExpr, logical_plan::LogicalTableSource,
 };
 
-use graphforge_core::{GfError, OntologyMode, TypeId};
+use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::plan::PATTERN_COMPREHENSION_VALUE_ALIAS;
 use graphforge_ir::{
     AggExpr, AggFunc, CreatePattern, Direction, ExprArena, ExprId, GraphOp, GraphPlan, IrExpr,
@@ -54,6 +54,7 @@ use graphforge_plan::{
 use graphforge_storage::{
     EXPLORATORY_EDGE_SCHEMA, GraphCatalog, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA,
 };
+use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
 use crate::LogicalPlan;
 use crate::expr::{ExprLowerer, LoweringError, VarMap, list_index_range};
@@ -182,9 +183,8 @@ impl<'a> GraphPlanLowerer<'a> {
         if let Some(c) = catalog {
             type_id_to_rel_name.extend(c.semantic_rel_routes().clone());
             for (id, name) in c.rel_names() {
-                let plan_id =
-                    graphforge_ir::runtime_relation_type_id(graphforge_ir::RuntimeTypeId(*id));
-                type_id_to_rel_name.insert(plan_id.0, name.clone());
+                let plan_id = RelationTypeId::runtime(*id);
+                type_id_to_rel_name.insert(plan_id.encode(), name.clone());
             }
         }
         Self {
@@ -241,7 +241,7 @@ impl<'a> GraphPlanLowerer<'a> {
     /// With no catalog (pure logical/explain lowering) the map is empty, so
     /// property accesses fall back to `"prop_<id>"` — those paths render plans,
     /// not data.
-    fn prop_names(&self) -> HashMap<u32, String> {
+    fn prop_names(&self) -> HashMap<PropertyId, String> {
         match self.catalog {
             Some(c) => c.prop_names().clone(),
             None => HashMap::new(),
@@ -261,10 +261,9 @@ impl<'a> GraphPlanLowerer<'a> {
         if let Some(c) = self.catalog {
             node_label_names.extend(c.semantic_label_names().clone());
             for (id, name) in c.label_names() {
-                let plan_id =
-                    graphforge_ir::runtime_entity_type_id(graphforge_ir::RuntimeTypeId(*id));
+                let plan_id = EntityTypeId::runtime(*id);
                 node_label_names
-                    .entry(plan_id.0)
+                    .entry(plan_id.encode())
                     .or_insert_with(|| name.clone());
             }
         }
@@ -338,11 +337,11 @@ impl<'a> GraphPlanLowerer<'a> {
     ///   properties are written — so `MATCH (n) RETURN n` carries its props (#889);
     /// - unlabelled in an **ontology** mode: `None` — properties are spread across
     ///   per-entity tables with no single stem (a multi-table union; out of scope).
-    fn prop_table_stem(&self, ty: Option<TypeId>) -> Option<String> {
+    fn prop_table_stem(&self, ty: Option<EntityTypeId>) -> Option<String> {
         match ty {
             Some(type_id) => Some(
                 self.type_id_to_entity_name
-                    .get(&type_id.0)
+                    .get(&type_id.encode())
                     .cloned()
                     .unwrap_or_else(|| "_untyped".to_owned()),
             ),
@@ -357,7 +356,7 @@ impl<'a> GraphPlanLowerer<'a> {
     /// columns `join_node_properties` materializes as `var_N.<name>`. Empty in
     /// schema-only lowering or when no single property table applies (see
     /// [`prop_table_stem`](Self::prop_table_stem)).
-    fn node_prop_cols(&self, ty: Option<TypeId>) -> Vec<String> {
+    fn node_prop_cols(&self, ty: Option<EntityTypeId>) -> Vec<String> {
         let Some(dir) = self.read_dir() else {
             return Vec::new();
         };
@@ -406,7 +405,7 @@ impl<'a> GraphPlanLowerer<'a> {
     fn join_node_properties(
         &self,
         var: VarId,
-        ty: Option<TypeId>,
+        ty: Option<EntityTypeId>,
         scan: LogicalPlan,
     ) -> Result<LogicalPlan, LoweringError> {
         use datafusion::common::Column;
@@ -2200,11 +2199,11 @@ impl<'a> GraphPlanLowerer<'a> {
                     eval_map_literal(self, n.properties, exprs, var_map, input_schema)?;
                 Ok(ResolvedNodeSpec {
                     var: n.var.0,
-                    label_ids: n.labels.iter().map(|t| t.0).collect(),
+                    label_ids: n.labels.clone(),
                     label_names: n
                         .labels
                         .iter()
-                        .filter_map(|t| self.type_id_to_entity_name.get(&t.0).cloned())
+                        .filter_map(|t| self.type_id_to_entity_name.get(&t.encode()).cloned())
                         .collect(),
                     properties,
                     computed_properties,
@@ -2223,10 +2222,10 @@ impl<'a> GraphPlanLowerer<'a> {
                     var: e.var.0,
                     src: e.src.0,
                     dst: e.dst.0,
-                    rel_type_id: e.rel_type.map(|t| t.0),
+                    rel_type_id: e.rel_type,
                     rel_type_name: e
                         .rel_type
-                        .and_then(|t| self.type_id_to_rel_name.get(&t.0).cloned()),
+                        .and_then(|t| self.type_id_to_rel_name.get(&t.encode()).cloned()),
                     direction: e.direction,
                     properties,
                     computed_properties,
@@ -3077,12 +3076,15 @@ fn edge_scan_source(
 fn filter_node_by_type(
     input: LogicalPlan,
     alias: &str,
-    type_id: TypeId,
+    type_id: EntityTypeId,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::functions_nested::expr_fn::array_has;
     use datafusion::logical_expr::{col, lit};
     LogicalPlanBuilder::from(input)
-        .filter(array_has(col(format!("{alias}.type_ids")), lit(type_id.0)))
+        .filter(array_has(
+            col(format!("{alias}.type_ids")),
+            lit(type_id.encode()),
+        ))
         .and_then(LogicalPlanBuilder::build)
         .map_unsupported_expr()
 }
@@ -3129,7 +3131,7 @@ fn enrich_bound_node_identity(
 
 fn lower_node_scan(
     var: VarId,
-    ty: Option<TypeId>,
+    ty: Option<EntityTypeId>,
     var_map: &mut VarMap,
     dir: Option<&Path>,
     pending_nodes: Option<&RecordBatch>,
@@ -3156,7 +3158,10 @@ fn lower_node_scan(
         use datafusion::functions_nested::expr_fn::array_has;
         use datafusion::logical_expr::{col, lit};
         builder = builder
-            .filter(array_has(col(format!("{alias}.type_ids")), lit(type_id.0)))
+            .filter(array_has(
+                col(format!("{alias}.type_ids")),
+                lit(type_id.encode()),
+            ))
             .map_unsupported_expr()?;
     }
 
@@ -3165,7 +3170,7 @@ fn lower_node_scan(
 
 fn lower_typed_edge_scan(
     var: VarId,
-    rel_ty: TypeId,
+    rel_ty: RelationTypeId,
     var_map: &mut VarMap,
     catalog: Option<&GraphCatalog>,
     type_id_to_rel_name: &HashMap<u32, String>,
@@ -3180,11 +3185,11 @@ fn lower_typed_edge_scan(
 
     // Require a known relation name — silently falling back to _exploratory
     // would change query semantics (wrong table / over-scan).
-    let rel_name = type_id_to_rel_name.get(&rel_ty.0).ok_or_else(|| {
+    let rel_name = type_id_to_rel_name.get(&rel_ty.encode()).ok_or_else(|| {
         LoweringError::UnsupportedExpr(format!(
             "TypedEdgeScan: TypeId({}) has no known relation name; \
              ontology may be incomplete or stale",
-            rel_ty.0
+            rel_ty.encode()
         ))
     })?;
 
@@ -3192,13 +3197,13 @@ fn lower_typed_edge_scan(
     // authenticated and registered by GraphCatalog. Reconstructing a provider
     // from a string route loses that authority and must never fall back to the
     // exploratory relation-name filter.
-    if catalog.is_some_and(|catalog| catalog.semantic_rel_routes().contains_key(&rel_ty.0)) {
+    if catalog.is_some_and(|catalog| catalog.semantic_rel_routes().contains_key(&rel_ty.encode())) {
         let provider = catalog
-            .and_then(|catalog| catalog.semantic_edge_table(rel_ty.0))
+            .and_then(|catalog| catalog.semantic_edge_table(rel_ty.encode()))
             .ok_or_else(|| {
                 LoweringError::UnsupportedExpr(format!(
                     "semantic relation TypeId({}) has no authenticated catalog provider",
-                    rel_ty.0
+                    rel_ty.encode()
                 ))
             })?;
         return LogicalPlanBuilder::scan(
@@ -3235,7 +3240,7 @@ fn lower_typed_edge_scan(
 
 fn lower_edge_scan(
     var: VarId,
-    ty: Option<TypeId>,
+    ty: Option<RelationTypeId>,
     var_map: &mut VarMap,
     type_id_to_rel_name: &HashMap<u32, String>,
     dir: Option<&Path>,
@@ -3250,7 +3255,7 @@ fn lower_edge_scan(
     let mut builder = LogicalPlanBuilder::scan(alias, src, None).map_unsupported_expr()?;
 
     if let Some(type_id) = ty
-        && let Some(name) = type_id_to_rel_name.get(&type_id.0)
+        && let Some(name) = type_id_to_rel_name.get(&type_id.encode())
     {
         builder = builder
             .filter(col("rel_type_name").eq(lit(name.as_str())))
@@ -3529,7 +3534,7 @@ fn lower_var_len_expand(
     src: VarId,
     edge: VarId,
     dst: VarId,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     dir: Direction,
     min_hops: u16,
     max_hops: Option<u16>,
@@ -3547,13 +3552,16 @@ fn lower_var_len_expand(
         .as_ref()
         .map_or(dst, |_| VarId(u32::MAX.saturating_sub(dst.0)));
     let rel_name = match rel_ty {
-        Some(rt) => type_id_to_rel_name.get(&rt.0).cloned().ok_or_else(|| {
-            LoweringError::UnsupportedExpr(format!(
-                "VarLenExpand: TypeId({}) has no known relation name; \
+        Some(rt) => type_id_to_rel_name
+            .get(&rt.encode())
+            .cloned()
+            .ok_or_else(|| {
+                LoweringError::UnsupportedExpr(format!(
+                    "VarLenExpand: TypeId({}) has no known relation name; \
                  ontology may be incomplete or stale",
-                rt.0
-            ))
-        })?,
+                    rt.encode()
+                ))
+            })?,
         None => "*".to_owned(),
     };
     // Ontology inference (#605): if this relation carries semantic rules
@@ -3561,7 +3569,7 @@ fn lower_var_len_expand(
     // so the closure is auditable. Empty in exploratory mode (no ontology) → the
     // TCK-safety gate. Captured here before `rel_name` is moved into the node.
     let infer_rules: Vec<(String, String)> = rel_ty
-        .and_then(|rt| inference_rules.get(&rt.0))
+        .and_then(|rt| inference_rules.get(&rt.encode()))
         .cloned()
         .unwrap_or_default();
     let rel_for_infer = rel_name.clone();
@@ -3628,7 +3636,7 @@ fn lower_var_len_expand(
         traversal_dst.0,
         edge.0,
         dir,
-        rel_ty.map(|t| t.0),
+        rel_ty,
         dir_path.to_path_buf(),
         mode,
         dst_fields,
@@ -3721,7 +3729,7 @@ fn lower_expand(
     src: VarId,
     edge: VarId,
     dst: VarId,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     dir: Direction,
     min_hops: u16,
     max_hops: Option<u16>,
@@ -3936,7 +3944,7 @@ fn try_lower_provider_expand(
     src: VarId,
     edge: VarId,
     dst: VarId,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     dir: Direction,
     input: &LogicalPlan,
     var_map: &mut VarMap,
@@ -3951,7 +3959,7 @@ fn try_lower_provider_expand(
     }
     let rel_name = match rel_ty {
         Some(rt) => {
-            let Some(name) = type_id_to_rel_name.get(&rt.0) else {
+            let Some(name) = type_id_to_rel_name.get(&rt.encode()) else {
                 return Ok(None); // relational path reports the unknown TypeId
             };
             name.clone()
@@ -4003,7 +4011,7 @@ fn try_lower_provider_expand(
         traversal_dst.0,
         edge.0,
         dir,
-        rel_ty.map(|rt| rt.0),
+        rel_ty,
         dir_path.to_path_buf(),
         mode,
         edge_fields,
@@ -4064,7 +4072,7 @@ fn expand_single_dir(
     _src: VarId,
     edge: VarId,
     dst: VarId,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     src_alias: &str,
     out_direction: bool,
     input: LogicalPlan,
@@ -4182,7 +4190,7 @@ fn expand_single_dir(
 #[allow(clippy::too_many_arguments)]
 fn expand_bound_edge_single_dir(
     dst: VarId,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     src_alias: &str,
     edge_alias: &str,
     out_direction: bool,
@@ -4200,10 +4208,10 @@ fn expand_bound_edge_single_dir(
         col(format!("{src_alias}.node_id")).eq(col(format!("{edge_alias}.{edge_src_field}")));
 
     if let Some(rt) = rel_ty {
-        let rel_name = type_id_to_rel_name.get(&rt.0).ok_or_else(|| {
+        let rel_name = type_id_to_rel_name.get(&rt.encode()).ok_or_else(|| {
             LoweringError::UnsupportedExpr(format!(
                 "bound edge TypeId({}) has no known relation name; ontology may be incomplete or stale",
-                rt.0
+                rt.encode()
             ))
         })?;
         let qual = TableReference::bare(edge_alias);
@@ -4262,7 +4270,7 @@ fn expand_bound_edge_single_dir(
 /// with whichever edge file the scan reads.
 fn join_edge_properties(
     edge_alias: &str,
-    rel_ty: Option<TypeId>,
+    rel_ty: Option<RelationTypeId>,
     type_id_to_rel_name: &HashMap<u32, String>,
     catalog: Option<&GraphCatalog>,
     dir: Option<&Path>,
@@ -4313,10 +4321,11 @@ fn join_edge_properties(
             prop_sources.push((stem, table, prop_cols));
         };
     if let Some(rel_ty) = rel_ty {
-        let Some(rel_name) = type_id_to_rel_name.get(&rel_ty.0) else {
+        let Some(rel_name) = type_id_to_rel_name.get(&rel_ty.encode()) else {
             return Ok(scan); // unknown relation name: nothing to resolve
         };
-        let registered = catalog.and_then(|catalog| catalog.semantic_edge_property_table(rel_ty.0));
+        let registered =
+            catalog.and_then(|catalog| catalog.semantic_edge_property_table(rel_ty.encode()));
         push_source(rel_name.clone(), registered);
     } else {
         for stem in graphforge_storage::list_edge_property_stems(dir) {
@@ -6166,7 +6175,8 @@ mod tests {
     ) {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut rc = graphforge_ir::RuntimeCatalog::new();
-        let rel = graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS"));
+        let rel =
+            graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS").unwrap());
         let catalog = graphforge_storage::GraphCatalog::open(tmp.path(), None, &rc).unwrap();
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
@@ -6326,7 +6336,8 @@ mod tests {
         // silently column-0-seeded ExpandNode.
         let tmp = tempfile::TempDir::new().unwrap();
         let mut rc = graphforge_ir::RuntimeCatalog::new();
-        let rel = graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS"));
+        let rel =
+            graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS").unwrap());
         let catalog = graphforge_storage::GraphCatalog::open(tmp.path(), None, &rc).unwrap();
         // No NodeScan: src VarId(0) is never registered.
         let plan = GraphPlan::builder("openCypher")

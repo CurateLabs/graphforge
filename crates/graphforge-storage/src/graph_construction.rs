@@ -857,7 +857,7 @@ impl ConstructionSemanticAuthority {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        ))
+        )?)
     }
 }
 

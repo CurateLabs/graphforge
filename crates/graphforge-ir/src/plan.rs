@@ -8,9 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AggExpr, BindingExplainReceipt, CreatePattern, Direction, ExprArena, ExprId, IrVersion,
-    OntologyVersion, ProcedureDefinition, ProcedureYield, ProjectItem, RemovePropItem, SetMapItem,
-    SetPropItem, SortOrder, TypeId, VarId,
+    AggExpr, BindingExplainReceipt, CreatePattern, Direction, EntityTypeId, ExprArena, ExprId,
+    IrVersion, OntologyVersion, ProcedureDefinition, ProcedureYield, ProjectItem, RelationTypeId,
+    RemovePropItem, SetMapItem, SetPropItem, SortOrder, VarId,
 };
 
 /// Child projection column consumed by pattern-comprehension lowering.
@@ -64,7 +64,7 @@ pub enum GraphOp {
         /// The variable that receives each scanned node.
         var: VarId,
         /// The label type to filter on, or `None` for a full scan.
-        ty: Option<TypeId>,
+        ty: Option<EntityTypeId>,
     },
 
     /// Wildcard edge scan across all relation types.
@@ -75,7 +75,7 @@ pub enum GraphOp {
         /// The variable that receives each scanned edge.
         var: VarId,
         /// Optional relation type filter.
-        ty: Option<TypeId>,
+        ty: Option<RelationTypeId>,
     },
 
     /// Scan `topology/edges/TYPENAME.parquet` for a specific relation type.
@@ -90,7 +90,7 @@ pub enum GraphOp {
         /// The variable that receives each scanned edge.
         var: VarId,
         /// The concrete relation type to scan.
-        rel_ty: TypeId,
+        rel_ty: RelationTypeId,
     },
 
     /// Expand from a source node along edges to destination nodes.
@@ -102,7 +102,7 @@ pub enum GraphOp {
         /// Destination node variable.
         dst: VarId,
         /// Relation type filter (`None` = any relation type).
-        rel_ty: Option<TypeId>,
+        rel_ty: Option<RelationTypeId>,
         /// Traversal direction.
         dir: Direction,
         /// Minimum number of hops (1 for a single hop).
@@ -379,7 +379,8 @@ fn is_false(value: &bool) -> bool {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphPlan {
-    /// IR format version for forward-compatibility checks.
+    /// IR format version, negotiated before accepting a serialized plan.
+    #[serde(deserialize_with = "deserialize_supported_version")]
     pub ir_version: IrVersion,
     /// Query dialect (e.g. `"openCypher"`).
     pub dialect: String,
@@ -403,7 +404,30 @@ pub struct GraphPlan {
     pub exprs: ExprArena,
 }
 
+fn deserialize_supported_version<'de, D>(deserializer: D) -> Result<IrVersion, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let version = IrVersion::deserialize(deserializer)?;
+    version
+        .require_supported()
+        .map_err(serde::de::Error::custom)?;
+    Ok(version)
+}
+
 impl GraphPlan {
+    /// Negotiate JSON's IR version before decoding any ambiguous identity fields.
+    /// Older IR must be recompiled; it is never reinterpreted as ontology IDs.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, crate::IrWireError> {
+        #[derive(Deserialize)]
+        struct Header {
+            ir_version: IrVersion,
+        }
+        let header: Header = serde_json::from_slice(bytes)?;
+        header.ir_version.require_supported()?;
+        Ok(serde_json::from_slice(bytes)?)
+    }
+
     /// Create a [`GraphPlanBuilder`] for constructing a new plan.
     ///
     /// `dialect` identifies the query language (e.g. `"openCypher"`).
@@ -881,5 +905,53 @@ mod tests {
             let back: GraphOp = serde_json::from_str(&json).unwrap();
             assert_eq!(op, &back, "round-trip failed for {op:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_wire_tests {
+    use super::*;
+    use graphforge_value::{PropertyId, RuntimePropId};
+
+    #[test]
+    fn property_domains_survive_current_wire_without_collisions() {
+        let mut builder = GraphPlan::builder("openCypher");
+        let base = builder.push_expr(crate::IrExpr::VarRef(crate::VarId(0)));
+        builder.push_expr(crate::IrExpr::PropertyAccess {
+            base,
+            prop: PropertyId::runtime(RuntimePropId::new(7).unwrap()),
+        });
+        builder.push_expr(crate::IrExpr::PropertyAccess {
+            base,
+            prop: PropertyId::ontology(graphforge_core::PropId(7)).unwrap(),
+        });
+        let plan = builder.build();
+        let bytes = serde_json::to_vec(&plan).unwrap();
+        assert_eq!(GraphPlan::from_json(&bytes).unwrap(), plan);
+        assert_eq!(serde_json::from_slice::<GraphPlan>(&bytes).unwrap(), plan);
+    }
+
+    #[test]
+    fn old_ambiguous_property_ir_is_rejected_by_version_before_identity_decode() {
+        let mut wire = serde_json::to_value(GraphPlan::builder("openCypher").build()).unwrap();
+        wire["ir_version"] = serde_json::json!({"major": 0, "minor": 3, "patch": 0});
+        // Original numeric property representation deliberately cannot identify
+        // whether zero meant ontology property zero or runtime property zero.
+        wire["exprs"] = serde_json::json!([{ "PropertyAccess": { "base": 0, "prop": 0 } }]);
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        assert!(matches!(
+            GraphPlan::from_json(&bytes),
+            Err(crate::IrWireError::UnsupportedVersion {
+                found: IrVersion {
+                    major: 0,
+                    minor: 3,
+                    patch: 0
+                },
+                ..
+            })
+        ));
+        assert!(serde_json::from_slice::<GraphPlan>(&bytes).is_err());
+        wire["ir_version"] = serde_json::to_value(IrVersion::CURRENT).unwrap();
+        assert!(GraphPlan::from_json(&serde_json::to_vec(&wire).unwrap()).is_err());
     }
 }

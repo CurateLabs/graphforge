@@ -389,14 +389,14 @@ mod tests {
         let catalog = graph.runtime_catalog();
         let mut catalog = catalog.lock().unwrap();
         if first_order {
-            catalog.intern_label("Person");
-            catalog.intern_label("Organization");
+            catalog.intern_label("Person").unwrap();
+            catalog.intern_label("Organization").unwrap();
         } else {
-            catalog.intern_label("Organization");
-            catalog.intern_label("Person");
+            catalog.intern_label("Organization").unwrap();
+            catalog.intern_label("Person").unwrap();
         }
-        catalog.intern_property("name", Some("Person"));
-        catalog.intern_relation_type("WORKS_AT");
+        catalog.intern_property("name", Some("Person")).unwrap();
+        catalog.intern_relation_type("WORKS_AT").unwrap();
         drop(catalog);
         graph
     }

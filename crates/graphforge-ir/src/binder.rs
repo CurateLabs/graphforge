@@ -20,6 +20,7 @@ use graphforge_ast::{
 };
 use graphforge_core::{PropId, Span, TypeId};
 use graphforge_ontology::OntologyHandle;
+use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
 use crate::catalog::RuntimeCatalog;
 use crate::composition_binding::{BindingDiagnosticCode, CompositionBindingContext, SymbolBinding};
@@ -526,10 +527,15 @@ impl Binder {
                     let var = pending_dst.take().unwrap_or_else(|| {
                         ensure_pattern_var(node.var.as_deref(), VarKind::Node, node.span, s)
                     });
-                    let ty = node
-                        .labels
-                        .first()
-                        .map(|label| self.resolve_label(label, node.span, s));
+                    let ty = match node.labels.first() {
+                        Some(label) => {
+                            let Some(id) = self.resolve_label(label, node.span, s) else {
+                                return;
+                            };
+                            Some(id)
+                        }
+                        None => None,
+                    };
                     s.builder.push_op_mut(GraphOp::NodeScan { var, ty });
                     s.node_vars.insert(var, node.labels.first().cloned());
                     if node.labels.len() > 1 {
@@ -563,9 +569,15 @@ impl Binder {
                     let rel_name = (rel.types.len() == 1)
                         .then(|| rel.types.first().cloned())
                         .flatten();
-                    let rel_ty = rel_name
-                        .as_ref()
-                        .map(|t| self.resolve_relation_type(t, rel.span, s));
+                    let rel_ty = match rel_name.as_ref() {
+                        Some(name) => {
+                            let Some(id) = self.resolve_relation_type(name, rel.span, s) else {
+                                return;
+                            };
+                            Some(id)
+                        }
+                        None => None,
+                    };
                     let is_var_hop = rel.min_hops.is_some() || rel.max_hops.is_some();
 
                     // Both fixed (`-[:R]->`) and variable-length (`-[:R*1..3]->`)
@@ -752,7 +764,9 @@ impl Binder {
             let value = self.lower_expr(&map.entries[key], span, s);
             let owner = property_owner_for_var(var, s);
             let prop_span = map.key_spans.get(key).copied().unwrap_or(span);
-            let prop = self.resolve_property(key, prop_span, owner, s);
+            let Some(prop) = self.resolve_property(key, prop_span, owner, s) else {
+                continue;
+            };
             let base = s.builder.push_expr(IrExpr::VarRef(var));
             let access = s.builder.push_expr(IrExpr::PropertyAccess { base, prop });
             let eq = s.builder.push_expr(IrExpr::BinaryOp {
@@ -792,7 +806,9 @@ impl Binder {
             let value = self.lower_expr(&map.entries[key], span, s);
             let owner = BoundPropertyOwner::Relationship(rel_name.map(str::to_owned));
             let prop_span = map.key_spans.get(key).copied().unwrap_or(span);
-            let prop = self.resolve_property(key, prop_span, owner, s);
+            let Some(prop) = self.resolve_property(key, prop_span, owner, s) else {
+                continue;
+            };
             let loop_var = alloc_anon_var(s);
             let element = s.builder.push_expr(IrExpr::VarRef(loop_var));
             let access = s.builder.push_expr(IrExpr::PropertyAccess {
@@ -931,7 +947,7 @@ impl Binder {
                             let labels = node
                                 .labels
                                 .iter()
-                                .map(|label| self.resolve_label(label, node.span, s))
+                                .filter_map(|label| self.resolve_label(label, node.span, s))
                                 .collect();
                             let resolved_properties = node.properties.as_ref().map(|expr| {
                                 rewrite_projection_alias_refs(
@@ -993,10 +1009,15 @@ impl Binder {
                             alloc_anon_var(s)
                         };
                         let src_var = prev_node_var.unwrap_or_else(|| alloc_anon_var(s));
-                        let rel_type = rel
-                            .types
-                            .first()
-                            .map(|t| self.resolve_relation_type(t, rel.span, s));
+                        let rel_type = match rel.types.first() {
+                            Some(name) => {
+                                let Some(id) = self.resolve_relation_type(name, rel.span, s) else {
+                                    return pattern;
+                                };
+                                Some(id)
+                            }
+                            None => None,
+                        };
                         let properties = rel
                             .properties
                             .as_ref()
@@ -1074,7 +1095,7 @@ impl Binder {
                             target,
                             labels: labels
                                 .iter()
-                                .map(|label| self.resolve_label(label, *span, s))
+                                .filter_map(|label| self.resolve_label(label, *span, s))
                                 .collect(),
                         });
                     } else {
@@ -1204,7 +1225,7 @@ impl Binder {
                         target,
                         labels: labels
                             .iter()
-                            .map(|label| self.resolve_label(label, *span, s))
+                            .filter_map(|label| self.resolve_label(label, *span, s))
                             .collect(),
                     }),
                     None => s.errors.push(BindError::new(
@@ -1261,7 +1282,7 @@ impl Binder {
                         target,
                         labels: labels
                             .iter()
-                            .map(|label| self.resolve_label(label, *span, s))
+                            .filter_map(|label| self.resolve_label(label, *span, s))
                             .collect(),
                     }),
                     None => s.errors.push(BindError::new(
@@ -1294,7 +1315,7 @@ impl Binder {
         &self,
         target: &PropertyAccess,
         s: &mut BinderState,
-    ) -> Option<(VarId, PropId, String)> {
+    ) -> Option<(VarId, PropertyId, String)> {
         if matches!(target.key.as_str(), "node_uuid" | "edge_uuid") {
             s.errors.push(BindError::new(
                 BindErrorKind::InvalidArgument,
@@ -1321,7 +1342,7 @@ impl Binder {
             return None;
         };
         let owner = property_owner_for_var(var, s);
-        let prop = self.resolve_property(&target.key, target.span, owner, s);
+        let prop = self.resolve_property(&target.key, target.span, owner, s)?;
         Some((var, prop, target.key.clone()))
     }
 
@@ -3608,7 +3629,9 @@ impl Binder {
                 }
                 let owner = property_owner_for_expr(object, s);
                 let base = self.lower_expr(object, *span, s);
-                let prop = self.resolve_property(key, *span, owner, s);
+                let Some(prop) = self.resolve_property(key, *span, owner, s) else {
+                    return s.builder.push_expr(IrExpr::Literal(IrLiteral::Null));
+                };
                 s.builder.push_expr(IrExpr::PropertyAccess { base, prop })
             }
 
@@ -4472,101 +4495,164 @@ impl Binder {
     // Type resolution
     // -----------------------------------------------------------------------
 
-    fn resolve_label(&self, name: &str, span: Span, s: &mut BinderState) -> TypeId {
-        if let Some(composition) = &self.composition {
-            return match composition.resolve(graphforge_ontology::SymbolKind::Entity, name) {
+    fn resolve_label(&self, name: &str, span: Span, s: &mut BinderState) -> Option<EntityTypeId> {
+        let resolved = if let Some(composition) = &self.composition {
+            match composition.resolve(graphforge_ontology::SymbolKind::Entity, name) {
                 Ok((binding, receipt)) => {
                     s.builder.push_binding_receipt(receipt);
                     match binding {
-                        SymbolBinding::Qualified(symbol) => {
-                            TypeId(composition.semantic_id(&symbol))
-                        }
-                        SymbolBinding::Runtime { local_id, .. } => crate::runtime_entity_type_id(
-                            self.catalog.lock().unwrap().intern_label(&local_id),
-                        ),
+                        SymbolBinding::Qualified(symbol) => composition
+                            .semantic_id(&symbol)
+                            .map_err(|error| error.to_string())
+                            .and_then(|id| {
+                                EntityTypeId::ontology(id).map_err(|error| error.to_string())
+                            }),
+                        SymbolBinding::Runtime { local_id, .. } => self
+                            .catalog
+                            .lock()
+                            .unwrap()
+                            .intern_label(&local_id)
+                            .map(EntityTypeId::runtime)
+                            .map_err(|error| error.to_string()),
                     }
                 }
                 Err(diagnostic) => {
                     Self::push_composition_error(&diagnostic, span, s);
-                    TypeId(u32::MAX)
+                    return None;
                 }
-            };
-        }
-        if let Some(handle) = &self.ontology
-            && let Some(id) = handle.entity_type_id(name)
+            }
+        } else if let Some(id) = self
+            .ontology
+            .as_ref()
+            .and_then(|handle| handle.entity_type_id(name))
         {
-            return id;
-        }
-        match self.mode {
-            OntologyMode::Strict => {
-                s.errors.push(BindError::new(
-                    BindErrorKind::UnknownLabel,
-                    span,
-                    format!("unknown label `{name}` (strict mode)"),
-                ));
-                TypeId(u32::MAX)
+            EntityTypeId::ontology(id).map_err(|error| error.to_string())
+        } else {
+            match self.mode {
+                OntologyMode::Strict => {
+                    s.errors.push(BindError::new(
+                        BindErrorKind::UnknownLabel,
+                        span,
+                        format!("unknown label `{name}` (strict mode)"),
+                    ));
+                    return None;
+                }
+                OntologyMode::Advisory => {
+                    s.warnings.push(BindError::new(
+                        BindErrorKind::UnknownLabel,
+                        span,
+                        format!("unknown label `{name}` — using runtime catalog"),
+                    ));
+                }
+                OntologyMode::Exploratory => {}
             }
-            OntologyMode::Advisory => {
-                s.warnings.push(BindError::new(
-                    BindErrorKind::UnknownLabel,
-                    span,
-                    format!("unknown label `{name}` — using runtime catalog"),
-                ));
-                crate::runtime_entity_type_id(self.catalog.lock().unwrap().intern_label(name))
-            }
-            OntologyMode::Exploratory => {
-                crate::runtime_entity_type_id(self.catalog.lock().unwrap().intern_label(name))
+            self.catalog
+                .lock()
+                .unwrap()
+                .intern_label(name)
+                .map(EntityTypeId::runtime)
+                .map_err(|error| error.to_string())
+        };
+        match resolved {
+            Ok(id) => Some(id),
+            Err(error) => {
+                s.errors
+                    .push(BindError::new(BindErrorKind::InvalidArgument, span, error));
+                None
             }
         }
     }
 
-    fn resolve_relation_type(&self, name: &str, span: Span, s: &mut BinderState) -> TypeId {
-        if let Some(composition) = &self.composition {
-            return match composition.resolve(graphforge_ontology::SymbolKind::Relation, name) {
+    fn resolve_relation_type(
+        &self,
+        name: &str,
+        span: Span,
+        s: &mut BinderState,
+    ) -> Option<RelationTypeId> {
+        let resolved = if let Some(composition) = &self.composition {
+            match composition.resolve(graphforge_ontology::SymbolKind::Relation, name) {
                 Ok((binding, receipt)) => {
                     s.builder.push_binding_receipt(receipt);
                     match binding {
-                        SymbolBinding::Qualified(symbol) => {
-                            TypeId(composition.semantic_id(&symbol))
-                        }
-                        SymbolBinding::Runtime { local_id, .. } => crate::runtime_relation_type_id(
-                            self.catalog.lock().unwrap().intern_relation_type(&local_id),
-                        ),
+                        SymbolBinding::Qualified(symbol) => composition
+                            .semantic_id(&symbol)
+                            .map_err(|error| error.to_string())
+                            .and_then(|id| {
+                                RelationTypeId::ontology(id).map_err(|error| error.to_string())
+                            }),
+                        SymbolBinding::Runtime { local_id, .. } => self
+                            .catalog
+                            .lock()
+                            .unwrap()
+                            .intern_relation_type(&local_id)
+                            .map(RelationTypeId::runtime)
+                            .map_err(|error| error.to_string()),
                     }
                 }
                 Err(diagnostic) => {
                     Self::push_composition_error(&diagnostic, span, s);
-                    TypeId(u32::MAX)
+                    return None;
                 }
-            };
-        }
-        if let Some(handle) = &self.ontology
-            && let Some(id) = handle.relation_type_id(name)
+            }
+        } else if let Some(id) = self
+            .ontology
+            .as_ref()
+            .and_then(|handle| handle.relation_type_id(name))
         {
-            return id;
+            RelationTypeId::ontology(id).map_err(|error| error.to_string())
+        } else {
+            match self.mode {
+                OntologyMode::Strict => {
+                    s.errors.push(BindError::new(
+                        BindErrorKind::UnknownRelationType,
+                        span,
+                        format!("unknown relation type `{name}` (strict mode)"),
+                    ));
+                    return None;
+                }
+                OntologyMode::Advisory => {
+                    s.warnings.push(BindError::new(
+                        BindErrorKind::UnknownRelationType,
+                        span,
+                        format!("unknown relation type `{name}` — using runtime catalog"),
+                    ));
+                }
+                OntologyMode::Exploratory => {}
+            }
+            self.catalog
+                .lock()
+                .unwrap()
+                .intern_relation_type(name)
+                .map(RelationTypeId::runtime)
+                .map_err(|error| error.to_string())
+        };
+        match resolved {
+            Ok(id) => Some(id),
+            Err(error) => {
+                s.errors
+                    .push(BindError::new(BindErrorKind::InvalidArgument, span, error));
+                None
+            }
         }
-        match self.mode {
-            OntologyMode::Strict => {
+    }
+
+    fn runtime_property(
+        &self,
+        name: &str,
+        owner: Option<&str>,
+        span: Span,
+        s: &mut BinderState,
+    ) -> Option<PropertyId> {
+        match self.catalog.lock().unwrap().intern_property(name, owner) {
+            Ok(id) => Some(PropertyId::runtime(id)),
+            Err(error) => {
                 s.errors.push(BindError::new(
-                    BindErrorKind::UnknownRelationType,
+                    BindErrorKind::InvalidArgument,
                     span,
-                    format!("unknown relation type `{name}` (strict mode)"),
+                    error.to_string(),
                 ));
-                TypeId(u32::MAX)
+                None
             }
-            OntologyMode::Advisory => {
-                s.warnings.push(BindError::new(
-                    BindErrorKind::UnknownRelationType,
-                    span,
-                    format!("unknown relation type `{name}` — using runtime catalog"),
-                ));
-                crate::runtime_relation_type_id(
-                    self.catalog.lock().unwrap().intern_relation_type(name),
-                )
-            }
-            OntologyMode::Exploratory => crate::runtime_relation_type_id(
-                self.catalog.lock().unwrap().intern_relation_type(name),
-            ),
         }
     }
 
@@ -4576,13 +4662,10 @@ impl Binder {
         span: Span,
         owner: BoundPropertyOwner,
         s: &mut BinderState,
-    ) -> PropId {
-        // Durable graph identity columns are structural fields supplied by the
-        // engine, not user-defined ontology properties. They remain readable
-        // in strict mode so internal and public graph projections can address
-        // persisted entities without weakening ontology validation.
+    ) -> Option<PropertyId> {
+        // Structural fields retain their existing runtime catalog name routing.
         if matches!(name, "node_uuid" | "edge_uuid") {
-            return PropId(self.catalog.lock().unwrap().intern_property(name, None).0);
+            return self.runtime_property(name, None, span, s);
         }
         if let Some(composition) = &self.composition {
             let scoped_owner = match &owner {
@@ -4592,9 +4675,7 @@ impl Binder {
                 BoundPropertyOwner::Relationship(Some(owner)) => {
                     Some((graphforge_ontology::SymbolKind::Relation, owner.as_str()))
                 }
-                BoundPropertyOwner::Entity(None)
-                | BoundPropertyOwner::Relationship(None)
-                | BoundPropertyOwner::Value => None,
+                _ => None,
             };
             let resolution = scoped_owner.map_or_else(
                 || composition.resolve(graphforge_ontology::SymbolKind::Property, name),
@@ -4604,21 +4685,31 @@ impl Binder {
                 Ok((binding, receipt)) => {
                     s.builder.push_binding_receipt(receipt);
                     match binding {
-                        SymbolBinding::Qualified(symbol) => {
-                            PropId(composition.semantic_id(&symbol))
+                        SymbolBinding::Qualified(symbol) => match composition
+                            .semantic_id(&symbol)
+                            .map_err(|error| error.to_string())
+                            .and_then(|id| {
+                                PropertyId::ontology(PropId(id.0))
+                                    .map_err(|error| error.to_string())
+                            }) {
+                            Ok(id) => Some(id),
+                            Err(error) => {
+                                s.errors.push(BindError::new(
+                                    BindErrorKind::InvalidArgument,
+                                    span,
+                                    error.to_string(),
+                                ));
+                                None
+                            }
+                        },
+                        SymbolBinding::Runtime { local_id, .. } => {
+                            self.runtime_property(&local_id, None, span, s)
                         }
-                        SymbolBinding::Runtime { local_id, .. } => PropId(
-                            self.catalog
-                                .lock()
-                                .unwrap()
-                                .intern_property(&local_id, None)
-                                .0,
-                        ),
                     }
                 }
                 Err(diagnostic) => {
                     Self::push_composition_error(&diagnostic, span, s);
-                    PropId(u32::MAX)
+                    None
                 }
             };
         }
@@ -4630,11 +4721,9 @@ impl Binder {
                     span,
                     format!("unknown property `{name}` — using runtime catalog"),
                 ));
-                PropId(self.catalog.lock().unwrap().intern_property(name, None).0)
+                self.runtime_property(name, None, span, s)
             }
-            OntologyMode::Exploratory => {
-                PropId(self.catalog.lock().unwrap().intern_property(name, None).0)
-            }
+            OntologyMode::Exploratory => self.runtime_property(name, None, span, s),
         }
     }
 
@@ -4686,9 +4775,9 @@ impl Binder {
         span: Span,
         owner: BoundPropertyOwner,
         s: &mut BinderState,
-    ) -> PropId {
+    ) -> Option<PropertyId> {
         if owner == BoundPropertyOwner::Value {
-            return PropId(self.catalog.lock().unwrap().intern_property(name, None).0);
+            return self.runtime_property(name, None, span, s);
         }
         let Some(handle) = &self.ontology else {
             s.errors.push(BindError::new(
@@ -4696,7 +4785,7 @@ impl Binder {
                 span,
                 format!("unknown property `{name}` (strict mode has no ontology)"),
             ));
-            return PropId(u32::MAX);
+            return None;
         };
 
         let (declarations, description, runtime_owner, entity_owner) = match owner {
@@ -4734,13 +4823,7 @@ impl Binder {
         };
 
         if declarations.len() == 1 {
-            return PropId(
-                self.catalog
-                    .lock()
-                    .unwrap()
-                    .intern_property(name, runtime_owner.as_deref())
-                    .0,
-            );
+            return self.runtime_property(name, runtime_owner.as_deref(), span, s);
         }
         let (kind, message) = if declarations.is_empty() {
             (
@@ -4765,7 +4848,7 @@ impl Binder {
             )
         };
         s.errors.push(BindError::new(kind, span, message));
-        PropId(u32::MAX)
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -6694,11 +6777,11 @@ fn check_duplicate_aliases(items: &[ReturnItem], s: &mut BinderState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RuntimeTypeId;
     use crate::{ProcedureDefinition, ProcedureField};
     use arrow::array::{StringArray, UInt32Array, UInt64Array};
     use graphforge_cypher::parse;
     use graphforge_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader};
+    use graphforge_value::RuntimeEntityId;
 
     fn make_binder(mode: OntologyMode) -> (Binder, Arc<Mutex<RuntimeCatalog>>) {
         let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
@@ -6822,7 +6905,11 @@ mod tests {
         .unwrap();
         let ontology = OntologyCompiler::compile(&doc).unwrap();
         let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
-        catalog.lock().unwrap().intern_property("preexisting", None);
+        catalog
+            .lock()
+            .unwrap()
+            .intern_property("preexisting", None)
+            .unwrap();
         (
             Binder::new(
                 Some(OntologyHandle::new(ontology)),
@@ -6833,7 +6920,7 @@ mod tests {
         )
     }
 
-    fn plan_property_ids(plan: &GraphPlan) -> Vec<PropId> {
+    fn plan_property_ids(plan: &GraphPlan) -> Vec<PropertyId> {
         (0..u32::try_from(plan.exprs.len()).unwrap())
             .filter_map(|index| match plan.exprs.get(ExprId(index)) {
                 IrExpr::PropertyAccess { prop, .. } => Some(*prop),
@@ -6887,9 +6974,15 @@ migrations: []
                 _ => None,
             })
             .expect("NodeScan");
-        assert_eq!(ghost_ty, crate::runtime_entity_type_id(RuntimeTypeId(0)));
-        assert_ne!(ghost_ty, TypeId(0));
-        assert_eq!(catalog.lock().unwrap().intern_label("Ghost").0, 0);
+        assert_eq!(
+            ghost_ty,
+            EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap())
+        );
+        assert_ne!(ghost_ty, EntityTypeId::ontology(TypeId(0)).unwrap());
+        assert_eq!(
+            catalog.lock().unwrap().intern_label("Ghost").unwrap().get(),
+            0
+        );
     }
 
     #[test]
@@ -6913,9 +7006,9 @@ migrations: []
         let (binder, catalog) = make_binder(OntologyMode::Exploratory);
         {
             let mut catalog = catalog.lock().unwrap();
-            assert_eq!(catalog.intern_label("Seed").0, 0);
-            assert_eq!(catalog.intern_relation_type("SEED_REL").0, 1);
-            assert_eq!(catalog.intern_property("seed", None).0, 0);
+            assert_eq!(catalog.intern_label("Seed").unwrap().get(), 0);
+            assert_eq!(catalog.intern_relation_type("SEED_REL").unwrap().get(), 1);
+            assert_eq!(catalog.intern_property("seed", None).unwrap().get(), 0);
         }
         let before = catalog.lock().unwrap().to_record_batch();
 
@@ -8024,6 +8117,41 @@ migrations: []
     }
 
     #[test]
+    fn omitted_restrictions_bind_but_failed_names_never_produce_wildcard_plans() {
+        let (binder, catalog) = make_binder(OntologyMode::Strict);
+        let plan = binder
+            .bind(&parse("MATCH (a)-[r]->(b) RETURN a").unwrap())
+            .unwrap();
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, GraphOp::NodeScan { ty: None, .. }))
+        );
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, GraphOp::Expand { rel_ty: None, .. }))
+        );
+        let before = catalog.lock().unwrap().to_record_batch();
+        for (query, kind) in [
+            (
+                "MATCH (a:MissingLabel) RETURN a",
+                BindErrorKind::UnknownLabel,
+            ),
+            (
+                "MATCH (a)-[:MISSING_RELATION]->(b) RETURN a",
+                BindErrorKind::UnknownRelationType,
+            ),
+        ] {
+            let errors = binder
+                .bind(&parse(query).unwrap())
+                .expect_err("failed resolution cannot become unrestricted syntax");
+            assert!(errors.iter().any(|error| error.kind == kind));
+            assert_eq!(catalog.lock().unwrap().to_record_batch(), before);
+        }
+    }
+
+    #[test]
     fn strict_mode_allows_durable_identity_fields() {
         let (binder, _) = make_binder(OntologyMode::Strict);
         let ast = parse(
@@ -8045,10 +8173,20 @@ migrations: []
         let catalog = catalog.lock().unwrap();
         let names = ids
             .iter()
-            .map(|id| catalog.property_name(crate::RuntimePropId(id.0)).unwrap())
+            .map(|id| {
+                catalog
+                    .property_name(
+                        id.runtime_id()
+                            .expect("strict property retains runtime identity"),
+                    )
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         assert_eq!(names, ["direct", "inherited", "shared", "weight", "shared"]);
-        assert!(ids.iter().all(|id| id.0 > 0));
+        assert!(
+            ids.iter()
+                .all(|id| id.runtime_id().is_some_and(|id| id.get() > 0))
+        );
         assert_ne!(ids[2], ids[4]);
     }
 
@@ -8068,11 +8206,14 @@ migrations: []
             })
             .collect::<Vec<_>>();
         assert_eq!(write_ids.len(), 5);
-        assert!(
-            write_ids
-                .iter()
-                .all(|id| catalog.property_name(crate::RuntimePropId(id.0)).is_some())
-        );
+        assert!(write_ids.iter().all(|id| {
+            catalog
+                .property_name(
+                    id.runtime_id()
+                        .expect("strict property retains runtime identity"),
+                )
+                .is_some()
+        }));
         drop(catalog);
 
         for query in [

@@ -617,8 +617,8 @@ migrations: []
         seed.create_node(endpoints[1], TypeId(1)).unwrap();
         seed.flush().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        assert_eq!(catalog.intern_label("Ghost").0, 0);
-        assert_eq!(catalog.intern_label("Spectre").0, 1);
+        assert_eq!(catalog.intern_label("Ghost").unwrap().0, 0);
+        assert_eq!(catalog.intern_label("Spectre").unwrap().0, 1);
 
         let outcome =
             reconcile_runtime_entity_label_ids(dir.path(), None, &catalog).expect("migrate");
@@ -656,8 +656,8 @@ migrations: []
         let dir = TempDir::new().unwrap();
         write_nodes(dir.path(), &[&[0], &[1]]);
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
-        catalog.intern_label("Spectre");
+        catalog.intern_label("Ghost").unwrap();
+        catalog.intern_label("Spectre").unwrap();
         reconcile_runtime_entity_label_ids(dir.path(), None, &catalog).unwrap();
 
         let stage_current = || {
@@ -714,7 +714,7 @@ migrations: []
         let dir = TempDir::new().unwrap();
         write_nodes(dir.path(), &[&[0]]);
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
         let handle = person_ontology();
         assert_eq!(handle.entity_type_id("Person"), Some(TypeId(0)));
 
@@ -734,7 +734,7 @@ migrations: []
         write_nodes(dir.path(), &[&[0], &[ghost]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
         let handle = person_ontology();
 
         let outcome = reconcile_runtime_entity_label_ids(dir.path(), Some(&handle), &catalog)
@@ -750,7 +750,7 @@ migrations: []
         write_nodes(dir.path(), &[&[0], &[ghost]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
 
         let outcome = reconcile_runtime_entity_label_ids(dir.path(), None, &catalog)
             .expect("marked project without ontology must not rewrite ontology zeros");
@@ -772,8 +772,8 @@ migrations: []
     fn adoption_promotes_same_named_tagged_person_keeps_ghost_tagged() {
         let dir = TempDir::new().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        let person_runtime = catalog.intern_label("Person");
-        let ghost_runtime = catalog.intern_label("Ghost");
+        let person_runtime = catalog.intern_label("Person").unwrap();
+        let ghost_runtime = catalog.intern_label("Ghost").unwrap();
         let person_tagged = runtime_entity_type_id(person_runtime).0;
         let ghost_tagged = runtime_entity_type_id(ghost_runtime).0;
         write_nodes(dir.path(), &[&[person_tagged], &[ghost_tagged]]);
@@ -823,7 +823,7 @@ migrations: []
     fn validate_read_only_rejects_pending_adoption_remap() {
         let dir = TempDir::new().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        let person_runtime = catalog.intern_label("Person");
+        let person_runtime = catalog.intern_label("Person").unwrap();
         let person_tagged = runtime_entity_type_id(person_runtime).0;
         write_nodes(dir.path(), &[&[person_tagged]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();

@@ -8,6 +8,7 @@
     reason = "algorithm foundation consumed by the Rust dispatch slice in issue #1146"
 )]
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -31,7 +32,7 @@ const VECTOR_CELL_LIMIT: usize = 16_777_216;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AdjacencySelection<'a> {
     /// Resolved node label id. `None` includes every node.
-    pub label: Option<TypeId>,
+    pub label: EntityTypeSelection,
     /// Relationship name, or `"*"` for all relationships.
     pub via: &'a str,
     /// Traversal direction requested from the provider.
@@ -647,7 +648,7 @@ impl AdjacencyGraph {
 /// Export only stable node selection and UUID identity, without reading edges.
 pub(crate) fn export_node_selection(
     dir: &Path,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
 ) -> Result<AdjacencyGraph, GfError> {
     let (node_ids, node_uuid_by_id) = selected_nodes(dir, label)?;
     let node_id_by_uuid = node_uuid_by_id
@@ -1070,7 +1071,13 @@ fn validate_vector_shape(nodes: usize, dimension: usize) -> Result<(), GfError> 
     Ok(())
 }
 
-fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
+fn selected_nodes(
+    dir: &Path,
+    label: EntityTypeSelection,
+) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
+    if label == EntityTypeSelection::Missing {
+        return Ok((Vec::new(), HashMap::new()));
+    }
     let mut rows = Vec::new();
     for batch in graphforge_storage::read_nodes(dir).map_err(storage_error)? {
         let uuids = fixed_binary(&batch, "node_uuid")?;
@@ -1083,7 +1090,7 @@ fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUu
             if ids.is_null(row) || uuids.is_null(row) {
                 continue;
             }
-            if let Some(label) = label {
+            if let EntityTypeSelection::Known(label) = label {
                 let values = labels.value(row);
                 let values = values
                     .as_any()
@@ -1091,7 +1098,7 @@ fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUu
                     .ok_or_else(|| {
                         GfError::Execution("node topology type_ids values are not UInt32".into())
                     })?;
-                if !values.values().contains(&label.0) {
+                if !values.values().contains(&label.encode()) {
                     continue;
                 }
             }
@@ -1405,7 +1412,7 @@ mod tests {
 
     fn selection(direction: Direction) -> AdjacencySelection<'static> {
         AdjacencySelection {
-            label: None,
+            label: EntityTypeSelection::All,
             via: "KNOWS",
             direction,
             weight: None,

@@ -58,7 +58,7 @@ async fn strict_mode_round_trip_nodes_and_edges() {
     // Reload. GraphCatalog registers `edges_<name>` from the runtime catalog's
     // relation types, so intern KNOWS first.
     let mut rc = RuntimeCatalog::new();
-    rc.intern_relation_type("KNOWS");
+    rc.intern_relation_type("KNOWS").unwrap();
     let gc = GraphCatalog::open(dir.path(), None, &rc).unwrap();
     let ctx = SessionContext::new();
     ctx.register_catalog("graph", Arc::new(gc));
@@ -373,7 +373,7 @@ async fn append_round_trip_continues_surrogates() {
     // `edges_<rel>` for runtime relations whose typed file exists, so intern
     // KNOWS first.)
     let mut rc = RuntimeCatalog::new();
-    rc.intern_relation_type("KNOWS");
+    rc.intern_relation_type("KNOWS").unwrap();
     let gc = GraphCatalog::open(dir.path(), None, &rc).unwrap();
     let ctx = SessionContext::new();
     ctx.register_catalog("graph", Arc::new(gc));
@@ -520,8 +520,8 @@ async fn append_edge_stems_are_isolated() {
     w2.flush().unwrap();
 
     let mut rc = RuntimeCatalog::new();
-    rc.intern_relation_type("KNOWS");
-    rc.intern_relation_type("LIKES");
+    rc.intern_relation_type("KNOWS").unwrap();
+    rc.intern_relation_type("LIKES").unwrap();
     let gc = GraphCatalog::open(dir.path(), None, &rc).unwrap();
     let ctx = SessionContext::new();
     ctx.register_catalog("graph", Arc::new(gc));

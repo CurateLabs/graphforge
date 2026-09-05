@@ -84,6 +84,35 @@ pub struct OntologyRuntime {
     pub property_name_to_id: HashMap<(PropertyOwnerKind, u32, String), u32>,
 }
 
+fn validate_identity_counts(
+    entities: usize,
+    relations: usize,
+    properties: usize,
+) -> Result<(), OntologyError> {
+    for (kind, count, limit) in [
+        (
+            "entity",
+            entities,
+            u64::from(graphforge_value::TYPE_LOCAL_ID_LIMIT),
+        ),
+        (
+            "relation",
+            relations,
+            u64::from(graphforge_value::TYPE_LOCAL_ID_LIMIT),
+        ),
+        ("property", properties, u64::from(u32::MAX)),
+    ] {
+        if u64::try_from(count).map_or(true, |count| count > limit) {
+            return Err(OntologyError::SchemaMismatch {
+                message: format!(
+                    "{kind} identity count {count} exceeds supported namespace size {limit}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // OntologyCompiler
 // ---------------------------------------------------------------------------
@@ -98,6 +127,12 @@ impl OntologyCompiler {
     /// Returns [`OntologyError::Arrow`] if an Arrow array or RecordBatch cannot
     /// be constructed (schema mismatch, buffer overflow, etc.).
     pub fn compile(doc: &OntologyDoc) -> Result<OntologyRuntime, OntologyError> {
+        // Reject exhausted namespaces before any integer assignment or Arrow output.
+        validate_identity_counts(
+            doc.entity_types.len(),
+            doc.relation_types.len(),
+            doc.properties.len(),
+        )?;
         // Step 1: Assign stable integer IDs.
         let entity_name_to_id: HashMap<String, u32> = doc
             .entity_types
@@ -842,5 +877,21 @@ constraints:
         assert_eq!(rt.property_types.num_rows(), 1);
         assert_eq!(rt.type_constraints.num_rows(), 1);
         assert_eq!(rt.semantic_flags.num_rows(), 2);
+    }
+}
+
+#[cfg(test)]
+mod identity_range_tests {
+    use super::validate_identity_counts;
+
+    #[test]
+    fn rejects_namespace_exhaustion_before_allocating_runtime_tables() {
+        let type_limit = graphforge_value::TYPE_LOCAL_ID_LIMIT as usize;
+        assert!(validate_identity_counts(type_limit, type_limit, u32::MAX as usize).is_ok());
+        assert!(validate_identity_counts(type_limit + 1, 0, 0).is_err());
+        assert!(validate_identity_counts(0, type_limit + 1, 0).is_err());
+        if let Some(overflow) = (u32::MAX as usize).checked_add(1) {
+            assert!(validate_identity_counts(0, 0, overflow).is_err());
+        }
     }
 }
