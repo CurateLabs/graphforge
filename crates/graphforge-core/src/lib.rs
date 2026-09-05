@@ -1,9 +1,10 @@
-//! GraphForge core — public error type, span, and shared value model.
+//! GraphForge shared identities, values, options, and facade errors.
 //!
-//! This is the **foundation crate**: every other `graphforge-*` crate depends on it. The
-//! `GraphForge` engine facade lives in the top-level `graphforge-api` crate (it needs the
-//! pipeline crates, which depend on `graphforge-core` — so it cannot live here without a
-//! cycle; see #716).
+//! Compiler, execution, storage, and domain crates consume these shared contracts.
+//! Independent utility crates can define their own types without depending on core.
+//! The public engine facade lives in `graphforge-api`, above the pipeline crates.
+//! Stage and transport crates retain dedicated error types; relevant boundaries
+//! classify errors for the facade and bindings.
 #![forbid(unsafe_code)]
 
 pub mod algorithms;
@@ -95,11 +96,11 @@ pub enum OntologyMode {
 // GfError — public error enum
 // ---------------------------------------------------------------------------
 
-/// All errors produced by GraphForge.
+/// Shared error classifications used by the engine facade and bindings.
 ///
-/// Variant names correspond 1-to-1 with the Python exception hierarchy in
-/// `graphforge.exceptions` so that binding layers can map them without
-/// string-matching.
+/// Compiler stages, I/O, discovery, and other subsystems also expose dedicated
+/// error types. Boundary adapters classify them as needed; [`GfError::code`]
+/// supplies stable public codes rather than a one-to-one variant/exception map.
 #[derive(thiserror::Error, Debug)]
 pub enum GfError {
     /// Feature exists in the API but has not been implemented yet.

@@ -1,6 +1,6 @@
 [package]
 name = "graphforge-io"
-description = "GraphForge CSV/JSON/Parquet/IPC sinks"
+description = "GraphForge bounded, atomic Parquet and Arrow IPC result sinks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

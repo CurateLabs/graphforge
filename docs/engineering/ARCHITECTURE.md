@@ -31,8 +31,11 @@ flowchart LR
 | `graphforge-api` | Public facade: lifecycle, Cypher, analyst verbs | `graphforge-cypher`, `graphforge-exec`, `graphforge-storage`, knowledge crates |
 | `graphforge-cypher` / `graphforge-ast` | Parse Cypher to AST | — |
 | `graphforge-ir` / `graphforge-rel` | Graph IR and relational lowering | AST / ontology |
-| `graphforge-exec` / `graphforge-plan` | DataFusion execution, algorithms, search | IR, storage providers |
-| `graphforge-storage` | Generations, participants, Parquet I/O | filesystem |
+| `graphforge-core` | Shared identities, values, options, and facade errors | No workspace crate dependencies |
+| `graphforge-plan` | DataFusion logical extension nodes and mutation specifications | Core, IR, DataFusion |
+| `graphforge-exec` | DataFusion execution, algorithms, search | IR, logical extension nodes, storage |
+| `graphforge-io` | Bounded, atomic Parquet and Arrow IPC result sinks | Arrow, Parquet, futures; no workspace crate dependencies |
+| `graphforge-storage` | Project generations, Arrow schemas, and Parquet storage | Core, discovery, filesystem, IR, ontology |
 | `graphforge-ontology` | Progressive ontology validation | API / binder |
 | `graphforge-provenance` / `graphforge-knowledge` | Provenance and epistemic records | UUID references to graph |
 | Bindings | Thin FFI projections | `graphforge-api` / core facade |

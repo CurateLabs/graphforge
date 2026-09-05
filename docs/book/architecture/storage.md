@@ -10,15 +10,15 @@
 The native directory authority, lifecycle policy, and adversarial checks are
 documented in [Directory capabilities](directory-capabilities.md).
 
-GraphForge uses a **pluggable storage provider** model. No provider is the semantic owner of the query language. All providers implement a common Rust trait and are selected at runtime based on the use case.
+`graphforge-storage` owns project generations and participants, admission and
+recovery, Arrow schemas, Parquet catalogs and write paths, derived indexes, and
+portable interchange. Runtime scans use `GraphCatalog` and DataFusion
+`TableProvider` implementations over the selected project's data. Query-language
+semantics remain in the compiler and execution layers.
 
-```rust
-pub trait StorageProvider: Send + Sync {
-    fn provider_name(&self) -> &'static str;
-    fn table_provider(&self, table: &QualifiedTable) -> Result<Arc<dyn TableProvider>, GfError>;
-    fn capabilities(&self) -> ProviderCapabilities;
-}
-```
+The legacy `StorageProvider`, `StorageRow`, and `ParquetProvider` declarations
+are unused stubs: their `scan_nodes` path returns `NotImplemented`. They are not
+the runtime storage interface or a shipped backend-selection mechanism.
 
 ---
 
@@ -38,9 +38,9 @@ Moving definitions must preserve existing bytes and public Arrow layouts.
 container, participant and value compatibility use their own checked contracts.
 See [project format compatibility](project-format-compatibility.md).
 
-## Provider Role: Parquet
+## Parquet persistence
 
-Parquet is the sole storage provider for the Rust core. It:
+Parquet is the graph data format used by the Rust storage implementation. It:
 
 - Stores graph tables and opaque domain-owned participants as columnar Parquet
   files; `graphforge-storage` does not define provenance or knowledge semantics
@@ -60,7 +60,7 @@ graphforge.query_id          = "01J..."
 graphforge.provenance_policy = "conservative_min"
 ```
 
-The `StorageProvider` trait is designed to be extended with additional backends in a later release. No other provider is in scope for v0.5.
+Project metadata and manifests use JSON. A future storage backend would need to satisfy the actual generation, admission, publication, and scan contracts; the unused `StorageProvider` stub does not establish that support.
 
 ---
 

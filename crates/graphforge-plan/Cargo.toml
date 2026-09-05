@@ -1,6 +1,6 @@
 [package]
 name = "graphforge-plan"
-description = "GraphForge DataFusion integration, optimizer rules, and custom plan nodes"
+description = "GraphForge DataFusion logical extension nodes and mutation specifications"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

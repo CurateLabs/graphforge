@@ -1,20 +1,23 @@
-//! GraphForge DataFusion integration, optimizer rules, and custom plan nodes.
+//! GraphForge DataFusion logical extension nodes and mutation specifications.
 //!
-//! # Custom logical plan nodes (#577)
+//! These nodes carry graph-specific schemas, expressions, traversal constraints,
+//! and resolved mutation inputs from `graphforge-rel` into DataFusion logical
+//! plans. Physical planning and execution belong to `graphforge-exec`; this crate
+//! defines the logical contracts rather than optimizer rules.
 //!
-//! Six graph-native operators cannot be expressed in relational algebra.  This
-//! module defines their **logical plan stubs** — enough for the lowering layer
-//! to produce a valid [`LogicalPlan`] that DataFusion accepts without panicking.
-//! Physical implementations come in milestone 13 (Execution Baseline).
-//!
-//! | Node | Triggered by |
+//! | Node | Purpose |
 //! |---|---|
-//! | [`VarLenExpandNode`] | `Expand` with `max_hops != Some(1)` |
-//! | [`OptionalMatchNode`] | `Optional { child }` |
-//! | [`PathUniqueNode`] | `Expand` with path-uniqueness flag |
-//! | [`OntologyInferNode`] | `Expand` on transitive/symmetric relation |
-//! | [`GraphMergeNode`] | `Merge { pattern }` |
-//! | [`UnwindNode`] | `Unwind { list_expr, alias }` |
+//! | [`ExpandNode`] | Fixed-hop graph expansion |
+//! | [`VarLenExpandNode`] | Variable-length graph expansion |
+//! | [`OptionalMatchNode`] | Optional graph-pattern matching |
+//! | [`PathUniqueNode`] | Path uniqueness constraints |
+//! | [`OntologyInferNode`] | Ontology-derived relation expansion |
+//! | [`GraphMergeNode`] | Match-or-create graph patterns |
+//! | [`GraphCreateNode`] | Resolved node and edge creation |
+//! | [`GraphDeleteNode`] | Node and edge deletion |
+//! | [`GraphSetNode`] | Property assignment |
+//! | [`GraphRemoveNode`] | Property removal |
+//! | [`UnwindNode`] | List expansion into rows |
 #![forbid(unsafe_code)]
 // The `name()` methods return string literals but the trait signature requires
 // `&str` tied to `&self`; the lint fires because the bound is unnecessary for

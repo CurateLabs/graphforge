@@ -111,7 +111,7 @@ graphforge/
 │   ├── graphforge-ir/                   # graph IR
 │   ├── graphforge-rel/                  # relational lowering
 │   ├── graphforge-exec/                 # execution + analyst verbs
-│   ├── graphforge-storage/              # StorageProvider + Parquet
+│   ├── graphforge-storage/              # project generations, Arrow schemas, Parquet storage
 │   ├── graphforge-knowledge/            # knowledge + epistemic record domains
 │   ├── graphforge-bindings-py/          # PyO3 Python binding
 │   ├── graphforge-bindings-node/        # napi-rs Node binding

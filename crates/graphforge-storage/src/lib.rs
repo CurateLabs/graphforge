@@ -1,4 +1,9 @@
-//! GraphForge `StorageProvider` trait, canonical Arrow schemas, and Parquet backend.
+//! GraphForge project generations, Arrow schemas, and Parquet storage.
+//!
+//! Owns project admission, generation and participant publication, recovery,
+//! Parquet catalogs and write paths, derived indexes, and portable interchange.
+//! Runtime scans use [`GraphCatalog`] and DataFusion table providers; the legacy
+//! [`StorageProvider`] / [`ParquetProvider`] stubs are not the execution path.
 //!
 //! - [`schemas`] — Arrow schema constants for every Parquet file
 //! - [`catalog`] — DataFusion `TableProvider` / `CatalogProvider` implementations (#572)
@@ -7,7 +12,7 @@
 //! - [`staging`] — temp-file + atomic-rename Parquet commit ([`RewriteBatch`]) (#790)
 //! - [`adjacency`] — on-disk CSR format for the derived adjacency index (#758, ADR 0005)
 //! - [`generation`] — `topology_generation` counter, the staleness signal for derived indexes (#759)
-//! - [`search_manifest`] / [`search_publication`] — shared search search freshness and atomic publication
+//! - [`search_manifest`] / [`search_publication`] — shared search freshness and atomic publication
 #![forbid(unsafe_code)]
 
 mod durable_rewrite;
