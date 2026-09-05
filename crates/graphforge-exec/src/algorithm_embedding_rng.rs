@@ -53,6 +53,7 @@ impl EmbeddingRng {
         Self { state }
     }
 
+    #[cfg(test)]
     pub(crate) fn derived_state(&self) -> u64 {
         self.state
     }

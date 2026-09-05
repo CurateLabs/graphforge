@@ -10,25 +10,11 @@ use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ResolvedNumber {
     Float64(f64),
-    Int64(i64),
-    UInt64(u64),
-    Null,
-    NonNumeric,
 }
 
 impl ResolvedNumber {
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "graph integer properties share the canonical Float64 algorithm cost domain"
-    )]
     fn finite_nonnegative(self, name: &str) -> Result<f64, AlgorithmError> {
-        let value = match self {
-            Self::Float64(value) => value,
-            Self::Int64(value) => value as f64,
-            Self::UInt64(value) => value as f64,
-            Self::Null => return Err(execution(format!("{name} is null"))),
-            Self::NonNumeric => return Err(execution(format!("{name} is not numeric"))),
-        };
+        let Self::Float64(value) = self;
         if !value.is_finite() || value < 0.0 {
             return Err(execution(format!("{name} must be finite and nonnegative")));
         }
@@ -563,9 +549,6 @@ mod tests {
             ResolvedNumber::Float64(f64::NAN),
             ResolvedNumber::Float64(f64::INFINITY),
             ResolvedNumber::Float64(-1.0),
-            ResolvedNumber::Int64(-1),
-            ResolvedNumber::Null,
-            ResolvedNumber::NonNumeric,
         ] {
             let mut invalid_nodes = nodes;
             invalid_nodes[1].prize = invalid;
@@ -578,7 +561,7 @@ mod tests {
             solve(
                 &[NodePrize {
                     node_uuid: uuid(1),
-                    prize: ResolvedNumber::UInt64(u64::MAX)
+                    prize: ResolvedNumber::Float64(18_446_744_073_709_551_616.0)
                 }],
                 &[],
                 &[1]

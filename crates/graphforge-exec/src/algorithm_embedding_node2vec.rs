@@ -520,13 +520,6 @@ fn walk_task_chunks(total_walks: usize, threads: usize) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn walk_task_ordinal(start_ordinal: usize, walk_ordinal: usize, walks_per_node: usize) -> usize {
-    start_ordinal
-        .checked_mul(walks_per_node)
-        .and_then(|value| value.checked_add(walk_ordinal))
-        .expect("validated walk task ordinals fit usize")
-}
-
 fn build_walk(
     graph: &AdjacencyGraph,
     options: &Node2VecOptions,
@@ -1000,9 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn walk_task_ordinal_mapping_and_chunks_are_stable() {
-        assert_eq!(walk_task_ordinal(0, 0, 4), 0);
-        assert_eq!(walk_task_ordinal(2, 3, 4), 11);
+    fn walk_task_chunks_are_stable() {
         assert_eq!(walk_task_chunks(0, 4), Vec::<(usize, usize)>::new());
         assert_eq!(walk_task_chunks(5, 1), vec![(0, 5)]);
         assert_eq!(walk_task_chunks(5, 2), vec![(0, 3), (3, 5)]);
