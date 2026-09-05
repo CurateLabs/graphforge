@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim
 
 install:
 	uv sync --locked
@@ -67,19 +67,14 @@ progressive-qualification-project-s20: install
 		--project-s20 --output-dir "$(OUTPUT_DIR)" \
 		--provider-capacity "$(PROVIDER_CAPACITY)"
 
+# Native host evidence is the release path. The module retains its explicit
+# image/result-anchor flags for optional historical provider bundles.
 progressive-storage-qualification: install
-	test -n "$(LOW_RUNG)" && test -n "$(HIGH_RUNG)" && test -n "$(EVIDENCE)"
-	test -n "$(COMMIT)" && test -n "$(IMAGE_DIGEST)"
-	test -n "$(LOW_RESULT_SHA256)" && test -n "$(HIGH_RESULT_SHA256)"
-	test -n "$(VOLUME_BYTES)" && test -n "$(RESERVED_HEADROOM_BYTES)"
+	test -n "$(LOW_RUNG)" && test -n "$(HIGH_RUNG)" && test -n "$(EVIDENCE)" && test -n "$(WORK_ROOT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m \
 		graphforge_bench.progressive_storage_qualification \
 		"$(LOW_RUNG)" "$(HIGH_RUNG)" "$(EVIDENCE)" \
-		--commit "$(COMMIT)" --image-digest "$(IMAGE_DIGEST)" \
-		--low-result-sha256 "$(LOW_RESULT_SHA256)" \
-		--high-result-sha256 "$(HIGH_RESULT_SHA256)" \
-		--volume-bytes "$(VOLUME_BYTES)" \
-		--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
+		--work-root "$(WORK_ROOT)" --reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
 
 # Safe control-plane admission only; this never provisions a provider.
 progressive-provider-plan: install
@@ -118,26 +113,32 @@ ingest-ladder-bundle: install
 # Host BenchExec must use system Python (BenchExec + pystemd). The harness venv
 # BenchExec cannot attach cgroups even inside a delegated systemd scope.
 BENCHEXEC_PYTHON ?= /usr/bin/python3
+HOST_TARGET_DIR ?= $(CURDIR)/../target-host-ladder
+MAXIMUM_SCALE ?= 26
+RESERVED_HEADROOM_BYTES ?= 80530636800
+HOST_LADDER_ARGS = --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
+	--gf "$(HOST_TARGET_DIR)/release/gf" \
+	--certify "$(HOST_TARGET_DIR)/release/graphforge-benchmark-certify" \
+	--generator "$(HOST_TARGET_DIR)/release/graphforge-benchmark-graph500-generator" \
+	--benchexec-python "$(BENCHEXEC_PYTHON)" \
+	--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
 
-progressive-host-ladder-plan: install progressive-qualification-binaries
-	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
-	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
-		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" --dry-run \
-		--gf "$(CURDIR)/../target/release/gf" \
-		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
-		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
-		--benchexec-python "$(BENCHEXEC_PYTHON)" \
-		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
+progressive-host-ladder-binaries:
+	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-certify --bin graphforge-benchmark-graph500-generator
 
-progressive-host-ladder-run: install progressive-qualification-binaries
-	test -n "$(RUNG)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+# Preview only the next admissible rung; later rungs need its real measurements.
+# Planning reads existing executables and never writes plans or projections.
+progressive-host-ladder-plan: install
+	test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
-		--rung "$(RUNG)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
-		--gf "$(CURDIR)/../target/release/gf" \
-		--certify "$(CURDIR)/target/release/graphforge-benchmark-certify" \
-		--generator "$(CURDIR)/target/release/graphforge-benchmark-graph500-generator" \
-		--benchexec-python "$(BENCHEXEC_PYTHON)" \
-		$(if $(HOST_CAPACITY),--host-capacity "$(HOST_CAPACITY)",)
+		$(if $(RUNG),--rung "$(RUNG)",--maximum-scale "$(MAXIMUM_SCALE)") $(HOST_LADDER_ARGS) --dry-run
+
+# Resolve/build once, then sequentially advance, accept evidence, and reclaim.
+progressive-host-ladder-run: install progressive-host-ladder-binaries
+	test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+		$(if $(RUNG),--rung "$(RUNG)",--maximum-scale "$(MAXIMUM_SCALE)") $(HOST_LADDER_ARGS)
 
 progressive-host-ladder-inventory: install
 	test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"

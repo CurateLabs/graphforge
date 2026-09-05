@@ -26,6 +26,7 @@
       ],
       "properties": {
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "producer_sha256": {"$ref": "#/$defs/digest"},
         "host_profile_id": {"const": "local-linux-cgroups-v2"},
         "host_profile_sha256": {"$ref": "#/$defs/digest"},
         "profile_id": {
@@ -47,6 +48,14 @@
         "benchexec_python_sha256": {"$ref": "#/$defs/digest"},
         "benchexec_version": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)+$"},
         "admitted_projection_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "work_root_capacity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["free_bytes", "reserved_headroom_bytes"],
+      "properties": {
+        "free_bytes": {"type": "integer", "minimum": 1},
+        "reserved_headroom_bytes": {"type": "integer", "minimum": 0}
       }
     },
     "limits": {

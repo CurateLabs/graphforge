@@ -318,20 +318,37 @@ OUTPUT_DIR=$WORK_ROOT/evidence
 GRAPHFORGE_ADMISSION_EVIDENCE=$PWD/benchmarks/outputs/local-admission-evidence.json GRAPHFORGE_EXPECTED_UID=$(id -u) GRAPHFORGE_SYSTEMD_SCOPE_MODE=user GRAPHFORGE_SYSTEMD_SCOPE=gf-admit.scope   systemd-run --user --scope --slice=benchexec -p Delegate=yes --unit=gf-admit   "$PWD/benchmarks/scripts/run-delegated-local-admission.sh"
 ```
 
-Execute rungs sequentially. `WORK_ROOT` must share the process-root filesystem
-device with `/` (ext4 on OVHC-AGENCY). Do not use `/tmp` (tmpfs). Host runs
-default to `--benchexec-python /usr/bin/python3` (BenchExec + pystemd); the
-locked harness venv BenchExec cannot attach cgroups under a delegated scope.
-Product RSS remains the 4 GiB process VmHWM envelope; host BenchExec uses a
-raised cgroup kill ceiling so durable NVMe page cache does not false-OOM.
+Run the sequential ladder to the chosen maximum with one command. `WORK_ROOT`
+must share the process-root filesystem device with `/` (ext4 on OVHC-AGENCY);
+`/tmp` is tmpfs on this host. The command builds the three executables once in
+an isolated `HOST_TARGET_DIR`, resolves them once, and advances
+S18 → S19 → S20 → S22 → S24 → S25 → S26. Each rung uses native admission and
+ordinary BenchExec lifecycle/reopen evidence. A typed failure stops advancement
+and retains its artifacts; accepted rung datasets are reclaimed automatically.
 
 ```bash
-make -C benchmarks progressive-host-ladder-run   RUNG=S18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
-# after accepted evidence:
-make -C benchmarks progressive-host-ladder-reclaim   RUNG_SCALE=18 OUTPUT_DIR=$OUTPUT_DIR WORK_ROOT=$WORK_ROOT
-# S20+ also requires:
-#   HOST_CAPACITY=benchmarks/fixtures/progressive/ovhc-agency-host-capacity.json
+make -C benchmarks progressive-host-ladder-run \
+  MAXIMUM_SCALE=26 OUTPUT_DIR="$OUTPUT_DIR" WORK_ROOT="$WORK_ROOT" \
+  RESERVED_HEADROOM_BYTES=80530636800
 ```
+
+The reserve is 75 GiB by default. Before each launch, admission measures free
+space available to the current user on the actual work-root filesystem.
+S20+ projects storage and work from the declared adjacent completed rungs;
+throughput comes from their measured counters and elapsed time. No manual
+rate certificate or fixed provider volume limit applies. Product RSS remains
+the 4 GiB process VmHWM envelope, including its plateau check; the separate
+BenchExec cgroup kill ceiling accommodates durable page cache. A refused RSS
+projection is a real fix to investigate, not permission to relax that envelope.
+
+With existing binaries, `progressive-host-ladder-plan` previews the next rung
+without creating plans, projections, or an evidence directory. It accepts the
+same arguments as the run command, so preview → run works unchanged. Later
+rungs require actual measurements and cannot be fabricated by planning.
+`RUNG=S20` remains available to execute only the next selected rung. Existing
+passed evidence is validated before continuation; failed attempts are retained
+for diagnosis. Native execution has no Fly image, spend, or provider teardown
+requirement.
 
 Terminal teardown proof:
 
@@ -583,24 +600,19 @@ orchestration:
 
 ```bash
 make -C benchmarks progressive-storage-qualification \
-  LOW_RUNG=/evidence/s20-rung.json HIGH_RUNG=/evidence/s22-rung.json \
-  EVIDENCE=/evidence/g500-ladder-qualification.json \
-  COMMIT=$(git rev-parse HEAD) \
-  IMAGE_DIGEST=registry.fly.io/graphforge-bench@sha256:<64-hex-digest> \
-  LOW_RESULT_SHA256=<independently-recorded-s20-result-sha256> \
-  HIGH_RESULT_SHA256=<independently-recorded-s22-result-sha256> \
-  VOLUME_BYTES=536870912000 RESERVED_HEADROOM_BYTES=53687091200
+  LOW_RUNG="$OUTPUT_DIR/s20-rung.json" HIGH_RUNG="$OUTPUT_DIR/s22-rung.json" \
+  EVIDENCE="$OUTPUT_DIR/g500-ladder-qualification.json" \
+  WORK_ROOT="$WORK_ROOT" RESERVED_HEADROOM_BYTES=80530636800
 ```
 
-Each rung path must be accompanied by its canonical provider plan, BenchExec,
-GraphForge, and passed result files in the same evidence directory. The adapter
-first verifies each result against its independently supplied SHA-256 trust
-anchor, then verifies the result-owned artifact digests and exact
-commit/profile/image identities. The anchors must come from trusted transport
-metadata or an immutable manifest outside the evidence directory, never from
-the bundle being qualified. The adapter preserves integer numerators and
-denominators, recomputes all reconciliations, and emits `refuse` when the
-projected S26 lifecycle peak lacks the requested storage headroom.
+Each native rung path is accompanied by its plan, BenchExec, GraphForge, and
+passed result documents. The consumer verifies result-owned artifact digests,
+matching execution identities, and ordinary receipts, and checks that the two
+rung workspaces were reclaimed. Capacity is measured on `WORK_ROOT` with the
+specified reserve. The terminal inventory remains the independent whole-work-root
+cleanup record. Historical provider bundles retain the module's explicit
+image/result-anchor mode as optional tooling; native results require no external
+manifest or manual SHA certificate.
 
 ## Native local admission deployment
 

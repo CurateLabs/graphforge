@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from graphforge_bench.native_rung import read_native_rung
 from graphforge_bench.progressive_qualification import (
     QualificationError,
     load_profiles,
@@ -45,17 +47,91 @@ HOST_PROFILE_ID = "local-linux-cgroups-v2"
 LADDER = (18, 19, 20, 22, 24, 25, 26)
 LOCAL_SCALES = (18, 19)
 PROVIDER_SCALES = (20, 22, 24, 25, 26)
-CAPACITY_RATE_FIELDS = (
-    "physical_read_bytes_per_second",
-    "physical_write_bytes_per_second",
-    "reader_calls_per_second",
-    "publication_work_per_second",
-)
+DEFAULT_RESERVE_BYTES = 75 * 1024**3
 SYSTEM_BENCHEXEC_PYTHON = Path("/usr/bin/python3")
 
 
 class HostRunError(ControllerError):
     """Host-native ladder planning or execution refused."""
+
+    def __init__(self, code: str, *, rung: str | None = None, projection: Any = None):
+        super().__init__(code)
+        self.rung = rung
+        self.projection = projection
+
+
+def producer_files(root: Path) -> list[Path]:
+    """Hash the runtime package boundary, excluding docs, tests, and outputs.
+
+    Include all package sources rather than guessing an import closure: relative
+    imports, dynamic helpers, and executable admission fixtures are runtime code.
+    """
+    paths = set((root / "harness/graphforge_bench").rglob("*.py"))
+    paths.update(
+        root / name
+        for name in (
+            "definitions/graphforge-progressive-qualification-v1.xml",
+            "pyproject.toml",
+            "uv.lock",
+            "schemas/progressive-host-run-plan.json",
+            "schemas/progressive-host-run-result.json",
+            "schemas/progressive-qualification-profile.json",
+            "schemas/progressive-qualification-evidence.json",
+            "schemas/progressive-qualification-rung-evidence.json",
+            "schemas/certification-evidence.json",
+            "schemas/benchexec-run-evidence.json",
+        )
+    )
+    return sorted(paths)
+
+
+def producer_digest(root: Path, *, commit: str | None = None) -> str:
+    """Bind producer behavior automatically; documentation changes are excluded."""
+    paths = set(producer_files(root))
+    if commit is not None:
+        package = root / "harness/graphforge_bench"
+        recorded_paths = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root.parent),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                commit,
+                "--",
+                "benchmarks/harness/graphforge_bench",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if recorded_paths.returncode:
+            raise HostRunError("host_prefix_producer_identity_mismatch")
+        # Legacy receipts have no stored producer digest. Enumerate their tree,
+        # not today's files, so deleted runtime helpers remain part of the hash.
+        paths = {path for path in paths if not path.is_relative_to(package)}
+        paths.update(
+            root.parent / name.decode("utf-8")
+            for name in recorded_paths.stdout.split(b"\0")
+            if name.endswith(b".py")
+        )
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        relative = path.relative_to(root).as_posix()
+        if commit is None:
+            content = path.read_bytes()
+        else:
+            recorded = subprocess.run(
+                ["git", "-C", str(root.parent), "show", f"{commit}:benchmarks/{relative}"],
+                capture_output=True,
+                check=False,
+            )
+            if recorded.returncode:
+                raise HostRunError("host_prefix_producer_identity_mismatch")
+            content = recorded.stdout
+        digest.update(relative.encode("utf-8") + b"\0" + hashlib.sha256(content).digest())
+    return digest.hexdigest()
 
 
 def resolve_host_benchexec_python(candidate: Path | None = None) -> Path:
@@ -142,6 +218,21 @@ def load_host_capacity(root: Path, path: Path) -> Mapping[str, Any]:
     return document
 
 
+def measure_host_capacity(work_root: Path, reserved_headroom_bytes: int) -> dict[str, int]:
+    """Measure space available to this user on the actual work-root filesystem."""
+    if isinstance(reserved_headroom_bytes, bool) or reserved_headroom_bytes < 0:
+        raise HostRunError("work_root_capacity_invalid")
+    free = shutil.disk_usage(work_root).free
+    if free <= reserved_headroom_bytes:
+        raise HostRunError("work_root_capacity_refused")
+    return {"free_bytes": free, "reserved_headroom_bytes": reserved_headroom_bytes}
+
+
+def validated_host_rung(root: Path, output_dir: Path, scale: int) -> Mapping[str, Any]:
+    """Read the shared native receipt validation used by all native consumers."""
+    return read_native_rung(root, output_dir, scale)["rung"]
+
+
 def _passed_rung(root: Path, output_dir: Path, scale: int) -> Mapping[str, Any] | None:
     path = output_dir / f"s{scale}-rung.json"
     if not path.exists():
@@ -162,6 +253,7 @@ def _passed_rung(root: Path, output_dir: Path, scale: int) -> Mapping[str, Any] 
 def completed_prefix(root: Path, output_dir: Path) -> list[Mapping[str, Any]]:
     completed: list[Mapping[str, Any]] = []
     gap = False
+    shared_identity = None
     for scale in LADDER:
         rung = _passed_rung(root, output_dir, scale)
         if rung is None:
@@ -169,10 +261,16 @@ def completed_prefix(root: Path, output_dir: Path) -> list[Mapping[str, Any]]:
             continue
         if gap:
             raise HostRunError("rung evidence is out of order")
-        result = _json(output_dir / f"s{scale}-result.json")
-        _validate(root, "progressive-host-run-result.json", result)
-        if result.get("status") != "passed" or result.get("rung") != f"S{scale}":
-            raise HostRunError(f"S{scale} host result contradicts passed rung evidence")
+        validated_host_rung(root, output_dir, scale)
+        identities = _json(output_dir / f"s{scale}-result.json")["identities"]
+        shared = {
+            key: value
+            for key, value in identities.items()
+            if key not in {"profile_id", "profile_sha256", "admitted_projection_sha256"}
+        }
+        if shared_identity is not None and shared != shared_identity:
+            raise HostRunError("host_prefix_identity_mismatch")
+        shared_identity = shared
         completed.append(rung)
     return completed
 
@@ -196,17 +294,15 @@ def _admit_projection(
     profiles = load_profiles(root / "profiles" / "graph500")
     profile = next(item for item in profiles if item.scale == scale)
     completed = completed_prefix(root, output_dir)
-    rates = {name: int(capacity[name]) for name in CAPACITY_RATE_FIELDS}
     try:
-        evidence = project(profile, completed, rates)
+        evidence = project(profile, completed, native_capacity=capacity)
     except QualificationError as error:
         raise HostRunError("projection_refused") from error
     _validate(root, "progressive-qualification-evidence.json", evidence)
     if evidence.get("decision") != "admitted":
-        raise HostRunError("projection_refused")
-    path = output_dir / f"s{scale}-projection.json"
-    publish_json_no_clobber(path, evidence)
-    return evidence, _digest(path)
+        raise HostRunError("projection_refused", rung=f"S{scale}", projection=evidence)
+    encoded = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return evidence, hashlib.sha256(encoded).hexdigest()
 
 
 def build_plan(
@@ -217,6 +313,7 @@ def build_plan(
     commit: str,
     executables: Executables,
     capacity: Mapping[str, Any] | None,
+    projection: tuple[dict[str, Any], str] | None = None,
 ) -> dict[str, Any]:
     require_order(root, output_dir, scale)
     profile_path = _profile_path(root, scale)
@@ -234,6 +331,7 @@ def build_plan(
     host_profile_path = root / "profiles" / f"{HOST_PROFILE_ID}.json"
     identities: dict[str, Any] = {
         "commit": commit,
+        "producer_sha256": producer_digest(root),
         "host_profile_id": HOST_PROFILE_ID,
         "host_profile_sha256": _digest(host_profile_path),
         "profile_id": profile["id"],
@@ -248,7 +346,7 @@ def build_plan(
     if scale in PROVIDER_SCALES:
         if capacity is None:
             raise HostRunError("host capacity is required before S20+")
-        _, projection_digest = _admit_projection(root, output_dir, scale, capacity)
+        _, projection_digest = projection or _admit_projection(root, output_dir, scale, capacity)
         identities["admitted_projection_sha256"] = projection_digest
     plan = {
         "schema": PLAN_SCHEMA,
@@ -265,6 +363,8 @@ def build_plan(
         ],
         "claim": "engineering_evidence_only",
     }
+    if capacity is not None:
+        plan["work_root_capacity"] = dict(capacity)
     _validate(root, "progressive-host-run-plan.json", plan)
     return plan
 
@@ -457,13 +557,129 @@ def run(
     publish_json_no_clobber(result_path, passed)
 
 
+def execute_ladder(
+    *,
+    root: Path,
+    output_dir: Path,
+    work_root: Path,
+    maximum_scale: int,
+    executables: Executables,
+    commit: str,
+    reserved_headroom_bytes: int,
+    dry_run: bool = False,
+    rung: int | None = None,
+) -> list[dict[str, Any]]:
+    """Advance the existing ladder once, stopping before any successor on failure."""
+    completed = completed_prefix(root, output_dir)
+    next_index = len(completed)
+    if rung is not None:
+        require_order(root, output_dir, rung)
+        scales = [rung]
+    else:
+        scales = list(LADDER[next_index : LADDER.index(maximum_scale) + 1])
+    shared_identity = None
+    if completed:
+        previous = _json(output_dir / f"s{int(completed[0]['scale'])}-result.json")["identities"]
+        shared_identity = {
+            key: value
+            for key, value in previous.items()
+            if key not in {"profile_id", "profile_sha256", "admitted_projection_sha256"}
+        }
+        # Documentation-only checkout changes do not invalidate existing binaries.
+        # Continue with the original recorded commit after verifying all producer
+        # and input identities below, rather than relabelling old measurements.
+        commit = previous["commit"]
+        current_producer = producer_digest(root)
+        recorded_producer = previous.get("producer_sha256")
+        if recorded_producer is None:
+            recorded_producer = producer_digest(root, commit=commit)
+        if current_producer != recorded_producer:
+            raise HostRunError("host_prefix_producer_identity_mismatch")
+        expected = {
+            "host_profile_sha256": _digest(root / "profiles" / f"{HOST_PROFILE_ID}.json"),
+            "generator": "sha256:" + _digest(root / "runners/graph500-generator/src/main.rs"),
+            "gf_sha256": _digest(executables.gf),
+            "certify_sha256": _digest(executables.certify),
+            "generator_executable_sha256": _digest(executables.generator),
+            "benchexec_python_sha256": _digest(executables.benchexec_python),
+            "benchexec_version": version("BenchExec"),
+        }
+        if any(previous[key] != value for key, value in expected.items()):
+            raise HostRunError("host_prefix_identity_mismatch")
+        for accepted in completed:
+            accepted_scale = int(accepted["scale"])
+            identity = _json(output_dir / f"s{accepted_scale}-result.json")["identities"]
+            if identity["profile_sha256"] != _digest(_profile_path(root, accepted_scale)):
+                raise HostRunError("host_prefix_identity_mismatch", rung=f"S{accepted_scale}")
+        if not dry_run:
+            # Resume cleanup after a crash between passed-result publication and
+            # reclaim, including when the requested maximum is already complete.
+            for accepted in completed:
+                reclaim_rung_workspace(work_root, int(accepted["scale"]))
+
+    plans = []
+    for scale in scales:
+        try:
+            # An actual incomplete/failed attempt is immutable. A dry-run creates none.
+            if any(
+                (output_dir / f"s{scale}-{name}.json").exists()
+                for name in ("plan", "projection", "result", "rung", "graphforge", "benchexec")
+            ):
+                raise HostRunError("existing_attempt_requires_inspection")
+            capacity = measure_host_capacity(work_root, reserved_headroom_bytes)
+            projection = (
+                _admit_projection(root, output_dir, scale, capacity) if scale >= 20 else None
+            )
+            plan = build_plan(
+                root=root,
+                output_dir=output_dir,
+                scale=scale,
+                commit=commit,
+                executables=executables,
+                capacity=capacity,
+                projection=projection,
+            )
+            if shared_identity is not None and "producer_sha256" not in shared_identity:
+                plan["identities"].pop("producer_sha256", None)
+            current_shared = {
+                key: value
+                for key, value in plan["identities"].items()
+                if key not in {"profile_id", "profile_sha256", "admitted_projection_sha256"}
+            }
+            if shared_identity is not None and current_shared != shared_identity:
+                raise HostRunError("host_prefix_identity_mismatch")
+            shared_identity = current_shared
+            plans.append(plan)
+            if dry_run:
+                # Later projections require actual measurements from this next rung.
+                break
+            if projection is not None:
+                publish_json_no_clobber(output_dir / f"s{scale}-projection.json", projection[0])
+            publish_json_no_clobber(output_dir / f"s{scale}-plan.json", plan)
+            run(
+                root=root,
+                output_dir=output_dir,
+                work_root=work_root,
+                scale=scale,
+                plan=plan,
+                executables=executables,
+            )
+            validated_host_rung(root, output_dir, scale)
+            reclaim_rung_workspace(work_root, scale)
+        except HostRunError as error:
+            error.rung = error.rung or f"S{scale}"
+            raise
+        except (ControllerError, QualificationError, OSError, ValueError) as error:
+            code = "execution_io_failed" if isinstance(error, OSError) else str(error)
+            raise HostRunError(code, rung=f"S{scale}") from error
+    return plans
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument(
-        "--rung",
-        choices=tuple(f"S{scale}" for scale in LADDER),
-    )
+    action.add_argument("--rung", choices=tuple(f"S{scale}" for scale in LADDER))
+    action.add_argument("--maximum-scale", type=int, choices=LADDER)
     action.add_argument("--inventory", action="store_true")
     action.add_argument("--reclaim", type=int, choices=LADDER)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -471,12 +687,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gf")
     parser.add_argument("--certify")
     parser.add_argument("--generator")
+    parser.add_argument("--benchexec-python", default=str(SYSTEM_BENCHEXEC_PYTHON))
+    parser.add_argument("--reserved-headroom-bytes", type=int, default=DEFAULT_RESERVE_BYTES)
     parser.add_argument(
-        "--benchexec-python",
-        default=str(SYSTEM_BENCHEXEC_PYTHON),
-        help="Python that provides BenchExec + pystemd (default: /usr/bin/python3)",
+        "--host-capacity",
+        type=Path,
+        help="legacy input: only reserve is used; space and rates are measured",
     )
-    parser.add_argument("--host-capacity", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -488,16 +705,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(document, sort_keys=True))
             return 0 if document["empty"] else 2
         if args.reclaim is not None:
+            validated_host_rung(root, args.output_dir, args.reclaim)
             reclaim_rung_workspace(work_root, args.reclaim)
             return 0
         if not all((args.gf, args.certify, args.generator)):
             raise HostRunError("rung execution requires gf, certify, and generator")
-        scale = int(args.rung[1:])
-        capacity = None
-        if scale in PROVIDER_SCALES:
-            if args.host_capacity is None:
-                raise HostRunError("S20+ requires --host-capacity")
-            capacity = load_host_capacity(root, args.host_capacity)
+        reserve = args.reserved_headroom_bytes
+        if args.host_capacity is not None:
+            reserve = int(load_host_capacity(root, args.host_capacity)["reserved_headroom_bytes"])
         benchexec_python = resolve_host_benchexec_python(Path(args.benchexec_python))
         executables = resolve_executables(
             gf=args.gf,
@@ -505,36 +720,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             generator=args.generator,
             benchexec_python=str(benchexec_python),
         )
-        plan = build_plan(
+        rung = int(args.rung[1:]) if args.rung else None
+        plans = execute_ladder(
             root=root,
             output_dir=args.output_dir,
-            scale=scale,
-            commit=repository_commit(root),
+            work_root=work_root,
+            maximum_scale=rung or args.maximum_scale,
+            rung=rung,
             executables=executables,
-            capacity=capacity,
+            commit=repository_commit(root),
+            reserved_headroom_bytes=reserve,
+            dry_run=args.dry_run,
         )
-        publish_json_no_clobber(args.output_dir / f"s{scale}-plan.json", plan)
-        if not args.dry_run:
-            run(
-                root=root,
-                output_dir=args.output_dir,
-                work_root=work_root,
-                scale=scale,
-                plan=plan,
-                executables=executables,
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {"plans": plans, "maximum_scale": rung or args.maximum_scale}, sort_keys=True
+                )
             )
         return 0
-    except (HostRunError, ControllerError, QualificationError) as error:
-        print(
-            json.dumps(
-                {
-                    "schema": RESULT_SCHEMA,
-                    "status": "failed",
-                    "failure": str(error),
-                },
-                sort_keys=True,
-            )
-        )
+    except (ControllerError, QualificationError, OSError, ValueError) as error:
+        failed: dict[str, Any] = {
+            "schema": RESULT_SCHEMA,
+            "status": "failed",
+            "failure": "execution_io_failed" if isinstance(error, OSError) else str(error),
+        }
+        if isinstance(error, HostRunError):
+            failed["rung"] = error.rung
+            if error.projection is not None:
+                failed["failed_checks"] = [
+                    key for key, passed in error.projection["checks"].items() if not passed
+                ]
+                failed["projection"] = error.projection
+        print(json.dumps(failed, sort_keys=True))
         return 2
 
 

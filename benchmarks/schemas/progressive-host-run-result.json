@@ -39,6 +39,7 @@
       ],
       "properties": {
         "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "producer_sha256": {"$ref": "#/$defs/digest"},
         "host_profile_id": {"const": "local-linux-cgroups-v2"},
         "host_profile_sha256": {"$ref": "#/$defs/digest"},
         "profile_id": {

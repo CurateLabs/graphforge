@@ -20,6 +20,7 @@ from graphforge_bench.progressive_host_run import (
     resolve_host_benchexec_python,
 )
 from graphforge_bench.progressive_run import Executables
+from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,11 +123,9 @@ class ProgressiveHostRunTests(unittest.TestCase):
             require_order(ROOT, output, 18)
             with self.assertRaisesRegex(HostRunError, "requires completed prefix"):
                 require_order(ROOT, output, 19)
-            (output / "s18-rung.json").write_text(json.dumps(passed_rung(18)), encoding="utf-8")
-            (output / "s18-result.json").write_text(json.dumps(host_result(18)), encoding="utf-8")
+            write_host_bundle(output, 18)
             require_order(ROOT, output, 19)
-            (output / "s19-rung.json").write_text(json.dumps(passed_rung(19)), encoding="utf-8")
-            (output / "s19-result.json").write_text(json.dumps(host_result(19)), encoding="utf-8")
+            write_host_bundle(output, 19)
             require_order(ROOT, output, 20)
 
             python = ROOT / ".venv/bin/python"
@@ -172,8 +171,7 @@ class ProgressiveHostRunTests(unittest.TestCase):
     def test_completed_prefix_rejects_gaps(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
             output = Path(temporary)
-            (output / "s18-rung.json").write_text(json.dumps(passed_rung(18)), encoding="utf-8")
-            (output / "s18-result.json").write_text(json.dumps(host_result(18)), encoding="utf-8")
+            write_host_bundle(output, 18)
             (output / "s20-rung.json").write_text(json.dumps(passed_rung(20)), encoding="utf-8")
             (output / "s20-result.json").write_text(json.dumps(host_result(20)), encoding="utf-8")
             with self.assertRaisesRegex(HostRunError, "out of order"):

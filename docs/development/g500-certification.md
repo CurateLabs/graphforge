@@ -1,5 +1,7 @@
 # Billion-live-edge certification
 
+## Current native OVHC-AGENCY execution
+
 The current #745 release outcome reuses the #900 native **OVHC-AGENCY** ladder
 and its [host runbook](../../benchmarks/README.md).
 Use the [streaming generator](../../benchmarks/runners/graph500-generator/README.md):
@@ -9,10 +11,33 @@ tuples, including self-loops and repeated endpoint pairs, and GraphForge stores
 each as a distinct edge record. These are not unique undirected edges. The
 generator never filters or replenishes tuples to reach a target-live count.
 
+The native host runs through `local-linux-cgroups-v2`.
+After the one-time native host preparation described in `benchmarks/README.md`,
+run as the unprivileged user:
+
+```bash
+make -C benchmarks progressive-host-ladder-run MAXIMUM_SCALE=26 \
+  WORK_ROOT="$HOME/graphforge-ladder" \
+  OUTPUT_DIR="$HOME/graphforge-ladder/evidence" \
+  RESERVED_HEADROOM_BYTES=80530636800
+```
+
+The command builds once and advances the existing sequential ladder, using
+actual work-root free capacity, the declared reserve, and adjacent-rung measured
+throughput. The first execution or projection failure stops the command. Preserve
+its evidence and fix the underlying cause, including RSS/IO or recovery defects.
+Successful rungs retain ordinary public lifecycle receipts and reclaim their
+datasets before the next admission. Run `progressive-host-ladder-inventory`
+with the same work/evidence arguments to record independent terminal cleanup.
+`progressive-host-ladder-plan` previews only the next admissible rung, reads
+existing binaries, and writes no immutable artifacts. Implementation closure
+for #1087 does not claim the actual host outcomes retained by #900/#745.
+
 ## Historical cloud certification workflow
 
-The cloud workflow and target-live client below are retained for historical
-reference. They do not authorize or define the current native host run.
+The following describes the earlier standalone cloud workflow. It is not a
+prerequisite for the native host command above.
+
 
 Issue #745 certifies the complete persisted GraphForge lifecycle on an explicitly
 provisioned Linux evidence host. The workflow is manual, protected by the

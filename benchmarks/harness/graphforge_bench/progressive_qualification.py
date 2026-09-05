@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -183,6 +184,8 @@ def project(
     profile: Profile,
     completed: Sequence[Mapping[str, Any]],
     provider_capacity: Mapping[str, Any] | None = None,
+    *,
+    native_capacity: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Project one provider rung from its two declared completed source scales."""
     if profile.execution != "provider" or profile.projection_sources is None:
@@ -234,6 +237,33 @@ def project(
     rss_high = _integer(high["metrics"], "peak_rss_bytes")
     rss_growth_fraction = (rss_high - rss_low) / max(1, rss_low)
     capacity = provider_capacity or {}
+    volume = VOLUME_LIMIT_BYTES
+    reserve = VOLUME_LIMIT_BYTES * 15 // 100
+    if native_capacity is not None:
+        volume = _integer(native_capacity, "free_bytes")
+        reserve = _integer(native_capacity, "reserved_headroom_bytes")
+        if volume <= 0 or reserve >= volume:
+            raise QualificationError("work_root_capacity_refused")
+        # Rates come from the same executed adjacent rungs, never operator estimates.
+        metric_rates = {
+            "physical_read_bytes_per_second": "physical_read_bytes",
+            "physical_write_bytes_per_second": "physical_write_bytes",
+            "reader_calls_per_second": "reader_calls",
+            "publication_work_per_second": "publication_work_units",
+        }
+        if any(_integer(item["metrics"], "wall_seconds") <= 0 for item in (low, high)):
+            raise QualificationError("measured throughput requires positive elapsed time")
+        observations = {}
+        for rate, metric in metric_rates.items():
+            positive = [
+                (_integer(item["metrics"], metric), _integer(item["metrics"], "wall_seconds"))
+                for item in (low, high)
+                if _integer(item["metrics"], metric) > 0
+            ]
+            # Cached zero-read runs do not measure zero device throughput.
+            observations[rate] = (
+                min(positive, key=lambda pair: Fraction(*pair)) if positive else None
+            )
     usable_seconds = int(WALL_LIMIT_SECONDS * (1 - TIME_HEADROOM))
     required_rates = {
         "physical_read_bytes_per_second": _ceil_ratio(
@@ -254,21 +284,35 @@ def project(
     work_headroom = measured_capacity and all(
         required * 5 <= capacity[name] * 4 for name, required in required_rates.items()
     )
+    if native_capacity is not None:
+        measured_capacity = all(
+            observation is not None or projected[metric_rates[rate]] == 0
+            for rate, observation in observations.items()
+        )
+        # Compare rational work/time directly; flooring subunit rates or rounding
+        # required demand up to one unit/second would create artificial blockers.
+        work_headroom = measured_capacity and all(
+            projected[metric_rates[rate]] == 0
+            or (
+                observation is not None
+                and projected[metric_rates[rate]] * observation[1] * 5
+                <= observation[0] * usable_seconds * 4
+            )
+            for rate, observation in observations.items()
+        )
     rss_growth = rss_high - rss_low
     checks = {
         "time_headroom": projected["wall_seconds"] <= WALL_LIMIT_SECONDS * 80 // 100,
         "rss_headroom": projected["peak_rss_bytes"] <= RSS_LIMIT_BYTES * 80 // 100,
-        "retained_storage_headroom": projected["retained_storage_bytes"]
-        <= VOLUME_LIMIT_BYTES * 85 // 100,
-        "transient_storage_headroom": projected["transient_peak_storage_bytes"]
-        <= VOLUME_LIMIT_BYTES * 85 // 100,
-        "storage_headroom": storage_peak <= VOLUME_LIMIT_BYTES * 85 // 100,
+        "retained_storage_headroom": projected["retained_storage_bytes"] <= volume - reserve,
+        "transient_storage_headroom": projected["transient_peak_storage_bytes"] <= volume - reserve,
+        "storage_headroom": storage_peak <= volume - reserve,
         "rss_bounded_or_plateaued": rss_growth <= rss_low * 10 // 100,
         "io_reader_publication_capacity_measured": measured_capacity,
         "io_reader_publication_headroom": work_headroom,
         "correctness": True,
     }
-    return {
+    evidence = {
         "schema": "graphforge-progressive-qualification-evidence/1",
         "target": f"S{profile.scale}",
         "source_scales": list(profile.projection_sources),
@@ -276,17 +320,21 @@ def project(
         "limits": {
             "wall_seconds": WALL_LIMIT_SECONDS,
             "rss_bytes": RSS_LIMIT_BYTES,
-            "volume_bytes": VOLUME_LIMIT_BYTES,
+            "volume_bytes": volume,
         },
         "headroom": {
             "time_fraction": TIME_HEADROOM,
             "rss_fraction": RSS_HEADROOM,
-            "storage_fraction": STORAGE_HEADROOM,
+            "storage_fraction": reserve / volume
+            if native_capacity is not None
+            else STORAGE_HEADROOM,
         },
         "projected": projected | {"storage_peak_bytes": storage_peak},
         "required_rates": required_rates,
         "provider_capacity": (
-            {name: capacity[name] for name in required_rates} if measured_capacity else None
+            {name: capacity[name] for name in required_rates}
+            if measured_capacity and native_capacity is None
+            else None
         ),
         "slopes_observed": {
             name: _integer(high["metrics"], name) - _integer(low["metrics"], name)
@@ -303,3 +351,14 @@ def project(
         "checks": checks,
         "claim": "engineering_evidence_only",
     }
+    if native_capacity is not None:
+        evidence["native_capacity"] = {
+            "free_bytes": volume,
+            "reserved_headroom_bytes": reserve,
+            "rate_source": "completed_adjacent_rungs",
+            "observed_rates": {
+                rate: {"work_units": pair[0], "wall_seconds": pair[1]} if pair else None
+                for rate, pair in observations.items()
+            },
+        }
+    return evidence
