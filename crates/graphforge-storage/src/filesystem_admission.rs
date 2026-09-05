@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use graphforge_core::{GfError, ProjectErrorCode};
+use graphforge_filesystem::is_link_or_reparse;
+
 use sha2::{Digest as _, Sha256};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use sysinfo::Disks;
@@ -133,7 +135,7 @@ impl ProjectLifecycleAdmission {
         }
         self.project
             .revalidate("IDENTITY", "project_identity_changed")?;
-        if self.project.identity.volume_serial != self.parent.identity.volume_serial {
+        if self.project.identity().volume_serial != self.parent.identity().volume_serial {
             return Err(unsupported("IDENTITY", "project_cross_volume"));
         }
         Ok(())
@@ -185,7 +187,7 @@ impl ProjectLifecycleAdmission {
             lifecycle_lock,
             ..
         } = self;
-        let project_identity = project.identity;
+        let project_identity = project.identity();
         drop(project);
 
         let named = std::fs::symlink_metadata(&root)
@@ -200,7 +202,7 @@ impl ProjectLifecycleAdmission {
         }
         std::fs::remove_dir_all(&root)
             .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
-        complete_namespace_barrier(&parent.path)
+        complete_namespace_barrier(parent.path())
             .map_err(|_| unsupported("REMOVE", "parent_namespace_barrier_failed"))?;
         parent.revalidate("REMOVE", "parent_identity_changed")?;
         if let Some(lock) = &lifecycle_lock {
@@ -227,7 +229,7 @@ impl ProjectRootIdentity {
             .revalidate("IDENTITY", "parent_identity_changed")?;
         self.project
             .revalidate("IDENTITY", "project_identity_changed")?;
-        if self.project.identity.volume_serial != self.parent.identity.volume_serial {
+        if self.project.identity().volume_serial != self.parent.identity().volume_serial {
             return Err(unsupported("IDENTITY", "project_cross_volume"));
         }
         Ok(())
@@ -247,8 +249,8 @@ impl ProjectRootIdentity {
         self.revalidate_identity()?;
         let admission =
             admit_project_lifecycle(&self.root, self.mode, ProjectRootRequirement::Existing)?;
-        if admission.parent.identity != self.parent.identity
-            || admission.project.identity != self.project.identity
+        if admission.parent.identity() != self.parent.identity()
+            || admission.project.identity() != self.project.identity()
         {
             return Err(unsupported("IDENTITY", "project_identity_changed"));
         }
@@ -404,39 +406,56 @@ where
 
 #[derive(Debug)]
 struct LifecycleDirectory {
-    path: PathBuf,
-    handle: File,
-    identity: graphforge_filesystem::FileIdentity,
-    ancestors: Vec<RetainedDirectory>,
+    directory: graphforge_filesystem::StableDirectory,
+    ancestors: Vec<graphforge_filesystem::StableDirectory>,
 }
 
-#[derive(Debug)]
-struct RetainedDirectory {
-    path: PathBuf,
-    handle: File,
-    identity: graphforge_filesystem::FileIdentity,
+fn lifecycle_directory_error(
+    error: &graphforge_filesystem::DirectoryValidationError,
+    phase: &'static str,
+    cause: &'static str,
+) -> GfError {
+    if error.stage() == graphforge_filesystem::DirectoryValidationStage::RetainedIdentity {
+        unsupported("IDENTITY", "opened_identity_unavailable")
+    } else {
+        unsupported(phase, cause)
+    }
 }
 
 impl LifecycleDirectory {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn handle(&self) -> &File {
+        self.directory.as_file()
+    }
+
+    fn identity(&self) -> graphforge_filesystem::FileIdentity {
+        self.directory.identity()
+    }
+
     fn from_handle(
         path: PathBuf,
-        handle: File,
+        handle: graphforge_filesystem::OpenedDirectoryHandle,
         phase: &'static str,
         cause: &'static str,
     ) -> Result<Self, GfError> {
-        let opened = handle.metadata().map_err(|_| unsupported(phase, cause))?;
-        let identity = file_identity(&handle)?;
+        let opened = handle
+            .as_file()
+            .metadata()
+            .map_err(|_| unsupported(phase, cause))?;
+        let identity = file_identity(handle.as_file())?;
         if !opened.is_dir() {
             return Err(unsupported(phase, cause));
         }
-        let directory = Self {
-            path,
-            handle,
-            identity,
+        let directory =
+            graphforge_filesystem::StableDirectory::from_retained_handle(path, handle, identity)
+                .map_err(|error| lifecycle_directory_error(&error, phase, cause))?;
+        Ok(Self {
+            directory,
             ancestors: Vec::new(),
-        };
-        directory.revalidate(phase, cause)?;
-        Ok(directory)
+        })
     }
 
     fn open(path: &Path, phase: &'static str, cause: &'static str) -> Result<Self, GfError> {
@@ -444,11 +463,15 @@ impl LifecycleDirectory {
         if is_link_or_reparse(&named) || !named.is_dir() {
             return Err(unsupported(phase, cause));
         }
-        let handle = open_directory_handle(path).map_err(|_| unsupported(phase, cause))?;
+        let handle = graphforge_filesystem::open_directory_handle(path)
+            .map_err(|_| unsupported(phase, cause))?;
         let identity =
             graphforge_filesystem::path_identity(path).map_err(|_| unsupported(phase, cause))?;
-        let opened = handle.metadata().map_err(|_| unsupported(phase, cause))?;
-        if !opened.is_dir() || file_identity(&handle)? != identity {
+        let opened = handle
+            .as_file()
+            .metadata()
+            .map_err(|_| unsupported(phase, cause))?;
+        if !opened.is_dir() || file_identity(handle.as_file())? != identity {
             return Err(unsupported(phase, cause));
         }
         Self::from_handle(path.to_path_buf(), handle, phase, cause)
@@ -463,20 +486,11 @@ impl LifecycleDirectory {
     ) -> Result<Self, GfError> {
         let handle = open_child_directory_handle(parent, name, path)
             .map_err(|_| unsupported(phase, cause))?;
-        let opened = handle.metadata().map_err(|_| unsupported(phase, cause))?;
-        let identity = file_identity(&handle)?;
-        if !opened.is_dir() {
-            return Err(unsupported(phase, cause));
-        }
-        let directory = Self {
-            path: path.to_path_buf(),
-            handle,
-            identity,
-            ancestors: parent.retained_ancestry(phase, cause)?,
-        };
+        let mut directory = Self::from_handle(path.to_path_buf(), handle, phase, cause)?;
+        directory.ancestors = parent.retained_ancestry(phase, cause)?;
         directory.revalidate(phase, cause)?;
         parent.revalidate(phase, "ancestor_identity_changed")?;
-        if directory.identity.volume_serial != parent.identity.volume_serial {
+        if directory.identity().volume_serial != parent.identity().volume_serial {
             return Err(unsupported(phase, "child_cross_volume"));
         }
         Ok(directory)
@@ -484,76 +498,34 @@ impl LifecycleDirectory {
 
     fn revalidate(&self, phase: &'static str, cause: &'static str) -> Result<(), GfError> {
         for ancestor in &self.ancestors {
-            ancestor.revalidate(phase, "ancestor_identity_changed")?;
+            ancestor.revalidate_named_detailed().map_err(|error| {
+                lifecycle_directory_error(&error, phase, "ancestor_identity_changed")
+            })?;
         }
-        let named = std::fs::symlink_metadata(&self.path).map_err(|_| unsupported(phase, cause))?;
-        let opened = self
-            .handle
-            .metadata()
-            .map_err(|_| unsupported(phase, cause))?;
-        if is_link_or_reparse(&named)
-            || !named.is_dir()
-            || !opened.is_dir()
-            || graphforge_filesystem::path_identity(&self.path)
-                .map_err(|_| unsupported(phase, cause))?
-                != self.identity
-            || file_identity(&self.handle)? != self.identity
-        {
-            return Err(unsupported(phase, cause));
-        }
-        Ok(())
+        self.directory
+            .revalidate_named_detailed()
+            .map_err(|error| lifecycle_directory_error(&error, phase, cause))
     }
 
     fn retained_ancestry(
         &self,
         phase: &'static str,
         cause: &'static str,
-    ) -> Result<Vec<RetainedDirectory>, GfError> {
+    ) -> Result<Vec<graphforge_filesystem::StableDirectory>, GfError> {
         let mut retained = Vec::with_capacity(self.ancestors.len() + 1);
         for ancestor in &self.ancestors {
-            retained.push(ancestor.try_clone(phase, cause)?);
+            retained.push(
+                ancestor
+                    .try_clone()
+                    .map_err(|_| unsupported(phase, cause))?,
+            );
         }
-        retained.push(RetainedDirectory {
-            path: self.path.clone(),
-            handle: self
-                .handle
+        retained.push(
+            self.directory
                 .try_clone()
                 .map_err(|_| unsupported(phase, cause))?,
-            identity: self.identity,
-        });
+        );
         Ok(retained)
-    }
-}
-
-impl RetainedDirectory {
-    fn try_clone(&self, phase: &'static str, cause: &'static str) -> Result<Self, GfError> {
-        Ok(Self {
-            path: self.path.clone(),
-            handle: self
-                .handle
-                .try_clone()
-                .map_err(|_| unsupported(phase, cause))?,
-            identity: self.identity,
-        })
-    }
-
-    fn revalidate(&self, phase: &'static str, cause: &'static str) -> Result<(), GfError> {
-        let named = std::fs::symlink_metadata(&self.path).map_err(|_| unsupported(phase, cause))?;
-        let opened = self
-            .handle
-            .metadata()
-            .map_err(|_| unsupported(phase, cause))?;
-        if is_link_or_reparse(&named)
-            || !named.is_dir()
-            || !opened.is_dir()
-            || graphforge_filesystem::path_identity(&self.path)
-                .map_err(|_| unsupported(phase, cause))?
-                != self.identity
-            || file_identity(&self.handle)? != self.identity
-        {
-            return Err(unsupported(phase, cause));
-        }
-        Ok(())
     }
 }
 
@@ -577,13 +549,13 @@ impl LifecycleLock {
         parent: &LifecycleDirectory,
         target_name: &std::ffi::OsStr,
     ) -> Result<Self, GfError> {
-        let name = lifecycle_lock_name(&parent.path, target_name);
-        let path = parent.path.join(&name);
+        let name = lifecycle_lock_name(parent.path(), target_name);
+        let path = parent.path().join(&name);
         let file = open_lifecycle_lock_file(parent, &name)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_open_failed"))?;
         file.sync_all()
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
-        complete_namespace_barrier(&parent.path)
+        complete_namespace_barrier(parent.path())
             .map_err(|_| unsupported("LOCK", "parent_namespace_barrier_failed"))?;
         crate::file_lock::lock_exclusive(&file)
             .map_err(|_| unsupported("LOCK", "lifecycle_lock_failed"))?;
@@ -593,7 +565,7 @@ impl LifecycleLock {
             path,
             file,
             identity,
-            parent_identity: parent.identity,
+            parent_identity: parent.identity(),
         };
         lock.revalidate()?;
         Ok(lock)
@@ -656,7 +628,7 @@ fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io:
 
     let open_existing = || {
         openat(
-            &parent.handle,
+            parent.handle(),
             name,
             OFlags::RDWR | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
@@ -667,7 +639,7 @@ fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io:
     match open_existing() {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => match openat(
-            &parent.handle,
+            parent.handle(),
             name,
             OFlags::RDWR
                 | OFlags::CREATE
@@ -699,7 +671,7 @@ fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io:
         .create(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
-        .open(parent.path.join(name))
+        .open(parent.path().join(name))
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -751,7 +723,7 @@ fn filesystem_durability_preflight_resolved(
     let started = Instant::now();
     let _probe_lock = lock_probe_parent(parent, target_name)?;
     let parent_metadata = parent
-        .handle
+        .handle()
         .metadata()
         .map_err(|_| unsupported("CLASSIFY", "parent_metadata_unavailable"))?;
     if !parent_metadata.is_dir() {
@@ -764,19 +736,19 @@ fn filesystem_durability_preflight_resolved(
         let target = LifecycleDirectory::open_child(
             parent,
             target_name,
-            &parent.path.join(target_name),
+            &parent.path().join(target_name),
             "CLASSIFY",
             "target_identity_unavailable",
         )?;
-        if target.identity.volume_serial != parent.identity.volume_serial {
+        if target.identity().volume_serial != parent.identity().volume_serial {
             return Err(unsupported("CLASSIFY", "target_cross_volume"));
         }
     }
     hit(fault, ProbeFault::Classify, "CLASSIFY")?;
     let filesystem_class = classify_supported_local_volume(parent)?;
 
-    let probe_name = stable_probe_name(&parent.path, target_name);
-    let probe_root = parent.path.join(&probe_name);
+    let probe_name = stable_probe_name(parent.path(), target_name);
+    let probe_root = parent.path().join(&probe_name);
     if child_metadata(parent, std::ffi::OsStr::new(&probe_name)).is_ok() {
         let stale = open_probe_directory(parent, &probe_name, &probe_root)?;
         cleanup_probe(parent, stale, ProbeFault::None)?;
@@ -855,7 +827,7 @@ fn lock_probe_parent(
     _target_name: &std::ffi::OsStr,
 ) -> Result<ProbeParentLock, GfError> {
     let handle = parent
-        .handle
+        .handle()
         .try_clone()
         .map_err(|_| unsupported("LOCK", "parent_open_failed"))?;
     crate::file_lock::lock_exclusive(&handle)
@@ -868,7 +840,7 @@ fn lock_probe_parent(
     parent: &LifecycleDirectory,
     target_name: &std::ffi::OsStr,
 ) -> Result<named_lock::NamedLockGuard, GfError> {
-    let name = stable_probe_name(&parent.path, target_name);
+    let name = stable_probe_name(parent.path(), target_name);
     let lock = named_lock::NamedLock::create(&format!("GraphForge.{name}"))
         .map_err(|_| unsupported("LOCK", "parent_lock_create_failed"))?;
     lock.lock()
@@ -906,7 +878,7 @@ fn resolve_project_path(root: &Path) -> Result<ResolvedProjectPath, GfError> {
     // from the process root; namespace ancestors above it are not mutated by
     // GraphForge and are therefore outside the durability contract.
     let parent = LifecycleDirectory::open(parent_path, "CLASSIFY", "parent_identity_unavailable")?;
-    let root = parent.path.join(&target_name);
+    let root = parent.path().join(&target_name);
     if let Ok(metadata) = child_metadata(&parent, &target_name)
         && is_link_or_reparse(&metadata)
     {
@@ -971,7 +943,7 @@ fn classify_supported_local_volume(parent: &LifecycleDirectory) -> Result<String
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
 ) -> Result<String, GfError> {
-    let stat = rustix::fs::fstatfs(&parent.handle)
+    let stat = rustix::fs::fstatfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     let class = stat
         .f_fstypename
@@ -993,7 +965,7 @@ fn classify_supported_local_volume_platform(
     if (flags & u32::try_from(libc::MNT_RDONLY).unwrap_or(u32::MAX)) != 0 {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    reject_removable_volume(&parent.path)?;
+    reject_removable_volume(parent.path())?;
     Ok(class)
 }
 
@@ -1001,7 +973,7 @@ fn classify_supported_local_volume_platform(
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
 ) -> Result<String, GfError> {
-    let stat = rustix::fs::fstatfs(&parent.handle)
+    let stat = rustix::fs::fstatfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     let class = match u64::try_from(stat.f_type).unwrap_or_default() {
         0xEF53 => "ext",
@@ -1009,12 +981,12 @@ fn classify_supported_local_volume_platform(
         0x9123_683E => "btrfs",
         _ => return Err(unsupported("CLASSIFY", "filesystem_class_unproven")),
     };
-    let vfs = rustix::fs::fstatvfs(&parent.handle)
+    let vfs = rustix::fs::fstatvfs(parent.handle())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     if vfs.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    reject_removable_volume(&parent.path)?;
+    reject_removable_volume(parent.path())?;
     Ok(class.into())
 }
 
@@ -1022,7 +994,7 @@ fn classify_supported_local_volume_platform(
 fn classify_supported_local_volume_platform(
     parent: &LifecycleDirectory,
 ) -> Result<String, GfError> {
-    let information = graphforge_filesystem::windows_volume_information(&parent.path)
+    let information = graphforge_filesystem::windows_volume_information(parent.path())
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
     classify_windows_volume(
         &information.filesystem_name,
@@ -1073,30 +1045,40 @@ fn reject_removable_volume(parent: &Path) -> Result<(), GfError> {
 }
 
 struct ProbeDirectory {
-    path: PathBuf,
-    handle: File,
-    identity: graphforge_filesystem::FileIdentity,
+    directory: graphforge_filesystem::StableDirectory,
+}
+
+fn probe_directory_error(
+    error: &graphforge_filesystem::DirectoryValidationError,
+    phase: &'static str,
+) -> GfError {
+    use graphforge_filesystem::DirectoryValidationStage as Stage;
+    match error.stage() {
+        Stage::NamedMetadata => unsupported(phase, "private_directory_missing"),
+        Stage::RetainedMetadata => unsupported(phase, "private_directory_handle_unreadable"),
+        Stage::NamedIdentity => unsupported(phase, "private_directory_identity_unavailable"),
+        Stage::RetainedIdentity => unsupported("IDENTITY", "opened_identity_unavailable"),
+        Stage::IdentityChanged => unsupported(phase, "private_directory_identity_changed"),
+    }
 }
 
 impl ProbeDirectory {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn handle(&self) -> &File {
+        self.directory.as_file()
+    }
+
+    fn identity(&self) -> graphforge_filesystem::FileIdentity {
+        self.directory.identity()
+    }
+
     fn revalidate(&self, phase: &'static str) -> Result<(), GfError> {
-        let named = std::fs::symlink_metadata(&self.path)
-            .map_err(|_| unsupported(phase, "private_directory_missing"))?;
-        let opened = self
-            .handle
-            .metadata()
-            .map_err(|_| unsupported(phase, "private_directory_handle_unreadable"))?;
-        if is_link_or_reparse(&named)
-            || !named.is_dir()
-            || !opened.is_dir()
-            || graphforge_filesystem::path_identity(&self.path)
-                .map_err(|_| unsupported(phase, "private_directory_identity_unavailable"))?
-                != self.identity
-            || file_identity(&self.handle)? != self.identity
-        {
-            return Err(unsupported(phase, "private_directory_identity_changed"));
-        }
-        Ok(())
+        self.directory
+            .revalidate_named_detailed()
+            .map_err(|error| probe_directory_error(&error, phase))
     }
 }
 
@@ -1113,61 +1095,42 @@ fn open_probe_directory(
     let handle = open_child_directory_handle(parent, std::ffi::OsStr::new(name), path)
         .map_err(|_| unsupported("CREATE", "private_directory_open_failed"))?;
     let opened = handle
+        .as_file()
         .metadata()
         .map_err(|_| unsupported("CREATE", "private_directory_handle_unreadable"))?;
     let identity = graphforge_filesystem::path_identity(path)
         .map_err(|_| unsupported("CREATE", "private_directory_identity_unavailable"))?;
-    if !opened.is_dir() || file_identity(&handle)? != identity {
+    if !opened.is_dir() || file_identity(handle.as_file())? != identity {
         return Err(unsupported(
             "CREATE",
             "private_directory_substituted_during_open",
         ));
     }
     parent.revalidate("CREATE", "parent_identity_changed")?;
-    Ok(ProbeDirectory {
-        path: path.to_path_buf(),
+    let directory = graphforge_filesystem::StableDirectory::from_retained_handle(
+        path.to_path_buf(),
         handle,
         identity,
-    })
+    )
+    .map_err(|error| probe_directory_error(&error, "CREATE"))?;
+    Ok(ProbeDirectory { directory })
 }
 
-#[cfg(unix)]
 fn open_child_directory_handle(
     parent: &LifecycleDirectory,
     name: &std::ffi::OsStr,
-    _path: &Path,
-) -> std::io::Result<File> {
-    use rustix::fs::{Mode, OFlags, openat};
-
-    openat(
-        &parent.handle,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(std::io::Error::from)
-}
-
-#[cfg(windows)]
-fn open_child_directory_handle(
-    _parent: &LifecycleDirectory,
-    _name: &std::ffi::OsStr,
     path: &Path,
-) -> std::io::Result<File> {
-    open_directory_handle(path)
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn open_child_directory_handle(
-    _parent: &LifecycleDirectory,
-    _name: &std::ffi::OsStr,
-    _path: &Path,
-) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "child directory handles are unsupported",
-    ))
+) -> std::io::Result<graphforge_filesystem::OpenedDirectoryHandle> {
+    if parent.path().join(name) != path {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "child path does not match retained parent and name",
+        ));
+    }
+    parent
+        .directory
+        .open_child_directory(name)
+        .map(graphforge_filesystem::StableDirectory::into_handle)
 }
 
 #[cfg(unix)]
@@ -1179,8 +1142,8 @@ fn child_metadata(
     use std::os::unix::fs::MetadataExt as _;
 
     let stat =
-        statat(&parent.handle, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
-    let path_metadata = std::fs::symlink_metadata(parent.path.join(name))?;
+        statat(parent.handle(), name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
+    let path_metadata = std::fs::symlink_metadata(parent.path().join(name))?;
     #[cfg(target_os = "linux")]
     let stat_device = stat.st_dev;
     #[cfg(not(target_os = "linux"))]
@@ -1196,7 +1159,7 @@ fn child_metadata(
     parent: &LifecycleDirectory,
     name: &std::ffi::OsStr,
 ) -> std::io::Result<std::fs::Metadata> {
-    std::fs::symlink_metadata(parent.path.join(name))
+    std::fs::symlink_metadata(parent.path().join(name))
 }
 
 #[cfg(unix)]
@@ -1207,7 +1170,7 @@ fn create_private_child_directory(
 ) -> std::io::Result<()> {
     use rustix::fs::{Mode, mkdirat};
 
-    mkdirat(&parent.handle, name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
+    mkdirat(parent.handle(), name, Mode::RUSR | Mode::WUSR | Mode::XUSR)
         .map_err(std::io::Error::from)
 }
 
@@ -1231,39 +1194,9 @@ fn create_private_child_directory(
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn open_directory_handle(path: &Path) -> std::io::Result<File> {
-    use rustix::fs::{Mode, OFlags, open};
-
-    let handle = open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    Ok(File::from(handle))
-}
-
-#[cfg(windows)]
-pub(crate) fn open_directory_handle(path: &Path) -> std::io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-#[cfg(all(not(unix), not(windows)))]
-pub(crate) fn open_directory_handle(_path: &Path) -> std::io::Result<File> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "directory identity handles are unsupported",
-    ))
+    graphforge_filesystem::open_directory_handle(path)
+        .map(graphforge_filesystem::OpenedDirectoryHandle::into_file)
 }
 
 fn create_private_probe_directory(
@@ -1286,11 +1219,11 @@ fn run_probe(
     fault: ProbeFault,
 ) -> Result<(), GfError> {
     probe.revalidate("CREATE")?;
-    if parent.identity.volume_serial != probe.identity.volume_serial {
+    if parent.identity().volume_serial != probe.identity().volume_serial {
         return Err(unsupported("CREATE", "private_directory_cross_volume"));
     }
 
-    let lock_path = probe.path.join("lock");
+    let lock_path = probe.path().join("lock");
     let mut lock = create_new_file(probe, "lock")?;
     lock.write_all(PROBE_BYTES_A)
         .map_err(|_| unsupported("WRITE", "lock_file_write_failed"))?;
@@ -1298,7 +1231,7 @@ fn run_probe(
     lock.sync_all()
         .map_err(|_| unsupported("FILE_FLUSH", "lock_file_flush_failed"))?;
     hit(fault, ProbeFault::FileFlush, "FILE_FLUSH")?;
-    verify_stable_identity(&lock, &lock_path, &parent.path)?;
+    verify_stable_identity(&lock, &lock_path, parent.path())?;
 
     crate::file_lock::lock_exclusive(&lock)
         .map_err(|_| unsupported("LOCK", "exclusive_lock_failed"))?;
@@ -1309,7 +1242,7 @@ fn run_probe(
         let _ = crate::file_lock::unlock(&contender);
         return Err(unsupported("LOCK", "exclusive_lock_not_enforced"));
     }
-    verify_stable_identity(&lock, &lock_path, &parent.path)?;
+    verify_stable_identity(&lock, &lock_path, parent.path())?;
     crate::file_lock::unlock(&lock).map_err(|_| unsupported("LOCK", "exclusive_unlock_failed"))?;
 
     crate::file_lock::lock_shared(&lock).map_err(|_| unsupported("LOCK", "shared_lock_failed"))?;
@@ -1329,7 +1262,7 @@ fn run_probe(
 
     let (target, target_identity, target_path) = replace_probe_file(probe, fault)?;
     probe.revalidate("NAMESPACE_DURABILITY")?;
-    complete_namespace_barrier(&probe.path)
+    complete_namespace_barrier(probe.path())
         .map_err(|_| unsupported("NAMESPACE_DURABILITY", "probe_namespace_barrier_failed"))?;
     hit(
         fault,
@@ -1356,7 +1289,7 @@ fn run_probe(
     if bytes != PROBE_BYTES_B {
         return Err(unsupported("IDENTITY", "replacement_bytes_mismatch"));
     }
-    verify_stable_identity(&published, &target_path, &parent.path)?;
+    verify_stable_identity(&published, &target_path, parent.path())?;
     drop(target);
     complete_namespace_barrier_handle(parent)
         .map_err(|_| unsupported("NAMESPACE_DURABILITY", "parent_namespace_barrier_failed"))
@@ -1374,16 +1307,16 @@ fn replace_probe_file(
         .map_err(|_| unsupported("REPLACE", "initial_file_flush_failed"))?;
     drop(initial);
     graphforge_filesystem::install_new_file(
-        &probe.handle,
+        probe.handle(),
         std::ffi::OsStr::new("initial"),
         std::ffi::OsStr::new("published"),
     )
     .map_err(|_| unsupported("REPLACE", "atomic_create_failed"))?;
 
-    let target_path = probe.path.join("published");
+    let target_path = probe.path().join("published");
     let target = open_regular_non_link(probe, "published")?;
     let target_identity = file_identity(&target)?;
-    let replacement_path = probe.path.join("replacement");
+    let replacement_path = probe.path().join("replacement");
     let mut replacement = create_new_file(probe, "replacement")?;
     replacement
         .write_all(PROBE_BYTES_B)
@@ -1398,7 +1331,7 @@ fn replace_probe_file(
         let target_before = graphforge_filesystem::path_identity(&target_path)
             .map_err(|_| unsupported("REPLACE", "target_identity_unavailable"))?;
         graphforge_filesystem::replace_file(
-            &probe.handle,
+            probe.handle(),
             std::ffi::OsStr::new("replacement"),
             std::ffi::OsStr::new("published"),
         )
@@ -1412,7 +1345,7 @@ fn replace_probe_file(
         ))
     } else {
         graphforge_filesystem::replace_file(
-            &probe.handle,
+            probe.handle(),
             std::ffi::OsStr::new("replacement"),
             std::ffi::OsStr::new("published"),
         )
@@ -1445,7 +1378,7 @@ fn create_new_file(probe: &ProbeDirectory, name: &str) -> Result<File, GfError> 
 }
 
 fn open_regular_non_link(probe: &ProbeDirectory, name: &str) -> Result<File, GfError> {
-    let path = probe.path.join(name);
+    let path = probe.path().join(name);
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|_| unsupported("IDENTITY", "path_metadata_failed"))?;
     if is_link_or_reparse(&metadata)
@@ -1475,7 +1408,7 @@ fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io:
     if create {
         flags |= OFlags::CREATE | OFlags::EXCL;
     }
-    openat(&probe.handle, name, flags, Mode::RUSR | Mode::WUSR)
+    openat(probe.handle(), name, flags, Mode::RUSR | Mode::WUSR)
         .map(File::from)
         .map_err(std::io::Error::from)
 }
@@ -1494,7 +1427,7 @@ fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io:
     if create {
         options.create_new(true);
     }
-    options.open(probe.path.join(name))
+    options.open(probe.path().join(name))
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -1534,7 +1467,7 @@ fn cleanup_probe(
     hit(fault, ProbeFault::Cleanup, "CLEANUP")?;
     probe.revalidate("CLEANUP")?;
     let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&probe.path)
+    for entry in std::fs::read_dir(probe.path())
         .map_err(|_| unsupported("CLEANUP", "private_directory_unreadable"))?
     {
         if entries.len() >= usize::try_from(MAX_PROBE_FILES).unwrap_or(usize::MAX) {
@@ -1572,8 +1505,8 @@ fn cleanup_probe(
             .map_err(|_| unsupported("CLEANUP", "private_entry_remove_failed"))?;
     }
     probe.revalidate("CLEANUP")?;
-    let path = probe.path.clone();
-    drop(probe.handle);
+    let path = probe.path().to_path_buf();
+    drop(probe);
     std::fs::remove_dir(path)
         .map_err(|_| unsupported("CLEANUP", "private_directory_remove_failed"))?;
     complete_namespace_barrier_handle(parent)
@@ -1583,11 +1516,11 @@ fn cleanup_probe(
 fn complete_namespace_barrier_handle(parent: &LifecycleDirectory) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        parent.handle.sync_all()
+        parent.handle().sync_all()
     }
     #[cfg(not(unix))]
     {
-        complete_namespace_barrier(&parent.path)
+        complete_namespace_barrier(parent.path())
     }
 }
 
@@ -1617,19 +1550,6 @@ fn complete_namespace_barrier(_path: &Path) -> std::io::Result<()> {
         std::io::ErrorKind::Unsupported,
         "namespace durability barrier is unsupported",
     ))
-}
-
-#[cfg(windows)]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    metadata.file_type().is_symlink()
-        || (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-}
-
-#[cfg(not(windows))]
-fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
-    metadata.file_type().is_symlink()
 }
 
 fn file_identity(file: &File) -> Result<graphforge_filesystem::FileIdentity, GfError> {
@@ -1677,6 +1597,10 @@ fn unsupported(phase: &'static str, cause: &'static str) -> GfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod directory_capability_conformance {
+        include!("directory_capability_conformance.rs");
+    }
 
     fn canonical_tempdir() -> tempfile::TempDir {
         let base = std::env::temp_dir().canonicalize().unwrap();
@@ -1776,7 +1700,7 @@ mod tests {
                 )
                 .unwrap();
                 admission.revalidate_identity().unwrap();
-                (admission.created_root(), admission.project.identity)
+                (admission.created_root(), admission.project.identity())
             }));
         }
         barrier.wait();
@@ -2006,14 +1930,14 @@ mod tests {
             ProjectRootRequirement::CreateIfMissing,
         )
         .unwrap();
-        let expected = admission.project.identity;
+        let expected = admission.project.identity();
 
         let identity = admission.into_identity().unwrap();
         identity.revalidate_identity().unwrap();
         assert_eq!(identity.root(), root);
         let readmitted = identity.readmit().unwrap();
 
-        assert_eq!(readmitted.project.identity, expected);
+        assert_eq!(readmitted.project.identity(), expected);
         readmitted.revalidate_identity().unwrap();
     }
 
@@ -2205,7 +2129,7 @@ mod tests {
 
         let resolved = resolve_project_path(&target).unwrap();
 
-        assert_eq!(resolved.parent.path, storage_parent);
+        assert_eq!(resolved.parent.path(), storage_parent);
         assert!(
             resolved.parent.ancestors.is_empty(),
             "namespace above the storage parent is outside GraphForge's contract"
