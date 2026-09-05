@@ -101,7 +101,11 @@ recursive temporal path filtering, temporal shortest transfer path, temporal
 transfer-cycle detection, hub-vertex truncation, and write/read-write transaction
 semantics the public surface does not expose. Its evidence keeps correctness,
 resource, and harness failures in distinct statuses and sections, records
-`certification: false`, and never masquerades as an audited GDC certification.
+`certification: false`, and never masquerades as an audited GDC certification. The
+`run-live` Rust command loads the pinned synthetic seed and executes parameterized
+TCR10 through the public GraphForge facade, comparing Jaccard similarity with an
+independent seed-derived reference. TCR10 is the bounded live proof; other mapped
+reads retain explicitly labeled static replay coverage.
 
 ```bash
 PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_contracts
@@ -336,8 +340,9 @@ make -C benchmarks smoke
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
 checks the Rust runners and their public-facade dependency boundary. This includes
-the bounded in-memory Graphalytics, SNB BI2, and SNB Interactive IS1 fixtures through the real GraphForge
-API. It does not start a provider or execute the host scale ladder.
+the bounded in-memory Graphalytics, SNB BI2, SNB Interactive IS1, and FinBench
+TCR10 fixtures through the real GraphForge API. It does not start a provider or
+execute the host scale ladder.
 
 ## Native local admission
 
