@@ -1,5 +1,10 @@
 //! GraphForge Graph IR → DataFusion relational lowering.
 //!
+//! Compiler consumers configure [`GraphPlanLowerer`] with their catalog, ontology,
+//! and project context, then call [`GraphPlanLowerer::lower_plan`]. DataFusion
+//! analysis and optimization use the consumer's execution session. Applications
+//! enter through the `graphforge-api` facade.
+//!
 //! # Milestone status
 //!
 //! - logical-plan lowering #574 — IR expression lowering to DataFusion `Expr`
@@ -29,40 +34,6 @@ use graphforge_ontology::OntologyHandle;
 /// Using a type alias means all downstream code (including `graphforge-exec`) works
 /// directly with the native DataFusion type without any wrapping overhead.
 pub type LogicalPlan = datafusion::logical_expr::LogicalPlan;
-
-/// Lower a [`GraphPlan`] to a DataFusion [`LogicalPlan`].
-///
-/// Delegates to [`GraphPlanLowerer`] with `catalog = None` and
-/// `ontology = None` (exploratory mode).  Scan operators (`NodeScan`,
-/// `Expand`) return [`GfError::Plan`] until #576 is complete.
-///
-/// # Errors
-///
-/// Returns [`GfError::Plan`] if any operator in the pipeline cannot be
-/// lowered (e.g. graph-native scan operators not yet implemented in #576).
-pub fn lower(plan: &GraphPlan) -> Result<LogicalPlan, GfError> {
-    GraphPlanLowerer::new(None, None).lower_plan(plan)
-}
-
-/// Lower a [`GraphPlan`] and run DataFusion's analyzer + optimizer over it.
-///
-/// Uses a transient [`SessionContext`](datafusion::prelude::SessionContext)
-/// with no registered catalog — the lowered plan is self-contained (scans use
-/// [`LogicalTableSource`](datafusion::logical_expr::logical_plan::LogicalTableSource)
-/// with static schemas), so optimisation needs no external state.  Lowering
-/// runs in exploratory mode (`catalog = None`, `ontology = None`).
-///
-/// # Errors
-///
-/// Returns [`GfError::Plan`] if lowering fails or the analyzer/optimizer
-/// rejects the plan (e.g. unresolved `$param` placeholders).
-pub fn lower_and_optimize(plan: &GraphPlan) -> Result<LogicalPlan, GfError> {
-    let lowered = lower(plan)?;
-    let ctx = datafusion::prelude::SessionContext::new();
-    ctx.state()
-        .optimize(&lowered)
-        .map_err(|e| GfError::Plan(e.to_string()))
-}
 
 /// Render a [`GraphPlan`]'s optimised DataFusion [`LogicalPlan`] as indented
 /// text (with per-node schemas) for the `explain` LogicalPlan stage.
