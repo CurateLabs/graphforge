@@ -1,0 +1,3 @@
+# Independent official TCR10 Jaccard reference. Static replay only; not live execution.
+# Official rounded similarity is 0.667; the paired system output is deliberately wrong.
+0.667

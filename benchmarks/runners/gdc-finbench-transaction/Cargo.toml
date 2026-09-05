@@ -7,8 +7,11 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arrow = "=58.3.0"
+graphforge-api = { version = "0.5.2", path = "../../../crates/graphforge-api" }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.11.0"
 
 [[bin]]
 name = "graphforge-benchmark-gdc-finbench-transaction"

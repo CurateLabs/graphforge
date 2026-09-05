@@ -1,0 +1,6 @@
+# Independent official TCR10 derivation from seed.json, not captured from GraphForge.
+# Open window startTime=100 < timestamp < endTime=200.
+# Person 1 companies: {10,11}. Person 2 companies: {10,11,12}.
+# Boundary timestamps 100 and 200, pre-window 90, and person 3 are excluded.
+# |intersection|=2, |union|=3, Jaccard=2/3, official 3-decimal rounding=0.667.
+0.667

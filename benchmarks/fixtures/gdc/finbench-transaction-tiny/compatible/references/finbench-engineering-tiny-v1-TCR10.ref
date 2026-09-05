@@ -1,0 +1,4 @@
+# Independent official TCR10 Jaccard derivation. Static replay only; not live execution.
+# Same params/seed window semantics as map_operation(TCR10):
+# |{10,11} ∩ {10,11,12}| / |union| = 2/3, official 3-decimal rounding = 0.667.
+0.667

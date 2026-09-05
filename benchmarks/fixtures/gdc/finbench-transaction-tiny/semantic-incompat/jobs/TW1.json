@@ -1,6 +1,6 @@
 {
   "schema": "graphforge-gdc-finbench-transaction-job/1",
   "suite_id": "finbench-transaction",
-  "dataset_id": "finbench-sf0.01",
+  "dataset_id": "finbench-engineering-tiny-v1",
   "operation": "TW1"
 }

@@ -144,7 +144,8 @@ PYTHONPATH=harness GRAPHFORGE_GDC_SNB_BI_BIN=target/debug/graphforge-benchmark-g
 | Operations | Complex reads TCR1–TCR12, simple reads TSR1–TSR6, writes TW1–TW19, read-writes TRW1–TRW3 (40 total) |
 | Runner | `graphforge-benchmark-gdc-finbench-transaction` (`suites/gdc-finbench-transaction.json`) |
 | Phases | Separate `load`, `warmup`, `execution`, `validation` (see evidence `phases`) |
-| Bounded fixture | `finbench-sf0.01` (every ladder/run begins on this tiny dataset) |
+| Bounded fixture | `finbench-engineering-tiny-v1` (synthetic engineering data; not an official scale factor) |
+| Live lane | Trusted Rust runner owns in-memory `GraphForge::new(None)` load + official TCR10 `execute_with_params` |
 | Validation | exact (ordered rows) and normalized (order-insensitive multiset) reference comparison |
 | Unsupported semantics | Typed `semantic_incompatibility`: `recursive_temporal_path_filtering_not_exposed` (TCR1–TCR2); `temporal_shortest_transfer_path_not_exposed` (TCR3); `temporal_transfer_cycle_detection_not_exposed` (TCR4); `hub_vertex_truncation_not_exposed` (TCR5); `finbench_transaction_write_semantics_not_exposed` (TW1–TW19, TRW1–TRW3) |
 
@@ -161,6 +162,30 @@ read-before-write risk semantics, which the public property-graph + Cypher
 surface does not expose, so they fail closed with
 `finbench_transaction_write_semantics_not_exposed`.
 
+The suite pins the upstream FinBench specification tag `v0.1.0` at
+`d3ec7036bf6919df8cd3eeaa3a986048e779ea02`, DataGen `0.1.0` at
+`eddcc0551861eaefeb9b37497b10de1bb0f52672`, and driver `0.1.0` at
+`27e5640f47e91c783112ca654f670d15863780a6`. The committed graph is a small
+FinBench-shaped synthetic engineering fixture authored in this repository, not
+an official `SF0.01` dataset. The Rust benchmark runner is an internal driver,
+not the upstream FinBench driver and not a certification implementation.
+
+The explicit Python `run_live_suite` lane only orchestrates the trusted Rust
+`run-live` command. The runner itself opens in-memory `GraphForge`, loads the
+committed seed, and executes official TCR10 (`pid1`, `pid2`, open
+`startTime < timestamp < endTime` window, single `jaccardSimilarity` column
+rounded to three decimals). A static JSON envelope or `.out` file cannot claim
+live execution. The reference `0.667` is independently derived from the seed
+(`|{10,11} ∩ {10,11,12}| / |union| = 2/3`). TCR1 and TW1 remain typed
+unsupported in the same evidence document, and correctness, resource, and
+harness lanes stay distinct. The older `run-suite` command is retained only as
+an explicitly marked `static_replay` regression lane and cannot satisfy live
+evidence. Its compatible TCR10 reference and system output use the same official
+single-column `jaccardSimilarity` value `0.667`; the reference-mismatch TCR10
+output is a deliberately wrong Jaccard (`0.500`) so normalized and exact
+comparison both fail closed. Obsolete company-ID rows are not a valid TCR10
+result schema.
+
 Evidence separates three failure classes and never conflates them: a
 **correctness** mismatch (`correctness_failed`), a **resource**-limit event
 (`resource_exceeded`, surfaced in the dedicated `resource_events` section), and a
@@ -174,7 +199,7 @@ SNB Interactive, or SNB BI. Evidence records `certification: false`: these are
 engineering runs and never masquerade as an audited GDC certification.
 
 ```bash
-CARGO_TARGET_DIR=target cargo build --locked -p graphforge-benchmark-gdc-finbench-transaction
+CARGO_TARGET_DIR=target cargo build --locked --manifest-path Cargo.toml -p graphforge-benchmark-gdc-finbench-transaction
 PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphforge-benchmark-gdc-finbench-transaction \
   uv run --locked python -m unittest tests.test_gdc_finbench_transaction
 ```
