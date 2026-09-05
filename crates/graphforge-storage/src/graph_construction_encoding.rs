@@ -84,7 +84,7 @@ fn run_source_spool_hook(phase: &str) {
 fn run_source_spool_hook(_phase: &str) {}
 
 struct CountingWriter {
-    inner: File,
+    inner: graphforge_filesystem::DurableFileCacheWriter,
     counter: IoCounter,
     digest: Sha256,
 }
@@ -132,12 +132,26 @@ fn authenticated_source_spool<'a>(
     output: &'a StableDirectory,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(File, EncodingTempGuard<'a>), GfError> {
-    let mut authenticated = open_authenticated_shape_source(source, outputs, name)?;
+    let authenticated = open_authenticated_shape_source(source, outputs, name)?;
+    let expected_identity = authenticated.identity;
+    let expected_bytes = authenticated.bytes;
+    let expected_sha256 = authenticated.sha256;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
+    let mut authenticated = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+        authenticated.file,
+        cache_window,
+        graphforge_filesystem::FileCacheReleaseTracker::default(),
+    )
+    .map_err(storage)?;
     let temporary = format!(".authenticated-source-{}.tmp", Uuid::new_v4().simple());
-    let mut spool = output
+    let spool = output
         .create_replaceable_child_file(OsStr::new(&temporary))
         .map_err(storage)?;
     let spool_identity = file_identity(&spool).map_err(storage)?;
+    let mut spool =
+        graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(spool, cache_window)
+            .map_err(storage)?;
     let guard = EncodingTempGuard {
         directory: output,
         name: temporary,
@@ -147,39 +161,64 @@ fn authenticated_source_spool<'a>(
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
-    loop {
-        run_source_spool_hook("before_read");
-        let read = authenticated.file.read(&mut buffer).map_err(storage)?;
-        run_source_spool_hook("after_read");
-        if read == 0 {
-            break;
+    let authentication = (|| -> Result<(), GfError> {
+        loop {
+            run_source_spool_hook("before_read");
+            let read = authenticated.read(&mut buffer).map_err(storage)?;
+            run_source_spool_hook("after_read");
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            spool.write_all(&buffer[..read]).map_err(storage)?;
+            bytes = bytes.saturating_add(read as u64);
+            evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(read as u64);
+            evidence.input_read_operations = evidence.input_read_operations.saturating_add(1);
+            evidence.source_spool_write_bytes = evidence
+                .source_spool_write_bytes
+                .saturating_add(read as u64);
+            evidence.source_spool_write_operations =
+                evidence.source_spool_write_operations.saturating_add(1);
         }
-        digest.update(&buffer[..read]);
-        spool.write_all(&buffer[..read]).map_err(storage)?;
-        bytes = bytes.saturating_add(read as u64);
-        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(read as u64);
-        evidence.input_read_operations = evidence.input_read_operations.saturating_add(1);
-        evidence.source_spool_write_bytes = evidence
-            .source_spool_write_bytes
-            .saturating_add(read as u64);
-        evidence.source_spool_write_operations =
-            evidence.source_spool_write_operations.saturating_add(1);
-    }
-    if file_identity(&authenticated.file).map_err(storage)? != authenticated.identity
-        || file_link_count(&authenticated.file).map_err(storage)? != 1
-        || bytes != authenticated.bytes
-        || hex(&digest.finalize()) != authenticated.sha256
-    {
-        return Err(storage(
-            "shaped source changed during authenticated spooling",
-        ));
-    }
+        if file_identity(authenticated.file()).map_err(storage)? != expected_identity
+            || file_link_count(authenticated.file()).map_err(storage)? != 1
+            || bytes != expected_bytes
+            || hex(&digest.finalize()) != expected_sha256
+        {
+            return Err(storage(
+                "shaped source changed during authenticated spooling",
+            ));
+        }
+        Ok(())
+    })();
+    let source_release = authenticated.finish().map_err(storage);
+    let source_release = match (authentication, source_release) {
+        (Ok(()), Ok(released)) => released,
+        (Ok(()), Err(error)) => return Err(error),
+        (Err(primary), Ok(_)) => return Err(primary),
+        (Err(primary), Err(release)) => {
+            return Err(storage(format!(
+                "{primary}; source cache release also failed: {release}"
+            )));
+        }
+    };
+    account_cache_release(source_release, evidence);
     spool.flush().map_err(storage)?;
-    spool.sync_all().map_err(storage)?;
-    evidence.source_spool_fsync_operations =
-        evidence.source_spool_fsync_operations.saturating_add(1);
+    spool.sync_all_and_release().map_err(storage)?;
+    evidence.source_spool_fsync_operations = evidence
+        .source_spool_fsync_operations
+        .saturating_add(spool.evidence().sync_operations);
+    let spool_release = spool.evidence();
+    account_cache_release(spool_release, evidence);
+    let aggregate_peak = source_release
+        .peak_window_bytes
+        .checked_add(spool_release.peak_window_bytes)
+        .ok_or_else(|| storage("source spool aggregate cache window overflow"))?;
+    evidence.peak_cache_release_window_bytes =
+        evidence.peak_cache_release_window_bytes.max(aggregate_peak);
     evidence.source_spool_peak_temporary_bytes =
         evidence.source_spool_peak_temporary_bytes.max(bytes);
+    let mut spool = spool.into_file();
     spool.rewind().map_err(storage)?;
     Ok((spool, guard))
 }
@@ -203,6 +242,48 @@ impl Write for CountingWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
+}
+
+fn account_cache_release(
+    released: graphforge_filesystem::FileCacheReleaseEvidence,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) {
+    evidence.cache_release_operations = evidence
+        .cache_release_operations
+        .saturating_add(released.release_operations);
+    evidence.cache_release_unsupported_operations = evidence
+        .cache_release_unsupported_operations
+        .saturating_add(released.unsupported_operations);
+    evidence.cache_released_bytes = evidence
+        .cache_released_bytes
+        .saturating_add(released.released_bytes);
+    evidence.peak_cache_release_window_bytes = evidence
+        .peak_cache_release_window_bytes
+        .max(released.peak_window_bytes);
+}
+
+fn merge_encoding_evidence(
+    target: &mut GraphConstructionEncodingEvidence,
+    source: &GraphConstructionEncodingEvidence,
+) {
+    target.input_read_bytes = target
+        .input_read_bytes
+        .saturating_add(source.input_read_bytes);
+    target.input_read_operations = target
+        .input_read_operations
+        .saturating_add(source.input_read_operations);
+    target.cache_release_operations = target
+        .cache_release_operations
+        .saturating_add(source.cache_release_operations);
+    target.cache_release_unsupported_operations = target
+        .cache_release_unsupported_operations
+        .saturating_add(source.cache_release_unsupported_operations);
+    target.cache_released_bytes = target
+        .cache_released_bytes
+        .saturating_add(source.cache_released_bytes);
+    target.peak_cache_release_window_bytes = target
+        .peak_cache_release_window_bytes
+        .max(source.peak_cache_release_window_bytes);
 }
 
 fn storage(error: impl std::fmt::Display) -> GfError {
@@ -258,6 +339,18 @@ pub struct GraphConstructionEncodingEvidence {
     pub output_write_operations: u64,
     /// Completed file and directory durability barriers.
     pub fsync_operations: u64,
+    /// Successful file-level page-cache release boundaries.
+    #[serde(default)]
+    pub cache_release_operations: u64,
+    /// Page-cache release boundaries unsupported by the target platform.
+    #[serde(default)]
+    pub cache_release_unsupported_operations: u64,
+    /// Clean file bytes covered by successful page-cache release requests.
+    #[serde(default)]
+    pub cache_released_bytes: u64,
+    /// Largest synchronized file-cache window between release boundaries.
+    #[serde(default)]
+    pub peak_cache_release_window_bytes: u64,
     /// Topology rows decoded from the retained parent. Always zero.
     pub prior_topology_rows_decoded: u64,
     /// Retained topology bytes copied. Always zero.
@@ -359,6 +452,22 @@ pub struct GraphConstructionEncoding {
     pub retained_artifacts: Vec<ConstructionRetainedArtifact>,
     /// Measured bounded work.
     pub evidence: GraphConstructionEncodingEvidence,
+    /// Work performed by the invocation that returned this inventory.
+    ///
+    /// This delta is not part of durable inventory authority.
+    #[serde(skip)]
+    pub invocation: GraphConstructionEncodingInvocationEvidence,
+}
+
+/// Per-invocation encoding work, distinct from durable cumulative evidence.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GraphConstructionEncodingInvocationEvidence {
+    /// This invocation generated and installed a new inventory.
+    pub performed: bool,
+    /// This invocation reused an already-authoritative inventory.
+    pub reused: bool,
+    /// Actual I/O and cache-release work performed by this invocation.
+    pub evidence: GraphConstructionEncodingEvidence,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,8 +526,8 @@ pub(crate) fn encode(
         .create_child_directory(OsStr::new(ENCODED_ROOT))
         .map_err(storage)?;
     cleanup_encoding_temps(&output, budgets)?;
-    if let Some(existing) = read_inventory(&output)? {
-        authenticate_inventory(&output, &existing, parent_index)?;
+    if let Some(mut existing) = read_inventory(&output)? {
+        let authentication = authenticate_inventory(&output, &existing, parent_index)?;
         if existing.generation != generation
             || existing.ontology_mode != shape.ontology_mode
             || existing.semantic_authority_sha256 != shape.semantic_authority_sha256
@@ -431,6 +540,11 @@ pub(crate) fn encode(
         match expected_inventory_sha256 {
             Some(expected) if expected == actual_authority => {
                 remove_encoding_intent(&output)?;
+                existing.invocation = GraphConstructionEncodingInvocationEvidence {
+                    performed: false,
+                    reused: true,
+                    evidence: authentication,
+                };
                 return Ok(existing);
             }
             Some(_) => {
@@ -483,7 +597,7 @@ pub(crate) fn encode(
             budgets,
             &mut evidence,
         )?;
-        copy_artifact(
+        copy_file_artifact(
             catalog_spool.try_clone().map_err(storage)?,
             &output,
             "topology/runtime_catalog.parquet",
@@ -526,7 +640,8 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
     )?;
-    if let Some((manifest, metrics)) = v4 {
+    if let Some(bundle) = v4 {
+        let metrics = &bundle.metrics;
         if metrics.input_records != shape.node_count {
             return Err(storage("v4 construction count differs from shaped nodes"));
         }
@@ -537,10 +652,10 @@ pub(crate) fn encode(
         evidence.ordinal_work_operations = metrics.cancellation_polls;
         evidence.ordinal_peak_buffer_bytes =
             u64::try_from(metrics.peak_buffer_bytes).map_err(storage)?;
-        let (v4_artifacts, publication) =
+        let (v4_artifacts, publication, metrics) =
             crate::uuid_membership::publish_v4_construction_artifacts(
                 &output,
-                &manifest,
+                bundle,
                 generation,
                 identities_sha256,
             )?;
@@ -552,6 +667,7 @@ pub(crate) fn encode(
         evidence.ordinal_peak_temporary_bytes = metrics
             .peak_temporary_bytes
             .max(publication.peak_temporary_bytes);
+        account_cache_release(metrics.cache_release, &mut evidence);
         crate::graph_construction::construction_failpoint("encode.after_v4_before_inventory");
         index.artifacts.extend(v4_artifacts);
     }
@@ -596,6 +712,7 @@ pub(crate) fn encode(
     evidence.membership_created_runs = index.created_runs;
     evidence.membership_peak_buffer_bytes = index.peak_buffer_bytes;
     evidence.membership_peak_temporary_bytes = index.peak_temporary_bytes;
+    account_cache_release(index.cache_release, &mut evidence);
     evidence.retained_index_runs = index.retained_runs;
     evidence.retained_index_payload_bytes = index.retained_payload_bytes;
     let retained_artifacts = index
@@ -612,7 +729,7 @@ pub(crate) fn encode(
     {
         return Err(storage("canonical encoding contains duplicate paths"));
     }
-    let completed = GraphConstructionEncoding {
+    let mut completed = GraphConstructionEncoding {
         root: ENCODED_ROOT.to_owned(),
         generation,
         ontology_mode: shape.ontology_mode,
@@ -622,10 +739,18 @@ pub(crate) fn encode(
         artifacts,
         retained_artifacts,
         evidence,
+        invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     install_json(&output, INVENTORY, &completed)?;
-    authenticate_inventory(&output, &completed, parent_index)?;
+    let authentication = authenticate_inventory(&output, &completed, parent_index)?;
     remove_encoding_intent(&output)?;
+    let mut invocation = completed.evidence.clone();
+    merge_encoding_evidence(&mut invocation, &authentication);
+    completed.invocation = GraphConstructionEncodingInvocationEvidence {
+        performed: true,
+        reused: false,
+        evidence: invocation,
+    };
     Ok(completed)
 }
 
@@ -767,13 +892,7 @@ fn encode_nodes(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<
-    Option<(
-        crate::V4OrdinalIdentityManifest,
-        crate::uuid_membership::V4OrdinalBuildMetrics,
-    )>,
-    GfError,
-> {
+) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
     if shape.node_rows.is_empty() {
         if !build_v4 {
             return Ok(None);
@@ -795,8 +914,14 @@ fn encode_nodes(
         .node_details
         .as_deref()
         .ok_or_else(|| storage("node rows lack canonical details"))?;
-    let mut identities =
-        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
+    let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
+        source,
+        shape_outputs,
+        &shape.identities,
+        cache_window,
+    )?;
     let v4_index = if build_v4 {
         let graph = output
             .open_child_directory(OsStr::new("graph"))
@@ -814,88 +939,114 @@ fn encode_nodes(
     };
     let mut v4 = v4_index
         .as_ref()
-        .map(|index| crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, index))
+        .map(|index| {
+            crate::uuid_membership::V4OrdinalConstructionWriter::start_with_cache_window(
+                generation,
+                index,
+                cache_window,
+            )
+        })
         .transpose()?;
-    let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
+    let mut details =
+        FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name, cache_window)?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 128).max(1));
-    loop {
-        if cancelled() {
-            return Err(storage("construction encoding cancelled"));
-        }
-        let mut out_uuid = Vec::with_capacity(rows_per_window);
-        let mut out_id = Vec::with_capacity(rows_per_window);
-        let mut out_type = Vec::with_capacity(rows_per_window);
-        let mut owners = BTreeMap::<String, ResolvedOwner>::new();
-        while out_uuid.len() < rows_per_window {
-            let (identity, detail) = match (next_kind(&mut identities, 0)?, details.next()?) {
-                (Some(identity), Some(detail)) => (identity, detail),
-                (None, None) => break,
-                _ => return Err(storage("node detail and identity stream lengths differ")),
-            };
-            if identity[..16] != detail[..16] || identity[17] != 0 {
-                return Err(storage("node detail and identity streams differ"));
-            }
-            let uuid: [u8; 16] = detail[..16].try_into().expect("fixed UUID");
-            let label_len = usize::from(detail[16]);
-            let label = std::str::from_utf8(&detail[17..17 + label_len]).map_err(storage)?;
-            let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                "_untyped"
-            } else {
-                label
-            };
-            let owner = if let Some(owner) = owners.get(label) {
-                owner.clone()
-            } else {
-                let owner = resolve_owner(
-                    semantic_context,
-                    semantic_bindings,
-                    SymbolKind::Entity,
-                    SemanticRouteKind::Entity,
-                    label,
-                    runtime_route,
-                )?;
-                owners.insert(label.to_owned(), owner.clone());
-                owner
-            };
-            let type_id = match owner.storage_id {
-                Some(storage_id) => storage_id,
-                None => *label_ids
-                    .get(label)
-                    .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
-            };
-            let node_id = u64::from_be_bytes(identity[24..32].try_into().expect("fixed"));
-            if let Some(v4) = v4.as_mut() {
-                v4.push_pair(Uuid::from_bytes(uuid), node_id, cancelled)?;
-            }
-            out_uuid.push(uuid);
-            out_id.push(node_id);
-            out_type.push(type_id);
-            if out_uuid.len().is_multiple_of(4096) && cancelled() {
+    let encoded = (|| -> Result<(), GfError> {
+        loop {
+            if cancelled() {
                 return Err(storage("construction encoding cancelled"));
             }
+            let mut out_uuid = Vec::with_capacity(rows_per_window);
+            let mut out_id = Vec::with_capacity(rows_per_window);
+            let mut out_type = Vec::with_capacity(rows_per_window);
+            let mut owners = BTreeMap::<String, ResolvedOwner>::new();
+            while out_uuid.len() < rows_per_window {
+                let (identity, detail) = match (next_kind(&mut identities, 0)?, details.next()?) {
+                    (Some(identity), Some(detail)) => (identity, detail),
+                    (None, None) => break,
+                    _ => return Err(storage("node detail and identity stream lengths differ")),
+                };
+                if identity[..16] != detail[..16] || identity[17] != 0 {
+                    return Err(storage("node detail and identity streams differ"));
+                }
+                let uuid: [u8; 16] = detail[..16].try_into().expect("fixed UUID");
+                let label_len = usize::from(detail[16]);
+                let label = std::str::from_utf8(&detail[17..17 + label_len]).map_err(storage)?;
+                let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                    "_untyped"
+                } else {
+                    label
+                };
+                let owner = if let Some(owner) = owners.get(label) {
+                    owner.clone()
+                } else {
+                    let owner = resolve_owner(
+                        semantic_context,
+                        semantic_bindings,
+                        SymbolKind::Entity,
+                        SemanticRouteKind::Entity,
+                        label,
+                        runtime_route,
+                    )?;
+                    owners.insert(label.to_owned(), owner.clone());
+                    owner
+                };
+                let type_id = match owner.storage_id {
+                    Some(storage_id) => storage_id,
+                    None => *label_ids
+                        .get(label)
+                        .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
+                };
+                let node_id = u64::from_be_bytes(identity[24..32].try_into().expect("fixed"));
+                if let Some(v4) = v4.as_mut() {
+                    v4.push_pair(Uuid::from_bytes(uuid), node_id, cancelled)?;
+                }
+                out_uuid.push(uuid);
+                out_id.push(node_id);
+                out_type.push(type_id);
+                if out_uuid.len().is_multiple_of(4096) && cancelled() {
+                    return Err(storage("construction encoding cancelled"));
+                }
+            }
+            if out_id.is_empty() {
+                break;
+            }
+            let canonical = node_batch(
+                &out_uuid,
+                &out_id,
+                &out_type,
+                shape.runtime_catalog_now_micros,
+            )?;
+            account_batch(&canonical, budgets, evidence)?;
+            let first = *out_id.first().expect("nonempty");
+            let last = *out_id.last().expect("nonempty");
+            let path = format!("topology/nodes/{first:020}-{last:020}.parquet");
+            artifacts.push(write_parquet(
+                output,
+                &path,
+                &canonical,
+                cache_window,
+                evidence,
+            )?);
         }
-        if out_id.is_empty() {
-            break;
+        if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
+            return Err(storage("node streams contain unconsumed rows"));
         }
-        let canonical = node_batch(
-            &out_uuid,
-            &out_id,
-            &out_type,
-            shape.runtime_catalog_now_micros,
-        )?;
-        account_batch(&canonical, budgets, evidence)?;
-        let first = *out_id.first().expect("nonempty");
-        let last = *out_id.last().expect("nonempty");
-        let path = format!("topology/nodes/{first:020}-{last:020}.parquet");
-        artifacts.push(write_parquet(output, &path, &canonical, evidence)?);
-    }
-    if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
-        return Err(storage("node streams contain unconsumed rows"));
-    }
-    identities.authenticate_and_account(evidence)?;
-    details.authenticate_and_account(evidence)?;
+        Ok(())
+    })();
+    let authenticate = encoded.is_ok();
+    let encoded = combine_reader_cleanup(
+        encoded,
+        identities.finish_and_account(authenticate, evidence),
+        "node identity",
+    );
+    let encoded = combine_reader_cleanup(
+        encoded,
+        details.finish_and_account(authenticate, evidence),
+        "node detail",
+    );
+    encoded?;
     encode_node_properties(
         source,
         output,
@@ -934,88 +1085,119 @@ fn encode_node_properties(
         }
         let (file, _spool_guard) =
             authenticated_source_spool(source, shape_outputs, name, output, evidence)?;
+        let cache_window =
+            graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
         let counter = IoCounter::default();
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-            file,
-            counter: counter.clone(),
-        })
-        .map_err(storage)?
-        .with_batch_size(budgets.max_batch_rows)
-        .build()
-        .map_err(storage)?;
+        let chunk_reader =
+            CountingChunkReader::with_cache_window(file, counter.clone(), cache_window);
+        let cache_release = chunk_reader.cache_release_tracker();
+        let reader = (|| {
+            ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
+                .map_err(storage)?
+                .with_batch_size(budgets.max_batch_rows)
+                .build()
+                .map_err(storage)
+        })();
+        let mut reader = match reader {
+            Ok(reader) => reader,
+            Err(primary) => {
+                combine_reader_cleanup(
+                    Err(primary),
+                    cache_release.check_error().map_err(storage),
+                    "node property",
+                )?;
+                unreachable!("failed node property reader construction returned success");
+            }
+        };
         evidence.peak_open_input_readers = evidence.peak_open_input_readers.max(1);
-        for input in &mut reader {
-            let input = input.map_err(storage)?;
-            account_batch(&input, budgets, evidence)?;
-            if input.num_columns() == 2 {
-                continue;
-            }
-            let labels = required_string(&input, "label")?;
-            let mut groups = BTreeMap::<String, Vec<u32>>::new();
-            for row in 0..input.num_rows() {
-                groups
-                    .entry(labels.value(row).to_owned())
-                    .or_default()
-                    .push(u32::try_from(row).map_err(storage)?);
-            }
-            for (label, indexes) in groups {
-                let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                    "_untyped"
-                } else {
-                    label.as_str()
-                };
-                let owner = resolve_owner(
-                    semantic_context,
-                    semantic_bindings,
-                    SymbolKind::Entity,
-                    SemanticRouteKind::Entity,
-                    &label,
-                    runtime_route,
-                )?;
-                let projections = property_projections(
-                    &input,
-                    2,
-                    &indexes,
-                    &owner,
-                    SymbolKind::Entity,
-                    SemanticRouteKind::NodeProperty,
-                    semantic_context,
-                    semantic_bindings,
-                )?;
-                for (route, fields) in projections {
-                    let ordinal = ordinals.entry(route.clone()).or_default();
-                    let property = property_batch(
-                        &input,
-                        "node_uuid",
-                        "graphforge.entity_type",
-                        &owner.topology_route,
-                        &indexes,
-                        &fields,
-                        PropertyRouteKind::Node,
-                        &route,
-                        shape.parent_topology_generation + 1,
-                        *ordinal,
-                    )?;
-                    let property = if owner.symbol.is_some() {
-                        with_route_metadata_batch(
-                            &property,
-                            &route,
-                            semantic_context
-                                .expect("qualified owner has context")
-                                .fingerprint(),
-                        )?
+        let processed = (|| -> Result<(), GfError> {
+            for input in &mut reader {
+                let input = input.map_err(storage)?;
+                account_batch(&input, budgets, evidence)?;
+                if input.num_columns() == 2 {
+                    continue;
+                }
+                let labels = required_string(&input, "label")?;
+                let mut groups = BTreeMap::<String, Vec<u32>>::new();
+                for row in 0..input.num_rows() {
+                    groups
+                        .entry(labels.value(row).to_owned())
+                        .or_default()
+                        .push(u32::try_from(row).map_err(storage)?);
+                }
+                for (label, indexes) in groups {
+                    let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                        "_untyped"
                     } else {
-                        property
+                        label.as_str()
                     };
-                    let path = format!(
-                        "properties/{route}/{:020}-{ordinal:020}.parquet",
-                        shape.parent_topology_generation + 1
-                    );
-                    artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                    *ordinal = ordinal.saturating_add(1);
+                    let owner = resolve_owner(
+                        semantic_context,
+                        semantic_bindings,
+                        SymbolKind::Entity,
+                        SemanticRouteKind::Entity,
+                        &label,
+                        runtime_route,
+                    )?;
+                    let projections = property_projections(
+                        &input,
+                        2,
+                        &indexes,
+                        &owner,
+                        SymbolKind::Entity,
+                        SemanticRouteKind::NodeProperty,
+                        semantic_context,
+                        semantic_bindings,
+                    )?;
+                    for (route, fields) in projections {
+                        let ordinal = ordinals.entry(route.clone()).or_default();
+                        let property = property_batch(
+                            &input,
+                            "node_uuid",
+                            "graphforge.entity_type",
+                            &owner.topology_route,
+                            &indexes,
+                            &fields,
+                            PropertyRouteKind::Node,
+                            &route,
+                            shape.parent_topology_generation + 1,
+                            *ordinal,
+                        )?;
+                        let property = if owner.symbol.is_some() {
+                            with_route_metadata_batch(
+                                &property,
+                                &route,
+                                semantic_context
+                                    .expect("qualified owner has context")
+                                    .fingerprint(),
+                            )?
+                        } else {
+                            property
+                        };
+                        let path = format!(
+                            "properties/{route}/{:020}-{ordinal:020}.parquet",
+                            shape.parent_topology_generation + 1
+                        );
+                        artifacts.push(write_parquet(
+                            output,
+                            &path,
+                            &property,
+                            cache_window,
+                            evidence,
+                        )?);
+                        *ordinal = ordinal.saturating_add(1);
+                    }
                 }
             }
-        }
+            Ok(())
+        })();
+        drop(reader);
+        combine_reader_cleanup(
+            processed,
+            cache_release.check_error().map_err(storage),
+            "node property",
+        )?;
+        account_cache_release(cache_release.evidence(), evidence);
         let (bytes, operations) = counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
@@ -1052,138 +1234,174 @@ fn encode_edges(
         .edge_endpoints
         .as_deref()
         .ok_or_else(|| storage("edge rows lack resolved endpoints"))?;
-    let mut identities =
-        FixedReader::<IDENTITY_WIDTH>::open(source, shape_outputs, &shape.identities)?;
-    let mut details = FixedReader::<EDGE_DETAIL_WIDTH>::open(source, shape_outputs, details_name)?;
-    let mut endpoints =
-        FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(source, shape_outputs, endpoints_name)?;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
+    let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
+        source,
+        shape_outputs,
+        &shape.identities,
+        cache_window,
+    )?;
+    let mut details =
+        FixedReader::<EDGE_DETAIL_WIDTH>::open(source, shape_outputs, details_name, cache_window)?;
+    let mut endpoints = FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
+        source,
+        shape_outputs,
+        endpoints_name,
+        cache_window,
+    )?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 192).max(1));
-    loop {
-        if cancelled() {
-            return Err(storage("construction encoding cancelled"));
-        }
-        let mut out_uuid = Vec::with_capacity(rows_per_window);
-        let mut out_src = Vec::with_capacity(rows_per_window);
-        let mut out_dst = Vec::with_capacity(rows_per_window);
-        let mut out_id = Vec::with_capacity(rows_per_window);
-        let mut out_src_id = Vec::with_capacity(rows_per_window);
-        let mut out_dst_id = Vec::with_capacity(rows_per_window);
-        let mut groups = BTreeMap::<String, Vec<u32>>::new();
-        while out_uuid.len() < rows_per_window {
-            let (identity, detail) = match (next_kind(&mut identities, 1)?, details.next()?) {
-                (Some(identity), Some(detail)) => (identity, detail),
-                (None, None) => break,
-                _ => return Err(storage("edge detail and identity stream lengths differ")),
-            };
-            let (Some(source_endpoint), Some(target_endpoint)) =
-                (endpoints.next()?, endpoints.next()?)
-            else {
-                return Err(storage("edge endpoint stream ended early"));
-            };
-            let uuid: [u8; 16] = detail[..16].try_into().expect("fixed UUID");
-            if identity[..16] != uuid
-                || detail[..16] != uuid
-                || identity[17] != 0
-                || source_endpoint[..16] != uuid
-                || target_endpoint[..16] != uuid
-                || source_endpoint[16] != 0
-                || target_endpoint[16] != 1
-            {
-                return Err(storage("edge row/detail/identity/endpoint streams differ"));
-            }
-            let route_len = usize::from(detail[48]);
-            let route = std::str::from_utf8(&detail[49..49 + route_len]).map_err(storage)?;
-            out_uuid.push(uuid);
-            out_src.push(detail[16..32].try_into().expect("fixed UUID"));
-            out_dst.push(detail[32..48].try_into().expect("fixed UUID"));
-            out_id.push(u64::from_be_bytes(
-                identity[24..32].try_into().expect("fixed"),
-            ));
-            out_src_id.push(u64::from_be_bytes(
-                source_endpoint[24..32].try_into().expect("fixed"),
-            ));
-            out_dst_id.push(u64::from_be_bytes(
-                target_endpoint[24..32].try_into().expect("fixed"),
-            ));
-            groups
-                .entry(route.to_owned())
-                .or_default()
-                .push(u32::try_from(out_uuid.len() - 1).map_err(storage)?);
-            if out_uuid.len().is_multiple_of(4096) && cancelled() {
+    let encoded = (|| -> Result<(), GfError> {
+        loop {
+            if cancelled() {
                 return Err(storage("construction encoding cancelled"));
             }
-        }
-        if out_id.is_empty() {
-            break;
-        }
-        let canonical = edge_batch(
-            &out_uuid,
-            &out_src,
-            &out_dst,
-            &out_id,
-            &out_src_id,
-            &out_dst_id,
-            shape.runtime_catalog_now_micros,
-        )?;
-        account_batch(&canonical, budgets, evidence)?;
-        for (route, output_indexes) in groups {
-            let mut selected = select_rows(&canonical, &output_indexes)?;
-            let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                "_exploratory"
-            } else {
-                route.as_str()
-            };
-            let owner = resolve_owner(
-                semantic_context,
-                semantic_bindings,
-                SymbolKind::Relation,
-                SemanticRouteKind::Relation,
-                &route,
-                runtime_route,
-            )?;
-            let topology_route = if owner.symbol.is_none()
-                && ontology_mode == OntologyMode::Exploratory
-            {
-                let routes = StringArray::from(vec![route.as_str(); selected.num_rows()]);
-                let mut columns = selected.columns().to_vec();
-                columns.push(Arc::new(routes));
-                selected =
-                    RecordBatch::try_new(crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(), columns)
-                        .map_err(storage)?;
-                "_exploratory"
-            } else {
-                owner.topology_route.as_str()
-            };
-            if owner.symbol.is_some() {
-                selected = with_route_metadata_batch(
-                    &selected,
-                    topology_route,
-                    semantic_context
-                        .expect("qualified owner has context")
-                        .fingerprint(),
-                )?;
+            let mut out_uuid = Vec::with_capacity(rows_per_window);
+            let mut out_src = Vec::with_capacity(rows_per_window);
+            let mut out_dst = Vec::with_capacity(rows_per_window);
+            let mut out_id = Vec::with_capacity(rows_per_window);
+            let mut out_src_id = Vec::with_capacity(rows_per_window);
+            let mut out_dst_id = Vec::with_capacity(rows_per_window);
+            let mut groups = BTreeMap::<String, Vec<u32>>::new();
+            while out_uuid.len() < rows_per_window {
+                let (identity, detail) = match (next_kind(&mut identities, 1)?, details.next()?) {
+                    (Some(identity), Some(detail)) => (identity, detail),
+                    (None, None) => break,
+                    _ => return Err(storage("edge detail and identity stream lengths differ")),
+                };
+                let (Some(source_endpoint), Some(target_endpoint)) =
+                    (endpoints.next()?, endpoints.next()?)
+                else {
+                    return Err(storage("edge endpoint stream ended early"));
+                };
+                let uuid: [u8; 16] = detail[..16].try_into().expect("fixed UUID");
+                if identity[..16] != uuid
+                    || detail[..16] != uuid
+                    || identity[17] != 0
+                    || source_endpoint[..16] != uuid
+                    || target_endpoint[..16] != uuid
+                    || source_endpoint[16] != 0
+                    || target_endpoint[16] != 1
+                {
+                    return Err(storage("edge row/detail/identity/endpoint streams differ"));
+                }
+                let route_len = usize::from(detail[48]);
+                let route = std::str::from_utf8(&detail[49..49 + route_len]).map_err(storage)?;
+                out_uuid.push(uuid);
+                out_src.push(detail[16..32].try_into().expect("fixed UUID"));
+                out_dst.push(detail[32..48].try_into().expect("fixed UUID"));
+                out_id.push(u64::from_be_bytes(
+                    identity[24..32].try_into().expect("fixed"),
+                ));
+                out_src_id.push(u64::from_be_bytes(
+                    source_endpoint[24..32].try_into().expect("fixed"),
+                ));
+                out_dst_id.push(u64::from_be_bytes(
+                    target_endpoint[24..32].try_into().expect("fixed"),
+                ));
+                groups
+                    .entry(route.to_owned())
+                    .or_default()
+                    .push(u32::try_from(out_uuid.len() - 1).map_err(storage)?);
+                if out_uuid.len().is_multiple_of(4096) && cancelled() {
+                    return Err(storage("construction encoding cancelled"));
+                }
             }
-            let ids = selected
-                .column_by_name("edge_id")
-                .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
-                .ok_or_else(|| storage("canonical edge ids are incompatible"))?;
-            let first = ids.value(0);
-            let last = ids.value(ids.len() - 1);
-            let path = format!("topology/edges/{topology_route}/{first:020}-{last:020}.parquet");
-            artifacts.push(write_parquet(output, &path, &selected, evidence)?);
+            if out_id.is_empty() {
+                break;
+            }
+            let canonical = edge_batch(
+                &out_uuid,
+                &out_src,
+                &out_dst,
+                &out_id,
+                &out_src_id,
+                &out_dst_id,
+                shape.runtime_catalog_now_micros,
+            )?;
+            account_batch(&canonical, budgets, evidence)?;
+            for (route, output_indexes) in groups {
+                let mut selected = select_rows(&canonical, &output_indexes)?;
+                let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                    "_exploratory"
+                } else {
+                    route.as_str()
+                };
+                let owner = resolve_owner(
+                    semantic_context,
+                    semantic_bindings,
+                    SymbolKind::Relation,
+                    SemanticRouteKind::Relation,
+                    &route,
+                    runtime_route,
+                )?;
+                let topology_route =
+                    if owner.symbol.is_none() && ontology_mode == OntologyMode::Exploratory {
+                        let routes = StringArray::from(vec![route.as_str(); selected.num_rows()]);
+                        let mut columns = selected.columns().to_vec();
+                        columns.push(Arc::new(routes));
+                        selected = RecordBatch::try_new(
+                            crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(),
+                            columns,
+                        )
+                        .map_err(storage)?;
+                        "_exploratory"
+                    } else {
+                        owner.topology_route.as_str()
+                    };
+                if owner.symbol.is_some() {
+                    selected = with_route_metadata_batch(
+                        &selected,
+                        topology_route,
+                        semantic_context
+                            .expect("qualified owner has context")
+                            .fingerprint(),
+                    )?;
+                }
+                let ids = selected
+                    .column_by_name("edge_id")
+                    .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| storage("canonical edge ids are incompatible"))?;
+                let first = ids.value(0);
+                let last = ids.value(ids.len() - 1);
+                let path =
+                    format!("topology/edges/{topology_route}/{first:020}-{last:020}.parquet");
+                artifacts.push(write_parquet(
+                    output,
+                    &path,
+                    &selected,
+                    cache_window,
+                    evidence,
+                )?);
+            }
         }
-    }
-    if details.next()?.is_some()
-        || endpoints.next()?.is_some()
-        || next_kind(&mut identities, 1)?.is_some()
-    {
-        return Err(storage("edge streams contain unconsumed rows"));
-    }
-    identities.authenticate_and_account(evidence)?;
-    details.authenticate_and_account(evidence)?;
-    endpoints.authenticate_and_account(evidence)?;
+        if details.next()?.is_some()
+            || endpoints.next()?.is_some()
+            || next_kind(&mut identities, 1)?.is_some()
+        {
+            return Err(storage("edge streams contain unconsumed rows"));
+        }
+        Ok(())
+    })();
+    let authenticate = encoded.is_ok();
+    let encoded = combine_reader_cleanup(
+        encoded,
+        identities.finish_and_account(authenticate, evidence),
+        "edge identity",
+    );
+    let encoded = combine_reader_cleanup(
+        encoded,
+        details.finish_and_account(authenticate, evidence),
+        "edge detail",
+    );
+    let encoded = combine_reader_cleanup(
+        encoded,
+        endpoints.finish_and_account(authenticate, evidence),
+        "edge endpoint",
+    );
+    encoded?;
     encode_edge_properties(
         source,
         output,
@@ -1220,88 +1438,119 @@ fn encode_edge_properties(
         }
         let (file, _spool_guard) =
             authenticated_source_spool(source, shape_outputs, name, output, evidence)?;
+        let cache_window =
+            graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
         let counter = IoCounter::default();
-        let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-            file,
-            counter: counter.clone(),
-        })
-        .map_err(storage)?
-        .with_batch_size(budgets.max_batch_rows)
-        .build()
-        .map_err(storage)?;
+        let chunk_reader =
+            CountingChunkReader::with_cache_window(file, counter.clone(), cache_window);
+        let cache_release = chunk_reader.cache_release_tracker();
+        let reader = (|| {
+            ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
+                .map_err(storage)?
+                .with_batch_size(budgets.max_batch_rows)
+                .build()
+                .map_err(storage)
+        })();
+        let mut reader = match reader {
+            Ok(reader) => reader,
+            Err(primary) => {
+                combine_reader_cleanup(
+                    Err(primary),
+                    cache_release.check_error().map_err(storage),
+                    "edge property",
+                )?;
+                unreachable!("failed edge property reader construction returned success");
+            }
+        };
         evidence.peak_open_input_readers = evidence.peak_open_input_readers.max(1);
-        for input in &mut reader {
-            let input = input.map_err(storage)?;
-            account_batch(&input, budgets, evidence)?;
-            if input.num_columns() == 4 {
-                continue;
-            }
-            let routes = required_string(&input, "rel_type")?;
-            let mut groups = BTreeMap::<String, Vec<u32>>::new();
-            for row in 0..input.num_rows() {
-                groups
-                    .entry(routes.value(row).to_owned())
-                    .or_default()
-                    .push(u32::try_from(row).map_err(storage)?);
-            }
-            for (route, indexes) in groups {
-                let runtime_route = if ontology_mode == OntologyMode::Exploratory {
-                    "_exploratory"
-                } else {
-                    route.as_str()
-                };
-                let owner = resolve_owner(
-                    semantic_context,
-                    semantic_bindings,
-                    SymbolKind::Relation,
-                    SemanticRouteKind::Relation,
-                    &route,
-                    runtime_route,
-                )?;
-                let projections = property_projections(
-                    &input,
-                    4,
-                    &indexes,
-                    &owner,
-                    SymbolKind::Relation,
-                    SemanticRouteKind::EdgeProperty,
-                    semantic_context,
-                    semantic_bindings,
-                )?;
-                for (property_route, fields) in projections {
-                    let ordinal = ordinals.entry(property_route.clone()).or_default();
-                    let property = property_batch(
-                        &input,
-                        "edge_uuid",
-                        "graphforge.rel_type",
-                        &owner.topology_route,
-                        &indexes,
-                        &fields,
-                        PropertyRouteKind::Edge,
-                        &property_route,
-                        shape.parent_topology_generation + 1,
-                        *ordinal,
-                    )?;
-                    let property = if owner.symbol.is_some() {
-                        with_route_metadata_batch(
-                            &property,
-                            &property_route,
-                            semantic_context
-                                .expect("qualified owner has context")
-                                .fingerprint(),
-                        )?
+        let processed = (|| -> Result<(), GfError> {
+            for input in &mut reader {
+                let input = input.map_err(storage)?;
+                account_batch(&input, budgets, evidence)?;
+                if input.num_columns() == 4 {
+                    continue;
+                }
+                let routes = required_string(&input, "rel_type")?;
+                let mut groups = BTreeMap::<String, Vec<u32>>::new();
+                for row in 0..input.num_rows() {
+                    groups
+                        .entry(routes.value(row).to_owned())
+                        .or_default()
+                        .push(u32::try_from(row).map_err(storage)?);
+                }
+                for (route, indexes) in groups {
+                    let runtime_route = if ontology_mode == OntologyMode::Exploratory {
+                        "_exploratory"
                     } else {
-                        property
+                        route.as_str()
                     };
-                    let path = format!(
-                        "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
-                        shape.parent_topology_generation + 1
-                    );
-                    artifacts.push(write_parquet(output, &path, &property, evidence)?);
-                    *ordinal = ordinal.saturating_add(1);
+                    let owner = resolve_owner(
+                        semantic_context,
+                        semantic_bindings,
+                        SymbolKind::Relation,
+                        SemanticRouteKind::Relation,
+                        &route,
+                        runtime_route,
+                    )?;
+                    let projections = property_projections(
+                        &input,
+                        4,
+                        &indexes,
+                        &owner,
+                        SymbolKind::Relation,
+                        SemanticRouteKind::EdgeProperty,
+                        semantic_context,
+                        semantic_bindings,
+                    )?;
+                    for (property_route, fields) in projections {
+                        let ordinal = ordinals.entry(property_route.clone()).or_default();
+                        let property = property_batch(
+                            &input,
+                            "edge_uuid",
+                            "graphforge.rel_type",
+                            &owner.topology_route,
+                            &indexes,
+                            &fields,
+                            PropertyRouteKind::Edge,
+                            &property_route,
+                            shape.parent_topology_generation + 1,
+                            *ordinal,
+                        )?;
+                        let property = if owner.symbol.is_some() {
+                            with_route_metadata_batch(
+                                &property,
+                                &property_route,
+                                semantic_context
+                                    .expect("qualified owner has context")
+                                    .fingerprint(),
+                            )?
+                        } else {
+                            property
+                        };
+                        let path = format!(
+                            "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
+                            shape.parent_topology_generation + 1
+                        );
+                        artifacts.push(write_parquet(
+                            output,
+                            &path,
+                            &property,
+                            cache_window,
+                            evidence,
+                        )?);
+                        *ordinal = ordinal.saturating_add(1);
+                    }
                 }
             }
-        }
+            Ok(())
+        })();
+        drop(reader);
+        combine_reader_cleanup(
+            processed,
+            cache_release.check_error().map_err(storage),
+            "edge property",
+        )?;
+        account_cache_release(cache_release.evidence(), evidence);
         let (bytes, operations) = counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
@@ -1479,33 +1728,56 @@ fn read_runtime_label_ids(
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<BTreeMap<String, u32>, GfError> {
     let counter = IoCounter::default();
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(CountingChunkReader {
-        file,
-        counter: counter.clone(),
-    })
-    .map_err(storage)?
-    .with_batch_size(budgets.max_batch_rows)
-    .build()
-    .map_err(storage)?;
+    let chunk_reader = CountingChunkReader::new(file, counter.clone());
+    let cache_release = chunk_reader.cache_release_tracker();
+    let reader = (|| {
+        ParquetRecordBatchReaderBuilder::try_new(chunk_reader)
+            .map_err(storage)?
+            .with_batch_size(budgets.max_batch_rows)
+            .build()
+            .map_err(storage)
+    })();
+    let mut reader = match reader {
+        Ok(reader) => reader,
+        Err(primary) => {
+            combine_reader_cleanup(
+                Err(primary),
+                cache_release.check_error().map_err(storage),
+                "runtime catalog",
+            )?;
+            unreachable!("failed runtime catalog reader construction returned success");
+        }
+    };
     let mut labels = BTreeMap::new();
-    for batch in &mut reader {
-        let batch = batch.map_err(storage)?;
-        account_batch(&batch, budgets, evidence)?;
-        let kinds = required_string(&batch, "entry_kind")?;
-        let names = required_string(&batch, "name")?;
-        let ids = batch
-            .column_by_name("runtime_id")
-            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-            .ok_or_else(|| storage("runtime catalog id is not UInt32"))?;
-        for row in 0..batch.num_rows() {
-            if kinds.value(row) == "entity_type" {
-                let tagged = runtime_entity_type_id(graphforge_ir::RuntimeTypeId(ids.value(row))).0;
-                if labels.insert(names.value(row).to_owned(), tagged).is_some() {
-                    return Err(storage("runtime catalog repeats an entity type"));
+    let decoded = (|| -> Result<(), GfError> {
+        for batch in &mut reader {
+            let batch = batch.map_err(storage)?;
+            account_batch(&batch, budgets, evidence)?;
+            let kinds = required_string(&batch, "entry_kind")?;
+            let names = required_string(&batch, "name")?;
+            let ids = batch
+                .column_by_name("runtime_id")
+                .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+                .ok_or_else(|| storage("runtime catalog id is not UInt32"))?;
+            for row in 0..batch.num_rows() {
+                if kinds.value(row) == "entity_type" {
+                    let tagged =
+                        runtime_entity_type_id(graphforge_ir::RuntimeTypeId(ids.value(row))).0;
+                    if labels.insert(names.value(row).to_owned(), tagged).is_some() {
+                        return Err(storage("runtime catalog repeats an entity type"));
+                    }
                 }
             }
         }
-    }
+        Ok(())
+    })();
+    drop(reader);
+    combine_reader_cleanup(
+        decoded,
+        cache_release.check_error().map_err(storage),
+        "runtime catalog",
+    )?;
+    account_cache_release(cache_release.evidence(), evidence);
     let (bytes, operations) = counter.values();
     evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
     evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
@@ -1535,10 +1807,13 @@ fn write_surrogate_tails(
         ],
     )
     .map_err(storage)?;
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(1).map_err(storage)?;
     artifacts.push(write_parquet(
         output,
         "topology/surrogate_tails.parquet",
         &batch,
+        cache_window,
         evidence,
     )?);
     Ok(())
@@ -1548,6 +1823,7 @@ fn write_parquet(
     root: &StableDirectory,
     relative: &str,
     batch: &RecordBatch,
+    cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<ConstructionEncodedArtifact, GfError> {
     let (directory, name) = directory_for(root, relative)?;
@@ -1565,7 +1841,11 @@ fn write_parquet(
     let counter = IoCounter::default();
     let mut writer = ArrowWriter::try_new(
         CountingWriter {
-            inner: file,
+            inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+                file,
+                cache_window,
+            )
+            .map_err(storage)?,
             counter: counter.clone(),
             digest: Sha256::new(),
         },
@@ -1574,8 +1854,10 @@ fn write_parquet(
     )
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
-    let writer = writer.into_inner().map_err(storage)?;
-    writer.inner.sync_all().map_err(storage)?;
+    let mut writer = writer.into_inner().map_err(storage)?;
+    writer.inner.sync_all_and_release().map_err(storage)?;
+    let cache_release = writer.inner.evidence();
+    account_cache_release(cache_release, evidence);
     crate::graph_construction::construction_failpoint(&format!(
         "encode.parquet.after_temp_fsync.{relative}"
     ));
@@ -1595,7 +1877,10 @@ fn write_parquet(
     ));
     evidence.output_write_bytes = evidence.output_write_bytes.saturating_add(written);
     evidence.output_write_operations = evidence.output_write_operations.saturating_add(operations);
-    evidence.fsync_operations = evidence.fsync_operations.saturating_add(2);
+    evidence.fsync_operations = evidence
+        .fsync_operations
+        .saturating_add(1)
+        .saturating_add(cache_release.sync_operations);
     Ok(artifact)
 }
 
@@ -1606,6 +1891,8 @@ fn copy_artifact<R: Read + Seek>(
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
     let read_counter = IoCounter::default();
     source_file.rewind().map_err(storage)?;
     let mut input = BufReader::with_capacity(
@@ -1631,14 +1918,24 @@ fn copy_artifact<R: Read + Seek>(
     let mut writer = BufWriter::with_capacity(
         COPY_BUFFER_BYTES,
         CountingWriter {
-            inner: file,
+            inner: graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+                file,
+                cache_window,
+            )
+            .map_err(storage)?,
             counter: write_counter.clone(),
             digest: Sha256::new(),
         },
     );
     let bytes = std::io::copy(&mut input, &mut writer).map_err(storage)?;
     writer.flush().map_err(storage)?;
-    writer.get_ref().inner.sync_all().map_err(storage)?;
+    writer
+        .get_mut()
+        .inner
+        .sync_all_and_release()
+        .map_err(storage)?;
+    let cache_release = writer.get_ref().inner.evidence();
+    account_cache_release(cache_release, evidence);
     crate::graph_construction::construction_failpoint(&format!(
         "encode.copy.after_temp_fsync.{relative}"
     ));
@@ -1681,9 +1978,42 @@ fn copy_artifact<R: Read + Seek>(
     evidence.output_write_operations = evidence
         .output_write_operations
         .saturating_add(write_operations);
-    evidence.fsync_operations = evidence.fsync_operations.saturating_add(2);
+    evidence.fsync_operations = evidence
+        .fsync_operations
+        .saturating_add(1)
+        .saturating_add(cache_release.sync_operations);
     artifacts.push(artifact);
     Ok(())
+}
+
+fn copy_file_artifact(
+    source_file: File,
+    output: &StableDirectory,
+    relative: &str,
+    artifacts: &mut Vec<ConstructionEncodedArtifact>,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<(), GfError> {
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage)?;
+    let mut source = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+        source_file,
+        cache_window,
+        graphforge_filesystem::FileCacheReleaseTracker::default(),
+    )
+    .map_err(storage)?;
+    let copied = copy_artifact(&mut source, output, relative, artifacts, evidence);
+    let released = source.finish().map_err(storage);
+    match (copied, released) {
+        (Ok(()), Ok(released)) => {
+            account_cache_release(released, evidence);
+            Ok(())
+        }
+        (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Ok(_)) => Err(primary),
+        (Err(primary), Err(release)) => Err(storage(format!(
+            "{primary}; copied-source cache release also failed: {release}"
+        ))),
+    }
 }
 
 fn directory_for(
@@ -1714,24 +2044,48 @@ fn directory_for(
     Ok((directory, name))
 }
 
-fn authenticate_file(path: &str, file: &mut File) -> Result<ConstructionEncodedArtifact, GfError> {
+fn authenticate_file(
+    path: &str,
+    file: File,
+) -> Result<
+    (
+        ConstructionEncodedArtifact,
+        graphforge_filesystem::FileCacheReleaseEvidence,
+        u64,
+    ),
+    GfError,
+> {
+    let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
+    let mut operations = 0_u64;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
     file.rewind().map_err(storage)?;
-    loop {
-        let read = file.read(&mut buffer).map_err(storage)?;
-        if read == 0 {
-            break;
+    let authentication = (|| -> Result<ConstructionEncodedArtifact, GfError> {
+        loop {
+            let read = file.read(&mut buffer).map_err(storage)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+            bytes = bytes.saturating_add(read as u64);
+            operations = operations.saturating_add(1);
         }
-        digest.update(&buffer[..read]);
-        bytes = bytes.saturating_add(read as u64);
+        Ok(ConstructionEncodedArtifact {
+            path: path.to_owned(),
+            bytes,
+            sha256: hex(&digest.finalize()),
+        })
+    })();
+    let released = file.finish().map_err(storage);
+    match (authentication, released) {
+        (Ok(artifact), Ok(released)) => Ok((artifact, released, operations)),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Ok(_)) => Err(primary),
+        (Err(primary), Err(release)) => Err(storage(format!(
+            "{primary}; cache release after failed authentication also failed: {release}"
+        ))),
     }
-    Ok(ConstructionEncodedArtifact {
-        path: path.to_owned(),
-        bytes,
-        sha256: hex(&digest.finalize()),
-    })
 }
 
 pub(crate) fn read_inventory(
@@ -1850,7 +2204,7 @@ fn authenticate_inventory(
     root: &StableDirectory,
     inventory: &GraphConstructionEncoding,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
-) -> Result<(), GfError> {
+) -> Result<GraphConstructionEncodingEvidence, GfError> {
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
         || inventory.shape_authority_sha256.len() != 64
@@ -1877,15 +2231,19 @@ fn authenticate_inventory(
     {
         return Err(storage("canonical inventory invariants are invalid"));
     }
+    let mut evidence = GraphConstructionEncodingEvidence::default();
     for expected in &inventory.artifacts {
         let (directory, name) = directory_for(root, &expected.path)?;
-        let mut file = directory
+        let file = directory
             .open_child_file(OsStr::new(&name))
             .map_err(storage)?;
-        let actual = authenticate_file(&expected.path, &mut file)?;
+        let (actual, released, operations) = authenticate_file(&expected.path, file)?;
         if &actual != expected {
             return Err(storage("canonical artifact differs from inventory"));
         }
+        evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(actual.bytes);
+        evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
+        account_cache_release(released, &mut evidence);
     }
     if inventory.retained_artifacts.is_empty() {
         if inventory.evidence.retained_index_runs != 0 {
@@ -1920,7 +2278,7 @@ fn authenticate_inventory(
         }
         parent.authenticate_construction_references(&references)?;
     }
-    Ok(())
+    Ok(evidence)
 }
 
 /// Bind publication to the durable encoding control record without rereading
@@ -1947,7 +2305,7 @@ pub(crate) fn authenticate_inventory_control_for_publication(
         },
     ))
     .map_err(storage)?;
-    if &recorded != inventory {
+    if inventory_authority_sha256(&recorded)? != inventory_authority_sha256(inventory)? {
         return Err(storage(
             "publication inventory differs from durable encoding",
         ));
@@ -2001,7 +2359,7 @@ fn install_json<T: Serialize>(
 }
 
 struct FixedReader<const N: usize> {
-    reader: BufReader<CountingInput<File>>,
+    reader: BufReader<CountingInput<graphforge_filesystem::FileCacheReleasingReader>>,
     counter: IoCounter,
     identity: graphforge_filesystem::FileIdentity,
     expected_bytes: u64,
@@ -2015,6 +2373,7 @@ impl<const N: usize> FixedReader<N> {
         root: &StableDirectory,
         outputs: &[ArtifactReceipt],
         name: &str,
+        cache_window: std::num::NonZeroU64,
     ) -> Result<Self, GfError> {
         let authenticated = open_authenticated_shape_source(root, outputs, name)?;
         let file = authenticated.file;
@@ -2026,7 +2385,12 @@ impl<const N: usize> FixedReader<N> {
             reader: BufReader::with_capacity(
                 COPY_BUFFER_BYTES,
                 CountingInput {
-                    inner: file,
+                    inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                        file,
+                        cache_window,
+                        graphforge_filesystem::FileCacheReleaseTracker::default(),
+                    )
+                    .map_err(storage)?,
                     counter: counter.clone(),
                 },
             ),
@@ -2057,23 +2421,58 @@ impl<const N: usize> FixedReader<N> {
         Ok(Some(record))
     }
 
-    fn authenticate_and_account(
-        &self,
+    fn finish_and_account(
+        &mut self,
+        authenticate: bool,
         evidence: &mut GraphConstructionEncodingEvidence,
     ) -> Result<(), GfError> {
-        if file_identity(&self.reader.get_ref().inner).map_err(storage)? != self.identity
-            || file_link_count(&self.reader.get_ref().inner).map_err(storage)? != 1
-            || self.consumed_bytes != self.expected_bytes
-            || hex(&self.digest.clone().finalize()) != self.expected_sha256
-        {
-            return Err(storage(
-                "fixed-width shaped source changed during consumption",
-            ));
+        let authentication = if authenticate {
+            (|| {
+                if file_identity(self.reader.get_ref().inner.file()).map_err(storage)?
+                    != self.identity
+                    || file_link_count(self.reader.get_ref().inner.file()).map_err(storage)? != 1
+                    || self.consumed_bytes != self.expected_bytes
+                    || hex(&self.digest.clone().finalize()) != self.expected_sha256
+                {
+                    return Err(storage(
+                        "fixed-width shaped source changed during consumption",
+                    ));
+                }
+                Ok(())
+            })()
+        } else {
+            Ok(())
+        };
+        let released = self.reader.get_mut().inner.finish().map_err(storage);
+        match (authentication, released) {
+            (Ok(()), Ok(released)) => account_cache_release(released, evidence),
+            (Ok(()), Err(release)) => return Err(release),
+            (Err(primary), Ok(_)) => return Err(primary),
+            (Err(primary), Err(release)) => {
+                return Err(storage(format!(
+                    "{primary}; fixed-width source cache release also failed: {release}"
+                )));
+            }
         }
         let (bytes, operations) = self.counter.values();
         evidence.input_read_bytes = evidence.input_read_bytes.saturating_add(bytes);
         evidence.input_read_operations = evidence.input_read_operations.saturating_add(operations);
         Ok(())
+    }
+}
+
+fn combine_reader_cleanup<T>(
+    primary: Result<T, GfError>,
+    cleanup: Result<(), GfError>,
+    source: &str,
+) -> Result<T, GfError> {
+    match (primary, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(storage(format!(
+            "{primary}; {source} cache cleanup also failed: {cleanup}"
+        ))),
     }
 }
 

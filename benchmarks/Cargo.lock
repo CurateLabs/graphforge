@@ -1597,6 +1597,7 @@ dependencies = [
  "graphforge-storage",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1616,7 +1617,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "graphforge-benchmark-gdc-snb-interactive"
+name = "graphforge-benchmark-gdc-snb-bi"
 version = "0.0.0"
 dependencies = [
  "serde",
@@ -1624,7 +1625,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "graphforge-benchmark-gdc-snb-bi"
+name = "graphforge-benchmark-gdc-snb-interactive"
 version = "0.0.0"
 dependencies = [
  "serde",
@@ -1636,7 +1637,9 @@ name = "graphforge-benchmark-graph500-generator"
 version = "0.0.0"
 dependencies = [
  "arrow",
+ "graphforge-filesystem",
  "parquet",
+ "tempfile",
 ]
 
 [[package]]

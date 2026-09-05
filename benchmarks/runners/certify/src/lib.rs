@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -266,6 +266,7 @@ pub struct Execution {
     pub duration_ms: u64,
     pub peak_rss_bytes: Option<u64>,
     pub failure: Option<FailureKind>,
+    pub cleanup_failure: Option<String>,
     pub receipts: Vec<serde_json::Value>,
 }
 
@@ -403,8 +404,10 @@ impl LifecycleStorageSession {
             || !self.imported_project_observed
             || self.source_project_current_allocated_bytes.is_none()
         {
-            return Err("lifecycle storage session is missing an authenticated owner or transient phase"
-                .to_owned());
+            return Err(
+                "lifecycle storage session is missing an authenticated owner or transient phase"
+                    .to_owned(),
+            );
         }
         let source_project_current_allocated_bytes = self
             .source_project_current_allocated_bytes
@@ -517,6 +520,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                             duration_ms: millis(started.elapsed()),
                             peak_rss_bytes,
                             failure: Some(FailureKind::CommandUnavailable),
+                            cleanup_failure: None,
                             receipts,
                         });
                     }
@@ -529,6 +533,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                         duration_ms: millis(started.elapsed()),
                         peak_rss_bytes,
                         failure: execution.failure,
+                        cleanup_failure: execution.cleanup_failure,
                         receipts,
                     });
                 }
@@ -538,6 +543,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                cleanup_failure: None,
                 receipts,
             };
             if produce_lifecycle_storage {
@@ -598,32 +604,57 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
-            let receipts = match parse_receipts(
+            let receipts = parse_receipts(
                 &stdout,
                 status.success() && args.iter().any(|argument| argument == "--json"),
-            ) {
-                Ok(receipts) => receipts,
-                Err(_) if status.success() => {
-                    release_cgroup_page_cache();
+            );
+            let released = release_command_owned_file_cache(args);
+            if !status.success() {
+                let cleanup_failure = match (receipts.as_ref().err(), released.as_ref().err()) {
+                    (None, None) => None,
+                    (Some(receipts), None) => Some(format!(
+                        "child exit preserved; receipt cleanup also failed: {receipts}"
+                    )),
+                    (None, Some(release)) => Some(format!(
+                        "child exit preserved; command-owned cache release also failed: {release}"
+                    )),
+                    (Some(receipts), Some(release)) => Some(format!(
+                        "child exit preserved; receipt cleanup also failed: {receipts}; command-owned cache release also failed: {release}"
+                    )),
+                };
+                return Ok(Execution {
+                    exit_code: status.code(),
+                    duration_ms: millis(started.elapsed()),
+                    peak_rss_bytes,
+                    failure: Some(FailureKind::CommandFailed),
+                    cleanup_failure,
+                    receipts: receipts.unwrap_or_default(),
+                });
+            }
+            let receipts = match (receipts, released) {
+                (Ok(receipts), Ok(_)) => receipts,
+                (Ok(_), Err(error)) => return Err(error),
+                (Err(_), Ok(_)) if status.success() => {
                     return Ok(Execution {
                         exit_code: status.code(),
                         duration_ms: millis(started.elapsed()),
                         peak_rss_bytes,
                         failure: Some(FailureKind::EvidenceInvalid),
+                        cleanup_failure: None,
                         receipts: Vec::new(),
                     });
                 }
-                Err(error) => {
-                    release_cgroup_page_cache();
-                    return Err(error);
+                (Err(primary), Err(release)) => {
+                    return Err(format!("{primary}; {release}"));
                 }
+                (Err(error), Ok(_)) => return Err(error),
             };
-            release_cgroup_page_cache();
             return Ok(Execution {
                 exit_code: status.code(),
                 duration_ms: millis(started.elapsed()),
                 peak_rss_bytes,
                 failure: None,
+                cleanup_failure: None,
                 receipts,
             });
         }
@@ -631,22 +662,140 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
     }
 }
 
-/// Drop Linux page-cache pressure attributed to the BenchExec cgroup between
-/// sequential public-command invocations. Without this, file-backed cache from
-/// prior `gf` subprocesses accumulates until the 4 GiB memlimit even though
-/// each invocation's anonymous RSS stays bounded (#904).
-#[cfg(target_os = "linux")]
-fn release_cgroup_page_cache() {
-    use std::io::Write;
-
-    let _ = std::process::Command::new("sync").status();
-    if let Ok(mut drop_caches) = fs::File::create("/proc/sys/vm/drop_caches") {
-        let _ = drop_caches.write_all(b"3");
-    }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CommandCacheReleaseEvidence {
+    files: u64,
+    sync_operations: u64,
+    release_operations: u64,
+    unsupported_operations: u64,
+    unsupported_traversals: u64,
+    released_bytes: u64,
+    peak_window_bytes: u64,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn release_cgroup_page_cache() {}
+#[cfg(test)]
+thread_local! {
+    static INJECT_COMMAND_CACHE_RELEASE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn inject_command_cache_release_failure() {
+    INJECT_COMMAND_CACHE_RELEASE_FAILURE.with(|failure| failure.set(true));
+}
+
+/// Release only regular files explicitly owned or consumed by one command.
+///
+/// This fallback uses retained, no-follow file capabilities. It synchronizes
+/// each owned file before advice, never invokes global sync or privileged cache
+/// controls, and never submits a known-dirty range to `POSIX_FADV_DONTNEED`.
+fn release_command_owned_file_cache(
+    args: &[String],
+) -> Result<CommandCacheReleaseEvidence, String> {
+    #[cfg(test)]
+    INJECT_COMMAND_CACHE_RELEASE_FAILURE.with(|failure| {
+        if failure.replace(false) {
+            return Err("injected command-owned cache release failure".to_owned());
+        }
+        Ok(())
+    })?;
+    let mut roots = BTreeSet::new();
+    for flag in [
+        "--project",
+        "--input",
+        "--output",
+        "--nodes",
+        "--edges",
+        "--path",
+    ] {
+        if let Some(path) = argument_path(args, flag)
+            && path.exists()
+        {
+            roots.insert(path.to_path_buf());
+        }
+    }
+    let mut remaining = 1_000_000_usize;
+    let mut evidence = CommandCacheReleaseEvidence::default();
+    for root in roots {
+        let metadata = fs::symlink_metadata(&root)
+            .map_err(|_| "command-owned cache root could not be inspected".to_owned())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_file() {
+            let parent = root
+                .parent()
+                .ok_or_else(|| "command-owned cache file has no parent".to_owned())?;
+            let name = root
+                .file_name()
+                .ok_or_else(|| "command-owned cache file has no name".to_owned())?;
+            let directory = graphforge_filesystem::StableDirectory::open(parent)
+                .map_err(|_| "command-owned cache parent could not be retained".to_owned())?;
+            let file = directory
+                .open_child_file(name)
+                .map_err(|_| "command-owned cache file is not a stable regular file".to_owned())?;
+            release_open_file_cache(&file, &mut evidence)?;
+        } else if metadata.is_dir() {
+            let directory = graphforge_filesystem::StableDirectory::open(&root)
+                .map_err(|_| "command-owned cache directory could not be retained".to_owned())?;
+            let traversal = directory.visit_regular_files(&mut remaining, &mut |file| {
+                release_open_file_cache(file, &mut evidence).map_err(std::io::Error::other)
+            });
+            match traversal {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Unsupported => {
+                    evidence.unsupported_traversals =
+                        evidence.unsupported_traversals.saturating_add(1);
+                }
+                Err(_) => {
+                    return Err("command-owned descriptor traversal failed".to_owned());
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+fn release_open_file_cache(
+    file: &fs::File,
+    evidence: &mut CommandCacheReleaseEvidence,
+) -> Result<(), String> {
+    let bytes = file
+        .metadata()
+        .map_err(|_| "command-owned cache file could not be inspected".to_owned())?
+        .len();
+    // Unix synchronizes before attempting cache advice. Windows does not support
+    // this advice, and these retained input handles are read-only: attempting
+    // FlushFileBuffers would require write access and fail a completed command.
+    #[cfg(unix)]
+    {
+        file.sync_all()
+            .map_err(|_| "command-owned cache file synchronization failed".to_owned())?;
+        evidence.sync_operations = evidence.sync_operations.saturating_add(1);
+    }
+    evidence.files = evidence.files.saturating_add(1);
+    let mut offset = 0_u64;
+    while offset < bytes {
+        let window =
+            (bytes - offset).min(graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES);
+        let outcome = graphforge_filesystem::release_file_cache(file, offset, window)
+            .map_err(|_| "command-owned file cache release failed".to_owned())?;
+        evidence.peak_window_bytes = evidence.peak_window_bytes.max(window);
+        match outcome {
+            graphforge_filesystem::FileCacheReleaseOutcome::Released => {
+                evidence.release_operations = evidence.release_operations.saturating_add(1);
+                evidence.released_bytes = evidence.released_bytes.saturating_add(window);
+            }
+            graphforge_filesystem::FileCacheReleaseOutcome::Unsupported => {
+                evidence.unsupported_operations = evidence.unsupported_operations.saturating_add(1);
+            }
+        }
+        offset = offset
+            .checked_add(window)
+            .ok_or_else(|| "command-owned cache release offset overflow".to_owned())?;
+    }
+    Ok(())
+}
 
 fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
     let mut kept = Vec::new();
@@ -805,9 +954,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "transient_peak_allocated_bytes",
             ],
         )
-        .filter(|receipt| {
-            sanitized_numeric_fields(receipt, &["transient_peak_allocated_bytes"])
-        }),
+        .filter(|receipt| sanitized_numeric_fields(receipt, &["transient_peak_allocated_bytes"])),
         Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
             object,
             &[
@@ -1225,6 +1372,28 @@ pub enum FailureKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupFailureKind {
+    ReceiptCleanupFailed,
+    CommandOwnedCacheReleaseFailed,
+    MultipleCleanupFailures,
+    CleanupFailed,
+}
+
+fn sanitize_cleanup_failure(value: Option<&str>) -> Option<CleanupFailureKind> {
+    value.map(|value| {
+        let receipt = value.contains("receipt cleanup");
+        let cache = value.contains("command-owned cache release");
+        match (receipt, cache) {
+            (true, true) => CleanupFailureKind::MultipleCleanupFailures,
+            (true, false) => CleanupFailureKind::ReceiptCleanupFailed,
+            (false, true) => CleanupFailureKind::CommandOwnedCacheReleaseFailed,
+            (false, false) => CleanupFailureKind::CleanupFailed,
+        }
+    })
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhaseOutcome {
     pub phase: Phase,
@@ -1234,6 +1403,8 @@ pub struct PhaseOutcome {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_failure: Option<CleanupFailureKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receipts: Vec<serde_json::Value>,
 }
@@ -1289,6 +1460,7 @@ pub fn certify_with_events(
                     } else {
                         execution.failure.or(Some(FailureKind::CommandFailed))
                     },
+                    cleanup_failure: sanitize_cleanup_failure(execution.cleanup_failure.as_deref()),
                     receipts: execution.receipts,
                 }
             }
@@ -1299,6 +1471,7 @@ pub fn certify_with_events(
                 peak_rss_bytes: None,
                 exit_code: None,
                 failure: Some(FailureKind::CommandUnavailable),
+                cleanup_failure: None,
                 receipts: Vec::new(),
             },
         };
@@ -1377,6 +1550,7 @@ pub fn normalize_evidence(input: &[u8]) -> Result<Evidence, RunnerError> {
                     peak_rss_bytes: phase.max_rss_kib.and_then(|value| value.checked_mul(1_024)),
                     exit_code: phase.exit_code,
                     failure: (!phase.ok).then_some(FailureKind::CommandFailed),
+                    cleanup_failure: None,
                     receipts: Vec::new(),
                 });
                 if !phase.ok {
@@ -1421,7 +1595,9 @@ fn validate_evidence(evidence: Evidence) -> Result<Evidence, RunnerError> {
         .map(|outcome| outcome.phase);
     let statuses_are_consistent = evidence.phases.iter().enumerate().all(|(index, outcome)| {
         let failed = outcome.status == OutcomeStatus::Failed;
-        failed == outcome.failure.is_some() && (!failed || index + 1 == evidence.phases.len())
+        failed == outcome.failure.is_some()
+            && (failed || outcome.cleanup_failure.is_none())
+            && (!failed || index + 1 == evidence.phases.len())
     });
     if observed_failure != evidence.failed_phase
         || (observed_failure.is_some()) != (evidence.status == OutcomeStatus::Failed)
@@ -1610,8 +1786,6 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn child_receipts_are_bounded_allowlisted_and_strip_content_bearing_paths() {
@@ -1742,10 +1916,7 @@ mod tests {
         });
         let encoded = serde_json::to_vec(&lifecycle).expect("lifecycle receipt JSON");
         let sanitized = parse_receipts(&encoded, true).expect("closed lifecycle receipt");
-        assert_eq!(
-            sanitized[0]["source_project_current_allocated_bytes"],
-            256
-        );
+        assert_eq!(sanitized[0]["source_project_current_allocated_bytes"], 256);
         for invalid in [
             serde_json::Value::Null,
             serde_json::json!(true),
@@ -1754,8 +1925,7 @@ mod tests {
         ] {
             let mut malformed = lifecycle.clone();
             malformed["source_project_current_allocated_bytes"] = invalid;
-            let encoded =
-                serde_json::to_vec(&malformed).expect("malformed lifecycle receipt JSON");
+            let encoded = serde_json::to_vec(&malformed).expect("malformed lifecycle receipt JSON");
             assert!(parse_receipts(&encoded, true).is_err());
         }
         let mut missing = lifecycle;
@@ -1990,6 +2160,7 @@ mod tests {
             duration_ms: index + 1,
             peak_rss_bytes: Some((index + 1) * 1_024),
             failure: None,
+            cleanup_failure: None,
             receipts: Vec::new(),
         })
     }
@@ -2024,6 +2195,7 @@ mod tests {
             duration_ms: 4,
             peak_rss_bytes: Some(4_096),
             failure: None,
+            cleanup_failure: None,
             receipts: Vec::new(),
         }));
         executions.extend((4..10).map(passed_execution));
@@ -2042,6 +2214,42 @@ mod tests {
         assert_eq!(evidence.phases.len(), 4);
         assert_eq!(events.len(), 4);
         assert_eq!(events.last().unwrap().outcome.status, OutcomeStatus::Failed);
+    }
+
+    #[test]
+    fn cleanup_failure_is_closed_sanitized_and_emitted_with_primary_child_failure() {
+        let mut executor = FakeExecutor {
+            executions: VecDeque::from([Ok(Execution {
+                exit_code: Some(7),
+                duration_ms: 4,
+                peak_rss_bytes: Some(4_096),
+                failure: Some(FailureKind::CommandFailed),
+                cleanup_failure: Some(
+                    "child exit preserved; command-owned cache release also failed: /secret/project"
+                        .to_owned(),
+                ),
+                receipts: Vec::new(),
+            })]),
+            calls: Vec::new(),
+        };
+        let mut events = Vec::new();
+        let evidence = certify_with_events(&tiny_profile(), &mut executor, |event| {
+            events.push(event.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(evidence.failed_phase, Some(Phase::Admission));
+        assert_eq!(evidence.phases[0].failure, Some(FailureKind::CommandFailed));
+        assert_eq!(
+            evidence.phases[0].cleanup_failure,
+            Some(CleanupFailureKind::CommandOwnedCacheReleaseFailed)
+        );
+        assert_eq!(events[0].outcome, evidence.phases[0]);
+        let encoded = serde_json::to_string(&(events, evidence)).unwrap();
+        assert!(encoded.contains("\"cleanup_failure\":\"command_owned_cache_release_failed\""));
+        assert!(!encoded.contains("/secret"));
+        assert!(!encoded.contains("project"));
     }
 
     #[test]
@@ -2132,6 +2340,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn shell_ingest_profile(script: &Path) -> Profile {
+        let mut profile = tiny_profile();
+        profile.executable = "/bin/sh".to_owned();
+        let PhaseAction::GraphForgeCliWorkflow { commands } = &mut profile.phases[2].action else {
+            panic!("ingest fixture must be a command workflow");
+        };
+        for args in commands {
+            args.insert(0, script.to_string_lossy().into_owned());
+        }
+        profile
+    }
+
+    #[cfg(unix)]
     #[test]
     fn public_executor_runs_ingest_transaction_in_order() {
         let root = std::env::temp_dir().join(format!("gf-certify-{}", std::process::id()));
@@ -2147,13 +2368,19 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut profile = tiny_profile();
-        profile.executable = executable.to_string_lossy().into_owned();
+        // Model a write descriptor inherited by another concurrent child until
+        // its exec closes the descriptor. The stable shell reads the fixture;
+        // executing this newly written inode directly would be ETXTBSY.
+        let fixture_writer = fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .unwrap();
+        let profile = shell_ingest_profile(&executable);
         let mut executor = PublicProcessExecutor::default();
         let result = executor.execute(&profile, &profile.phases[2]).unwrap();
         assert_eq!(result.exit_code, Some(0));
         assert_eq!(fs::read_to_string(state).unwrap().trim(), "5");
+        drop(fixture_writer);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2173,9 +2400,7 @@ mod tests {
             ),
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut profile = tiny_profile();
-        profile.executable = executable.to_string_lossy().into_owned();
+        let profile = shell_ingest_profile(&executable);
         let result = PublicProcessExecutor::default()
             .execute(&profile, &profile.phases[2])
             .unwrap();
@@ -2189,10 +2414,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn public_executor_classifies_invalid_success_receipt_as_evidence_invalid() {
-        let root = std::env::temp_dir().join(format!(
-            "gf-certify-invalid-receipt-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("gf-certify-invalid-receipt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let executable = root.join("gf");
@@ -2201,10 +2424,12 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' '{\"contract\":\"graphforge-portable-import/2\"}'\n",
         )
         .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let result = execute_process(
-            executable.to_str().unwrap(),
-            &["--json".to_owned()],
+            "/bin/sh",
+            &[
+                executable.to_string_lossy().into_owned(),
+                "--json".to_owned(),
+            ],
         )
         .unwrap();
         assert_eq!(result.exit_code, Some(0));
@@ -2214,18 +2439,14 @@ mod tests {
 
     #[test]
     fn reopen_emits_authoritative_source_project_union_allocation() {
-        let root = std::env::temp_dir().join(format!(
-            "gf-certify-source-union-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("gf-certify-source-union-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let project = root.join("project");
-        let current =
-            graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
+        let current = graphforge_storage::open_or_initialize_ephemeral_project(&project).unwrap();
         let selected = graphforge_storage::capture_storage_attribution(&current).unwrap();
-        let union =
-            graphforge_storage::capture_project_storage_identity_union(&current).unwrap();
+        let union = graphforge_storage::capture_project_storage_identity_union(&current).unwrap();
         assert!(
             union
                 .retained_generation_uuids
@@ -2244,7 +2465,12 @@ mod tests {
                 ],
             },
         };
-        assert!(session.observe(Phase::Reopen, &reopen, &[]).unwrap().is_none());
+        assert!(
+            session
+                .observe(Phase::Reopen, &reopen, &[])
+                .unwrap()
+                .is_none()
+        );
         session.generator_observed = true;
         session.construction_peak_observed = true;
         session.portable_package_observed = true;
@@ -2379,4 +2605,173 @@ mod tests {
         assert!(error.contains("missing an authenticated owner or transient phase"));
     }
 
+    #[test]
+    fn command_owned_cache_fallback_covers_complete_lifecycle() {
+        let root =
+            std::env::temp_dir().join(format!("gf-certify-cache-lifecycle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        for phase in Phase::ALL {
+            let owned = root.join(phase.to_string());
+            fs::create_dir_all(owned.join("nested")).unwrap();
+            fs::write(owned.join("nested").join("payload"), vec![7_u8; 1 << 20]).unwrap();
+            let evidence = release_command_owned_file_cache(&[
+                "--project".to_owned(),
+                owned.to_string_lossy().into_owned(),
+            ])
+            .unwrap();
+            #[cfg(unix)]
+            {
+                assert_eq!(evidence.files, 1, "{phase}");
+                assert_eq!(evidence.sync_operations, 1, "{phase}");
+                assert!(
+                    evidence.peak_window_bytes
+                        <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES,
+                    "{phase}"
+                );
+                #[cfg(target_os = "linux")]
+                {
+                    assert_eq!(evidence.release_operations, 1, "{phase}");
+                    assert_eq!(evidence.released_bytes, 1 << 20, "{phase}");
+                }
+                #[cfg(not(target_os = "linux"))]
+                assert_eq!(evidence.unsupported_operations, 1, "{phase}");
+            }
+            #[cfg(not(unix))]
+            {
+                assert_eq!(evidence.files, 0, "{phase}");
+                assert_eq!(evidence.unsupported_traversals, 1, "{phase}");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn command_owned_cache_direct_files_preserve_read_only_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("input.parquet");
+        let payload = b"completed command input";
+        fs::write(&path, payload).unwrap();
+        for flag in ["--input", "--nodes", "--edges", "--path", "--output"] {
+            // StableDirectory opens the existing regular file with read access
+            // only, including on Windows. Each public flag must finish cleanup
+            // without requiring write authority over that input.
+            let evidence = release_command_owned_file_cache(&[
+                flag.to_owned(),
+                path.to_string_lossy().into_owned(),
+            ])
+            .unwrap();
+            assert_eq!(evidence.files, 1, "{flag}");
+            assert_eq!(evidence.sync_operations, u64::from(cfg!(unix)), "{flag}");
+            assert_eq!(evidence.unsupported_traversals, 0, "{flag}");
+            let supported = cfg!(target_os = "linux");
+            assert_eq!(evidence.release_operations, u64::from(supported), "{flag}");
+            assert_eq!(
+                evidence.unsupported_operations,
+                u64::from(!supported),
+                "{flag}"
+            );
+            assert_eq!(
+                evidence.released_bytes,
+                u64::from(supported) * payload.len() as u64,
+                "{flag}"
+            );
+            assert_eq!(evidence.peak_window_bytes, payload.len() as u64, "{flag}");
+            assert_eq!(fs::read(&path).unwrap(), payload, "{flag}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_owned_cache_fallback_covers_s18_generator_and_register_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = root.path().join("nodes.parquet");
+        let edges = root.path().join("edges.parquet");
+        fs::write(&nodes, vec![1_u8; 1 << 20]).unwrap();
+        fs::write(&edges, vec![2_u8; 1 << 20]).unwrap();
+
+        let generated = release_command_owned_file_cache(&[
+            "--scale".to_owned(),
+            "18".to_owned(),
+            "--edge-factor".to_owned(),
+            "16".to_owned(),
+            "--nodes".to_owned(),
+            nodes.to_string_lossy().into_owned(),
+            "--edges".to_owned(),
+            edges.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(generated.files, 2);
+        assert_eq!(generated.sync_operations, 2);
+
+        let project = root.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("manifest.json"), b"durable").unwrap();
+        let registered = release_command_owned_file_cache(&[
+            "--project".to_owned(),
+            project.to_string_lossy().into_owned(),
+            "import-session".to_owned(),
+            "register-parquet".to_owned(),
+            "--path".to_owned(),
+            nodes.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(registered.files, 2);
+        assert_eq!(registered.sync_operations, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_owned_cache_fallback_never_follows_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let owned = root.path().join("owned");
+        let outside = root.path().join("outside");
+        fs::create_dir(&owned).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(owned.join("inside"), b"inside").unwrap();
+        fs::write(outside.join("secret"), b"outside").unwrap();
+        symlink(&outside, owned.join("escape")).unwrap();
+        symlink(outside.join("secret"), root.path().join("root-alias")).unwrap();
+
+        let nested = release_command_owned_file_cache(&[
+            "--project".to_owned(),
+            owned.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(nested.files, 1);
+        assert_eq!(nested.sync_operations, 1);
+
+        let alias = release_command_owned_file_cache(&[
+            "--path".to_owned(),
+            root.path()
+                .join("root-alias")
+                .to_string_lossy()
+                .into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(alias, CommandCacheReleaseEvidence::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsuccessful_child_remains_primary_when_cache_release_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("fails");
+        fs::write(&executable, "#!/bin/sh\nexit 7\n").unwrap();
+        inject_command_cache_release_failure();
+
+        let execution =
+            execute_process("/bin/sh", &[executable.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(execution.exit_code, Some(7));
+        assert_eq!(execution.failure, Some(FailureKind::CommandFailed));
+        assert_eq!(
+            execution.cleanup_failure.as_deref(),
+            Some(
+                "child exit preserved; command-owned cache release also failed: injected command-owned cache release failure"
+            )
+        );
+    }
 }

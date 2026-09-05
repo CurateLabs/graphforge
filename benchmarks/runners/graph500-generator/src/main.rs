@@ -31,8 +31,8 @@ fn main() -> Result<(), String> {
         return Err("scale must be 1..26 and edge factor must be 16".to_owned());
     }
     let node_count = 1_u64 << config.scale;
-    write_nodes(&config.nodes, node_count)?;
-    write_edges(
+    let _node_cache_release = write_nodes(&config.nodes, node_count)?;
+    let _edge_cache_release = write_edges(
         &config.edges,
         config.scale,
         node_count.saturating_mul(config.edge_factor),
@@ -94,19 +94,35 @@ fn binary(values: impl Iterator<Item = [u8; 16]>) -> Result<FixedSizeBinaryArray
         .map_err(|error| error.to_string())
 }
 
-fn writer(path: &Path, schema: Arc<Schema>) -> Result<ArrowWriter<File>, String> {
+type DurableArrowWriter = ArrowWriter<graphforge_filesystem::DurableFileCacheWriter>;
+
+fn writer(path: &Path, schema: Arc<Schema>) -> Result<DurableArrowWriter, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    ArrowWriter::try_new(
+    let output = graphforge_filesystem::DurableFileCacheWriter::new(
         File::create(path).map_err(|error| error.to_string())?,
-        schema,
-        None,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    ArrowWriter::try_new(output, schema, None).map_err(|error| error.to_string())
 }
 
-fn write_nodes(path: &Path, count: u64) -> Result<(), String> {
+fn finish_writer(
+    output: DurableArrowWriter,
+) -> Result<graphforge_filesystem::FileCacheReleaseEvidence, String> {
+    // `into_inner` finalizes and flushes the Parquet footer before the durable
+    // writer synchronizes and releases the final clean cache window.
+    let mut output = output.into_inner().map_err(|error| error.to_string())?;
+    output
+        .sync_all_and_release()
+        .map_err(|error| error.to_string())?;
+    Ok(output.evidence())
+}
+
+fn write_nodes(
+    path: &Path,
+    count: u64,
+) -> Result<graphforge_filesystem::FileCacheReleaseEvidence, String> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
         Field::new("label", DataType::Utf8, false),
@@ -125,11 +141,15 @@ fn write_nodes(path: &Path, count: u64) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         output.write(&batch).map_err(|error| error.to_string())?;
     }
-    output.close().map_err(|error| error.to_string())?;
-    Ok(())
+    finish_writer(output)
 }
 
-fn write_edges(path: &Path, scale: u32, count: u64, seed: u64) -> Result<(), String> {
+fn write_edges(
+    path: &Path,
+    scale: u32,
+    count: u64,
+    seed: u64,
+) -> Result<graphforge_filesystem::FileCacheReleaseEvidence, String> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("edge_uuid", DataType::FixedSizeBinary(16), true),
         Field::new("rel_type", DataType::Utf8, false),
@@ -160,8 +180,7 @@ fn write_edges(path: &Path, scale: u32, count: u64, seed: u64) -> Result<(), Str
         .map_err(|error| error.to_string())?;
         output.write(&batch).map_err(|error| error.to_string())?;
     }
-    output.close().map_err(|error| error.to_string())?;
-    Ok(())
+    finish_writer(output)
 }
 
 fn rmat_edge(scale: u32, random: &mut SplitMix64) -> (u64, u64) {
@@ -212,5 +231,44 @@ mod tests {
                 .iter()
                 .all(|(source, target)| *source < 64 && *target < 64)
         );
+    }
+
+    #[test]
+    fn generator_outputs_are_finalized_before_bounded_durable_release() {
+        let root = tempfile::tempdir().unwrap();
+        let nodes = root.path().join("nodes.parquet");
+        let edges = root.path().join("edges.parquet");
+        let node_evidence = write_nodes(&nodes, 128).unwrap();
+        let edge_evidence = write_edges(&edges, 7, 256, 13_907_095_936_298_285_200).unwrap();
+
+        for (path, evidence) in [(&nodes, node_evidence), (&edges, edge_evidence)] {
+            assert!(path.metadata().unwrap().len() > 0);
+            assert!(
+                evidence.peak_window_bytes
+                    <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES
+            );
+            assert!(evidence.sync_operations > 0);
+            #[cfg(target_os = "linux")]
+            {
+                assert!(evidence.release_operations > 0);
+                assert_eq!(evidence.unsupported_operations, 0);
+            }
+            #[cfg(not(target_os = "linux"))]
+            assert!(evidence.unsupported_operations > 0);
+
+            let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                File::open(path).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            assert!(
+                reader
+                    .map(Result::unwrap)
+                    .map(|batch| batch.num_rows())
+                    .sum::<usize>()
+                    > 0
+            );
+        }
     }
 }

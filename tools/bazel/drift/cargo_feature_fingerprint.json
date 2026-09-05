@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "0e8388776ea735062c4becc7eb3ef7200fbb16b15d36ceae80b74286a1326a4d",
+  "sha256": "b86739fcc00c0ff528956d8c6e28a5350455393d0b3cf75c84913efdad3a9ff2",
   "entries": [
     {
       "name": "graphforge-api",
@@ -13,6 +13,15 @@
           "features": [
             "prettyprint"
           ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "bytes",
+          "req": "^1",
+          "features": [],
           "optional": false,
           "uses_default_features": true,
           "kind": null,
@@ -92,11 +101,11 @@
         },
         {
           "name": "graphforge-filesystem",
-          "req": "*",
+          "req": "^0.5.2",
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": "dev",
+          "kind": null,
           "target": null
         },
         {

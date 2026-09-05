@@ -3,10 +3,591 @@
 
 #![deny(unsafe_code)]
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Seek, Write};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// Default maximum dirty/file-cache window retained by one durable writer.
+pub const DEFAULT_CACHE_RELEASE_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Derive one non-zero per-stream window from the shared 64 MiB operation budget.
+///
+/// # Errors
+/// Returns an error for zero streams, an unrepresentable stream count, or when
+/// the stream count is too large to receive even one byte.
+pub fn cache_release_window_for_streams(active_streams: usize) -> io::Result<NonZeroU64> {
+    let active_streams = u64::try_from(active_streams)
+        .map_err(|_| io::Error::other("cache-release stream count overflow"))?;
+    if active_streams == 0 {
+        return Err(io::Error::other("cache-release stream count is zero"));
+    }
+    let window = DEFAULT_CACHE_RELEASE_WINDOW_BYTES
+        .checked_div(active_streams)
+        .and_then(NonZeroU64::new)
+        .ok_or_else(|| io::Error::other("cache-release operation budget is exhausted"))?;
+    let aggregate = window
+        .get()
+        .checked_mul(active_streams)
+        .ok_or_else(|| io::Error::other("cache-release aggregate window overflow"))?;
+    if aggregate > DEFAULT_CACHE_RELEASE_WINDOW_BYTES {
+        return Err(io::Error::other(
+            "cache-release aggregate window exceeds operation budget",
+        ));
+    }
+    Ok(window)
+}
+
+/// Validate the aggregate configured windows of the streams actually opened
+/// by one operation.
+///
+/// # Errors
+/// Returns an error on arithmetic overflow, an empty stream set, or an
+/// aggregate above the shared 64 MiB operation budget.
+pub fn validate_cache_release_operation_windows(windows: &[NonZeroU64]) -> io::Result<u64> {
+    if windows.is_empty() {
+        return Err(io::Error::other(
+            "cache-release operation has no active streams",
+        ));
+    }
+    let aggregate = windows.iter().try_fold(0_u64, |sum, window| {
+        sum.checked_add(window.get())
+            .ok_or_else(|| io::Error::other("cache-release aggregate window overflow"))
+    })?;
+    if aggregate > DEFAULT_CACHE_RELEASE_WINDOW_BYTES {
+        return Err(io::Error::other(
+            "cache-release aggregate window exceeds operation budget",
+        ));
+    }
+    Ok(aggregate)
+}
+
+/// Result of one file-level page-cache release request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCacheReleaseOutcome {
+    /// The operating system accepted the release request.
+    Released,
+    /// This target has no supported file-level cache-release primitive.
+    Unsupported,
+}
+
+/// Content-free evidence emitted by a durable cache-bounded writer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileCacheReleaseEvidence {
+    /// Synchronization barriers completed by the writer.
+    pub sync_operations: u64,
+    /// File-level cache-release requests accepted by the operating system.
+    pub release_operations: u64,
+    /// File-level cache-release requests not supported on this target.
+    pub unsupported_operations: u64,
+    /// Bytes covered by accepted release requests.
+    pub released_bytes: u64,
+    /// Largest byte window synchronized before a release request.
+    pub peak_window_bytes: u64,
+}
+
+/// Shared evidence and deferred-error channel for cache-releasing readers.
+#[derive(Clone, Debug, Default)]
+pub struct FileCacheReleaseTracker {
+    state: Arc<Mutex<FileCacheReleaseTrackerState>>,
+}
+
+#[derive(Debug, Default)]
+struct FileCacheReleaseTrackerState {
+    evidence: FileCacheReleaseEvidence,
+    deferred_error: Option<(io::ErrorKind, String)>,
+}
+
+impl FileCacheReleaseTracker {
+    /// Return aggregate evidence from every reader attached to this tracker.
+    #[must_use]
+    pub fn evidence(&self) -> FileCacheReleaseEvidence {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .evidence
+    }
+
+    /// Surface an advisory failure captured while a reader was being dropped.
+    ///
+    /// # Errors
+    /// Returns the first deferred cache-release error.
+    pub fn check_error(&self) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.deferred_error.take() {
+            Some((kind, message)) => Err(io::Error::new(kind, message)),
+            None => Ok(()),
+        }
+    }
+
+    fn account(&self, outcome: FileCacheReleaseOutcome, bytes: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.evidence.peak_window_bytes = state.evidence.peak_window_bytes.max(bytes);
+        match outcome {
+            FileCacheReleaseOutcome::Released => {
+                state.evidence.release_operations =
+                    state.evidence.release_operations.saturating_add(1);
+                state.evidence.released_bytes = state.evidence.released_bytes.saturating_add(bytes);
+            }
+            FileCacheReleaseOutcome::Unsupported => {
+                state.evidence.unsupported_operations =
+                    state.evidence.unsupported_operations.saturating_add(1);
+            }
+        }
+    }
+
+    fn defer(&self, error: &io::Error) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.deferred_error.is_none() {
+            state.deferred_error = Some((error.kind(), error.to_string()));
+        }
+    }
+}
+
+/// Owned sequential reader that releases completed, already-consumed windows.
+#[derive(Debug)]
+pub struct FileCacheReleasingReader {
+    file: File,
+    window_bytes: NonZeroU64,
+    pending_offset: u64,
+    pending_bytes: u64,
+    tracker: FileCacheReleaseTracker,
+    finished: bool,
+}
+
+impl FileCacheReleasingReader {
+    /// Wrap `file` at its current descriptor offset with the default window.
+    ///
+    /// # Errors
+    /// Returns an error when the current descriptor offset cannot be observed.
+    pub fn new(file: File) -> io::Result<Self> {
+        Self::with_window_bytes(
+            file,
+            NonZeroU64::new(DEFAULT_CACHE_RELEASE_WINDOW_BYTES)
+                .expect("default cache-release window is non-zero"),
+            FileCacheReleaseTracker::default(),
+        )
+    }
+
+    /// Wrap `file` at its current descriptor offset and attach shared evidence.
+    ///
+    /// # Errors
+    /// Returns an error when the current descriptor offset cannot be observed.
+    pub fn with_tracker(file: File, tracker: FileCacheReleaseTracker) -> io::Result<Self> {
+        Self::with_window_bytes(
+            file,
+            NonZeroU64::new(DEFAULT_CACHE_RELEASE_WINDOW_BYTES)
+                .expect("default cache-release window is non-zero"),
+            tracker,
+        )
+    }
+
+    /// Wrap `file` with an explicit non-zero window and evidence tracker.
+    ///
+    /// # Errors
+    /// Returns an error when the current descriptor offset cannot be observed.
+    pub fn with_window_bytes(
+        mut file: File,
+        window_bytes: NonZeroU64,
+        tracker: FileCacheReleaseTracker,
+    ) -> io::Result<Self> {
+        let pending_offset = file.stream_position()?;
+        Ok(Self {
+            file,
+            window_bytes,
+            pending_offset,
+            pending_bytes: 0,
+            tracker,
+            finished: false,
+        })
+    }
+
+    /// Release the final consumed partial window and surface deferred failures.
+    ///
+    /// # Errors
+    /// Returns an error when a supported release request fails.
+    pub fn finish(&mut self) -> io::Result<FileCacheReleaseEvidence> {
+        self.release_pending()?;
+        self.finished = true;
+        self.tracker.check_error()?;
+        Ok(self.tracker.evidence())
+    }
+
+    /// Borrow the shared aggregate evidence tracker.
+    #[must_use]
+    pub fn tracker(&self) -> FileCacheReleaseTracker {
+        self.tracker.clone()
+    }
+
+    /// Return this reader's configured release window.
+    #[must_use]
+    pub const fn window_bytes(&self) -> NonZeroU64 {
+        self.window_bytes
+    }
+
+    /// Borrow the underlying file.
+    #[must_use]
+    pub const fn file(&self) -> &File {
+        &self.file
+    }
+
+    fn release_pending(&mut self) -> io::Result<()> {
+        if self.pending_bytes == 0 {
+            return Ok(());
+        }
+        let bytes = self.pending_bytes;
+        let end = self
+            .pending_offset
+            .checked_add(bytes)
+            .ok_or_else(|| io::Error::other("cache-release reader offset overflow"))?;
+        let outcome = release_file_cache(&self.file, self.pending_offset, bytes)?;
+        self.tracker.account(outcome, bytes);
+        self.pending_offset = end;
+        self.pending_bytes = 0;
+        Ok(())
+    }
+}
+
+impl Read for FileCacheReleasingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() || self.finished {
+            return Ok(0);
+        }
+        if file_cache_release_supported() && self.pending_bytes == self.window_bytes.get() {
+            self.release_pending()?;
+        }
+        let limit = if file_cache_release_supported() {
+            usize::try_from(self.window_bytes.get() - self.pending_bytes)
+                .unwrap_or(usize::MAX)
+                .min(buffer.len())
+        } else {
+            buffer.len()
+        };
+        self.pending_offset
+            .checked_add(self.pending_bytes)
+            .and_then(|offset| offset.checked_add(u64::try_from(limit).ok()?))
+            .ok_or_else(|| io::Error::other("cache-release reader offset overflow"))?;
+        let read = self.file.read(&mut buffer[..limit])?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(u64::try_from(read).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other("cache-release reader byte count overflow"))?;
+        if read == 0 {
+            self.release_pending()?;
+            self.finished = true;
+        }
+        Ok(read)
+    }
+}
+
+impl Seek for FileCacheReleasingReader {
+    fn seek(&mut self, position: io::SeekFrom) -> io::Result<u64> {
+        self.release_pending()?;
+        let offset = self.file.seek(position)?;
+        self.pending_offset = offset;
+        self.finished = false;
+        Ok(offset)
+    }
+}
+
+impl Drop for FileCacheReleasingReader {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Err(error) = self.release_pending()
+        {
+            self.tracker.defer(&error);
+        }
+    }
+}
+
+/// File writer that synchronizes and releases completed page-cache windows.
+#[derive(Debug)]
+pub struct DurableFileCacheWriter {
+    file: File,
+    window_bytes: NonZeroU64,
+    pending_offset: u64,
+    pending_bytes: u64,
+    evidence: FileCacheReleaseEvidence,
+}
+
+impl DurableFileCacheWriter {
+    /// Wrap `file` with the default 64 MiB durable cache window.
+    ///
+    /// # Errors
+    /// Returns an error when the current descriptor offset cannot be observed.
+    pub fn new(file: File) -> io::Result<Self> {
+        Self::with_window_bytes(
+            file,
+            NonZeroU64::new(DEFAULT_CACHE_RELEASE_WINDOW_BYTES)
+                .expect("default cache-release window is non-zero"),
+        )
+    }
+
+    /// Wrap `file` with an explicit non-zero durable cache window.
+    ///
+    /// # Errors
+    /// Returns an error when the current descriptor offset cannot be observed.
+    pub fn with_window_bytes(file: File, window_bytes: NonZeroU64) -> io::Result<Self> {
+        Self::with_window_bytes_checked(file, window_bytes, || Ok(()))
+    }
+
+    /// Wrap `file` and run one caller-supplied setup check after observing the
+    /// real descriptor offset but before constructing the writer.
+    ///
+    /// This exists so higher layers can deterministically exercise constructor
+    /// failure without bypassing the actual descriptor setup path.
+    ///
+    /// # Errors
+    /// Returns an error when offset observation or `setup_check` fails.
+    pub fn with_window_bytes_checked(
+        mut file: File,
+        window_bytes: NonZeroU64,
+        setup_check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let pending_offset = file.stream_position()?;
+        setup_check()?;
+        Ok(Self {
+            file,
+            window_bytes,
+            pending_offset,
+            pending_bytes: 0,
+            evidence: FileCacheReleaseEvidence::default(),
+        })
+    }
+
+    /// Complete the final durability barrier and release its remaining cache window.
+    ///
+    /// # Errors
+    /// Returns an error if synchronization or a supported cache-release request fails.
+    pub fn sync_all_and_release(&mut self) -> io::Result<()> {
+        self.synchronize_pending(true)
+    }
+
+    /// Borrow the underlying file.
+    #[must_use]
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    /// Return content-free synchronization and cache-release evidence.
+    #[must_use]
+    pub const fn evidence(&self) -> FileCacheReleaseEvidence {
+        self.evidence
+    }
+
+    /// Return this writer's configured synchronization/release window.
+    #[must_use]
+    pub const fn window_bytes(&self) -> NonZeroU64 {
+        self.window_bytes
+    }
+
+    /// Consume the writer and return its underlying file.
+    #[must_use]
+    pub fn into_file(self) -> File {
+        self.file
+    }
+
+    fn synchronize_pending(&mut self, final_barrier: bool) -> io::Result<()> {
+        if self.pending_bytes == 0 && !final_barrier {
+            return Ok(());
+        }
+        if self.pending_bytes == 0 {
+            synchronize_file(&self.file)?;
+            self.evidence.sync_operations = self
+                .evidence
+                .sync_operations
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("cache-release sync count overflow"))?;
+            return Ok(());
+        }
+        let bytes = self.pending_bytes;
+        let end = self
+            .pending_offset
+            .checked_add(bytes)
+            .ok_or_else(|| io::Error::other("cache-release writer offset overflow"))?;
+        let outcome = synchronize_before_release(
+            || synchronize_file(&self.file),
+            || release_file_cache(&self.file, self.pending_offset, bytes),
+        )?;
+        self.evidence.sync_operations = self
+            .evidence
+            .sync_operations
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("cache-release sync count overflow"))?;
+        self.evidence.peak_window_bytes = self.evidence.peak_window_bytes.max(bytes);
+        match outcome {
+            FileCacheReleaseOutcome::Released => {
+                self.evidence.release_operations = self
+                    .evidence
+                    .release_operations
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("cache-release operation count overflow"))?;
+                self.evidence.released_bytes = self
+                    .evidence
+                    .released_bytes
+                    .checked_add(bytes)
+                    .ok_or_else(|| io::Error::other("cache-release byte count overflow"))?;
+            }
+            FileCacheReleaseOutcome::Unsupported => {
+                self.evidence.unsupported_operations = self
+                    .evidence
+                    .unsupported_operations
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("unsupported cache-release count overflow"))?;
+            }
+        }
+        self.pending_offset = end;
+        self.pending_bytes = 0;
+        Ok(())
+    }
+}
+
+fn synchronize_before_release<T>(
+    synchronize: impl FnOnce() -> io::Result<()>,
+    release: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    synchronize()?;
+    release()
+}
+
+impl Write for DurableFileCacheWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if file_cache_release_supported() && self.pending_bytes == self.window_bytes.get() {
+            // Synchronize before consuming any bytes from this call. A failure
+            // therefore obeys `Write::write`: callers may safely retry.
+            self.synchronize_pending(false)?;
+        }
+        let limit = if file_cache_release_supported() {
+            let remaining = self.window_bytes.get() - self.pending_bytes;
+            buffer
+                .len()
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX))
+        } else {
+            buffer.len()
+        };
+        self.pending_offset
+            .checked_add(self.pending_bytes)
+            .and_then(|offset| offset.checked_add(u64::try_from(limit).ok()?))
+            .ok_or_else(|| io::Error::other("cache-release writer offset overflow"))?;
+        let written = self.file.write(&buffer[..limit])?;
+        self.pending_bytes = self
+            .pending_bytes
+            .checked_add(u64::try_from(written).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other("cache-release writer byte count overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// Release one clean file range from the operating-system page cache.
+///
+/// Callers writing the file must synchronize the range before calling this
+/// primitive. Prefer [`DurableFileCacheWriter`] for write paths because it
+/// structurally enforces synchronization before release.
+///
+/// # Errors
+/// Returns an error when a supported operating-system release request fails.
+pub fn release_file_cache(
+    file: &File,
+    offset: u64,
+    bytes: u64,
+) -> io::Result<FileCacheReleaseOutcome> {
+    #[cfg(test)]
+    CACHE_RELEASE_FAILURE.with(|failure| {
+        if failure.replace(false) {
+            return Err(io::Error::other("injected cache-release failure"));
+        }
+        Ok(())
+    })?;
+    if bytes == 0 {
+        return Ok(if file_cache_release_supported() {
+            FileCacheReleaseOutcome::Released
+        } else {
+            FileCacheReleaseOutcome::Unsupported
+        });
+    }
+    release_file_cache_inner(file, offset, bytes)
+}
+
+fn synchronize_file(file: &File) -> io::Result<()> {
+    #[cfg(test)]
+    CACHE_SYNC_FAILURE.with(|failure| {
+        if failure.replace(false) {
+            return Err(io::Error::other("injected cache-sync failure"));
+        }
+        Ok(())
+    })?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CACHE_RELEASE_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static CACHE_SYNC_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn inject_cache_release_failure() {
+    CACHE_RELEASE_FAILURE.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+fn inject_cache_sync_failure() {
+    CACHE_SYNC_FAILURE.with(|failure| failure.set(true));
+}
+
+#[cfg(target_os = "linux")]
+const fn file_cache_release_supported() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn file_cache_release_supported() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn release_file_cache_inner(
+    file: &File,
+    offset: u64,
+    bytes: u64,
+) -> io::Result<FileCacheReleaseOutcome> {
+    rustix::fs::fadvise(
+        file,
+        offset,
+        NonZeroU64::new(bytes),
+        rustix::fs::Advice::DontNeed,
+    )
+    .map_err(io::Error::from)?;
+    Ok(FileCacheReleaseOutcome::Released)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_file_cache_inner(
+    _file: &File,
+    _offset: u64,
+    _bytes: u64,
+) -> io::Result<FileCacheReleaseOutcome> {
+    Ok(FileCacheReleaseOutcome::Unsupported)
+}
 
 /// Stable filesystem identity suitable for Windows and Unix filesystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +773,240 @@ pub struct StableDirectory {
     identity: FileIdentity,
 }
 
+/// Single-owner capability for one exclusively created, unpublished child.
+///
+/// The guard follows the owned inode across an atomic rename and removes any
+/// still-uncommitted name on explicit cleanup or drop. Callers must retain the
+/// guard until every higher-level publication invariant, including parent
+/// directory synchronization and manifest/receipt inclusion, is complete.
+#[derive(Debug)]
+pub struct UnpublishedArtifactGuard {
+    directory: StableDirectory,
+    candidate_names: Vec<OsString>,
+    identity: Option<FileIdentity>,
+    file: Option<File>,
+    published: bool,
+    parent_synced: bool,
+    armed: bool,
+}
+
+impl UnpublishedArtifactGuard {
+    /// Return the immutable identity captured during descriptor setup.
+    ///
+    /// # Errors
+    /// Returns an error before descriptor identity has been initialized.
+    pub fn identity(&self) -> io::Result<FileIdentity> {
+        self.identity
+            .ok_or_else(|| io::Error::other("unpublished artifact identity is not initialized"))
+    }
+
+    /// Re-read the retained descriptor identity and run a setup check before
+    /// the descriptor is transferred to a writer.
+    ///
+    /// # Errors
+    /// Returns an error when identity observation, `setup_check`, or the
+    /// identity comparison fails.
+    pub fn verify_identity_with(
+        &mut self,
+        setup_check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<FileIdentity> {
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| io::Error::other("unpublished artifact descriptor was transferred"))?;
+        let observed = file_identity(file)?;
+        self.identity = Some(observed);
+        setup_check()?;
+        Ok(observed)
+    }
+
+    /// Open one sibling through the retained no-follow parent capability.
+    ///
+    /// # Errors
+    /// Returns an error when the child is absent, special, linked, or the
+    /// retained directory authority changed.
+    pub fn open_sibling(&self, name: &OsStr) -> io::Result<File> {
+        self.directory.open_child_file(name)
+    }
+
+    /// Transfer the retained data descriptor into its durable writer.
+    ///
+    /// # Errors
+    /// Returns an error if identity observation fails or the descriptor was
+    /// already transferred.
+    pub fn take_file(&mut self) -> io::Result<File> {
+        if self.identity.is_none() {
+            let file = self
+                .file
+                .as_ref()
+                .ok_or_else(|| io::Error::other("unpublished artifact file already transferred"))?;
+            self.identity = Some(file_identity(file)?);
+        }
+        self.file
+            .take()
+            .ok_or_else(|| io::Error::other("unpublished artifact file already transferred"))
+    }
+
+    /// Atomically install `target` while retaining cleanup ownership.
+    ///
+    /// # Errors
+    /// Returns an error when identity-safe installation fails.
+    pub fn install_child(&mut self, target: &OsStr) -> io::Result<()> {
+        validate_child_name(target)?;
+        let temporary = self
+            .candidate_names
+            .first()
+            .ok_or_else(|| io::Error::other("unpublished artifact has no temporary name"))?
+            .clone();
+        if !self.candidate_names.iter().any(|name| name == target) {
+            self.candidate_names.push(target.to_owned());
+        }
+        self.directory
+            .install_child(&temporary, self.identity()?, target)?;
+        self.published = true;
+        self.parent_synced = false;
+        Ok(())
+    }
+
+    /// Synchronize the retained parent directory while remaining armed.
+    ///
+    /// # Errors
+    /// Returns an error when the directory durability barrier fails.
+    pub fn sync_parent(&mut self) -> io::Result<()> {
+        self.directory.sync()?;
+        self.parent_synced = true;
+        Ok(())
+    }
+
+    /// Disarm cleanup after every publication invariant is complete.
+    ///
+    /// # Errors
+    /// Returns an error if the descriptor is still held by the guard or the
+    /// atomic publication and parent barrier have not both completed.
+    pub fn commit(mut self) -> io::Result<()> {
+        if self.file.is_some() || !self.published || !self.parent_synced {
+            return Err(io::Error::other(
+                "unpublished artifact commit invariants are incomplete",
+            ));
+        }
+        self.armed = false;
+        Ok(())
+    }
+
+    /// Remove every possible uncommitted name and synchronize the parent.
+    ///
+    /// Names that are absent or no longer identify the exclusively created
+    /// inode are left untouched.
+    ///
+    /// # Errors
+    /// Returns sanitized cleanup failure context after attempting every unlink
+    /// and the final parent-directory barrier.
+    pub fn cleanup(&mut self) -> io::Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        let mut cleanup = Ok(());
+        let identity = match self.identity {
+            Some(identity) => Some(identity),
+            None => match self
+                .file
+                .as_ref()
+                .ok_or_else(|| io::Error::other("unpublished artifact descriptor is unavailable"))
+                .and_then(file_identity)
+            {
+                Ok(identity) => {
+                    self.identity = Some(identity);
+                    Some(identity)
+                }
+                Err(error) => {
+                    cleanup = append_sanitized_cleanup(
+                        cleanup,
+                        &error,
+                        "unpublished artifact identity recovery failed",
+                    );
+                    None
+                }
+            },
+        };
+        self.file.take();
+        for name in &self.candidate_names {
+            let Some(identity) = identity else {
+                break;
+            };
+            let removed = self.directory.open_child_file(name).and_then(|file| {
+                if file_identity(&file)? == identity {
+                    drop(file);
+                    self.directory.unlink_child_if_identity(name, identity)?;
+                }
+                Ok(())
+            });
+            match removed {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    cleanup = append_sanitized_cleanup(
+                        cleanup,
+                        &error,
+                        "unpublished artifact unlink failed",
+                    );
+                }
+            }
+        }
+        cleanup = match self.directory.sync() {
+            Ok(()) => cleanup,
+            Err(error) => append_sanitized_cleanup(
+                cleanup,
+                &error,
+                "unpublished artifact directory synchronization failed",
+            ),
+        };
+        self.armed = false;
+        cleanup
+    }
+
+    /// Perform full identity-safe cleanup and its parent barrier, then run one
+    /// caller-supplied finalization check.
+    ///
+    /// # Errors
+    /// Returns sanitized cleanup or finalization context after both have been
+    /// attempted.
+    pub fn cleanup_checked(
+        &mut self,
+        finalization_check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let cleanup = self.cleanup();
+        match finalization_check() {
+            Ok(()) => cleanup,
+            Err(error) => append_sanitized_cleanup(
+                cleanup,
+                &error,
+                "unpublished artifact cleanup finalization failed",
+            ),
+        }
+    }
+}
+
+impl Drop for UnpublishedArtifactGuard {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn append_sanitized_cleanup(
+    primary: io::Result<()>,
+    cleanup: &io::Error,
+    context: &'static str,
+) -> io::Result<()> {
+    let cleanup = io::Error::new(cleanup.kind(), context);
+    match primary {
+        Ok(()) => Err(cleanup),
+        Err(primary) => Err(io::Error::new(
+            primary.kind(),
+            format!("{primary}; {cleanup}"),
+        )),
+    }
+}
+
 impl StableDirectory {
     /// Duplicate this retained directory capability without resolving its path again.
     ///
@@ -364,6 +1179,25 @@ impl StableDirectory {
         Ok(file)
     }
 
+    /// Visit regular descendants through retained, no-follow directory handles.
+    ///
+    /// Every child is opened relative to its retained parent and revalidated
+    /// before it reaches `visit`. Links and non-regular objects are skipped.
+    ///
+    /// # Errors
+    /// Returns an error if traversal exceeds `remaining`, a retained identity
+    /// changes, directory enumeration fails, or `visit` fails. Targets without
+    /// descriptor-relative directory enumeration return `Unsupported`.
+    pub fn visit_regular_files(
+        &self,
+        remaining: &mut usize,
+        visit: &mut impl FnMut(&File) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.revalidate_named()?;
+        visit_regular_files_platform(self, remaining, visit)?;
+        self.revalidate_named()
+    }
+
     /// Create one new regular child without following links or reparse points.
     pub fn create_child_file(&self, name: &OsStr) -> io::Result<File> {
         validate_child_name(name)?;
@@ -511,6 +1345,32 @@ impl StableDirectory {
         validate_stable_child_file(&file, &path)?;
         self.revalidate_named()?;
         Ok(file)
+    }
+
+    /// Exclusively create one replaceable child and immediately bind cleanup
+    /// ownership to its retained descriptor identity.
+    ///
+    /// # Errors
+    /// Returns an error when creation, identity capture, or directory-capability
+    /// cloning fails. Setup failure removes the exact created inode when safe.
+    pub fn create_unpublished_replaceable_child(
+        &self,
+        name: &OsStr,
+    ) -> io::Result<UnpublishedArtifactGuard> {
+        // Clone the parent authority before creating the child. From the
+        // instant exclusive creation succeeds, no fallible setup remains
+        // outside the armed guard.
+        let directory = self.try_clone()?;
+        let file = self.create_replaceable_child_file(name)?;
+        Ok(UnpublishedArtifactGuard {
+            directory,
+            candidate_names: vec![name.to_owned()],
+            identity: None,
+            file: Some(file),
+            published: false,
+            parent_synced: false,
+            armed: true,
+        })
     }
 
     /// Open an existing regular child for read/write, or create it once.
@@ -741,6 +1601,59 @@ fn stable_open_directory(path: &Path) -> io::Result<File> {
     )
     .map(File::from)
     .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn visit_regular_files_platform(
+    directory: &StableDirectory,
+    remaining: &mut usize,
+    visit: &mut impl FnMut(&File) -> io::Result<()>,
+) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    use rustix::fs::{AtFlags, Dir, FileType};
+
+    let mut entries = Dir::read_from(&directory.file).map_err(io::Error::from)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(io::Error::from)?;
+        let raw_name = entry.file_name().to_bytes();
+        if matches!(raw_name, b"." | b"..") {
+            continue;
+        }
+        if *remaining == 0 {
+            return Err(io::Error::other(
+                "descriptor-relative traversal exceeds entry bound",
+            ));
+        }
+        *remaining -= 1;
+        let name = OsStr::from_bytes(raw_name);
+        let mut file_type = entry.file_type();
+        if file_type == FileType::Unknown {
+            let stat = rustix::fs::statat(&directory.file, name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(io::Error::from)?;
+            file_type = FileType::from_raw_mode(stat.st_mode);
+        }
+        if file_type.is_file() {
+            let file = directory.open_child_file(name)?;
+            visit(&file)?;
+        } else if file_type.is_dir() {
+            let child = directory.open_child_directory(name)?;
+            visit_regular_files_platform(&child, remaining, visit)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn visit_regular_files_platform(
+    _directory: &StableDirectory,
+    _remaining: &mut usize,
+    _visit: &mut impl FnMut(&File) -> io::Result<()>,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "descriptor-relative directory traversal is unsupported",
+    ))
 }
 
 #[cfg(unix)]
@@ -3466,6 +4379,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn descriptor_relative_visit_skips_symlinks_and_rejects_root_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let owned = parent.path().join("owned");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(owned.join("inside"), b"inside").unwrap();
+        std::fs::write(outside.join("secret"), b"secret").unwrap();
+        symlink(&outside, owned.join("escape")).unwrap();
+        let stable = StableDirectory::open(&owned).unwrap();
+        let mut remaining = 16;
+        let mut lengths = Vec::new();
+        stable
+            .visit_regular_files(&mut remaining, &mut |file| {
+                lengths.push(file.metadata()?.len());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(lengths, [6]);
+
+        std::fs::rename(&owned, parent.path().join("displaced")).unwrap();
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::write(owned.join("replacement"), b"replacement").unwrap();
+        let mut visited = 0;
+        assert!(
+            stable
+                .visit_regular_files(&mut remaining, &mut |_| {
+                    visited += 1;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(visited, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn stable_directory_enumerates_and_links_only_retained_regular_source() {
         use std::io::Write as _;
 
@@ -3661,6 +4613,467 @@ mod tests {
             b"authenticated"
         );
         assert!(!root.path().join("CURRENT").exists());
+    }
+
+    #[test]
+    fn cache_release_never_runs_before_successful_synchronization() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        synchronize_before_release(
+            || {
+                calls.borrow_mut().push("sync");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("release");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*calls.borrow(), ["sync", "release"]);
+
+        calls.borrow_mut().clear();
+        let error = synchronize_before_release(
+            || {
+                calls.borrow_mut().push("sync");
+                Err(io::Error::other("sync failed"))
+            },
+            || {
+                calls.borrow_mut().push("release");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "sync failed");
+        assert_eq!(*calls.borrow(), ["sync"]);
+    }
+
+    #[test]
+    fn durable_cache_writer_preserves_bytes_and_reports_platform_semantics() {
+        use std::io::Read as _;
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bounded");
+        let file = File::create(&path).unwrap();
+        let mut writer =
+            DurableFileCacheWriter::with_window_bytes(file, NonZeroU64::new(8).unwrap()).unwrap();
+        writer.write_all(b"0123456789abcdefghij").unwrap();
+
+        #[cfg(target_os = "linux")]
+        {
+            let evidence = writer.evidence();
+            assert_eq!(evidence.sync_operations, 2);
+            assert_eq!(evidence.release_operations, 2);
+            assert_eq!(evidence.released_bytes, 16);
+            assert_eq!(evidence.peak_window_bytes, 8);
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(writer.evidence(), FileCacheReleaseEvidence::default());
+
+        writer.sync_all_and_release().unwrap();
+        let evidence = writer.evidence();
+        assert_eq!(
+            evidence.sync_operations,
+            if cfg!(target_os = "linux") { 3 } else { 1 }
+        );
+        assert!(evidence.peak_window_bytes <= 8 || !cfg!(target_os = "linux"));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(evidence.release_operations, 3);
+            assert_eq!(evidence.unsupported_operations, 0);
+            assert_eq!(evidence.released_bytes, 20);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(evidence.release_operations, 0);
+            assert_eq!(evidence.unsupported_operations, 1);
+            assert_eq!(evidence.released_bytes, 0);
+            assert_eq!(evidence.peak_window_bytes, 20);
+        }
+
+        drop(writer);
+        let mut bytes = Vec::new();
+        File::open(path).unwrap().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"0123456789abcdefghij");
+    }
+
+    #[test]
+    fn shared_cache_budget_covers_every_construction_operation_topology() {
+        for (operation, active_streams) in [
+            ("copy", 2_usize),
+            ("v3-index", 3),
+            ("v4-projections", 2),
+            ("node-encoding", 5),
+            ("edge-encoding", 4),
+            ("merge-two-way", 3),
+            ("merge-fan-in", 33),
+        ] {
+            let window = cache_release_window_for_streams(active_streams).unwrap();
+            let aggregate = window
+                .get()
+                .checked_mul(u64::try_from(active_streams).unwrap())
+                .unwrap();
+            assert!(window.get() > 0, "{operation}");
+            assert!(
+                aggregate <= DEFAULT_CACHE_RELEASE_WINDOW_BYTES,
+                "{operation}: {aggregate}"
+            );
+        }
+        assert!(cache_release_window_for_streams(0).is_err());
+        assert!(
+            cache_release_window_for_streams(
+                usize::try_from(DEFAULT_CACHE_RELEASE_WINDOW_BYTES).unwrap() + 1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn operation_budget_validation_uses_opened_reader_and_writer_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let output = root.path().join("output");
+        std::fs::write(&source, b"source").unwrap();
+        let window = cache_release_window_for_streams(2).unwrap();
+        let reader = FileCacheReleasingReader::with_window_bytes(
+            File::open(source).unwrap(),
+            window,
+            FileCacheReleaseTracker::default(),
+        )
+        .unwrap();
+        let writer =
+            DurableFileCacheWriter::with_window_bytes(File::create(output).unwrap(), window)
+                .unwrap();
+
+        assert_eq!(
+            validate_cache_release_operation_windows(&[
+                reader.window_bytes(),
+                writer.window_bytes(),
+            ])
+            .unwrap(),
+            DEFAULT_CACHE_RELEASE_WINDOW_BYTES
+        );
+        assert!(
+            validate_cache_release_operation_windows(&[
+                NonZeroU64::new(DEFAULT_CACHE_RELEASE_WINDOW_BYTES).unwrap(),
+                writer.window_bytes(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unpublished_artifact_guard_tracks_rename_commit_and_safe_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+
+        {
+            let mut guard = directory
+                .create_unpublished_replaceable_child(OsStr::new("drop-temp"))
+                .unwrap();
+            let mut file = guard.take_file().unwrap();
+            file.write_all(b"temporary").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+        }
+        assert!(!root.path().join("drop-temp").exists());
+
+        {
+            let mut guard = directory
+                .create_unpublished_replaceable_child(OsStr::new("rename-temp"))
+                .unwrap();
+            let mut file = guard.take_file().unwrap();
+            file.write_all(b"renamed").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            guard.install_child(OsStr::new("renamed-final")).unwrap();
+            guard.sync_parent().unwrap();
+        }
+        assert!(!root.path().join("rename-temp").exists());
+        assert!(!root.path().join("renamed-final").exists());
+
+        {
+            let mut guard = directory
+                .create_unpublished_replaceable_child(OsStr::new("commit-temp"))
+                .unwrap();
+            let mut file = guard.take_file().unwrap();
+            file.write_all(b"committed").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            guard.install_child(OsStr::new("committed-final")).unwrap();
+            guard.sync_parent().unwrap();
+            guard.commit().unwrap();
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("committed-final")).unwrap(),
+            b"committed"
+        );
+
+        std::fs::write(root.path().join("occupied"), b"original").unwrap();
+        {
+            let mut guard = directory
+                .create_unpublished_replaceable_child(OsStr::new("failed-install-temp"))
+                .unwrap();
+            let file = guard.take_file().unwrap();
+            drop(file);
+            assert!(guard.install_child(OsStr::new("occupied")).is_err());
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("occupied")).unwrap(),
+            b"original"
+        );
+        assert!(!root.path().join("failed-install-temp").exists());
+    }
+
+    #[test]
+    fn durable_cache_writer_respects_current_offset() {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("offset");
+        std::fs::write(&path, b"prefix-xxxxxxx").unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(7)).unwrap();
+        let mut writer =
+            DurableFileCacheWriter::with_window_bytes(file, NonZeroU64::new(3).unwrap()).unwrap();
+        writer.write_all(b"changed").unwrap();
+        writer.sync_all_and_release().unwrap();
+        drop(writer);
+
+        let mut actual = Vec::new();
+        File::open(path).unwrap().read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"prefix-changed");
+    }
+
+    #[test]
+    fn durable_cache_writer_sync_failure_precedes_next_write_consumption() {
+        use std::io::Read as _;
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sync-failure");
+        let mut writer = DurableFileCacheWriter::with_window_bytes(
+            File::create(&path).unwrap(),
+            NonZeroU64::new(8).unwrap(),
+        )
+        .unwrap();
+        writer.write_all(b"12345678").unwrap();
+        inject_cache_sync_failure();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                writer.write(b"9").unwrap_err().to_string(),
+                "injected cache-sync failure"
+            );
+            assert_eq!(writer.write(b"9").unwrap(), 1);
+            writer.sync_all_and_release().unwrap();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(writer.write(b"9").unwrap(), 1);
+            assert_eq!(
+                writer.sync_all_and_release().unwrap_err().to_string(),
+                "injected cache-sync failure"
+            );
+            writer.sync_all_and_release().unwrap();
+        }
+        drop(writer);
+
+        let mut actual = Vec::new();
+        File::open(path).unwrap().read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, b"123456789");
+    }
+
+    #[test]
+    fn durable_cache_writer_surfaces_advice_failure_after_durability() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("writer-advice-failure");
+        let mut writer = DurableFileCacheWriter::new(File::create(&path).unwrap()).unwrap();
+        writer.write_all(b"durable").unwrap();
+        inject_cache_release_failure();
+        assert_eq!(
+            writer.sync_all_and_release().unwrap_err().to_string(),
+            "injected cache-release failure"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"durable");
+        writer.sync_all_and_release().unwrap();
+    }
+
+    #[test]
+    fn cache_releasing_reader_releases_completed_and_partial_windows_on_drop() {
+        use std::io::Read as _;
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("drop-reader");
+        std::fs::write(&path, b"0123456789abcdefghij").unwrap();
+        let tracker = FileCacheReleaseTracker::default();
+        let mut reader = FileCacheReleasingReader::with_window_bytes(
+            File::open(path).unwrap(),
+            NonZeroU64::new(8).unwrap(),
+            tracker.clone(),
+        )
+        .unwrap();
+        let mut bytes = [0_u8; 9];
+        reader.read_exact(&mut bytes).unwrap();
+        drop(reader);
+        tracker.check_error().unwrap();
+
+        let evidence = tracker.evidence();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(evidence.release_operations, 2);
+            assert_eq!(evidence.released_bytes, 9);
+            assert_eq!(evidence.peak_window_bytes, 8);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(evidence.unsupported_operations, 1);
+            assert_eq!(evidence.peak_window_bytes, 9);
+        }
+    }
+
+    #[test]
+    fn cache_releasing_reader_empty_reads_preserve_remaining_data_and_evidence() {
+        use std::io::Read as _;
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("empty-read");
+        let expected = b"0123456789abcdef";
+        std::fs::write(&path, expected).unwrap();
+
+        for prefix_length in [0, 3, 8] {
+            let tracker = FileCacheReleaseTracker::default();
+            let mut reader = FileCacheReleasingReader::with_window_bytes(
+                File::open(&path).unwrap(),
+                NonZeroU64::new(8).unwrap(),
+                tracker.clone(),
+            )
+            .unwrap();
+            let mut actual = vec![0; prefix_length];
+            reader.read_exact(&mut actual).unwrap();
+            let before_empty_read = tracker.evidence();
+            assert_eq!(reader.read(&mut []).unwrap(), 0);
+            assert_eq!(tracker.evidence(), before_empty_read);
+            reader.read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected, "prefix length {prefix_length}");
+            reader.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn cache_releasing_reader_real_syscalls_cover_two_windows_and_partial_tail() {
+        use std::io::Read as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("large-sparse-reader");
+        let length = DEFAULT_CACHE_RELEASE_WINDOW_BYTES
+            .checked_mul(2)
+            .unwrap()
+            .checked_add(1_048_593)
+            .unwrap();
+        let file = File::create(&path).unwrap();
+        file.set_len(length).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let mut reader = FileCacheReleasingReader::new(File::open(path).unwrap()).unwrap();
+        let mut buffer = vec![0_u8; 1 << 20];
+        let mut read = 0_u64;
+        loop {
+            let count = reader.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            read += count as u64;
+        }
+        let evidence = reader.finish().unwrap();
+        assert_eq!(read, length);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(evidence.release_operations, 3);
+            assert_eq!(evidence.released_bytes, length);
+            assert_eq!(
+                evidence.peak_window_bytes,
+                DEFAULT_CACHE_RELEASE_WINDOW_BYTES
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(evidence.unsupported_operations, 1);
+            assert_eq!(evidence.peak_window_bytes, length);
+        }
+    }
+
+    #[test]
+    fn cache_releasing_reader_surfaces_injected_advice_failure() {
+        use std::io::Read as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("advice-failure");
+        std::fs::write(&path, b"consumed").unwrap();
+        let mut reader = FileCacheReleasingReader::new(File::open(path).unwrap()).unwrap();
+        let mut bytes = [0_u8; 8];
+        assert_eq!(reader.read(&mut bytes).unwrap(), 8);
+        inject_cache_release_failure();
+        assert_eq!(
+            reader.finish().unwrap_err().to_string(),
+            "injected cache-release failure"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn injected_advice_failures_after_completed_windows_preserve_prior_evidence() {
+        use std::io::{Read as _, Write as _};
+        use std::num::NonZeroU64;
+
+        let root = tempfile::tempdir().unwrap();
+        let written_path = root.path().join("writer-spanning-failure");
+        let mut writer = DurableFileCacheWriter::with_window_bytes(
+            File::create(&written_path).unwrap(),
+            NonZeroU64::new(8).unwrap(),
+        )
+        .unwrap();
+        writer.write_all(b"0123456789abcdef").unwrap();
+        assert_eq!(writer.evidence().release_operations, 1);
+        inject_cache_release_failure();
+        assert_eq!(
+            writer.write(b"x").unwrap_err().to_string(),
+            "injected cache-release failure"
+        );
+        assert_eq!(writer.evidence().released_bytes, 8);
+        writer.write_all(b"x").unwrap();
+        writer.sync_all_and_release().unwrap();
+        assert_eq!(std::fs::read(&written_path).unwrap(), b"0123456789abcdefx");
+
+        let read_path = root.path().join("reader-spanning-failure");
+        std::fs::write(&read_path, b"0123456789abcdefghijklmnop").unwrap();
+        let tracker = FileCacheReleaseTracker::default();
+        let mut reader = FileCacheReleasingReader::with_window_bytes(
+            File::open(read_path).unwrap(),
+            NonZeroU64::new(8).unwrap(),
+            tracker.clone(),
+        )
+        .unwrap();
+        let mut prefix = [0_u8; 16];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(tracker.evidence().release_operations, 1);
+        inject_cache_release_failure();
+        assert_eq!(
+            reader.read(&mut [0_u8; 1]).unwrap_err().to_string(),
+            "injected cache-release failure"
+        );
+        assert_eq!(tracker.evidence().released_bytes, 8);
+        reader.finish().unwrap();
     }
 
     #[cfg(windows)]

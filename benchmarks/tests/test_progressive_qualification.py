@@ -4,6 +4,9 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import runpy
+import shutil
+import tempfile
 import unittest
 
 from graphforge_bench.progressive_qualification import (
@@ -362,6 +365,35 @@ class ProgressiveQualificationTests(unittest.TestCase):
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())
         profile["generator"]["identity"] = 42
         self.assertFalse(self.profile_schema.is_valid(profile))
+
+    def test_identity_regeneration_never_rewrites_commit_bound_evidence(self) -> None:
+        tool = runpy.run_path(str(ROOT.parent / "scripts/ci/graph500-generator-identity.py"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative in (
+                "benchmarks/profiles/graph500",
+                "benchmarks/fixtures/progressive",
+                "benchmarks/fixtures/parity/ladder-bundle",
+                "benchmarks/runners/graph500-generator/src",
+            ):
+                source = ROOT.parent / relative
+                shutil.copytree(source, root / relative)
+            generator = root / "benchmarks/runners/graph500-generator/src/main.rs"
+            generator.write_bytes(generator.read_bytes() + b"\n// changed\n")
+            historical = root / "benchmarks/fixtures/parity/ladder-bundle/manifest.json"
+            before = historical.read_bytes()
+
+            self.assertEqual(tool["main"](["--root", str(root), "--write"]), 0)
+
+            expected = "sha256:" + hashlib.sha256(generator.read_bytes()).hexdigest()
+            profile = json.loads((root / "benchmarks/profiles/graph500/s18-local.json").read_text())
+            tiny = json.loads(
+                (root / "benchmarks/fixtures/progressive/tiny-executable.json").read_text()
+            )
+            self.assertEqual(profile["generator"]["identity"], expected)
+            self.assertEqual(profile["phases"][1]["action"]["identity"], expected)
+            self.assertEqual(tiny["phases"][1]["action"]["identity"], expected)
+            self.assertEqual(historical.read_bytes(), before)
 
     def test_each_capacity_dimension_refuses_independently(self) -> None:
         cases = {

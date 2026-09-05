@@ -22,9 +22,11 @@ _API_COMPILE_DATA = [
 ]
 
 _API_DEPS = [
+    "@crates//:bytes",
     "//crates/graphforge-core:graphforge_core",
     "//crates/graphforge-cypher:graphforge_cypher",
     "//crates/graphforge-exec:graphforge_exec",
+    "//crates/graphforge-filesystem:graphforge_filesystem",
     "//crates/graphforge-ir:graphforge_ir",
     "//crates/graphforge-io:graphforge_io",
     "//crates/graphforge-knowledge:graphforge_knowledge",
@@ -210,7 +212,7 @@ gf_rust_integration_test(
     data = _API_TEST_DATA,
     size = "large",
     timeout = "long",
-    deps = _API_DEPS + ["//crates/graphforge-filesystem:graphforge_filesystem"],
+    deps = _API_DEPS,
 )
 
 gf_rust_integration_test(
