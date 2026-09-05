@@ -26,15 +26,24 @@ const SHA256_DIR: &str = "sha256";
 const TEMP_DIR: &str = "tmp";
 const ACTIVE_DIR: &str = "active";
 const LIFECYCLE_LOCK: &str = "lifecycle.lock";
-const BUFFER_BYTES: usize = 64 * 1024;
+/// Maximum bytes consumed by one instrumented CAS copy/hash operation.
+pub const GRAPH_OBJECT_IO_BUFFER_BYTES: usize = 64 * 1024;
+const BUFFER_BYTES: usize = GRAPH_OBJECT_IO_BUFFER_BYTES;
 
 #[cfg(test)]
 thread_local! {
     static RETURNED_ERROR_BOUNDARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_OBJECT_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn returned_error_boundary(name: &str) -> Result<(), GfError> {
+    if name == "install:temp-sealed" {
+        let hook = BEFORE_OBJECT_LINK.with(|current| current.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     if RETURNED_ERROR_BOUNDARY.with(|boundary| boundary.borrow().as_deref() == Some(name)) {
         return Err(GfError::Storage(format!(
             "injected graph object returned error at {name}"
@@ -563,6 +572,8 @@ pub struct GraphObjectInstallEvidence {
     pub bytes_installed: u64,
     /// Whether an already installed exact object satisfied the request.
     pub reused_existing: bool,
+    /// A temporary object was written and finalized, possibly losing a publication race.
+    pub attempted_install: bool,
     /// Non-empty source or authentication reads completed by the application.
     pub read_calls: u64,
     /// Temporary-object write submissions completed by the application.
@@ -571,6 +582,135 @@ pub struct GraphObjectInstallEvidence {
     pub write_bytes: u64,
     /// File and directory durability barriers completed by this installation.
     pub fsync_calls: u64,
+    /// Completed synchronization of the temporary payload file.
+    pub file_fsync_calls: u64,
+    /// Completed synchronization of object and temporary namespaces.
+    pub directory_fsync_calls: u64,
+}
+
+/// Content-free application work accumulated from actual CAS operations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphObjectIoTotals {
+    /// Bytes consumed by authentication and source reads.
+    pub read_bytes: u64,
+    /// Nonempty application read submissions.
+    pub read_calls: u64,
+    /// Bytes submitted to object writers.
+    pub write_bytes: u64,
+    /// Nonempty application write submissions.
+    pub write_calls: u64,
+    /// Completed file synchronization operations, including cache rollovers.
+    pub file_fsync_calls: u64,
+    /// Completed namespace synchronization operations.
+    pub directory_fsync_calls: u64,
+    /// Objects newly installed; shared objects are charged on first install only.
+    pub installed_objects: u64,
+    /// Completed temporary-object installation attempts, including concurrent losers.
+    pub install_attempts: u64,
+    /// Install requests satisfied by authenticated existing objects.
+    pub reused_objects: u64,
+    /// Logical bytes newly installed.
+    pub installed_bytes: u64,
+}
+
+impl GraphObjectIoTotals {
+    fn add_install(&mut self, evidence: &GraphObjectInstallEvidence) -> Result<(), GfError> {
+        if evidence
+            .file_fsync_calls
+            .checked_add(evidence.directory_fsync_calls)
+            != Some(evidence.fsync_calls)
+        {
+            return Err(validation(
+                "CAS synchronization components do not reconcile",
+            ));
+        }
+        self.checked_add_assign(&Self {
+            read_bytes: evidence.bytes_hashed,
+            read_calls: evidence.read_calls,
+            write_bytes: evidence.write_bytes,
+            write_calls: evidence.write_calls,
+            file_fsync_calls: evidence.file_fsync_calls,
+            directory_fsync_calls: evidence.directory_fsync_calls,
+            installed_objects: u64::from(!evidence.reused_existing),
+            install_attempts: u64::from(evidence.attempted_install),
+            reused_objects: u64::from(evidence.reused_existing),
+            installed_bytes: evidence.bytes_installed,
+        })
+    }
+
+    fn add_read(&mut self, io: ReadIoEvidence) -> Result<(), GfError> {
+        self.checked_add_assign(&Self {
+            read_bytes: io.bytes,
+            read_calls: io.calls,
+            ..Self::default()
+        })
+    }
+
+    fn checked_add_assign(&mut self, other: &Self) -> Result<(), GfError> {
+        for (counter, value) in [
+            (&mut self.read_bytes, other.read_bytes),
+            (&mut self.read_calls, other.read_calls),
+            (&mut self.write_bytes, other.write_bytes),
+            (&mut self.write_calls, other.write_calls),
+            (&mut self.file_fsync_calls, other.file_fsync_calls),
+            (&mut self.directory_fsync_calls, other.directory_fsync_calls),
+            (&mut self.installed_objects, other.installed_objects),
+            (&mut self.install_attempts, other.install_attempts),
+            (&mut self.reused_objects, other.reused_objects),
+            (&mut self.installed_bytes, other.installed_bytes),
+        ] {
+            *counter = counter
+                .checked_add(value)
+                .ok_or_else(|| validation("CAS component counter overflows"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Measured CAS work separated by the authority that performed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphPublicationIo {
+    /// Completed append invocations represented by these components.
+    pub publications: u64,
+    /// Authenticated prior logical entries across those invocations.
+    pub initial_entries: u64,
+    /// Sealed and tombstoned paths submitted to path-copy updates.
+    pub changed_paths: u64,
+    /// Canonical payload installation and source authentication.
+    pub payload: GraphObjectIoTotals,
+    /// Immutable manifest-node installation and reuse authentication.
+    pub manifest: GraphObjectIoTotals,
+    /// Existing manifest nodes read during path-copy updates.
+    pub manifest_reads: GraphObjectIoTotals,
+}
+
+impl GraphPublicationIo {
+    /// Add one completed invocation without replaying earlier receipt work.
+    pub fn checked_add_assign(&mut self, other: &Self) -> Result<(), GfError> {
+        for (counter, value) in [
+            (&mut self.publications, other.publications),
+            (&mut self.initial_entries, other.initial_entries),
+            (&mut self.changed_paths, other.changed_paths),
+        ] {
+            *counter = counter
+                .checked_add(value)
+                .ok_or_else(|| validation("CAS publication inventory overflows"))?;
+        }
+        self.payload.checked_add_assign(&other.payload)?;
+        self.manifest.checked_add_assign(&other.manifest)?;
+        self.manifest_reads
+            .checked_add_assign(&other.manifest_reads)
+    }
+
+    /// Reconcile the independently accumulated operation components.
+    pub fn totals(&self) -> Result<GraphObjectIoTotals, GfError> {
+        let mut totals = self.payload.clone();
+        totals.checked_add_assign(&self.manifest)?;
+        totals.checked_add_assign(&self.manifest_reads)?;
+        Ok(totals)
+    }
 }
 
 /// One-time v1 expanded-tree to v2 object-store migration evidence.
@@ -595,14 +735,16 @@ pub struct GraphFilesAppendEvidence {
     pub payload_bytes_hashed: u64,
     /// Logical object bytes newly installed.
     pub bytes_installed: u64,
-    /// Actual non-empty payload reads performed by object installation.
+    /// Actual nonempty payload, manifest-install and path-authentication reads.
     pub read_calls: u64,
-    /// Actual payload write submissions performed by object installation.
+    /// Actual payload and manifest write submissions performed by object installation.
     pub write_calls: u64,
     /// Payload bytes submitted to object writers.
     pub write_bytes: u64,
     /// File and directory durability barriers completed by object installation.
     pub fsync_calls: u64,
+    /// Independent payload, manifest install and manifest path-read components.
+    pub publication_io: GraphPublicationIo,
 }
 
 /// A graph file whose content identity was established by an upstream durable
@@ -644,9 +786,20 @@ impl GraphManifestState {
         limits: crate::GraphManifestLimits,
     ) -> Result<(Self, crate::GraphManifestResolveEvidence), GfError> {
         validate_publication_identity(lease)?;
-        let (entries, evidence) = crate::resolve_graph_manifest(&root, limits, |digest| {
-            read_graph_object_by_digest_from_cas(&lease.cas, digest, 64 * 1024 * 1024)
+        let mut read_calls = 0_u64;
+        let (entries, mut evidence) = crate::resolve_graph_manifest(&root, limits, |digest| {
+            let (bytes, io) = read_graph_object_by_digest_file_counted(
+                lease.cas.open_digest(digest)?,
+                digest,
+                64 * 1024 * 1024,
+                &lease.cas.diagnostic_root,
+            )?;
+            read_calls = read_calls
+                .checked_add(io.calls)
+                .ok_or_else(|| validation("manifest open read calls overflow"))?;
+            Ok(bytes)
         })?;
+        evidence.application_read_calls = read_calls;
         Ok((
             Self {
                 project_identity: Some(lease.cas.project.identity()),
@@ -984,7 +1137,8 @@ pub(crate) fn gc_graph_objects_guarded(
         }
     }
     let mut evidence = GraphObjectGcEvidence {
-        objects_marked: u64::try_from(marked.len()).unwrap_or(u64::MAX),
+        objects_marked: u64::try_from(marked.len())
+            .map_err(|_| validation("CAS marked object count exceeds u64"))?,
         ..GraphObjectGcEvidence::default()
     };
     for (prefix, object, identity, bytes, allocated) in candidates {
@@ -1015,8 +1169,14 @@ pub(crate) fn gc_graph_objects_guarded(
                 error,
             )
         })?;
-        evidence.objects_removed = evidence.objects_removed.saturating_add(1);
-        evidence.bytes_removed = evidence.bytes_removed.saturating_add(bytes);
+        evidence.objects_removed = evidence
+            .objects_removed
+            .checked_add(1)
+            .ok_or_else(|| validation("CAS removed object count overflows"))?;
+        evidence.bytes_removed = evidence
+            .bytes_removed
+            .checked_add(bytes)
+            .ok_or_else(|| validation("CAS removed byte count overflows"))?;
         evidence
             .removed_identity_allocated_bytes
             .insert(retained_identity_key(identity), allocated);
@@ -1105,7 +1265,7 @@ fn append_graph_files_v2_inner(
         .map_or(0, |root| root.logical_byte_length);
     for (index, relative) in sealed_paths.iter().enumerate() {
         let source = workspace.join(relative);
-        let (digest, expected_length, prehashed_bytes) = if let Some(files) = authenticated {
+        let (digest, expected_length, prehash_io) = if let Some(files) = authenticated {
             let expected = files
                 .get(index)
                 .ok_or_else(|| validation("authenticated graph inventory is incomplete"))?;
@@ -1113,32 +1273,24 @@ fn append_graph_files_v2_inner(
                 return Err(validation("authenticated graph file metadata changed"));
             }
             validate_digest(&expected.content_sha256)?;
-            (expected.content_sha256.clone(), expected.byte_length, 0)
+            (
+                expected.content_sha256.clone(),
+                expected.byte_length,
+                ReadIoEvidence::default(),
+            )
         } else {
             let metadata = fs::symlink_metadata(&source)
                 .map_err(|error| storage("inspect sealed graph file", &source, error))?;
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(validation("sealed graph path is not a regular file"));
             }
-            (
-                hex_digest(hash_regular_file(&source)?),
-                metadata.len(),
-                metadata.len(),
-            )
+            let (digest, io) = hash_regular_file(&source)?;
+            (hex_digest(digest), metadata.len(), io)
         };
         let installed =
             install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?;
-        evidence.payload_bytes_hashed = evidence
-            .payload_bytes_hashed
-            .saturating_add(prehashed_bytes)
-            .saturating_add(installed.bytes_hashed);
-        evidence.bytes_installed = evidence
-            .bytes_installed
-            .saturating_add(installed.bytes_installed);
-        evidence.read_calls = evidence.read_calls.saturating_add(installed.read_calls);
-        evidence.write_calls = evidence.write_calls.saturating_add(installed.write_calls);
-        evidence.write_bytes = evidence.write_bytes.saturating_add(installed.write_bytes);
-        evidence.fsync_calls = evidence.fsync_calls.saturating_add(installed.fsync_calls);
+        evidence.publication_io.payload.add_install(&installed)?;
+        evidence.publication_io.payload.add_read(prehash_io)?;
         let relative_path = relative
             .to_str()
             .ok_or_else(|| validation("sealed graph path is not UTF-8"))?
@@ -1150,7 +1302,9 @@ fn append_graph_files_v2_inner(
             role: crate::graph_files::infer_role(relative),
         };
         if let Some(previous) = state.entries.get(&relative_path) {
-            logical_byte_length = logical_byte_length.saturating_sub(previous.byte_length);
+            logical_byte_length = logical_byte_length
+                .checked_sub(previous.byte_length)
+                .ok_or_else(|| validation("graph files v2 logical byte total underflows"))?;
         }
         logical_byte_length = logical_byte_length
             .checked_add(entry.byte_length)
@@ -1162,18 +1316,29 @@ fn append_graph_files_v2_inner(
     tombstones.sort();
     for path in &tombstones {
         if let Some(previous) = state.entries.get(path) {
-            logical_byte_length = logical_byte_length.saturating_sub(previous.byte_length);
+            logical_byte_length = logical_byte_length
+                .checked_sub(previous.byte_length)
+                .ok_or_else(|| validation("graph files v2 logical byte total underflows"))?;
         }
     }
     // All payload objects are authenticated before any manifest node can
     // reference them. A returned error here therefore leaves only unreferenced,
     // retry-safe CAS state.
     returned_error_boundary("append:before-manifest-reference")?;
-    evidence.changed_entries_examined =
-        u64::try_from(additions.len().saturating_add(tombstones.len())).unwrap_or(u64::MAX);
+    evidence.changed_entries_examined = u64::try_from(
+        additions
+            .len()
+            .checked_add(tombstones.len())
+            .ok_or_else(|| validation("graph files v2 changed-entry count overflow"))?,
+    )
+    .map_err(|_| validation("graph files v2 changed-entry count exceeds u64"))?;
+    evidence.publication_io.publications = 1;
+    evidence.publication_io.initial_entries = u64::try_from(state.entries.len())
+        .map_err(|_| validation("graph files v2 prior-entry count exceeds u64"))?;
+    evidence.publication_io.changed_paths = evidence.changed_entries_examined;
     let mut root_digest = match state.root.as_ref() {
         Some(previous) => previous.root_node_sha256.clone(),
-        None => install_manifest_node(lease, &empty_branch(0), &mut evidence.bytes_installed)?,
+        None => install_manifest_node(lease, &empty_branch(0), &mut evidence.publication_io)?,
     };
     for entry in &additions {
         let relative_path = entry.relative_path.clone();
@@ -1183,7 +1348,7 @@ fn append_graph_files_v2_inner(
             0,
             &relative_path,
             Some(entry.clone()),
-            &mut evidence.bytes_installed,
+            &mut evidence.publication_io,
         )?
         .ok_or_else(|| validation("radix update unexpectedly removed the root"))?;
     }
@@ -1194,12 +1359,12 @@ fn append_graph_files_v2_inner(
             0,
             path,
             None,
-            &mut evidence.bytes_installed,
+            &mut evidence.publication_io,
         )?
         .unwrap_or(install_manifest_node(
             lease,
             &empty_branch(0),
-            &mut evidence.bytes_installed,
+            &mut evidence.publication_io,
         )?);
     }
     let added_new = additions
@@ -1220,9 +1385,20 @@ fn append_graph_files_v2_inner(
         format: GRAPH_FILES_V2_FORMAT.into(),
         format_version: GRAPH_FILES_V2_VERSION,
         root_node_sha256: root_digest,
-        logical_file_count: u64::try_from(logical_file_count).unwrap_or(u64::MAX),
+        logical_file_count: u64::try_from(logical_file_count)
+            .map_err(|_| validation("graph files v2 logical file count exceeds u64"))?,
         logical_byte_length,
     };
+    let totals = evidence.publication_io.totals()?;
+    evidence.payload_bytes_hashed = evidence.publication_io.payload.read_bytes;
+    evidence.bytes_installed = totals.installed_bytes;
+    evidence.read_calls = totals.read_calls;
+    evidence.write_calls = totals.write_calls;
+    evidence.write_bytes = totals.write_bytes;
+    evidence.fsync_calls = totals
+        .file_fsync_calls
+        .checked_add(totals.directory_fsync_calls)
+        .ok_or_else(|| validation("CAS synchronization total overflows"))?;
     // Commit the root-bound cache only after every payload and Patricia node
     // operation succeeded. An error above leaves both fields unchanged.
     for entry in additions {
@@ -1255,16 +1431,21 @@ pub fn migrate_graph_files_v1_to_v2(
             &entry.content_sha256,
             entry.byte_length,
         )?;
-        evidence.payload_objects = evidence.payload_objects.saturating_add(1);
+        evidence.payload_objects = evidence
+            .payload_objects
+            .checked_add(1)
+            .ok_or_else(|| validation("CAS payload object count overflows"))?;
         evidence.payload_bytes_hashed = evidence
             .payload_bytes_hashed
-            .saturating_add(installed.bytes_hashed);
+            .checked_add(installed.bytes_hashed)
+            .ok_or_else(|| validation("CAS payload byte count overflows"))?;
         evidence.bytes_installed = evidence
             .bytes_installed
-            .saturating_add(installed.bytes_installed);
+            .checked_add(installed.bytes_installed)
+            .ok_or_else(|| validation("CAS installed byte count overflows"))?;
     }
-    let mut root_digest =
-        install_manifest_node(lease, &empty_branch(0), &mut evidence.bytes_installed)?;
+    let mut publication_io = GraphPublicationIo::default();
+    let mut root_digest = install_manifest_node(lease, &empty_branch(0), &mut publication_io)?;
     for entry in &inventory.files {
         let mut canonical_entry = entry.clone();
         canonical_entry.relative_path =
@@ -1276,10 +1457,14 @@ pub fn migrate_graph_files_v1_to_v2(
             0,
             &canonical_path,
             Some(canonical_entry),
-            &mut evidence.bytes_installed,
+            &mut publication_io,
         )?
         .ok_or_else(|| validation("radix migration unexpectedly removed the root"))?;
     }
+    evidence.bytes_installed = evidence
+        .bytes_installed
+        .checked_add(publication_io.manifest.installed_bytes)
+        .ok_or_else(|| validation("migration manifest bytes overflow"))?;
     Ok((
         GraphFilesRootV2 {
             format: GRAPH_FILES_V2_FORMAT.into(),
@@ -1307,11 +1492,11 @@ fn empty_branch(depth: u8) -> GraphManifestNode {
 fn install_manifest_node(
     lease: &GraphObjectPublicationLease,
     node: &GraphManifestNode,
-    bytes_installed: &mut u64,
+    publication_io: &mut GraphPublicationIo,
 ) -> Result<String, GfError> {
     let bytes = crate::encode_graph_manifest_node(node)?;
     let (digest, evidence) = install_graph_object_bytes_with_lease(lease, &bytes)?;
-    *bytes_installed = bytes_installed.saturating_add(evidence.bytes_installed);
+    publication_io.manifest.add_install(&evidence)?;
     Ok(digest)
 }
 
@@ -1319,8 +1504,15 @@ fn load_manifest_node(
     lease: &GraphObjectPublicationLease,
     digest: &str,
     expected_depth: u8,
+    publication_io: &mut GraphPublicationIo,
 ) -> Result<GraphManifestNode, GfError> {
-    let bytes = read_graph_object_by_digest_from_cas(&lease.cas, digest, 64 * 1024 * 1024)?;
+    let (bytes, io) = read_graph_object_by_digest_file_counted(
+        lease.cas.open_digest(digest)?,
+        digest,
+        64 * 1024 * 1024,
+        &lease.cas.diagnostic_root,
+    )?;
+    publication_io.manifest_reads.add_read(io)?;
     let node = crate::decode_graph_manifest_node(&bytes)?;
     if node.depth != expected_depth {
         return Err(validation(
@@ -1336,7 +1528,7 @@ fn update_manifest_path(
     depth: u8,
     path: &str,
     replacement: Option<crate::GraphFileEntry>,
-    bytes_installed: &mut u64,
+    publication_io: &mut GraphPublicationIo,
 ) -> Result<Option<String>, GfError> {
     let path_digest = hex_digest(crate::graph_manifest::logical_path_digest(path));
     update_manifest_digest(
@@ -1346,7 +1538,7 @@ fn update_manifest_path(
         path,
         &path_digest,
         replacement,
-        bytes_installed,
+        publication_io,
     )
 }
 
@@ -1358,7 +1550,7 @@ fn update_manifest_digest(
     path: &str,
     path_digest: &str,
     replacement: Option<crate::GraphFileEntry>,
-    bytes_installed: &mut u64,
+    publication_io: &mut GraphPublicationIo,
 ) -> Result<Option<String>, GfError> {
     let Some(current_digest) = current_digest else {
         return replacement
@@ -1371,12 +1563,12 @@ fn update_manifest_digest(
                         path_digest,
                         vec![entry],
                     ),
-                    bytes_installed,
+                    publication_io,
                 )
             })
             .transpose();
     };
-    let mut node = load_manifest_node(lease, current_digest, depth)?;
+    let mut node = load_manifest_node(lease, current_digest, depth, publication_io)?;
     let start = usize::from(depth);
     let common = node
         .prefix
@@ -1394,7 +1586,7 @@ fn update_manifest_digest(
         let old_edge = node.prefix[common..=common].to_owned();
         node.depth = split_depth + 1;
         node.prefix = node.prefix[common + 1..].to_owned();
-        let old_digest = install_manifest_node(lease, &node, bytes_installed)?;
+        let old_digest = install_manifest_node(lease, &node, publication_io)?;
         let new_edge = path_digest[usize::from(split_depth)..=usize::from(split_depth)].to_owned();
         if old_edge == new_edge {
             return Err(validation("Patricia split did not diverge"));
@@ -1407,13 +1599,13 @@ fn update_manifest_digest(
                 path_digest,
                 vec![entry],
             ),
-            bytes_installed,
+            publication_io,
         )?;
         let children = BTreeMap::from([(old_edge, old_digest), (new_edge, new_digest)]);
         return install_manifest_node(
             lease,
             &branch_node(depth, &path_digest[start..start + common], children),
-            bytes_installed,
+            publication_io,
         )
         .map(Some);
     }
@@ -1451,7 +1643,7 @@ fn update_manifest_digest(
                 install_manifest_node(
                     lease,
                     &leaf_node(depth, &node.prefix, path_digest, entries),
-                    bytes_installed,
+                    publication_io,
                 )
                 .map(Some)
             }
@@ -1469,7 +1661,7 @@ fn update_manifest_digest(
                 path,
                 path_digest,
                 replacement,
-                bytes_installed,
+                publication_io,
             )?;
             match child {
                 Some(digest) => {
@@ -1483,15 +1675,20 @@ fn update_manifest_digest(
                 0 => Ok(None),
                 1 => {
                     let (edge, child_digest) = children.into_iter().next().expect("one child");
-                    let mut child = load_manifest_node(lease, &child_digest, payload_depth + 1)?;
+                    let mut child = load_manifest_node(
+                        lease,
+                        &child_digest,
+                        payload_depth + 1,
+                        publication_io,
+                    )?;
                     child.depth = depth;
                     child.prefix = format!("{}{}{}", node.prefix, edge, child.prefix);
-                    install_manifest_node(lease, &child, bytes_installed).map(Some)
+                    install_manifest_node(lease, &child, publication_io).map(Some)
                 }
                 _ => install_manifest_node(
                     lease,
                     &branch_node(depth, &node.prefix, children),
-                    bytes_installed,
+                    publication_io,
                 )
                 .map(Some),
             }
@@ -1571,7 +1768,8 @@ fn install_graph_object_bytes_with_lease(
     bytes: &[u8],
 ) -> Result<(String, GraphObjectInstallEvidence), GfError> {
     let digest = hex_digest(Sha256::digest(bytes).into());
-    let expected_length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let expected_length =
+        u64::try_from(bytes.len()).map_err(|_| validation("graph object bytes exceed u64"))?;
     install_object(&lease.cas, &digest, expected_length, false, |file| {
         file.write_all(bytes).map_err(|error| {
             storage(
@@ -1591,13 +1789,17 @@ fn install_graph_object_bytes_with_lease(
         // file verification below is an application-observed payload read.
         Ok(0)
     })
-    .map(|mut evidence| {
-        if !evidence.reused_existing {
+    .and_then(|mut evidence| {
+        if evidence.attempted_install {
             evidence.write_bytes = expected_length;
             evidence.write_calls = u64::from(!bytes.is_empty());
-            evidence.fsync_calls = evidence.fsync_calls.saturating_add(1);
+            evidence.file_fsync_calls = 1;
+            evidence.fsync_calls = evidence
+                .fsync_calls
+                .checked_add(1)
+                .ok_or_else(|| validation("CAS fsync count overflows"))?;
         }
-        (digest, evidence)
+        Ok((digest, evidence))
     })
 }
 
@@ -1631,136 +1833,161 @@ fn install_graph_object_file_with_lease(
     let read_calls = std::cell::Cell::new(0_u64);
     let write_calls = std::cell::Cell::new(0_u64);
     let file_sync_calls = std::cell::Cell::new(0_u64);
-    let result = install_object(
-        &lease.cas,
-        expected_digest,
-        expected_length,
-        true,
-        |output| {
-            let cache_window =
-                graphforge_filesystem::cache_release_window_for_streams(2).map_err(|error| {
-                    storage(
-                        "derive graph object cache budget",
-                        &lease.cas.diagnostic_root,
-                        error,
-                    )
-                })?;
-            let input = File::open(source)
-                .map_err(|error| storage("open graph object source", source, error))?;
-            let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-                input,
-                cache_window,
-                graphforge_filesystem::FileCacheReleaseTracker::default(),
-            )
-            .map_err(|error| storage("open bounded graph object source", source, error))?;
-            #[cfg(unix)]
-            let mut bounded_output =
-                graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
-                    output.try_clone().map_err(|error| {
+    let result =
+        install_object(
+            &lease.cas,
+            expected_digest,
+            expected_length,
+            true,
+            |output| {
+                let cache_window = graphforge_filesystem::cache_release_window_for_streams(2)
+                    .map_err(|error| {
                         storage(
-                            "clone temporary graph object",
+                            "derive graph object cache budget",
                             &lease.cas.diagnostic_root,
                             error,
                         )
-                    })?,
+                    })?;
+                let input = File::open(source)
+                    .map_err(|error| storage("open graph object source", source, error))?;
+                let mut input = graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                    input,
                     cache_window,
+                    graphforge_filesystem::FileCacheReleaseTracker::default(),
                 )
-                .map_err(|error| {
-                    storage(
-                        "open bounded temporary graph object",
-                        &lease.cas.diagnostic_root,
-                        error,
+                .map_err(|error| storage("open bounded graph object source", source, error))?;
+                #[cfg(unix)]
+                let mut bounded_output =
+                    graphforge_filesystem::DurableFileCacheWriter::with_window_bytes(
+                        output.try_clone().map_err(|error| {
+                            storage(
+                                "clone temporary graph object",
+                                &lease.cas.diagnostic_root,
+                                error,
+                            )
+                        })?,
+                        cache_window,
                     )
-                })?;
-            let mut hasher = Sha256::new();
-            let mut total = 0_u64;
-            let mut buffer = vec![0_u8; BUFFER_BYTES];
-            let copied = (|| -> Result<u64, GfError> {
-                loop {
-                    let read = input
-                        .read(&mut buffer)
-                        .map_err(|error| storage("read graph object source", source, error))?;
-                    if read == 0 {
-                        break;
+                    .map_err(|error| {
+                        storage(
+                            "open bounded temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                let mut hasher = Sha256::new();
+                let mut total = 0_u64;
+                let mut buffer = vec![0_u8; BUFFER_BYTES];
+                let copied =
+                    (|| -> Result<u64, GfError> {
+                        loop {
+                            let read = input.read(&mut buffer).map_err(|error| {
+                                storage("read graph object source", source, error)
+                            })?;
+                            if read == 0 {
+                                break;
+                            }
+                            read_calls.set(
+                                read_calls.get().checked_add(1).ok_or_else(|| {
+                                    validation("object install read calls overflow")
+                                })?,
+                            );
+                            #[cfg(unix)]
+                            bounded_output.write_all(&buffer[..read]).map_err(|error| {
+                                storage(
+                                    "write temporary graph object",
+                                    &lease.cas.diagnostic_root,
+                                    error,
+                                )
+                            })?;
+                            #[cfg(windows)]
+                            output.write_all(&buffer[..read]).map_err(|error| {
+                                storage(
+                                    "write temporary graph object",
+                                    &lease.cas.diagnostic_root,
+                                    error,
+                                )
+                            })?;
+                            write_calls.set(write_calls.get().checked_add(1).ok_or_else(|| {
+                                validation("object install write calls overflow")
+                            })?);
+                            hasher.update(&buffer[..read]);
+                            total = total
+                                .checked_add(u64::try_from(read).map_err(|_| {
+                                    validation("object install read length exceeds u64")
+                                })?)
+                                .ok_or_else(|| validation("object install byte count overflows"))?;
+                        }
+                        if total != expected_length
+                            || hex_digest(hasher.finalize().into()) != expected_digest
+                        {
+                            return Err(validation(
+                                "graph object source digest or length changed during install",
+                            ));
+                        }
+                        Ok(total)
+                    })();
+                let released = input
+                    .finish()
+                    .map_err(|error| storage("release graph object source cache", source, error));
+                let total = match (copied, released) {
+                    (Ok(total), Ok(_)) => total,
+                    (Ok(_), Err(release)) => return Err(release),
+                    (Err(primary), Ok(_)) => return Err(primary),
+                    (Err(primary), Err(release)) => {
+                        return Err(storage(
+                            "copy and release graph object source",
+                            source,
+                            format!("{primary}; cache release also failed: {release}"),
+                        ));
                     }
-                    read_calls.set(read_calls.get().saturating_add(1));
-                    #[cfg(unix)]
-                    bounded_output.write_all(&buffer[..read]).map_err(|error| {
-                        storage(
-                            "write temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
-                    #[cfg(windows)]
-                    output.write_all(&buffer[..read]).map_err(|error| {
-                        storage(
-                            "write temporary graph object",
-                            &lease.cas.diagnostic_root,
-                            error,
-                        )
-                    })?;
-                    write_calls.set(write_calls.get().saturating_add(1));
-                    hasher.update(&buffer[..read]);
-                    total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-                }
-                if total != expected_length
-                    || hex_digest(hasher.finalize().into()) != expected_digest
+                };
+                #[cfg(unix)]
                 {
-                    return Err(validation(
-                        "graph object source digest or length changed during install",
-                    ));
+                    bounded_output.sync_all_and_release().map_err(|error| {
+                        storage(
+                            "fsync temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                    file_sync_calls.set(bounded_output.evidence().sync_operations);
+                }
+                #[cfg(windows)]
+                {
+                    output.sync_all().map_err(|error| {
+                        storage(
+                            "fsync temporary graph object",
+                            &lease.cas.diagnostic_root,
+                            error,
+                        )
+                    })?;
+                    file_sync_calls.set(1);
                 }
                 Ok(total)
-            })();
-            let released = input
-                .finish()
-                .map_err(|error| storage("release graph object source cache", source, error));
-            let total = match (copied, released) {
-                (Ok(total), Ok(_)) => total,
-                (Ok(_), Err(release)) => return Err(release),
-                (Err(primary), Ok(_)) => return Err(primary),
-                (Err(primary), Err(release)) => {
-                    return Err(storage(
-                        "copy and release graph object source",
-                        source,
-                        format!("{primary}; cache release also failed: {release}"),
-                    ));
-                }
-            };
-            #[cfg(unix)]
-            {
-                bounded_output.sync_all_and_release().map_err(|error| {
-                    storage(
-                        "fsync temporary graph object",
-                        &lease.cas.diagnostic_root,
-                        error,
-                    )
-                })?;
-                file_sync_calls.set(bounded_output.evidence().sync_operations);
-            }
-            #[cfg(windows)]
-            {
-                output.sync_all().map_err(|error| {
-                    storage(
-                        "fsync temporary graph object",
-                        &lease.cas.diagnostic_root,
-                        error,
-                    )
-                })?;
-                file_sync_calls.set(1);
-            }
-            Ok(total)
-        },
-    );
-    result.map(|mut evidence| {
-        if !evidence.reused_existing {
-            evidence.read_calls = evidence.read_calls.saturating_add(read_calls.get());
-            evidence.write_calls = evidence.write_calls.saturating_add(write_calls.get());
-            evidence.write_bytes = evidence.write_bytes.saturating_add(expected_length);
-            evidence.fsync_calls = evidence.fsync_calls.saturating_add(file_sync_calls.get());
+            },
+        );
+    result.and_then(|mut evidence| {
+        if evidence.attempted_install {
+            evidence.read_calls = evidence
+                .read_calls
+                .checked_add(read_calls.get())
+                .ok_or_else(|| validation("object install read calls overflow"))?;
+            evidence.write_calls = evidence
+                .write_calls
+                .checked_add(write_calls.get())
+                .ok_or_else(|| validation("object install write calls overflow"))?;
+            evidence.write_bytes = evidence
+                .write_bytes
+                .checked_add(expected_length)
+                .ok_or_else(|| validation("object install write bytes overflow"))?;
+            evidence.file_fsync_calls = file_sync_calls.get();
+            evidence.fsync_calls = evidence
+                .fsync_calls
+                .checked_add(file_sync_calls.get())
+                .ok_or_else(|| validation("CAS file synchronization count overflows"))?;
         }
-        evidence
+        Ok(evidence)
     })
 }
 
@@ -1822,25 +2049,50 @@ pub fn materialize_graph_objects(
         let materialized = materialize_from_cas(&lease.cas, &target_directory, entry)?;
         evidence.application_read_bytes = evidence
             .application_read_bytes
-            .saturating_add(materialized.read_bytes);
+            .checked_add(materialized.read_bytes)
+            .ok_or_else(|| validation("object hydration read byte count overflows"))?;
         evidence.application_read_calls = evidence
             .application_read_calls
-            .saturating_add(materialized.read_calls);
+            .checked_add(materialized.read_calls)
+            .ok_or_else(|| validation("object hydration read call count overflows"))?;
         evidence.application_write_bytes = evidence
             .application_write_bytes
-            .saturating_add(materialized.write_bytes);
+            .checked_add(materialized.write_bytes)
+            .ok_or_else(|| validation("object hydration write byte count overflows"))?;
         evidence.application_write_calls = evidence
             .application_write_calls
-            .saturating_add(materialized.write_calls);
+            .checked_add(materialized.write_calls)
+            .ok_or_else(|| validation("object hydration write call count overflows"))?;
         evidence.fsync_calls = evidence
             .fsync_calls
-            .saturating_add(materialized.fsync_calls);
+            .checked_add(materialized.fsync_calls)
+            .ok_or_else(|| validation("object hydration fsync count overflows"))?;
+        evidence.file_fsync_calls = evidence
+            .file_fsync_calls
+            .checked_add(materialized.file_fsync_calls)
+            .ok_or_else(|| validation("object hydration file barrier count overflows"))?;
+        evidence.directory_fsync_calls = evidence
+            .directory_fsync_calls
+            .checked_add(materialized.directory_fsync_calls)
+            .ok_or_else(|| validation("object hydration directory barrier count overflows"))?;
         if materialized.copied {
-            evidence.files_copied = evidence.files_copied.saturating_add(1);
-            evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+            evidence.files_copied = evidence
+                .files_copied
+                .checked_add(1)
+                .ok_or_else(|| validation("object hydration copied-file count overflows"))?;
+            evidence.bytes_copied = evidence
+                .bytes_copied
+                .checked_add(entry.byte_length)
+                .ok_or_else(|| validation("object hydration copied-byte count overflows"))?;
         } else {
-            evidence.files_reused = evidence.files_reused.saturating_add(1);
-            evidence.bytes_reused = evidence.bytes_reused.saturating_add(entry.byte_length);
+            evidence.files_reused = evidence
+                .files_reused
+                .checked_add(1)
+                .ok_or_else(|| validation("object hydration reused-file count overflows"))?;
+            evidence.bytes_reused = evidence
+                .bytes_reused
+                .checked_add(entry.byte_length)
+                .ok_or_else(|| validation("object hydration reused-byte count overflows"))?;
         }
     }
     lease.revalidate_for_publish()?;
@@ -1927,6 +2179,8 @@ struct MaterializeIoEvidence {
     write_bytes: u64,
     write_calls: u64,
     fsync_calls: u64,
+    file_fsync_calls: u64,
+    directory_fsync_calls: u64,
 }
 
 fn requires_single_link_materialization(relative_path: &str) -> bool {
@@ -2039,6 +2293,7 @@ fn copy_single_link_materialized_object(
             )
         })?;
         io.fsync_calls = output.evidence().sync_operations;
+        io.file_fsync_calls = io.fsync_calls;
         drop(output.into_file());
         parent
             .replace_child(&temporary_name, output_identity, name)
@@ -2057,7 +2312,14 @@ fn copy_single_link_materialized_object(
                 error,
             )
         })?;
-        io.fsync_calls = io.fsync_calls.saturating_add(1);
+        io.fsync_calls = io
+            .fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("object hydration fsync count overflows"))?;
+        io.directory_fsync_calls = io
+            .directory_fsync_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("object hydration directory barrier count overflows"))?;
         let installed = parent.open_child_file(name).map_err(|error| {
             storage(
                 "open private materialization file",
@@ -2083,8 +2345,7 @@ fn copy_single_link_materialized_object(
             entry.byte_length,
             &cas.diagnostic_root,
         )?;
-        io.read_bytes = io.read_bytes.saturating_add(verified.bytes);
-        io.read_calls = io.read_calls.saturating_add(verified.calls);
+        add_materialization_verification(&mut io, verified)?;
         io.copied = true;
         Ok(io)
     })();
@@ -2094,6 +2355,21 @@ fn copy_single_link_materialized_object(
         let _ = parent.sync();
     }
     result
+}
+
+fn add_materialization_verification(
+    io: &mut MaterializeIoEvidence,
+    verified: ReadIoEvidence,
+) -> Result<(), GfError> {
+    io.read_bytes = io
+        .read_bytes
+        .checked_add(verified.bytes)
+        .ok_or_else(|| validation("object hydration verification bytes overflow"))?;
+    io.read_calls = io
+        .read_calls
+        .checked_add(verified.calls)
+        .ok_or_else(|| validation("object hydration verification calls overflow"))?;
+    Ok(())
 }
 
 fn copy_and_authenticate_materialized_object(
@@ -2114,11 +2390,15 @@ fn copy_and_authenticate_materialized_object(
         if read == 0 {
             break;
         }
-        read_calls = read_calls.saturating_add(1);
+        read_calls = read_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("object hydration read calls overflow"))?;
         output.write_all(&buffer[..read]).map_err(|error| {
             storage("write private materialization file", diagnostic_root, error)
         })?;
-        write_calls = write_calls.saturating_add(1);
+        write_calls = write_calls
+            .checked_add(1)
+            .ok_or_else(|| validation("object hydration write calls overflow"))?;
         digest.update(&buffer[..read]);
         length = length
             .checked_add(read as u64)
@@ -2136,6 +2416,8 @@ fn copy_and_authenticate_materialized_object(
         write_bytes: length,
         write_calls,
         fsync_calls: 0,
+        file_fsync_calls: 0,
+        directory_fsync_calls: 0,
     })
 }
 
@@ -2718,11 +3000,21 @@ fn read_graph_object_by_digest_from_cas(
 }
 
 fn read_graph_object_by_digest_file(
-    mut file: File,
+    file: File,
     digest: &str,
     max_length: u64,
     diagnostic_root: &Path,
 ) -> Result<Vec<u8>, GfError> {
+    read_graph_object_by_digest_file_counted(file, digest, max_length, diagnostic_root)
+        .map(|(bytes, _)| bytes)
+}
+
+fn read_graph_object_by_digest_file_counted(
+    mut file: File,
+    digest: &str,
+    max_length: u64,
+    diagnostic_root: &Path,
+) -> Result<(Vec<u8>, ReadIoEvidence), GfError> {
     let metadata = file
         .metadata()
         .map_err(|error| storage("inspect stable graph object", diagnostic_root, error))?;
@@ -2732,12 +3024,30 @@ fn read_graph_object_by_digest_file(
         ));
     }
     let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes)
-        .map_err(|error| storage("read stable graph object", diagnostic_root, error))?;
+    let mut io = ReadIoEvidence::default();
+    let mut buffer = vec![0; BUFFER_BYTES];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| storage("read stable graph object", diagnostic_root, error))?;
+        if read == 0 {
+            break;
+        }
+        io.bytes = io
+            .bytes
+            .checked_add(read as u64)
+            .filter(|total| *total <= max_length)
+            .ok_or_else(|| validation("manifest read exceeds admitted byte bound"))?;
+        io.calls = io
+            .calls
+            .checked_add(1)
+            .ok_or_else(|| validation("manifest read call count overflows"))?;
+        bytes.extend_from_slice(&buffer[..read]);
+    }
     if hex_digest(Sha256::digest(&bytes).into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
-    Ok(bytes)
+    Ok((bytes, io))
 }
 
 pub(crate) fn read_graph_object_by_digest_with_lease(
@@ -2817,18 +3127,29 @@ where
         digest,
         expected_length,
     )?;
+    let bytes_hashed = [
+        preseal_io.bytes,
+        sealed_bytes_hashed,
+        if installed { 0 } else { expected_length },
+    ]
+    .into_iter()
+    .try_fold(bytes_hashed, u64::checked_add)
+    .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
+    let read_calls = preseal_io
+        .calls
+        .checked_add(concurrent_io.calls)
+        .ok_or_else(|| validation("graph object read call count overflows"))?;
     Ok(GraphObjectInstallEvidence {
-        bytes_hashed: bytes_hashed
-            .saturating_add(preseal_io.bytes)
-            .saturating_add(sealed_bytes_hashed)
-            .saturating_add(if installed { 0 } else { expected_length }),
+        bytes_hashed,
         bytes_installed: if installed { expected_length } else { 0 },
         reused_existing: !installed,
-        read_calls: preseal_io.calls.saturating_add(concurrent_io.calls),
+        attempted_install: true,
+        read_calls,
         // The source-copy/authentication submissions are added by the caller.
-        // Fresh installation always durably synchronizes the destination bucket
-        // and temporary namespace; reuse performs neither operation here.
-        fsync_calls: if installed { 2 } else { 0 },
+        // Finalization synchronizes both namespaces even if a concurrent winner
+        // supplied the retained object. Early reuse returns before this path.
+        fsync_calls: 2,
+        directory_fsync_calls: 2,
         ..GraphObjectInstallEvidence::default()
     })
 }
@@ -2920,8 +3241,14 @@ fn try_reuse_existing_object(
         &cas.diagnostic_root,
     )?;
     let mut evidence = reused_object_evidence(expected_length, io);
-    evidence.bytes_hashed = adoption_io.bytes.saturating_add(io.bytes);
-    evidence.read_calls = adoption_io.calls.saturating_add(io.calls);
+    evidence.bytes_hashed = adoption_io
+        .bytes
+        .checked_add(io.bytes)
+        .ok_or_else(|| validation("reused object hashed byte count overflows"))?;
+    evidence.read_calls = adoption_io
+        .calls
+        .checked_add(io.calls)
+        .ok_or_else(|| validation("reused object read call count overflows"))?;
     Ok(Some(evidence))
 }
 
@@ -3030,11 +3357,24 @@ fn finalize_temporary_object(
     Ok((
         installed,
         sealed_bytes_hashed,
-        ReadIoEvidence {
-            bytes: sealed_io.bytes.saturating_add(concurrent_io.bytes),
-            calls: sealed_io.calls.saturating_add(concurrent_io.calls),
-        },
+        checked_read_io_sum(sealed_io, concurrent_io)?,
     ))
+}
+
+fn checked_read_io_sum(
+    left: ReadIoEvidence,
+    right: ReadIoEvidence,
+) -> Result<ReadIoEvidence, GfError> {
+    Ok(ReadIoEvidence {
+        bytes: left
+            .bytes
+            .checked_add(right.bytes)
+            .ok_or_else(|| validation("sealed object read byte count overflows"))?,
+        calls: left
+            .calls
+            .checked_add(right.calls)
+            .ok_or_else(|| validation("sealed object read call count overflows"))?,
+    })
 }
 
 fn validate_sealed_temporary(
@@ -3155,8 +3495,17 @@ fn verify_file_counted(
             if read == 0 {
                 break;
             }
-            io.bytes = io.bytes.saturating_add(read as u64);
-            io.calls = io.calls.saturating_add(1);
+            io.bytes = io
+                .bytes
+                .checked_add(
+                    u64::try_from(read)
+                        .map_err(|_| validation("object authentication read length exceeds u64"))?,
+                )
+                .ok_or_else(|| validation("object authentication read bytes overflow"))?;
+            io.calls = io
+                .calls
+                .checked_add(1)
+                .ok_or_else(|| validation("object authentication read calls overflow"))?;
             hasher.update(&buffer[..read]);
         }
         if hex_digest(hasher.finalize().into()) != digest {
@@ -3209,8 +3558,15 @@ fn verify_stream_counted(
         if read == 0 {
             break;
         }
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        calls = calls.saturating_add(1);
+        total = total
+            .checked_add(
+                u64::try_from(read)
+                    .map_err(|_| validation("object stream read size exceeds u64"))?,
+            )
+            .ok_or_else(|| validation("object stream byte count overflows"))?;
+        calls = calls
+            .checked_add(1)
+            .ok_or_else(|| validation("object stream call count overflows"))?;
         hasher.update(&buffer[..read]);
     }
     if total != expected_length || hex_digest(hasher.finalize().into()) != digest {
@@ -3290,9 +3646,10 @@ fn seal_graph_object(file: &File, object_path: &Path, diagnostic: &Path) -> Resu
     Ok(())
 }
 
-fn hash_regular_file(path: &Path) -> Result<[u8; 32], GfError> {
+fn hash_regular_file(path: &Path) -> Result<([u8; 32], ReadIoEvidence), GfError> {
     let mut file =
         File::open(path).map_err(|error| storage("open sealed graph file", path, error))?;
+    let mut io = ReadIoEvidence::default();
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; BUFFER_BYTES];
     loop {
@@ -3302,9 +3659,17 @@ fn hash_regular_file(path: &Path) -> Result<[u8; 32], GfError> {
         if read == 0 {
             break;
         }
+        io.bytes = io
+            .bytes
+            .checked_add(read as u64)
+            .ok_or_else(|| validation("source authentication bytes overflow"))?;
+        io.calls = io
+            .calls
+            .checked_add(1)
+            .ok_or_else(|| validation("source authentication calls overflow"))?;
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher.finalize().into())
+    Ok((hasher.finalize().into(), io))
 }
 
 fn validate_logical_path(path: &Path) -> Result<(), GfError> {
@@ -4217,6 +4582,8 @@ mod tests {
         assert_eq!(evidence.application_write_bytes, nonempty_bytes);
         assert_eq!(evidence.application_write_calls, nonempty_files);
         assert_eq!(evidence.fsync_calls, inventory.file_count * 2);
+        assert_eq!(evidence.file_fsync_calls, inventory.file_count);
+        assert_eq!(evidence.directory_fsync_calls, inventory.file_count);
         for entry in &inventory.files {
             let file = File::open(target.join(&entry.relative_path)).unwrap();
             assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
@@ -4256,6 +4623,64 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_winner_reuse_retains_the_losing_install_work() {
+        for file_backed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let payload = b"concurrent payload";
+            let digest = hex_digest(Sha256::digest(payload).into());
+            let winner_root = root.path().to_path_buf();
+            BEFORE_OBJECT_LINK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let (_, winner) = install_graph_object_bytes(&winner_root, payload).unwrap();
+                    assert!(!winner.reused_existing);
+                    assert!(winner.attempted_install);
+                    assert_eq!(winner.fsync_calls, 3);
+                }));
+            });
+            let loser = if file_backed {
+                let path = source.path().join("payload");
+                fs::write(&path, payload).unwrap();
+                install_graph_object_file(root.path(), &path, &digest, payload.len() as u64)
+                    .unwrap()
+            } else {
+                install_graph_object_bytes(root.path(), payload).unwrap().1
+            };
+            assert!(loser.reused_existing);
+            assert!(loser.attempted_install);
+            assert_eq!(loser.bytes_installed, 0);
+            assert_eq!(loser.write_bytes, payload.len() as u64);
+            assert_eq!(loser.write_calls, 1);
+            assert_eq!(loser.file_fsync_calls, 1);
+            assert_eq!(loser.directory_fsync_calls, 2);
+            assert_eq!(loser.fsync_calls, 3);
+            // Windows authenticates the protected sealed handle after closing
+            // the writable handle, in addition to a file source-copy pass.
+            let read_passes = 2 + u64::from(cfg!(windows) && file_backed);
+            assert_eq!(loser.read_calls, read_passes);
+            assert_eq!(loser.bytes_hashed, read_passes * payload.len() as u64);
+            assert_eq!(
+                read_graph_object(root.path(), &digest, payload.len() as u64).unwrap(),
+                payload
+            );
+            let (_, early_reuse) = install_graph_object_bytes(root.path(), payload).unwrap();
+            assert!(early_reuse.reused_existing);
+            assert!(!early_reuse.attempted_install);
+            assert_eq!(early_reuse.write_bytes, 0);
+            assert_eq!(early_reuse.fsync_calls, 0);
+            assert!(
+                root.path()
+                    .join(GRAPH_OBJECTS_DIR)
+                    .join(TEMP_DIR)
+                    .read_dir()
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn file_install_receipts_count_actual_cache_window_synchronizations() {
         let window = graphforge_filesystem::cache_release_window_for_streams(2)
             .unwrap()
@@ -4278,6 +4703,8 @@ mod tests {
                 "payload bytes {bytes}"
             );
             assert!(!installed.reused_existing);
+            assert_eq!(installed.file_fsync_calls, 1 + rollovers);
+            assert_eq!(installed.directory_fsync_calls, 2);
             assert_eq!(installed.bytes_installed, bytes);
             assert_eq!(
                 read_graph_object(root.path(), &digest, bytes).unwrap(),
@@ -4287,6 +4714,8 @@ mod tests {
             let reused = install_graph_object_file(root.path(), &source, &digest, bytes).unwrap();
             assert!(reused.reused_existing);
             assert_eq!(reused.fsync_calls, 0);
+            assert_eq!(reused.file_fsync_calls, 0);
+            assert_eq!(reused.directory_fsync_calls, 0);
             assert_eq!(reused.write_bytes, 0);
             assert!(
                 root.path()
@@ -4639,6 +5068,13 @@ mod tests {
             GraphManifestState::open(&lease, root.clone(), crate::GraphManifestLimits::default())
                 .unwrap();
         assert_eq!(open_evidence.entries_examined, 1);
+        assert_eq!(open_evidence.application_read_calls, 1);
+        assert_eq!(
+            open_evidence.decoded_bytes,
+            fs::metadata(graph_object_path(container.path(), &root.root_node_sha256).unwrap())
+                .unwrap()
+                .len()
+        );
         let (_, append_evidence) = append_graph_files_v2(
             &lease,
             workspace.path(),
@@ -4697,6 +5133,92 @@ mod tests {
         assert_eq!(resolved.len(), FILES);
         assert!(evidence.segments_examined <= (2 * FILES - 1) as u64);
         assert!(evidence.work_units <= (4 * FILES - 2) as u64);
+    }
+
+    #[test]
+    fn publication_components_measure_fresh_reuse_and_path_copy_work() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let relative_path = PathBuf::from("payload.parquet");
+        let sealed = |payload: &[u8]| {
+            fs::write(workspace.path().join(&relative_path), payload).unwrap();
+            vec![AuthenticatedGraphFile {
+                relative_path: relative_path.clone(),
+                byte_length: payload.len() as u64,
+                content_sha256: hex_digest(Sha256::digest(payload).into()),
+            }]
+        };
+        let files = sealed(b"first");
+        let mut state = GraphManifestState::empty();
+        let (first_root, fresh) =
+            append_authenticated_graph_files_v2(&lease, workspace.path(), &mut state, &files, &[])
+                .unwrap();
+        assert_eq!(fresh.publication_io.payload.read_bytes, 5);
+        assert_eq!(fresh.publication_io.payload.write_bytes, 5);
+        assert_eq!(fresh.publication_io.payload.installed_objects, 1);
+        // Empty branch, depth-one leaf, and collapsed root leaf are distinct
+        // immutable objects. Both existing nodes are read during the update.
+        assert_eq!(fresh.publication_io.manifest.installed_objects, 3);
+        assert_eq!(fresh.publication_io.manifest.reused_objects, 0);
+        assert_eq!(fresh.publication_io.manifest_reads.read_calls, 2);
+        assert_eq!(fresh.fsync_calls, 12);
+
+        let (_, replay) = append_authenticated_graph_files_v2(
+            &lease,
+            workspace.path(),
+            &mut GraphManifestState::empty(),
+            &files,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(replay.publication_io.payload.reused_objects, 1);
+        assert_eq!(replay.publication_io.payload.read_bytes, 5);
+        assert_eq!(replay.publication_io.manifest.reused_objects, 3);
+        assert_eq!(replay.publication_io.manifest_reads.read_calls, 2);
+        assert_eq!(replay.write_bytes, 0);
+        assert_eq!(replay.fsync_calls, 0);
+        assert_eq!(replay.bytes_installed, 0);
+
+        let changed = sealed(b"second");
+        let (second_root, update) = append_authenticated_graph_files_v2(
+            &lease,
+            workspace.path(),
+            &mut state,
+            &changed,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(update.publication_io.payload.installed_objects, 1);
+        assert_eq!(update.publication_io.manifest.installed_objects, 1);
+        assert_eq!(update.publication_io.manifest_reads.read_calls, 1);
+        assert_eq!(update.fsync_calls, 6);
+        assert_ne!(first_root, second_root);
+        for (root, expected) in [
+            (first_root, b"first".as_slice()),
+            (second_root, b"second".as_slice()),
+        ] {
+            let (reopened, _) =
+                GraphManifestState::open(&lease, root, crate::GraphManifestLimits::default())
+                    .unwrap();
+            let entry = reopened.entries().next().unwrap();
+            assert_eq!(
+                read_graph_object(container.path(), &entry.content_sha256, entry.byte_length)
+                    .unwrap(),
+                expected
+            );
+        }
+        for evidence in [fresh, replay, update] {
+            let totals = evidence.publication_io.totals().unwrap();
+            assert_eq!(totals.read_calls, evidence.read_calls);
+            assert_eq!(totals.write_calls, evidence.write_calls);
+            assert_eq!(totals.write_bytes, evidence.write_bytes);
+            assert_eq!(totals.installed_bytes, evidence.bytes_installed);
+            assert_eq!(
+                totals.file_fsync_calls + totals.directory_fsync_calls,
+                evidence.fsync_calls
+            );
+        }
     }
 
     #[test]

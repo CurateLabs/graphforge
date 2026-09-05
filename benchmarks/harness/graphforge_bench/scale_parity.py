@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -301,8 +302,58 @@ def coverage_map() -> dict[str, str]:
     }
 
 
-def validate_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -> None:
-    """Ensure preserved legacy certification evidence still passes the historical validator."""
+def read_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -> NormalizedEvidence:
+    """Read a preserved lifecycle fixture; this does not authenticate certification."""
+    try:
+        document = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ParityError("historical lifecycle fixture is unreadable") from error
+    if not isinstance(document, dict) or document.get("schema") != LEGACY_CERT_SCHEMA:
+        raise ParityError("historical lifecycle fixture requires the legacy schema")
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None
+        or document.get("git_sha") != expected_sha
+    ):
+        raise ParityError("historical lifecycle fixture git_sha mismatch")
+    run = document.get("run")
+    if not isinstance(run, dict) or type(run.get("scale")) is not int or run["scale"] <= 0:
+        raise ParityError("historical lifecycle fixture requires a positive scale")
+    if document.get("result") not in ("pass", "fail"):
+        raise ParityError("historical lifecycle fixture requires pass/fail result")
+    phases = document.get("phases")
+    if not isinstance(phases, list) or any(not isinstance(phase, dict) for phase in phases):
+        raise ParityError("historical lifecycle fixture requires phase objects")
+    expected_ids = set(_legacy_cert_phase_mapping(load_accepted_differences()))
+    ids = [phase.get("id") for phase in phases]
+    if (
+        any(not isinstance(phase_id, str) for phase_id in ids)
+        or len(ids) != len(expected_ids)
+        or set(ids) != expected_ids
+    ):
+        raise ParityError("historical lifecycle fixture requires each legacy phase exactly once")
+    for phase in phases:
+        if phase.get("status") not in ("pass", "fail"):
+            raise ParityError("historical lifecycle fixture requires pass/fail phase status")
+        for metric in ("elapsed_ms", "rss_peak_bytes"):
+            if type(phase.get(metric)) is not int or phase[metric] < 0:
+                raise ParityError(f"historical lifecycle fixture has invalid {metric}")
+    if document["result"] == "pass" and any(phase["status"] != "pass" for phase in phases):
+        raise ParityError("historical lifecycle result contradicts a failed phase")
+    return normalize_legacy_cert_lifecycle(document)
+
+
+def validate_historical_legacy_cert(
+    evidence_path: Path,
+    *,
+    expected_sha: str,
+    provider_result_path: Path | None = None,
+    provider_result_sha256: str | None = None,
+) -> None:
+    """Validate legacy evidence only when an external provider result authenticates it."""
+    if provider_result_path is None or provider_result_sha256 is None:
+        raise ParityError(
+            "historical certification evidence requires an external provider-result anchor"
+        )
     import importlib.util
 
     script = workspace_root().parent / "scripts" / "ci" / "validate-g500-certification.py"
@@ -311,10 +362,17 @@ def validate_historical_legacy_cert(evidence_path: Path, *, expected_sha: str) -
         raise ParityError("unable to load validate-g500-certification.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    document = json.loads(evidence_path.read_text(encoding="utf-8"))
-    if not isinstance(document, dict):
-        raise ParityError("legacy certification fixture must be a JSON object")
-    module.validate(document, expected_sha)
+    try:
+        module.validate(
+            evidence_path.read_bytes(),
+            expected_sha,
+            provider_result_path.read_bytes(),
+            provider_result_sha256,
+        )
+    except (OSError, ValueError) as error:
+        raise ParityError(
+            "legacy certification evidence is not externally authenticated"
+        ) from error
 
 
 def compare_ladder_bundle(bundle_root: Path) -> list[dict[str, Any]]:

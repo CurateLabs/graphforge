@@ -800,8 +800,9 @@ impl GraphImportSession {
         &mut self,
         progress: &crate::GraphConstructionProgress,
     ) -> Result<(), GfError> {
-        let application_io =
-            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
+        let application_io = graphforge_storage::ConstructionPhaseAttribution::from_construction(
+            &progress.evidence,
+        )?;
         application_io.validate_for_qualification()?;
         let publication_work = PublicationWorkComponents::from_application_io(&application_io)?;
         let construction_staging = progress

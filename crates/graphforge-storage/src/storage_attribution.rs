@@ -6,6 +6,7 @@ use std::path::Path;
 
 use graphforge_core::GfError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     GraphConstructionEvidence, GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration,
@@ -122,8 +123,7 @@ pub struct ConstructionPhaseAttribution {
 
 impl ConstructionPhaseAttribution {
     /// Derive phase ownership from storage-owned construction counters.
-    #[must_use]
-    pub fn from_construction(evidence: &GraphConstructionEvidence) -> Self {
+    pub fn from_construction(evidence: &GraphConstructionEvidence) -> Result<Self, GfError> {
         let mut phases: BTreeMap<_, _> = StorageIoPhase::ALL
             .into_iter()
             .map(|phase| (phase, PhaseIoTotals::default()))
@@ -149,7 +149,7 @@ impl ConstructionPhaseAttribution {
         );
         phases.insert(
             StorageIoPhase::ShapeConsumeReauthentication,
-            shape_phase_totals(evidence),
+            shape_phase_totals(evidence)?,
         );
         phases.insert(
             StorageIoPhase::EncodeWritePostwriteAuthentication,
@@ -195,9 +195,10 @@ impl ConstructionPhaseAttribution {
         phases.insert(
             StorageIoPhase::FsyncSynchronization,
             PhaseIoTotals {
-                fsync_calls: evidence
-                    .fsync_operations
-                    .saturating_add(evidence.merge_fsync_operations),
+                fsync_calls: checked_add(
+                    evidence.fsync_operations,
+                    evidence.merge_fsync_operations,
+                )?,
                 ..Default::default()
             },
         );
@@ -209,26 +210,29 @@ impl ConstructionPhaseAttribution {
                 ..Default::default()
             },
         );
-        let totals = phases
-            .values()
-            .fold(PhaseIoTotals::default(), |mut total, value| {
-                add_phase_totals_saturating(&mut total, value);
-                total
-            });
-        Self { phases, totals }
+        let mut totals = PhaseIoTotals::default();
+        for value in phases.values() {
+            add_phase_totals(&mut totals, value)?;
+        }
+        Ok(Self { phases, totals })
     }
 
     /// Add writer-reported recovery reauthentication completed outside the
     /// construction session, such as interrupted portable finalization.
-    pub fn add_recovery_reauthentication(&mut self, read_bytes: u64, read_calls: u64) {
+    pub fn add_recovery_reauthentication(
+        &mut self,
+        read_bytes: u64,
+        read_calls: u64,
+    ) -> Result<(), GfError> {
         let recovery = self
             .phases
             .entry(StorageIoPhase::RecoveryReauthentication)
             .or_default();
-        recovery.read_bytes = recovery.read_bytes.saturating_add(read_bytes);
-        recovery.read_calls = recovery.read_calls.saturating_add(read_calls);
-        self.totals.read_bytes = self.totals.read_bytes.saturating_add(read_bytes);
-        self.totals.read_calls = self.totals.read_calls.saturating_add(read_calls);
+        recovery.read_bytes = checked_add(recovery.read_bytes, read_bytes)?;
+        recovery.read_calls = checked_add(recovery.read_calls, read_calls)?;
+        self.totals.read_bytes = checked_add(self.totals.read_bytes, read_bytes)?;
+        self.totals.read_calls = checked_add(self.totals.read_calls, read_calls)?;
+        Ok(())
     }
 
     /// Reject missing phases or totals that do not equal the phase sum.
@@ -271,27 +275,27 @@ impl ConstructionPhaseAttribution {
     }
 }
 
-fn shape_phase_totals(evidence: &GraphConstructionEvidence) -> PhaseIoTotals {
-    PhaseIoTotals {
+fn shape_phase_totals(evidence: &GraphConstructionEvidence) -> Result<PhaseIoTotals, GfError> {
+    Ok(PhaseIoTotals {
         read_bytes: evidence.shape_application_read_bytes,
-        write_bytes: evidence
-            .merge_written_bytes
-            .saturating_add(evidence.parquet_write_bytes),
-        read_calls: evidence
-            .shape_input_validation_read_operations
-            .saturating_add(evidence.merge_read_operations)
-            .saturating_add(evidence.parquet_read_operations)
-            .saturating_add(evidence.shaped_output_authentication_operations)
-            .saturating_add(evidence.parent_catalog_read_operations)
-            .saturating_add(evidence.retained_probe_block_loads),
-        write_calls: evidence
-            .merge_write_operations
-            .saturating_add(evidence.parquet_write_operations),
-        block_count: evidence
-            .merge_read_blocks
-            .saturating_add(evidence.merge_write_blocks),
+        write_bytes: checked_add(evidence.merge_written_bytes, evidence.parquet_write_bytes)?,
+        read_calls: [
+            evidence.shape_input_validation_read_operations,
+            evidence.merge_read_operations,
+            evidence.parquet_read_operations,
+            evidence.shaped_output_authentication_operations,
+            evidence.parent_catalog_read_operations,
+            evidence.retained_probe_block_loads,
+        ]
+        .into_iter()
+        .try_fold(0_u64, checked_add)?,
+        write_calls: checked_add(
+            evidence.merge_write_operations,
+            evidence.parquet_write_operations,
+        )?,
+        block_count: checked_add(evidence.merge_read_blocks, evidence.merge_write_blocks)?,
         ..Default::default()
-    }
+    })
 }
 
 /// Reconciled totals for one artifact category.
@@ -309,6 +313,31 @@ pub struct ArtifactStorageTotals {
     pub allocated_bytes: u64,
 }
 
+/// Safe context binding category evidence to native receipt and identity roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCategoryAuthorityContext {
+    /// Evidence contract domain.
+    pub contract: String,
+    /// Authority format version.
+    pub version: u32,
+    /// Deterministic lifecycle rung.
+    pub rung: u64,
+    /// Authenticated generation-manifest digest.
+    pub generation_sha256: String,
+    /// Storage owner within the lifecycle.
+    pub owner: String,
+    /// Digest of the storage-owned receipt/category ledger.
+    pub receipt_authority_sha256: String,
+    /// Digest of native identity membership and allocation.
+    pub native_identity_authority_sha256: String,
+    /// Per-category native identity-membership roots.
+    pub native_category_identity_authority_sha256: BTreeMap<ArtifactCategory, String>,
+    /// Authoritative reopened node denominator.
+    pub live_nodes: u64,
+    /// Authoritative reopened edge denominator.
+    pub live_edges: u64,
+}
+
 /// Authenticated storage attribution for one lifetime-pinned generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageAttributionSnapshot {
@@ -318,6 +347,9 @@ pub struct StorageAttributionSnapshot {
     pub generation_manifest_sha256: [u8; 32],
     /// Every category exactly once, including zero totals.
     pub categories: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
+    /// Independently accumulated receipt and native-identity category totals.
+    #[serde(skip)]
+    category_authorities: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
     /// Reconciled logical references across categories.
     pub logical_references: u64,
     /// Reconciled referenced logical bytes across categories.
@@ -332,6 +364,9 @@ pub struct StorageAttributionSnapshot {
     /// union is the cross-owner input to lifecycle peak tracking.
     #[serde(skip)]
     pub physical_identity_allocated_bytes: BTreeMap<String, u64>,
+    /// Native identity allocation partitioned by its authenticated category.
+    #[serde(skip)]
+    category_physical_identity_allocated_bytes: BTreeMap<ArtifactCategory, BTreeMap<String, u64>>,
 }
 
 /// Identity-free, closed storage evidence suitable for ordinary CLI output.
@@ -689,9 +724,111 @@ impl StorageAllocationLifecycle {
     pub const fn peak_allocated_bytes(&self) -> u64 {
         self.peak_allocated_bytes
     }
+
+    /// Exact deduplicated allocation for a closed set of active owners.
+    ///
+    /// Shared native identities are counted once. Missing owners are rejected
+    /// so an emitted aggregate cannot silently omit a lifecycle owner.
+    pub fn owner_union_allocated_bytes<'a>(
+        &self,
+        owners: impl IntoIterator<Item = &'a str>,
+    ) -> Result<u64, GfError> {
+        let mut identities = BTreeSet::new();
+        for owner in owners {
+            let owned = self
+                .owners
+                .get(owner)
+                .ok_or_else(|| validation("allocation union owner is absent"))?;
+            identities.extend(owned.iter());
+        }
+        identities.into_iter().try_fold(0_u64, |total, identity| {
+            let (allocated, _) = self
+                .active
+                .get(identity)
+                .ok_or_else(|| validation("allocation union identity is absent"))?;
+            checked_add(total, *allocated)
+        })
+    }
 }
 
 impl StorageAttributionSnapshot {
+    /// Identity-free category authorities derived from authenticated inventory
+    /// receipts and the per-category native-identity union.
+    pub fn category_authorities(
+        &self,
+    ) -> Result<BTreeMap<ArtifactCategory, ArtifactStorageTotals>, GfError> {
+        self.validate_reconciliation()?;
+        if self.category_authorities.len() != ArtifactCategory::ALL.len()
+            || self.category_authorities != self.categories
+        {
+            return Err(validation(
+                "reported categories differ from independent receipt/identity authorities",
+            ));
+        }
+        Ok(self.category_authorities.clone())
+    }
+
+    /// Sanitized commitments to independently accumulated category authority.
+    pub fn category_authority_commitments(
+        &self,
+        context: &ArtifactCategoryAuthorityContext,
+    ) -> Result<BTreeMap<ArtifactCategory, String>, GfError> {
+        self.category_authorities()?;
+        Ok(self
+            .category_authorities
+            .iter()
+            .map(|(category, totals)| {
+                (
+                    *category,
+                    artifact_category_authority_commitment(context, *category, totals),
+                )
+            })
+            .collect())
+    }
+
+    /// Build safe authority context from hidden receipt and identity membership.
+    pub fn category_authority_context(
+        &self,
+        contract: &str,
+        rung: u64,
+        owner: &str,
+        live_nodes: u64,
+        live_edges: u64,
+    ) -> Result<ArtifactCategoryAuthorityContext, GfError> {
+        self.category_authorities()?;
+        if contract.is_empty()
+            || owner.is_empty()
+            || rung == 0
+            || live_nodes == 0
+            || live_edges == 0
+        {
+            return Err(validation("category authority context is invalid"));
+        }
+        Ok(ArtifactCategoryAuthorityContext {
+            contract: contract.to_owned(),
+            version: 1,
+            rung,
+            generation_sha256: format_sha256(&self.generation_manifest_sha256),
+            owner: owner.to_owned(),
+            receipt_authority_sha256: category_map_authority_sha256(
+                b"graphforge-storage-receipt-authority-v1\0",
+                &self.category_authorities,
+            ),
+            native_identity_authority_sha256: identity_map_authority_sha256(
+                &self.physical_identity_allocated_bytes,
+            ),
+            native_category_identity_authority_sha256: self
+                .category_physical_identity_allocated_bytes
+                .iter()
+                .map(|(category, identities)| {
+                    (*category, identity_map_authority_sha256(identities))
+                })
+                .collect(),
+            live_nodes,
+            live_edges,
+        })
+    }
+
     /// Whether every retained graph artifact was assigned a qualifying category.
     #[must_use]
     pub fn is_fully_classified(&self) -> bool {
@@ -705,8 +842,18 @@ impl StorageAttributionSnapshot {
         if ArtifactCategory::ALL
             .iter()
             .any(|category| !self.categories.contains_key(category))
+            || ArtifactCategory::ALL
+                .iter()
+                .any(|category| !self.category_authorities.contains_key(category))
+            || self.categories.len() != ArtifactCategory::ALL.len()
+            || self.category_authorities.len() != ArtifactCategory::ALL.len()
         {
             return Err(validation("storage attribution is missing a category"));
+        }
+        if self.categories != self.category_authorities {
+            return Err(validation(
+                "storage categories differ from independent receipt/identity authorities",
+            ));
         }
         let mut total = ArtifactStorageTotals::default();
         for category in ArtifactCategory::ALL {
@@ -924,8 +1071,10 @@ struct Accumulator {
     generation_uuid: uuid::Uuid,
     generation_manifest_sha256: [u8; 32],
     categories: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
+    category_authorities: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
     physical_seen: BTreeSet<(u64, [u8; 16])>,
     physical_identity_allocated_bytes: BTreeMap<String, u64>,
+    category_physical_identity_allocated_bytes: BTreeMap<ArtifactCategory, BTreeMap<String, u64>>,
 }
 
 impl Accumulator {
@@ -937,8 +1086,16 @@ impl Accumulator {
                 .into_iter()
                 .map(|category| (category, ArtifactStorageTotals::default()))
                 .collect(),
+            category_authorities: ArtifactCategory::ALL
+                .into_iter()
+                .map(|category| (category, ArtifactStorageTotals::default()))
+                .collect(),
             physical_seen: BTreeSet::new(),
             physical_identity_allocated_bytes: BTreeMap::new(),
+            category_physical_identity_allocated_bytes: ArtifactCategory::ALL
+                .into_iter()
+                .map(|category| (category, BTreeMap::new()))
+                .collect(),
         }
     }
 
@@ -949,6 +1106,12 @@ impl Accumulator {
             .expect("complete categories");
         totals.logical_references = checked_add(totals.logical_references, 1)?;
         totals.logical_bytes = checked_add(totals.logical_bytes, bytes)?;
+        let authority = self
+            .category_authorities
+            .get_mut(&category)
+            .expect("complete category authorities");
+        authority.logical_references = checked_add(authority.logical_references, 1)?;
+        authority.logical_bytes = checked_add(authority.logical_bytes, bytes)?;
         Ok(())
     }
 
@@ -969,10 +1132,13 @@ impl Accumulator {
             .physical_seen
             .insert((identity.volume_serial, identity.file_id))
         {
-            self.physical_identity_allocated_bytes.insert(
-                native_identity_key(identity.volume_serial, &identity.file_id),
-                usage.allocated_bytes,
-            );
+            let identity_key = native_identity_key(identity.volume_serial, &identity.file_id);
+            self.physical_identity_allocated_bytes
+                .insert(identity_key.clone(), usage.allocated_bytes);
+            self.category_physical_identity_allocated_bytes
+                .get_mut(&category)
+                .expect("complete category identity authorities")
+                .insert(identity_key, usage.allocated_bytes);
             let totals = self
                 .categories
                 .get_mut(&category)
@@ -981,6 +1147,15 @@ impl Accumulator {
             totals.physical_logical_bytes =
                 checked_add(totals.physical_logical_bytes, usage.logical_bytes)?;
             totals.allocated_bytes = checked_add(totals.allocated_bytes, usage.allocated_bytes)?;
+            let authority = self
+                .category_authorities
+                .get_mut(&category)
+                .expect("complete category authorities");
+            authority.physical_objects = checked_add(authority.physical_objects, 1)?;
+            authority.physical_logical_bytes =
+                checked_add(authority.physical_logical_bytes, usage.logical_bytes)?;
+            authority.allocated_bytes =
+                checked_add(authority.allocated_bytes, usage.allocated_bytes)?;
         }
         Ok(())
     }
@@ -994,12 +1169,15 @@ impl Accumulator {
             generation_uuid: self.generation_uuid,
             generation_manifest_sha256: self.generation_manifest_sha256,
             categories: self.categories,
+            category_authorities: self.category_authorities,
             logical_references: total.logical_references,
             logical_bytes: total.logical_bytes,
             physical_objects: total.physical_objects,
             physical_logical_bytes: total.physical_logical_bytes,
             allocated_bytes: total.allocated_bytes,
             physical_identity_allocated_bytes: self.physical_identity_allocated_bytes,
+            category_physical_identity_allocated_bytes: self
+                .category_physical_identity_allocated_bytes,
         };
         snapshot.validate_reconciliation()?;
         Ok(snapshot)
@@ -1019,6 +1197,127 @@ fn add_totals(
     Ok(())
 }
 
+/// Commit to one independently derived category without exposing identities.
+#[must_use]
+pub fn artifact_category_authority_commitment(
+    context: &ArtifactCategoryAuthorityContext,
+    category: ArtifactCategory,
+    totals: &ArtifactStorageTotals,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-category-authority-v2\0");
+    update_authority_context(&mut digest, context, category);
+    digest.update(artifact_category_name(category));
+    for value in artifact_totals_values(totals) {
+        digest.update(value.to_be_bytes());
+    }
+    format_sha256(&digest.finalize())
+}
+
+/// Commit to one independently derived category allocation high-water mark.
+#[must_use]
+pub fn artifact_category_peak_authority_commitment(
+    context: &ArtifactCategoryAuthorityContext,
+    category: ArtifactCategory,
+    allocated_bytes: u64,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-category-peak-authority-v2\0");
+    update_authority_context(&mut digest, context, category);
+    digest.update(artifact_category_name(category));
+    digest.update(allocated_bytes.to_be_bytes());
+    format_sha256(&digest.finalize())
+}
+
+fn update_authority_context(
+    digest: &mut Sha256,
+    context: &ArtifactCategoryAuthorityContext,
+    category: ArtifactCategory,
+) {
+    for value in [
+        context.contract.as_bytes(),
+        context.generation_sha256.as_bytes(),
+        context.owner.as_bytes(),
+        context.receipt_authority_sha256.as_bytes(),
+        context.native_identity_authority_sha256.as_bytes(),
+    ] {
+        digest.update((value.len() as u128).to_be_bytes());
+        digest.update(value);
+    }
+    digest.update(context.version.to_be_bytes());
+    digest.update(context.rung.to_be_bytes());
+    digest.update(context.live_nodes.to_be_bytes());
+    digest.update(context.live_edges.to_be_bytes());
+    let category_identity = context
+        .native_category_identity_authority_sha256
+        .get(&category)
+        .expect("complete native category identity authority");
+    digest.update((category_identity.len() as u128).to_be_bytes());
+    digest.update(category_identity.as_bytes());
+}
+
+pub(crate) fn category_map_authority_sha256(
+    domain: &[u8],
+    categories: &BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for category in ArtifactCategory::ALL {
+        digest.update(artifact_category_name(category));
+        for value in artifact_totals_values(&categories[&category]) {
+            digest.update(value.to_be_bytes());
+        }
+    }
+    format_sha256(&digest.finalize())
+}
+
+pub(crate) fn identity_map_authority_sha256(identities: &BTreeMap<String, u64>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-native-identity-authority-v1\0");
+    for (identity, allocated_bytes) in identities {
+        digest.update((identity.len() as u128).to_be_bytes());
+        digest.update(identity.as_bytes());
+        digest.update(allocated_bytes.to_be_bytes());
+    }
+    format_sha256(&digest.finalize())
+}
+
+fn artifact_category_name(category: ArtifactCategory) -> &'static [u8] {
+    match category {
+        ArtifactCategory::TopologyNodes => b"topology_nodes",
+        ArtifactCategory::TopologyEdges => b"topology_edges",
+        ArtifactCategory::Properties => b"properties",
+        ArtifactCategory::UuidAndSurrogates => b"uuid_and_surrogates",
+        ArtifactCategory::Adjacency => b"adjacency",
+        ArtifactCategory::CatalogAndManifests => b"catalog_and_manifests",
+        ArtifactCategory::ConstructionStaging => b"construction_staging",
+        ArtifactCategory::PortablePackage => b"portable_package",
+        ArtifactCategory::CleanImportedProject => b"clean_imported_project",
+        ArtifactCategory::Other => b"other",
+    }
+}
+
+fn format_sha256(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut value = String::with_capacity(7 + digest.len() * 2);
+    value.push_str("sha256:");
+    for byte in digest {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    value
+}
+
+fn artifact_totals_values(totals: &ArtifactStorageTotals) -> [u64; 5] {
+    [
+        totals.logical_references,
+        totals.logical_bytes,
+        totals.physical_objects,
+        totals.physical_logical_bytes,
+        totals.allocated_bytes,
+    ]
+}
+
 fn add_phase_totals(target: &mut PhaseIoTotals, value: &PhaseIoTotals) -> Result<(), GfError> {
     target.read_bytes = checked_add(target.read_bytes, value.read_bytes)?;
     target.write_bytes = checked_add(target.write_bytes, value.write_bytes)?;
@@ -1028,16 +1327,6 @@ fn add_phase_totals(target: &mut PhaseIoTotals, value: &PhaseIoTotals) -> Result
     target.block_count = checked_add(target.block_count, value.block_count)?;
     target.fsync_calls = checked_add(target.fsync_calls, value.fsync_calls)?;
     Ok(())
-}
-
-fn add_phase_totals_saturating(target: &mut PhaseIoTotals, value: &PhaseIoTotals) {
-    target.read_bytes = target.read_bytes.saturating_add(value.read_bytes);
-    target.write_bytes = target.write_bytes.saturating_add(value.write_bytes);
-    target.read_calls = target.read_calls.saturating_add(value.read_calls);
-    target.write_calls = target.write_calls.saturating_add(value.write_calls);
-    target.object_count = target.object_count.saturating_add(value.object_count);
-    target.block_count = target.block_count.saturating_add(value.block_count);
-    target.fsync_calls = target.fsync_calls.saturating_add(value.fsync_calls);
 }
 
 fn checked_add(left: u64, right: u64) -> Result<u64, GfError> {
@@ -1160,6 +1449,7 @@ mod tests {
         let mut snapshot = StorageAttributionSnapshot {
             generation_uuid: uuid::Uuid::nil(),
             generation_manifest_sha256: [0; 32],
+            category_authorities: categories.clone(),
             categories,
             logical_references: 0,
             logical_bytes: 7,
@@ -1167,8 +1457,24 @@ mod tests {
             physical_logical_bytes: 0,
             allocated_bytes: 0,
             physical_identity_allocated_bytes: BTreeMap::new(),
+            category_physical_identity_allocated_bytes: ArtifactCategory::ALL
+                .into_iter()
+                .map(|category| (category, BTreeMap::new()))
+                .collect(),
         };
         snapshot.validate_reconciliation().unwrap();
+        snapshot
+            .categories
+            .get_mut(&ArtifactCategory::TopologyNodes)
+            .unwrap()
+            .logical_bytes = 6;
+        snapshot
+            .categories
+            .get_mut(&ArtifactCategory::TopologyEdges)
+            .unwrap()
+            .logical_bytes = 1;
+        assert!(snapshot.validate_reconciliation().is_err());
+        snapshot.categories = snapshot.category_authorities.clone();
         snapshot.logical_bytes = 8;
         assert!(snapshot.validate_reconciliation().is_err());
         snapshot.categories.remove(&ArtifactCategory::Other);
@@ -1188,6 +1494,7 @@ mod tests {
         let snapshot = StorageAttributionSnapshot {
             generation_uuid: uuid::Uuid::nil(),
             generation_manifest_sha256: [0; 32],
+            category_authorities: categories.clone(),
             categories,
             logical_references: 1,
             logical_bytes: 0,
@@ -1195,6 +1502,10 @@ mod tests {
             physical_logical_bytes: 0,
             allocated_bytes: 0,
             physical_identity_allocated_bytes: BTreeMap::new(),
+            category_physical_identity_allocated_bytes: ArtifactCategory::ALL
+                .into_iter()
+                .map(|category| (category, BTreeMap::new()))
+                .collect(),
         };
         assert!(snapshot.validate_reconciliation().is_ok());
         assert!(snapshot.validate_for_qualification().is_err());
@@ -1217,6 +1528,7 @@ mod tests {
         let snapshot = StorageAttributionSnapshot {
             generation_uuid: uuid::Uuid::nil(),
             generation_manifest_sha256: [0; 32],
+            category_authorities: categories.clone(),
             categories,
             logical_references: 1,
             logical_bytes: 0,
@@ -1227,6 +1539,17 @@ mod tests {
                 ("dev:a".to_owned(), 0),
                 ("dev:b".to_owned(), 0),
             ]),
+            category_physical_identity_allocated_bytes: ArtifactCategory::ALL
+                .into_iter()
+                .map(|category| {
+                    let identities = if category == ArtifactCategory::CatalogAndManifests {
+                        BTreeMap::from([("dev:a".to_owned(), 0), ("dev:b".to_owned(), 0)])
+                    } else {
+                        BTreeMap::new()
+                    };
+                    (category, identities)
+                })
+                .collect(),
         };
         assert!(snapshot.validate_reconciliation().is_ok());
         assert!(snapshot.validate_for_qualification().is_err());
@@ -1280,6 +1603,20 @@ mod tests {
         lifecycle.replace_owner("source", &first).unwrap();
         assert_eq!(lifecycle.current_allocated_bytes(), 12_288);
         lifecycle.replace_owner("import", &alias).unwrap();
+        assert_eq!(lifecycle.current_allocated_bytes(), 16_384);
+        assert_eq!(
+            lifecycle
+                .owner_union_allocated_bytes(["source", "import"])
+                .unwrap(),
+            16_384
+        );
+        assert_eq!(
+            lifecycle.owner_union_allocated_bytes(["source"]).unwrap(),
+            12_288
+        );
+        assert!(lifecycle.owner_union_allocated_bytes(["missing"]).is_err());
+        let contradictory = BTreeMap::from([("dev:b".to_owned(), 16_384)]);
+        assert!(lifecycle.replace_owner("invalid", &contradictory).is_err());
         assert_eq!(lifecycle.current_allocated_bytes(), 16_384);
         assert_eq!(lifecycle.peak_allocated_bytes(), 16_384);
         lifecycle.remove_owner("source").unwrap();
@@ -1488,7 +1825,7 @@ mod tests {
             merge_fsync_operations: 7,
             ..Default::default()
         };
-        let mut attribution = ConstructionPhaseAttribution::from_construction(&evidence);
+        let mut attribution = ConstructionPhaseAttribution::from_construction(&evidence).unwrap();
         attribution.validate_reconciliation().unwrap();
         attribution.validate_for_qualification().unwrap();
         assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
@@ -1507,7 +1844,7 @@ mod tests {
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_calls,
             2
         );
-        attribution.add_recovery_reauthentication(9, 1);
+        attribution.add_recovery_reauthentication(9, 1).unwrap();
         attribution.validate_for_qualification().unwrap();
         assert_eq!(
             attribution.phases[&StorageIoPhase::RecoveryReauthentication].read_bytes,
@@ -1527,15 +1864,83 @@ mod tests {
     #[test]
     fn construction_phase_inventory_rejects_double_counted_total() {
         let mut attribution =
-            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default());
+            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default())
+                .unwrap();
         attribution.totals.read_bytes = 1;
         assert!(attribution.validate_reconciliation().is_err());
     }
 
     #[test]
+    fn construction_phase_derivation_rejects_counter_overflow() {
+        let evidence = GraphConstructionEvidence {
+            shape_input_validation_read_operations: u64::MAX,
+            merge_read_operations: 1,
+            ..GraphConstructionEvidence::default()
+        };
+        assert!(ConstructionPhaseAttribution::from_construction(&evidence).is_err());
+        let evidence = GraphConstructionEvidence {
+            shape_application_read_bytes: u64::MAX,
+            encode_application_read_bytes: 1,
+            ..GraphConstructionEvidence::default()
+        };
+        assert!(evidence.total_application_read_bytes().is_err());
+    }
+
+    #[test]
+    fn construction_category_authority_is_independent_from_reported_view() {
+        let mut categories: BTreeMap<_, _> = ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| (category, ArtifactStorageTotals::default()))
+            .collect();
+        categories
+            .get_mut(&ArtifactCategory::ConstructionStaging)
+            .unwrap()
+            .allocated_bytes = 4096;
+        let mut peaks: BTreeMap<_, _> = ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| (category, 0))
+            .collect();
+        peaks.insert(ArtifactCategory::ConstructionStaging, 4096);
+        let mut evidence = GraphConstructionEvidence {
+            storage_current: categories.clone(),
+            storage_receipt_category_authorities: categories,
+            storage_transient_peak_allocated_bytes: peaks.clone(),
+            storage_receipt_transient_peak_authorities: peaks,
+            storage_active_identity_allocated_bytes: BTreeMap::from([(
+                "native-identity".to_owned(),
+                4096,
+            )]),
+            ..GraphConstructionEvidence::default()
+        };
+        evidence.storage_category_authorities().unwrap();
+        let context = evidence
+            .storage_category_authority_context(
+                "test-contract",
+                1,
+                "sha256:generation",
+                "construction",
+                1,
+                1,
+            )
+            .unwrap();
+        assert_ne!(
+            context.native_category_identity_authority_sha256
+                [&ArtifactCategory::ConstructionStaging],
+            context.native_category_identity_authority_sha256[&ArtifactCategory::TopologyNodes]
+        );
+        evidence
+            .storage_current
+            .get_mut(&ArtifactCategory::ConstructionStaging)
+            .unwrap()
+            .logical_bytes = 1;
+        assert!(evidence.storage_category_authorities().is_err());
+    }
+
+    #[test]
     fn qualification_preserves_truthful_zero_io_phase_rows() {
         let attribution =
-            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default());
+            ConstructionPhaseAttribution::from_construction(&GraphConstructionEvidence::default())
+                .unwrap();
         attribution.validate_for_qualification().unwrap();
         assert_eq!(attribution.phases.len(), StorageIoPhase::ALL.len());
         assert!(

@@ -32,6 +32,18 @@ REQUIRED_PHASES = (
     "drill_resource_limit",
     "drill_interrupted_finalization",
 )
+CATEGORY_NAMES = (
+    "topology_nodes",
+    "topology_edges",
+    "properties",
+    "uuid_and_surrogates",
+    "adjacency",
+    "catalog_and_manifests",
+    "construction_staging",
+    "portable_package",
+    "clean_imported_project",
+    "other",
+)
 FORBIDDEN_KEY = re.compile(
     r"(secret|credential|token|password|host_path|absolute_path|machine[_-]?id|volume[_-]?id|provider_resource_id)",
     re.I,
@@ -41,9 +53,14 @@ RAW_UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.I,
 )
+NATIVE_OBJECT_IDENTITY = re.compile(
+    r"(?<![0-9a-f])[0-9a-f]{16}:[0-9a-f]{32}(?![0-9a-f])",
+    re.I,
+)
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "crates/graphforge-api/tests/fixtures/scale_g500_certification.v1.json"
 SCHEMA = ROOT / "docs/development/evidence/g500-certification.schema.json"
+PROVIDER_RESULT_SCHEMA = ROOT / "benchmarks/schemas/progressive-provider-run-result.json"
 RUN_COMMAND = (
     "cargo test -p graphforge-api --release --test scale_g500_ladder "
     "certification_target_live_full_lifecycle_evidence -- --ignored --exact "
@@ -65,6 +82,238 @@ def validate_schema(evidence: dict[str, Any]) -> None:
     except ValidationError as error:
         location = ".".join(str(item) for item in error.absolute_path) or "$"
         raise EvidenceError(f"evidence schema violation at {location}: {error.message}") from error
+
+
+def update_authority_context(digest: Any, context: dict[str, Any], category: str) -> None:
+    for field in (
+        "contract",
+        "generation_sha256",
+        "owner",
+        "receipt_authority_sha256",
+        "native_identity_authority_sha256",
+    ):
+        value = context[field].encode()
+        digest.update(len(value).to_bytes(16, "big"))
+        digest.update(value)
+    digest.update(context["version"].to_bytes(4, "big"))
+    digest.update(context["rung"].to_bytes(8, "big"))
+    digest.update(context["live_nodes"].to_bytes(8, "big"))
+    digest.update(context["live_edges"].to_bytes(8, "big"))
+    category_identity = context["native_category_identity_authority_sha256"][category].encode()
+    digest.update(len(category_identity).to_bytes(16, "big"))
+    digest.update(category_identity)
+
+
+def category_commitment(context: dict[str, Any], category: str, totals: dict[str, int]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"graphforge-category-authority-v2\0")
+    update_authority_context(digest, context, category)
+    digest.update(category.encode())
+    for field in (
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes",
+    ):
+        digest.update(totals[field].to_bytes(8, "big"))
+    return "sha256:" + digest.hexdigest()
+
+
+def peak_commitment(context: dict[str, Any], category: str, allocated_bytes: int) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"graphforge-category-peak-authority-v2\0")
+    update_authority_context(digest, context, category)
+    digest.update(category.encode())
+    digest.update(allocated_bytes.to_bytes(8, "big"))
+    return "sha256:" + digest.hexdigest()
+
+
+def validate_cas_publication_components(storage: dict[str, Any]) -> None:
+    construction = storage["construction"]
+    components = construction["cas_publication_io"]
+    maximum = (1 << 64) - 1
+
+    def total(*values: int) -> int:
+        value = sum(values)
+        if value > maximum:
+            raise EvidenceError("CAS component sum exceeds native u64")
+        return value
+
+    field_projection = {
+        "read_bytes": "cas_application_read_bytes",
+        "read_calls": "cas_application_read_operations",
+        "write_bytes": "cas_application_write_bytes",
+        "write_calls": "cas_application_write_operations",
+    }
+    phase = storage["application_io_phases"]["phases"]["cas_install_read_write"]
+    for field, aggregate in field_projection.items():
+        expected = total(
+            *(
+                component[field]
+                for component in (
+                    components[name] for name in ("payload", "manifest", "manifest_reads")
+                )
+            )
+        )
+        if construction[aggregate] != expected or phase[field] != expected:
+            raise EvidenceError(f"CAS {field} components do not reconcile")
+    synchronization = total(
+        *(
+            component[field]
+            for component in (
+                components[name] for name in ("payload", "manifest", "manifest_reads")
+            )
+            for field in ("file_fsync_calls", "directory_fsync_calls")
+        )
+    )
+    if (
+        construction["cas_fsync_operations"] != synchronization
+        or phase["fsync_calls"] != synchronization
+    ):
+        raise EvidenceError("CAS synchronization components do not reconcile")
+    paths = construction["canonical_artifact_objects"]
+    if (
+        components["publications"] != 1
+        or components["initial_entries"] != 0
+        or components["changed_paths"] != paths
+    ):
+        raise EvidenceError(
+            "CAS growth proof requires one fresh publication of the complete changed inventory"
+        )
+    inventory_bytes = storage["application_io_phases"]["phases"]["publication_preauthentication"][
+        "read_bytes"
+    ]
+    # Native maximal-encoding fixtures establish 1319 branch/header bytes and
+    # 43 additional bytes per GraphFileEntry over ConstructionEncodedArtifact.
+    node_bytes = total(inventory_bytes, 43 * paths, 1319)
+    install_requests = total(67 * paths, 1)
+    read_requests = total(130 * paths)
+    manifest = components["manifest"]
+    requests = total(manifest["installed_objects"], manifest["reused_objects"])
+    if (
+        requests < total(paths, 1)
+        or manifest["read_calls"] < requests
+        or components["manifest_reads"]["read_calls"] < paths
+    ):
+        raise EvidenceError("CAS manifest lacks mandatory bootstrap/update authentication")
+    if (
+        total(manifest["installed_objects"], manifest["reused_objects"]) > install_requests
+        or manifest["read_bytes"] > total(install_requests * node_bytes)
+        or manifest["write_bytes"] > total(install_requests * node_bytes)
+        or manifest["write_bytes"] < manifest["installed_bytes"]
+        or manifest["write_calls"] != manifest["install_attempts"]
+        or components["manifest_reads"]["read_bytes"] > total(read_requests * node_bytes)
+    ):
+        raise EvidenceError("CAS manifest exceeds native path/object/encoded-inventory bounds")
+    for component in (manifest, components["manifest_reads"]):
+        if (
+            not (component["read_bytes"] + 65535) // 65536
+            <= component["read_calls"]
+            <= component["read_bytes"]
+        ):
+            raise EvidenceError("CAS manifest reads violate native buffer bounds")
+    payload = components["payload"]
+    if (
+        total(payload["installed_objects"], payload["reused_objects"])
+        != construction["canonical_artifact_objects"]
+    ):
+        raise EvidenceError("CAS payload requests differ from canonical inventory")
+    for name in ("payload", "manifest"):
+        component = components[name]
+        requests = total(component["installed_objects"], component["reused_objects"])
+        if not component["installed_objects"] <= component["install_attempts"] <= requests:
+            raise EvidenceError(f"CAS {name} install attempts differ from request inventory")
+        if component["directory_fsync_calls"] != total(
+            component["install_attempts"], component["install_attempts"]
+        ):
+            raise EvidenceError(f"CAS {name} namespace synchronization differs from installs")
+        if component["file_fsync_calls"] < component["install_attempts"]:
+            raise EvidenceError(f"CAS {name} lacks mandatory file synchronization")
+        if name == "manifest" and component["file_fsync_calls"] != component["install_attempts"]:
+            raise EvidenceError("CAS manifest file synchronization differs from installs")
+    if any(
+        value
+        for field, value in components["manifest_reads"].items()
+        if field not in ("read_bytes", "read_calls")
+    ):
+        raise EvidenceError("CAS manifest path authentication reports non-read work")
+
+
+def validate_category_authority(
+    storage: dict[str, Any],
+    *,
+    rung: int,
+    live_nodes: int,
+    live_edges: int,
+) -> None:
+    for owner in ("source", "clean_import"):
+        reported = storage[owner]["categories"]
+        authority = storage[owner]["category_authorities"]
+        context = storage[owner]["category_authority_context"]
+        if (
+            context["owner"] != owner
+            or context["rung"] != rung
+            or context["live_nodes"] != live_nodes
+            or context["live_edges"] != live_edges
+        ):
+            raise EvidenceError(f"{owner} category authority context differs")
+        if reported != authority:
+            raise EvidenceError(f"{owner} categories differ from native authority")
+        for category in CATEGORY_NAMES:
+            commitment = category_commitment(context, category, authority[category])
+            if storage[owner]["category_authority_sha256"][category] != commitment:
+                raise EvidenceError(f"{owner}.{category} authority commitment differs")
+
+    construction = storage["construction"]
+    source_context = storage["source"]["category_authority_context"]
+    construction_context = construction["storage_category_authority_context"]
+    if (
+        construction_context["owner"] != "construction"
+        or construction_context["rung"] != rung
+        or construction_context["generation_sha256"] != source_context["generation_sha256"]
+        or construction_context["live_nodes"] != live_nodes
+        or construction_context["live_edges"] != live_edges
+    ):
+        raise EvidenceError("construction category authority context differs")
+    if construction["storage_current"] != construction["storage_category_authorities"]:
+        raise EvidenceError("construction categories differ from native authority")
+    if (
+        construction["storage_transient_peak_allocated_bytes"]
+        != construction["storage_transient_peak_authorities"]
+    ):
+        raise EvidenceError("construction peaks differ from native authority")
+    for category in CATEGORY_NAMES:
+        current = category_commitment(
+            construction_context,
+            category,
+            construction["storage_category_authorities"][category],
+        )
+        peak = peak_commitment(
+            construction_context,
+            category,
+            construction["storage_transient_peak_authorities"][category],
+        )
+        if construction["storage_category_authority_sha256"][category] != current:
+            raise EvidenceError(f"construction.{category} authority commitment differs")
+        if construction["storage_transient_peak_authority_sha256"][category] != peak:
+            raise EvidenceError(f"construction.{category} peak commitment differs")
+
+    portable = storage["portable_package"]
+    portable_context = portable["category_authority_context"]
+    if (
+        portable_context["owner"] != "portable_package"
+        or portable_context["rung"] != rung
+        or portable_context["generation_sha256"] != source_context["generation_sha256"]
+        or portable_context["live_nodes"] != live_nodes
+        or portable_context["live_edges"] != live_edges
+    ):
+        raise EvidenceError("portable category authority context differs")
+    portable_commitment = category_commitment(
+        portable_context, "portable_package", portable["category_authority"]
+    )
+    if portable["category_authority_sha256"] != portable_commitment:
+        raise EvidenceError("portable package authority commitment differs")
 
 
 def require_mapping(evidence: dict[str, Any], key: str, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -91,9 +340,15 @@ def reject_sensitive(value: Any, trail: str = "$") -> None:
             raise EvidenceError(f"absolute host path at {trail}")
         if RAW_UUID.fullmatch(value):
             raise EvidenceError(f"raw UUID at {trail}")
+        if NATIVE_OBJECT_IDENTITY.search(value):
+            raise EvidenceError(f"raw native object identity at {trail}")
 
 
-def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
+def validate_semantics(
+    evidence: dict[str, Any],
+    expected_sha: str | None,
+) -> None:
+    """Validate content after an external provider-result binding is established."""
     validate_schema(evidence)
     reject_sensitive(evidence)
     if evidence.get("schema") != "graphforge-billion-edge-certification-evidence/1":
@@ -154,6 +409,13 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("source/imported node count does not match the declared scale")
 
     storage = evidence.get("storage_attribution", {})
+    validate_cas_publication_components(storage)
+    validate_category_authority(
+        storage,
+        rung=scale,
+        live_nodes=counts["source_nodes"],
+        live_edges=counts["source_edges"],
+    )
     selected_source = storage.get("source", {}).get("allocated_bytes")
     source_project = storage.get("source_project_current_allocated_bytes")
     workspace = storage.get("workspace_current_allocated_bytes")
@@ -278,15 +540,74 @@ def validate(evidence: dict[str, Any], expected_sha: str | None) -> None:
         raise EvidenceError("certification evidence is not a pass")
 
 
+def _decode_object(encoded: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvidenceError(f"{label} is malformed") from error
+    if not isinstance(value, dict):
+        raise EvidenceError(f"{label} root must be an object")
+    return value
+
+
+def validate(
+    evidence_encoded: bytes,
+    expected_sha: str | None,
+    provider_result_encoded: bytes,
+    expected_provider_result_sha256: str | None,
+) -> None:
+    """Validate evidence rooted in an externally authenticated provider result.
+
+    The expected provider-result digest must come from trusted transport or an
+    immutable manifest outside both documents. The provider result then binds
+    the exact ordinary GraphForge evidence bytes through ``graphforge_sha256``.
+    """
+    if not expected_sha:
+        raise EvidenceError("--expected-sha is required to pin the dispatched commit")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
+        raise EvidenceError("--expected-sha must be an exact lowercase 40-hex commit")
+    if (
+        expected_provider_result_sha256 is None
+        or re.fullmatch(r"[0-9a-f]{64}", expected_provider_result_sha256) is None
+    ):
+        raise EvidenceError("external provider-result SHA-256 is required")
+    actual_provider_result_sha256 = hashlib.sha256(provider_result_encoded).hexdigest()
+    if actual_provider_result_sha256 != expected_provider_result_sha256:
+        raise EvidenceError("provider result does not match its external anchor")
+    provider_result = _decode_object(provider_result_encoded, "provider result")
+    try:
+        provider_schema = json.loads(PROVIDER_RESULT_SCHEMA.read_text(encoding="utf-8"))
+        Draft202012Validator(provider_schema).validate(provider_result)
+    except (OSError, json.JSONDecodeError, SchemaError, ValidationError) as error:
+        raise EvidenceError(f"provider result schema is invalid: {error}") from error
+    evidence = _decode_object(evidence_encoded, "evidence")
+    scale = evidence.get("run", {}).get("scale")
+    identities = provider_result.get("identities", {})
+    artifacts = provider_result.get("artifacts", {})
+    if (
+        provider_result.get("status") != "passed"
+        or provider_result.get("rung") != f"S{scale}"
+        or identities.get("commit") != expected_sha
+        or not isinstance(artifacts, dict)
+        or artifacts.get("graphforge_sha256") != hashlib.sha256(evidence_encoded).hexdigest()
+    ):
+        raise EvidenceError("ordinary evidence is not bound by the authenticated provider result")
+    validate_semantics(evidence, expected_sha)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence", type=Path)
     parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--provider-result", required=True, type=Path)
+    parser.add_argument("--provider-result-sha256", required=True)
     args = parser.parse_args()
-    value = json.loads(args.evidence.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise EvidenceError("evidence root must be an object")
-    validate(value, args.expected_sha)
+    validate(
+        args.evidence.read_bytes(),
+        args.expected_sha,
+        args.provider_result.read_bytes(),
+        args.provider_result_sha256,
+    )
     print(f"valid #745 evidence: {args.evidence}")
     return 0
 

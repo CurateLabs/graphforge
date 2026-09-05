@@ -19,7 +19,7 @@
 #![recursion_limit = "256"]
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -122,7 +122,8 @@ struct CertificationProfile {
     schema: String,
     scale: u32,
     edgefactor: u32,
-    target_live_edges: u64,
+    #[serde(rename = "target_live_edges")]
+    _target_live_edges: u64,
     seed: u64,
     initiator: Initiator,
     envelope: Envelope,
@@ -406,10 +407,14 @@ fn generate_target_live_runs(
             &window_dir,
             Some(cancelled),
         );
-        combined.raw_attempts = combined.raw_attempts.saturating_add(generated.raw_attempts);
+        combined.raw_attempts = combined
+            .raw_attempts
+            .checked_add(generated.raw_attempts)
+            .expect("generated raw-attempt count overflow");
         combined.self_loops_rejected = combined
             .self_loops_rejected
-            .saturating_add(generated.self_loops_rejected);
+            .checked_add(generated.self_loops_rejected)
+            .expect("generated self-loop count overflow");
         combined.peak_buffer_len = combined.peak_buffer_len.max(generated.peak_buffer_len);
         combined.runs.extend(generated.runs);
         let compact_path = work.join(format!("accumulated-{window:04}.bin"));
@@ -505,21 +510,26 @@ fn exact_descriptor_allocation(paths: &[PathBuf]) -> Value {
     let mut logical_bytes = 0_u64;
     let mut allocated = 0_u64;
     for path in paths {
-        logical_bytes = logical_bytes.saturating_add(
-            fs::metadata(path)
-                .expect("generator descriptor metadata")
-                .len(),
-        );
+        logical_bytes = logical_bytes
+            .checked_add(
+                fs::metadata(path)
+                    .expect("generator descriptor metadata")
+                    .len(),
+            )
+            .expect("descriptor logical-byte count overflow");
         let file = File::open(path).expect("open exact allocation descriptor");
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            allocated = allocated.saturating_add(
-                file.metadata()
-                    .expect("exact descriptor metadata")
-                    .blocks()
-                    .saturating_mul(512),
-            );
+            allocated = allocated
+                .checked_add(
+                    file.metadata()
+                        .expect("exact descriptor metadata")
+                        .blocks()
+                        .checked_mul(512)
+                        .expect("descriptor block allocation overflow"),
+                )
+                .expect("descriptor allocated-byte count overflow");
         }
         #[cfg(not(unix))]
         panic!("certification descriptor allocation requires Unix stat blocks");
@@ -557,20 +567,101 @@ fn exact_descriptor_identities(paths: &[PathBuf]) -> BTreeMap<String, u64> {
         .collect()
 }
 
-fn portable_export_allocation(receipt: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+const CATEGORY_AUTHORITY_CONTRACT: &str = "graphforge-lifecycle-category-authority/2";
+
+fn portable_export_allocation(
+    receipt: &graphforge_api::PortableV2ExportFacadeResult,
+    rung: u64,
+    generation_sha256: &str,
+    live_nodes: u64,
+    live_edges: u64,
+) -> Value {
+    let allocated_bytes = receipt
+        .allocation_identity_allocated_bytes
+        .values()
+        .try_fold(0_u64, |total, allocated| total.checked_add(*allocated))
+        .expect("portable allocation authority overflow");
+    let authority = graphforge_storage::ArtifactStorageTotals {
+        logical_references: receipt.allocation_physical_objects,
+        logical_bytes: receipt.allocation_logical_bytes,
+        physical_objects: receipt.allocation_physical_objects,
+        physical_logical_bytes: receipt.allocation_logical_bytes,
+        allocated_bytes,
+    };
+    let native_identity_authority_sha256 =
+        safe_identity_authority_digest(&receipt.allocation_identity_allocated_bytes);
+    let empty_identity_authority_sha256 =
+        safe_identity_authority_digest(&BTreeMap::<String, u64>::new());
+    let mut native_category_identity_authority_sha256 = graphforge_storage::ArtifactCategory::ALL
+        .into_iter()
+        .map(|category| (category, empty_identity_authority_sha256.clone()))
+        .collect::<BTreeMap<_, _>>();
+    native_category_identity_authority_sha256.insert(
+        graphforge_storage::ArtifactCategory::PortablePackage,
+        native_identity_authority_sha256.clone(),
+    );
+    let context = graphforge_storage::ArtifactCategoryAuthorityContext {
+        contract: CATEGORY_AUTHORITY_CONTRACT.to_owned(),
+        version: 1,
+        rung,
+        generation_sha256: generation_sha256.to_owned(),
+        owner: "portable_package".to_owned(),
+        receipt_authority_sha256: safe_authority_digest(
+            b"graphforge-portable-receipt-authority-v1\0",
+            &[
+                receipt.package_digest.as_bytes(),
+                receipt.transport_digest.as_bytes(),
+                &receipt.allocation_logical_bytes.to_be_bytes(),
+                &receipt.allocation_physical_objects.to_be_bytes(),
+            ],
+        ),
+        native_identity_authority_sha256,
+        native_category_identity_authority_sha256,
+        live_nodes,
+        live_edges,
+    };
+    let authority_sha256 = graphforge_storage::artifact_category_authority_commitment(
+        &context,
+        graphforge_storage::ArtifactCategory::PortablePackage,
+        &authority,
+    );
     json!({
         "category": "portable_package",
         "logical_bytes": receipt.allocation_logical_bytes,
-        "allocated_bytes": receipt.allocation_identity_allocated_bytes.values().copied().sum::<u64>(),
+        "allocated_bytes": allocated_bytes,
         "logical_references": receipt.allocation_physical_objects,
         "physical_objects": receipt.allocation_physical_objects,
         "source": "portable_writer_receipt",
+        "category_authority": authority,
+        "category_authority_context": context,
+        "category_authority_sha256": authority_sha256,
     })
 }
 
-fn storage_attribution_value(project: &Path) -> Value {
-    let mut value =
-        serde_json::to_value(storage_attribution(project)).expect("serialize storage attribution");
+fn storage_attribution_value(
+    project: &Path,
+    owner: &str,
+    rung: u64,
+    live_nodes: u64,
+    live_edges: u64,
+) -> (Value, graphforge_storage::ArtifactCategoryAuthorityContext) {
+    let snapshot = storage_attribution(project);
+    let category_authorities = snapshot
+        .category_authorities()
+        .expect("storage-owned category authorities");
+    let context = snapshot
+        .category_authority_context(
+            CATEGORY_AUTHORITY_CONTRACT,
+            rung,
+            owner,
+            live_nodes,
+            live_edges,
+        )
+        .expect("storage-owned category authority context");
+    let category_authority_sha256 = snapshot
+        .category_authority_commitments(&context)
+        .expect("storage-owned category commitments");
+    let mut value = serde_json::to_value(snapshot).expect("serialize storage attribution");
     value
         .as_object_mut()
         .expect("storage attribution object")
@@ -580,6 +671,65 @@ fn storage_attribution_value(project: &Path) -> Value {
         .expect("storage attribution object")
         .remove("physical_identity_allocated_bytes");
     value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .insert(
+            "category_authorities".into(),
+            serde_json::to_value(category_authorities)
+                .expect("serialize storage category authorities"),
+        );
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .insert(
+            "category_authority_sha256".into(),
+            serde_json::to_value(category_authority_sha256)
+                .expect("serialize storage category commitments"),
+        );
+    value
+        .as_object_mut()
+        .expect("storage attribution object")
+        .insert(
+            "category_authority_context".into(),
+            serde_json::to_value(&context).expect("serialize storage category authority context"),
+        );
+    (value, context)
+}
+
+fn safe_authority_digest(domain: &[u8], values: &[&[u8]]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for value in values {
+        digest.update((value.len() as u128).to_be_bytes());
+        digest.update(value);
+    }
+    format!("sha256:{}", hex_encode(digest.finalize()))
+}
+
+fn safe_identity_authority_digest(identities: &BTreeMap<String, u64>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-native-identity-authority-v1\0");
+    for (identity, allocated_bytes) in identities {
+        digest.update((identity.len() as u128).to_be_bytes());
+        digest.update(identity.as_bytes());
+        digest.update(allocated_bytes.to_be_bytes());
+    }
+    format!("sha256:{}", hex_encode(digest.finalize()))
+}
+
+fn contains_native_object_identity(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(49).enumerate().any(|(offset, candidate)| {
+        candidate[16] == b':'
+            && candidate[..16].iter().all(u8::is_ascii_hexdigit)
+            && candidate[17..].iter().all(u8::is_ascii_hexdigit)
+            && offset
+                .checked_sub(1)
+                .is_none_or(|before| !bytes[before].is_ascii_hexdigit())
+            && bytes
+                .get(offset + candidate.len())
+                .is_none_or(|after| !after.is_ascii_hexdigit())
+    })
 }
 
 fn reject_unsanitized_evidence(value: &Value) -> Result<(), String> {
@@ -616,6 +766,9 @@ fn reject_unsanitized_evidence(value: &Value) -> Result<(), String> {
                 if Uuid::parse_str(text).is_ok() {
                     return Err(format!("raw UUID at {trail}"));
                 }
+                if contains_native_object_identity(text) {
+                    return Err(format!("raw native object identity at {trail}"));
+                }
                 if text.starts_with('/')
                     || text.starts_with("\\\\")
                     || (text.len() >= 3
@@ -635,7 +788,30 @@ fn reject_unsanitized_evidence(value: &Value) -> Result<(), String> {
 
 fn sanitized_construction_evidence(
     evidence: &graphforge_storage::GraphConstructionEvidence,
+    rung: u64,
+    generation_sha256: &str,
+    live_nodes: u64,
+    live_edges: u64,
 ) -> Value {
+    let category_authorities = evidence
+        .storage_category_authorities()
+        .expect("construction receipt/identity category authorities");
+    let peak_authorities = evidence
+        .storage_transient_peak_authorities()
+        .expect("construction receipt peak authorities");
+    let context = evidence
+        .storage_category_authority_context(
+            CATEGORY_AUTHORITY_CONTRACT,
+            rung,
+            generation_sha256,
+            "construction",
+            live_nodes,
+            live_edges,
+        )
+        .expect("construction category authority context");
+    let (category_authority_sha256, peak_authority_sha256) = evidence
+        .storage_category_authority_commitments(&context)
+        .expect("construction category authority commitments");
     let mut value = serde_json::to_value(evidence).expect("serialize construction evidence");
     value
         .as_object_mut()
@@ -645,6 +821,53 @@ fn sanitized_construction_evidence(
         .as_object_mut()
         .expect("construction evidence object")
         .remove("storage_allocation_transitions");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .remove("storage_receipt_category_authorities");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .remove("storage_receipt_transient_peak_authorities");
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .insert(
+            "storage_category_authorities".into(),
+            serde_json::to_value(category_authorities)
+                .expect("serialize construction category authorities"),
+        );
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .insert(
+            "storage_category_authority_context".into(),
+            serde_json::to_value(context).expect("serialize construction authority context"),
+        );
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .insert(
+            "storage_category_authority_sha256".into(),
+            serde_json::to_value(category_authority_sha256)
+                .expect("serialize construction category commitments"),
+        );
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .insert(
+            "storage_transient_peak_authority_sha256".into(),
+            serde_json::to_value(peak_authority_sha256)
+                .expect("serialize construction peak commitments"),
+        );
+    value
+        .as_object_mut()
+        .expect("construction evidence object")
+        .insert(
+            "storage_transient_peak_authorities".into(),
+            serde_json::to_value(peak_authorities)
+                .expect("serialize construction peak authorities"),
+        );
     value
 }
 
@@ -1258,7 +1481,7 @@ fn linux_process_memory() -> Value {
                     .trim()
                     .parse::<u64>()
                     .ok()
-                    .map(|kb| kb.saturating_mul(1024))
+                    .and_then(|kb| kb.checked_mul(1024))
             })
         })
     };
@@ -1628,14 +1851,16 @@ fn run_rung(
         heartbeat.stop();
         drop(graph);
         let committed_snapshot = storage_attribution(&project);
-        let ingest_disk_used_bytes =
-            generator_allocated_bytes.saturating_add(committed_snapshot.allocated_bytes);
+        let ingest_disk_used_bytes = generator_allocated_bytes
+            .checked_add(committed_snapshot.allocated_bytes)
+            .expect("ingest disk union overflow");
         let committed_storage =
             serde_json::to_value(committed_snapshot).expect("serialize committed storage");
         let construction_phases =
             graphforge_storage::ConstructionPhaseAttribution::from_construction(
                 &construction_evidence,
-            );
+            )
+            .expect("derive construction phase attribution");
         construction_phases
             .validate_reconciliation()
             .expect("construction phase attribution reconciliation");
@@ -1727,8 +1952,9 @@ fn run_rung(
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
             .expect("reopen GraphForge");
         let reopen_s = reopen_started.elapsed().as_secs_f64();
-        let reopen_disk_used_bytes =
-            generator_allocated_bytes.saturating_add(storage_attribution(&project).allocated_bytes);
+        let reopen_disk_used_bytes = generator_allocated_bytes
+            .checked_add(storage_attribution(&project).allocated_bytes)
+            .expect("reopen disk union overflow");
         let reopen_violation = envelope_violation(&env, ladder_started, reopen_disk_used_bytes);
         if let Some(class) = reopen_violation {
             first_failing_phase = Some("reopen");
@@ -1772,7 +1998,8 @@ fn run_rung(
             node_count = result.unwrap_or(0);
             let expected = 1u64 << rung.scale;
             let count_disk_used_bytes = generator_allocated_bytes
-                .saturating_add(storage_attribution(&project).allocated_bytes);
+                .checked_add(storage_attribution(&project).allocated_bytes)
+                .expect("node-count disk union overflow");
             let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
             if failure.is_some() {
                 violation = Some("execution_failure");
@@ -1820,16 +2047,17 @@ fn run_rung(
             edge_count = result.as_ref().map_or(0, scalar_count);
             gsi = gsi_undirected(node_count, edge_count);
             let count_disk_used_bytes = generator_allocated_bytes
-                .saturating_add(storage_attribution(&project).allocated_bytes);
+                .checked_add(storage_attribution(&project).allocated_bytes)
+                .expect("edge-count disk union overflow");
             let mut violation = envelope_violation(&env, ladder_started, count_disk_used_bytes);
             if failure.is_some() {
                 violation = Some("execution_failure");
             } else if edge_count != live_unique_edges {
                 violation = Some("result_mismatch");
-            } else if work.memory_reserved_after
-                > work
-                    .memory_reserved_before
-                    .saturating_add(work.returned_batch_bytes)
+            } else if work
+                .memory_reserved_before
+                .checked_add(work.returned_batch_bytes)
+                .is_none_or(|bound| work.memory_reserved_after > bound)
             {
                 violation = Some("memory_retained");
             }
@@ -1881,7 +2109,8 @@ fn run_rung(
                 let failure = result.as_ref().err().map(ToString::to_string);
                 let rows = result.as_ref().map_or(0, row_count);
                 let query_disk_used_bytes = generator_allocated_bytes
-                    .saturating_add(storage_attribution(&project).allocated_bytes);
+                    .checked_add(storage_attribution(&project).allocated_bytes)
+                    .expect("query disk union overflow");
                 let mut violation = envelope_violation(&env, ladder_started, query_disk_used_bytes);
                 if failure.is_some() {
                     violation = Some("execution_failure");
@@ -1925,11 +2154,13 @@ fn run_rung(
         drop(graph);
     }
 
-    let disk_used_bytes = generator_allocated_bytes.saturating_add(
-        ingest_ran
-            .then(|| storage_attribution(&project).allocated_bytes)
-            .unwrap_or(0),
-    );
+    let disk_used_bytes = generator_allocated_bytes
+        .checked_add(
+            ingest_ran
+                .then(|| storage_attribution(&project).allocated_bytes)
+                .unwrap_or(0),
+        )
+        .expect("final disk union overflow");
     // Tri-state: reconciliation is only *evaluated* once ingest has run. A rung
     // stopped in the generate phase is reported as null (not evaluated), never
     // as a forced `true`.
@@ -2023,6 +2254,7 @@ struct EdgeSink<'a, 'graph> {
     session: &'a mut GraphConstructionSession<'graph>,
     cancellation: Option<&'a AtomicBool>,
     buf: Vec<(u32, u32)>,
+    chunk_rows: usize,
     chunk_index: u128,
     hasher: Sha256,
 }
@@ -2032,10 +2264,20 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         session: &'a mut GraphConstructionSession<'graph>,
         cancellation: Option<&'a AtomicBool>,
     ) -> Self {
+        Self::with_chunk_rows(session, cancellation, CONSTRUCTION_BATCH_ROWS)
+    }
+
+    fn with_chunk_rows(
+        session: &'a mut GraphConstructionSession<'graph>,
+        cancellation: Option<&'a AtomicBool>,
+        chunk_rows: usize,
+    ) -> Self {
+        assert!(chunk_rows > 0, "edge chunk rows must be positive");
         EdgeSink {
             session,
             cancellation,
-            buf: Vec::with_capacity(CONSTRUCTION_BATCH_ROWS),
+            buf: Vec::with_capacity(chunk_rows),
+            chunk_rows,
             chunk_index: 0,
             hasher: Sha256::new(),
         }
@@ -2046,7 +2288,7 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         self.hasher.update(src.to_le_bytes());
         self.hasher.update(dst.to_le_bytes());
         self.buf.push((src, dst));
-        if self.buf.len() >= CONSTRUCTION_BATCH_ROWS {
+        if self.buf.len() >= self.chunk_rows {
             self.flush();
         }
     }
@@ -2062,8 +2304,9 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
         for (local, &(src, dst)) in self.buf.iter().enumerate() {
             let ordinal = self
                 .chunk_index
-                .saturating_mul(CONSTRUCTION_BATCH_ROWS as u128)
-                .saturating_add(u128::try_from(local).expect("edge ordinal"));
+                .checked_mul(self.chunk_rows as u128)
+                .and_then(|value| value.checked_add(u128::try_from(local).expect("edge ordinal")))
+                .expect("edge ordinal overflow");
             edge_ids.push(uuidv7(0xE000_0000_0000u128 + ordinal + 1));
             sources.push(uuidv7(u128::from(src) + 1));
             targets.push(uuidv7(u128::from(dst) + 1));
@@ -2091,7 +2334,7 @@ impl<'a, 'graph> EdgeSink<'a, 'graph> {
             .append_edges(&format!("edges-{:016x}", self.chunk_index), &batch)
             .expect("append construction edge chunk");
         INGEST_CHUNK_INDEX.store(
-            u64::try_from(self.chunk_index).unwrap_or(u64::MAX),
+            u64::try_from(self.chunk_index).expect("edge chunk index exceeds u64"),
             Ordering::Relaxed,
         );
         INGEST_SUBPHASE.store(3, Ordering::Relaxed);
@@ -2121,6 +2364,16 @@ fn publish_nodes(
     vertex_count: u64,
     cancellation: Option<&AtomicBool>,
 ) {
+    publish_nodes_with_chunk_rows(session, vertex_count, cancellation, CONSTRUCTION_BATCH_ROWS);
+}
+
+fn publish_nodes_with_chunk_rows(
+    session: &mut GraphConstructionSession<'_>,
+    vertex_count: u64,
+    cancellation: Option<&AtomicBool>,
+    chunk_rows: usize,
+) {
+    assert!(chunk_rows > 0, "node chunk rows must be positive");
     let total = usize::try_from(vertex_count).expect("vertex count fits usize");
     let mut offset = 0usize;
     while offset < total {
@@ -2128,7 +2381,7 @@ fn publish_nodes(
             !cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)),
             "node publication cancelled"
         );
-        let end = (offset + CONSTRUCTION_BATCH_ROWS).min(total);
+        let end = (offset + chunk_rows).min(total);
         let count = end - offset;
         let ids = (offset..end)
             .map(|index| uuidv7(u128::try_from(index + 1).expect("node seed")))
@@ -2252,7 +2505,7 @@ fn peak_rss() -> Option<(u64, &'static str)> {
                     .trim()
                     .parse::<u64>()
                     .ok()?;
-                return Some((kb.saturating_mul(1024), "vmhwm"));
+                return kb.checked_mul(1024).map(|bytes| (bytes, "vmhwm"));
             }
         }
     }
@@ -2267,7 +2520,7 @@ fn peak_rss() -> Option<(u64, &'static str)> {
         .trim()
         .parse::<u64>()
         .ok()?;
-    Some((kb.saturating_mul(1024), "ps_sampled"))
+    kb.checked_mul(1024).map(|bytes| (bytes, "ps_sampled"))
 }
 
 struct SplitMix64(u64);
@@ -2672,7 +2925,8 @@ impl PhaseJournal {
         if let Some(code) = self.monitor.failure_code() {
             self.phases.push(json!({
                 "id": id, "status": "fail",
-                "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "elapsed_ms": u64::try_from(started.elapsed().as_millis())
+                    .expect("lifecycle phase elapsed milliseconds exceed u64"),
                 "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
                 "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
                 "fingerprint": fingerprint, "detail": detail, "failure_code": code,
@@ -2684,7 +2938,8 @@ impl PhaseJournal {
         let disk_peak_bytes = self.monitor.peak_disk.swap(0, Ordering::SeqCst);
         self.phases.push(json!({
             "id": id, "status": "pass",
-            "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "elapsed_ms": u64::try_from(started.elapsed().as_millis())
+                .expect("lifecycle phase elapsed milliseconds exceed u64"),
             "rss_peak_bytes": rss_peak_bytes,
             "disk_peak_bytes": disk_peak_bytes,
             "fingerprint": fingerprint,
@@ -2699,7 +2954,8 @@ impl PhaseJournal {
             .observe_allocated_union(self.allocation.current_allocated_bytes());
         self.phases.push(json!({
             "id": id, "status": "fail",
-            "elapsed_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "elapsed_ms": u64::try_from(started.elapsed().as_millis())
+                .expect("lifecycle phase elapsed milliseconds exceed u64"),
             "rss_peak_bytes": self.monitor.peak_rss.load(Ordering::Relaxed),
             "disk_peak_bytes": self.monitor.peak_disk.load(Ordering::Relaxed),
             "fingerprint": null, "detail": detail, "failure_code": code,
@@ -2757,6 +3013,12 @@ impl PhaseJournal {
 
     fn current_allocated_union(&self) -> u64 {
         self.allocation.current_allocated_bytes()
+    }
+
+    fn owner_allocated_union(&self, owners: &[&str]) -> u64 {
+        self.allocation
+            .owner_union_allocated_bytes(owners.iter().copied())
+            .expect("capture authoritative owner allocation union")
     }
 
     fn flush(&self) {
@@ -2849,9 +3111,8 @@ impl ResourceMonitor {
                 let code = if rss > envelope.rss_bytes {
                     1
                 } else if elapsed_before_process
-                    .saturating_add(started.elapsed())
-                    .as_secs()
-                    > envelope.timeout_s
+                    .checked_add(started.elapsed())
+                    .is_none_or(|elapsed| elapsed.as_secs() > envelope.timeout_s)
                 {
                     3
                 } else {
@@ -2923,7 +3184,7 @@ fn current_rss_bytes() -> Result<u64, &'static str> {
                 .parse::<u64>()
                 .ok()
         })
-        .map(|kibibytes| kibibytes.saturating_mul(1024))
+        .and_then(|kibibytes| kibibytes.checked_mul(1024))
         .or_else(|| peak_rss().map(|value| value.0))
         .ok_or("process RSS is unavailable")
 }
@@ -3134,6 +3395,61 @@ fn run_integrated_certification_with_edge_factor(
     target_live: Option<u64>,
     preflight_edge_factor: Option<u32>,
 ) -> Value {
+    run_integrated_certification_config(
+        root,
+        target_live,
+        preflight_edge_factor,
+        1,
+        CONSTRUCTION_BATCH_ROWS,
+        false,
+    )
+    .value
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LinearityAxis {
+    Nodes,
+    Edges,
+}
+
+struct IntegratedCertificationEvidence {
+    value: Value,
+}
+
+fn checked_lifecycle_peak_allocation(
+    current_allocated_bytes: u64,
+    transient_allocated_bytes: u64,
+) -> Result<u64, String> {
+    current_allocated_bytes
+        .checked_add(transient_allocated_bytes)
+        .ok_or_else(|| "lifecycle peak allocation overflow".to_owned())
+}
+
+fn run_integrated_certification_for_linearity(
+    root: &Path,
+    axis: LinearityAxis,
+    factor: u32,
+) -> IntegratedCertificationEvidence {
+    // The production-sized append window would make every SCALE-10 preflight
+    // fit in one object. A small deterministic window lets the 1x/2x/4x proof
+    // observe byte, call, block, and object slopes without changing runtime
+    // behavior or the provider profile.
+    let (node_factor, edge_factor) = match axis {
+        LinearityAxis::Nodes => (factor, 1),
+        LinearityAxis::Edges => (1, factor),
+    };
+    run_integrated_certification_config(root, None, Some(edge_factor), node_factor, 256, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_integrated_certification_config(
+    root: &Path,
+    target_live: Option<u64>,
+    preflight_edge_factor: Option<u32>,
+    preflight_node_factor: u32,
+    proof_chunk_rows: usize,
+    scale_recovery_drill: bool,
+) -> IntegratedCertificationEvidence {
     let source = root.join("source");
     let imported = root.join("imported");
     let package = root.join("project.gfpb");
@@ -3224,12 +3540,20 @@ fn run_integrated_certification_with_edge_factor(
     let mut construction = graph
         .begin_graph_construction(Default::default())
         .expect("begin certification construction");
-    publish_nodes(
+    let node_count = (1_u64 << scale)
+        .checked_mul(u64::from(preflight_node_factor))
+        .expect("linearity node count");
+    publish_nodes_with_chunk_rows(
         &mut construction,
-        1u64 << scale,
+        node_count,
         Some(journal.cancellation()),
+        proof_chunk_rows,
     );
-    let mut sink = EdgeSink::new(&mut construction, Some(journal.cancellation()));
+    let mut sink = EdgeSink::with_chunk_rows(
+        &mut construction,
+        Some(journal.cancellation()),
+        proof_chunk_rows,
+    );
     if let Some(edges) = edges {
         for (src, dst) in edges {
             sink.push(src, dst);
@@ -3250,7 +3574,8 @@ fn run_integrated_certification_with_edge_factor(
         .expect("publish certification construction");
     let construction_evidence = construction.progress().evidence;
     let mut construction_phases =
-        graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence);
+        graphforge_storage::ConstructionPhaseAttribution::from_construction(&construction_evidence)
+            .expect("derive certification construction phases");
     construction_phases
         .validate_for_qualification()
         .expect("certification construction phase attribution");
@@ -3263,8 +3588,11 @@ fn run_integrated_certification_with_edge_factor(
     // already-open source project. The storage-owned numeric high-water mark
     // therefore restores peaks compacted out of durable checkpoint history.
     journal.monitor.observe_allocated_union(
-        pre_construction_union
-            .saturating_add(construction_evidence.storage_transient_peak_total_allocated_bytes),
+        checked_lifecycle_peak_allocation(
+            pre_construction_union,
+            construction_evidence.storage_transient_peak_total_allocated_bytes,
+        )
+        .expect("lifecycle peak allocation overflow"),
     );
     let committed_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve committed ingest generation");
@@ -3525,7 +3853,17 @@ fn run_integrated_certification_with_edge_factor(
         Some(imported_2hop.clone()),
         query_work_evidence(&imported_2hop_work),
     );
-    let source_storage = storage_attribution_value(&source);
+    let authority_rung = target_live.map_or_else(
+        || u64::from(preflight_node_factor.max(edge_factor)),
+        |_| u64::from(scale),
+    );
+    let (source_storage, source_context) = storage_attribution_value(
+        &source,
+        "source",
+        authority_rung,
+        source_nodes,
+        source_edges,
+    );
     let source_project_current_allocated_bytes =
         graphforge_storage::capture_project_storage_identity_union(
             &graphforge_storage::resolve_project_generation(&source)
@@ -3533,8 +3871,27 @@ fn run_integrated_certification_with_edge_factor(
         )
         .expect("capture authoritative source project identity union")
         .allocated_bytes;
-    let imported_storage = storage_attribution_value(&imported);
-    let package_storage = portable_export_allocation(&exported);
+    let (imported_storage, _) = storage_attribution_value(
+        &imported,
+        "clean_import",
+        authority_rung,
+        imported_nodes,
+        imported_edges,
+    );
+    let package_storage = portable_export_allocation(
+        &exported,
+        authority_rung,
+        &source_context.generation_sha256,
+        source_nodes,
+        source_edges,
+    );
+    let construction_storage = sanitized_construction_evidence(
+        &construction_evidence,
+        authority_rung,
+        &source_context.generation_sha256,
+        source_nodes,
+        source_edges,
+    );
     // Representative drills use the same verifier/import boundaries but never
     // repeat the billion-edge payload.
     let phase = Instant::now();
@@ -3637,8 +3994,13 @@ fn run_integrated_certification_with_edge_factor(
         capability_version: 1,
     })
     .collect::<Vec<_>>();
+    let recovery_package = if scale_recovery_drill {
+        &package
+    } else {
+        &drill_package
+    };
     let interrupted_error = graphforge_storage::import_complete_portable_v2_with_progress(
-        &drill_package,
+        recovery_package,
         &interrupted,
         interrupted_operation,
         interrupted_generation,
@@ -3654,10 +4016,12 @@ fn run_integrated_certification_with_edge_factor(
     .expect_err("cancelled finalization must fail");
     assert!(interrupted_error.recovery_reauthentication_read_bytes > 0);
     assert!(interrupted_error.recovery_reauthentication_read_calls > 0);
-    construction_phases.add_recovery_reauthentication(
-        interrupted_error.recovery_reauthentication_read_bytes,
-        interrupted_error.recovery_reauthentication_read_calls,
-    );
+    construction_phases
+        .add_recovery_reauthentication(
+            interrupted_error.recovery_reauthentication_read_bytes,
+            interrupted_error.recovery_reauthentication_read_calls,
+        )
+        .expect("accumulate interrupted recovery authority");
     construction_phases
         .validate_for_qualification()
         .expect("interrupted recovery phase attribution");
@@ -3679,6 +4043,46 @@ fn run_integrated_certification_with_edge_factor(
         format!("sha256:{}", hex_encode(digest.finalize()))
     };
     let workspace_current_allocated_bytes = journal.current_allocated_union();
+    let workspace_components = BTreeMap::from([
+        (
+            "source_project_and_construction",
+            journal.owner_allocated_union(&["source_project", "construction"]),
+        ),
+        (
+            "portable_package",
+            journal.owner_allocated_union(&["portable_package"]),
+        ),
+        (
+            "clean_import_project",
+            journal.owner_allocated_union(&["clean_import", "clean_import_project"]),
+        ),
+        (
+            "drill_project_and_construction",
+            journal.owner_allocated_union(&["drill_project", "drill_construction"]),
+        ),
+        (
+            "drill_package",
+            journal.owner_allocated_union(&["drill_package"]),
+        ),
+        (
+            "corrupt_drill_package",
+            journal.owner_allocated_union(&["corrupt_drill_package"]),
+        ),
+    ]);
+    assert_eq!(
+        workspace_components
+            .values()
+            .try_fold(0_u64, |total, allocated| total.checked_add(*allocated))
+            .expect("workspace component authority overflow"),
+        workspace_current_allocated_bytes,
+        "non-overlapping owner-group unions must reconcile to the workspace union"
+    );
+    let workspace_peak_allocated_bytes = journal
+        .phases
+        .iter()
+        .filter_map(|phase| phase["disk_peak_bytes"].as_u64())
+        .max()
+        .expect("completed lifecycle phase allocation peaks");
     let evidence = json!({
         "source_export_generation_authenticated": source_generation == exported.generation_uuid,
         "import_receipt_reopen_authenticated": current_generation_uuid(&imported_graph) == imported_receipt.generation_uuid,
@@ -3703,14 +4107,16 @@ fn run_integrated_certification_with_edge_factor(
             "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
             "portable_package": package_storage,
             "clean_import": imported_storage,
-            "construction": sanitized_construction_evidence(&construction_evidence),
+            "construction": construction_storage,
             "application_io_phases": construction_phases,
             "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
+            "workspace_peak_allocated_bytes": workspace_peak_allocated_bytes,
+            "workspace_components": workspace_components,
         },
         "phases": journal.phases,
     });
     reject_unsanitized_evidence(&evidence).expect("certification lifecycle evidence is sanitized");
-    evidence
+    IntegratedCertificationEvidence { value: evidence }
 }
 
 #[test]
@@ -3736,6 +4142,10 @@ fn certification_evidence_sanitizer_rejects_identity_paths_and_sensitive_keys() 
             "absolute host path",
         ),
         (
+            json!({"tools": {"build": "artifact=0011223344556677:00112233445566778899aabbccddeeff"}}),
+            "raw native object identity",
+        ),
+        (
             json!({"nested": {"api_token": "redacted"}}),
             "sensitive evidence key",
         ),
@@ -3748,91 +4158,3217 @@ fn certification_evidence_sanitizer_rejects_identity_paths_and_sensitive_keys() 
     }
     reject_unsanitized_evidence(&json!({
         "generation_authenticated": true,
-        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "tools": {
+            "rustc": "rustc 1.90.0 (1159e78c4 2026-08-01)",
+            "llvm": "llvm:19.1.7"
+        }
     }))
     .expect("closed proof is safe");
 }
 
-#[test]
-fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_phase_slopes() {
-    const FIELDS: [&str; 7] = [
-        "read_bytes",
-        "write_bytes",
-        "read_calls",
-        "write_calls",
-        "object_count",
-        "block_count",
-        "fsync_calls",
+const LINEARITY_PHASE_FIELDS: [&str; 7] = [
+    "read_bytes",
+    "write_bytes",
+    "read_calls",
+    "write_calls",
+    "object_count",
+    "block_count",
+    "fsync_calls",
+];
+
+#[derive(Clone, Copy)]
+enum RetainedMetricPolicy {
+    ScaleBearing,
+    FilesystemQuantized,
+    InventoryDerived,
+    NodeBearing,
+    EdgeBearing,
+    NodeFilesystemQuantized,
+    EdgeFilesystemQuantized,
+}
+
+const LINEARITY_RETAINED_FIELDS: [(&str, &str, RetainedMetricPolicy); 33] = [
+    (
+        "source.logical_references",
+        "/storage/source/logical_references",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "source.logical_bytes",
+        "/storage/source/logical_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "source.physical_objects",
+        "/storage/source/physical_objects",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "source.physical_logical_bytes",
+        "/storage/source/physical_logical_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "source.allocated_bytes",
+        "/storage/source/allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "source.canonical_nodes.logical_bytes",
+        "/storage/source/categories/topology_nodes/logical_bytes",
+        RetainedMetricPolicy::NodeBearing,
+    ),
+    (
+        "source.canonical_nodes.physical_logical_bytes",
+        "/storage/source/categories/topology_nodes/physical_logical_bytes",
+        RetainedMetricPolicy::NodeBearing,
+    ),
+    (
+        "source.canonical_nodes.allocated_bytes",
+        "/storage/source/categories/topology_nodes/allocated_bytes",
+        RetainedMetricPolicy::NodeFilesystemQuantized,
+    ),
+    (
+        "source.canonical_edges.logical_bytes",
+        "/storage/source/categories/topology_edges/logical_bytes",
+        RetainedMetricPolicy::EdgeBearing,
+    ),
+    (
+        "source.canonical_edges.physical_logical_bytes",
+        "/storage/source/categories/topology_edges/physical_logical_bytes",
+        RetainedMetricPolicy::EdgeBearing,
+    ),
+    (
+        "source.canonical_edges.allocated_bytes",
+        "/storage/source/categories/topology_edges/allocated_bytes",
+        RetainedMetricPolicy::EdgeFilesystemQuantized,
+    ),
+    (
+        "clean_import.logical_references",
+        "/storage/clean_import/logical_references",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "clean_import.logical_bytes",
+        "/storage/clean_import/logical_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "clean_import.physical_objects",
+        "/storage/clean_import/physical_objects",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "clean_import.physical_logical_bytes",
+        "/storage/clean_import/physical_logical_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "clean_import.allocated_bytes",
+        "/storage/clean_import/allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "clean_import.canonical_nodes.logical_bytes",
+        "/storage/clean_import/categories/topology_nodes/logical_bytes",
+        RetainedMetricPolicy::NodeBearing,
+    ),
+    (
+        "clean_import.canonical_nodes.physical_logical_bytes",
+        "/storage/clean_import/categories/topology_nodes/physical_logical_bytes",
+        RetainedMetricPolicy::NodeBearing,
+    ),
+    (
+        "clean_import.canonical_nodes.allocated_bytes",
+        "/storage/clean_import/categories/topology_nodes/allocated_bytes",
+        RetainedMetricPolicy::NodeFilesystemQuantized,
+    ),
+    (
+        "clean_import.canonical_edges.logical_bytes",
+        "/storage/clean_import/categories/topology_edges/logical_bytes",
+        RetainedMetricPolicy::EdgeBearing,
+    ),
+    (
+        "clean_import.canonical_edges.physical_logical_bytes",
+        "/storage/clean_import/categories/topology_edges/physical_logical_bytes",
+        RetainedMetricPolicy::EdgeBearing,
+    ),
+    (
+        "clean_import.canonical_edges.allocated_bytes",
+        "/storage/clean_import/categories/topology_edges/allocated_bytes",
+        RetainedMetricPolicy::EdgeFilesystemQuantized,
+    ),
+    (
+        "portable_package.logical_references",
+        "/storage/portable_package/logical_references",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "portable_package.logical_bytes",
+        "/storage/portable_package/logical_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "portable_package.physical_objects",
+        "/storage/portable_package/physical_objects",
+        RetainedMetricPolicy::InventoryDerived,
+    ),
+    (
+        "portable_package.allocated_bytes",
+        "/storage/portable_package/allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "construction.canonical_output_bytes",
+        "/storage/construction/canonical_output_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "construction.staged_and_retained_disk_bytes",
+        "/storage/construction/staged_and_retained_disk_bytes",
+        RetainedMetricPolicy::ScaleBearing,
+    ),
+    (
+        "construction.transient_peak_total_allocated_bytes",
+        "/storage/construction/storage_transient_peak_total_allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "source_project_current_allocated_bytes",
+        "/storage/source_project_current_allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "workspace_current_allocated_bytes",
+        "/storage/workspace_current_allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "workspace_peak_allocated_bytes",
+        "/storage/workspace_peak_allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+    (
+        "construction.current_merge_temporary_allocated_bytes",
+        "/storage/construction/current_merge_temporary_allocated_bytes",
+        RetainedMetricPolicy::FilesystemQuantized,
+    ),
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleLinearityObservation {
+    phases: BTreeMap<String, [u64; LINEARITY_PHASE_FIELDS.len()]>,
+    retained: BTreeMap<String, u64>,
+    append_objects: u64,
+    input_rows: u64,
+    live_nodes: u64,
+    live_edges: u64,
+    shape_merge_bytes: [u64; 2],
+    shape_block_components: [u64; 2],
+    canonical_artifact_objects: u64,
+    cas_publication_io: graphforge_storage::GraphPublicationIo,
+    encode_fsync_components: [u64; 4],
+    hydration_files_copied: u64,
+    hydration_file_fsync_operations: u64,
+    hydration_directory_fsync_operations: u64,
+    shape_read_component_calls: [u64; 6],
+    shape_write_component_calls: [u64; 2],
+    encode_write_component_calls: [u64; 5],
+    category_metrics: BTreeMap<String, [u64; 6]>,
+    category_authority_metrics: BTreeMap<String, [u64; 6]>,
+    phase_disk_peaks: BTreeMap<String, u64>,
+}
+
+const fn category_name(category: graphforge_storage::ArtifactCategory) -> &'static str {
+    use graphforge_storage::ArtifactCategory;
+    match category {
+        ArtifactCategory::TopologyNodes => "topology_nodes",
+        ArtifactCategory::TopologyEdges => "topology_edges",
+        ArtifactCategory::Properties => "properties",
+        ArtifactCategory::UuidAndSurrogates => "uuid_and_surrogates",
+        ArtifactCategory::Adjacency => "adjacency",
+        ArtifactCategory::CatalogAndManifests => "catalog_and_manifests",
+        ArtifactCategory::ConstructionStaging => "construction_staging",
+        ArtifactCategory::PortablePackage => "portable_package",
+        ArtifactCategory::CleanImportedProject => "clean_imported_project",
+        ArtifactCategory::Other => "other",
+    }
+}
+
+fn artifact_fields(totals: &graphforge_storage::ArtifactStorageTotals) -> [u64; 5] {
+    let graphforge_storage::ArtifactStorageTotals {
+        logical_references,
+        logical_bytes,
+        physical_objects,
+        physical_logical_bytes,
+        allocated_bytes,
+    } = totals;
+    [
+        *logical_references,
+        *logical_bytes,
+        *physical_objects,
+        *physical_logical_bytes,
+        *allocated_bytes,
+    ]
+}
+
+fn exact_category_map(
+    value: Value,
+    owner: &str,
+) -> BTreeMap<graphforge_storage::ArtifactCategory, graphforge_storage::ArtifactStorageTotals> {
+    let categories: BTreeMap<_, _> =
+        serde_json::from_value(value).unwrap_or_else(|error| panic!("{owner}: {error}"));
+    let observed = categories.keys().copied().collect::<BTreeSet<_>>();
+    let expected = graphforge_storage::ArtifactCategory::ALL
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(observed, expected, "{owner} category inventory");
+    categories
+}
+
+const fn phase_name(phase: graphforge_storage::StorageIoPhase) -> &'static str {
+    use graphforge_storage::StorageIoPhase;
+    match phase {
+        StorageIoPhase::AppendMerge => "append_merge",
+        StorageIoPhase::SealAuthentication => "seal_authentication",
+        StorageIoPhase::ShapeConsumeReauthentication => "shape_consume_reauthentication",
+        StorageIoPhase::EncodeWritePostwriteAuthentication => {
+            "encode_write_postwrite_authentication"
+        }
+        StorageIoPhase::PublicationPreauthentication => "publication_preauthentication",
+        StorageIoPhase::CasInstallReadWrite => "cas_install_read_write",
+        StorageIoPhase::HydrationVerification => "hydration_verification",
+        StorageIoPhase::FsyncSynchronization => "fsync_synchronization",
+        StorageIoPhase::RecoveryReauthentication => "recovery_reauthentication",
+    }
+}
+
+fn phase_fields(totals: &graphforge_storage::PhaseIoTotals) -> [u64; LINEARITY_PHASE_FIELDS.len()] {
+    let graphforge_storage::PhaseIoTotals {
+        read_bytes,
+        write_bytes,
+        read_calls,
+        write_calls,
+        object_count,
+        block_count,
+        fsync_calls,
+    } = totals;
+    [
+        *read_bytes,
+        *write_bytes,
+        *read_calls,
+        *write_calls,
+        *object_count,
+        *block_count,
+        *fsync_calls,
+    ]
+}
+
+fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObservation {
+    let attribution: graphforge_storage::ConstructionPhaseAttribution =
+        serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
+            .expect("typed phase evidence");
+    let phases = attribution
+        .phases
+        .iter()
+        .map(|(phase, totals)| (phase_name(*phase).to_owned(), phase_fields(totals)))
+        .collect();
+    let retained = LINEARITY_RETAINED_FIELDS
+        .iter()
+        .map(|(name, pointer, _)| {
+            (
+                (*name).to_owned(),
+                evidence
+                    .pointer(pointer)
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| panic!("retained metric {name} is an integer")),
+            )
+        })
+        .collect();
+    let append_objects = evidence["storage"]["construction"]["input_batches"]
+        .as_u64()
+        .expect("construction input batches are an integer");
+    let input_rows = evidence["storage"]["construction"]["input_rows"]
+        .as_u64()
+        .expect("construction input rows are an integer");
+    let live_nodes = evidence["source_nodes"]
+        .as_u64()
+        .expect("authoritative live node count");
+    let live_edges = evidence["source_edges"]
+        .as_u64()
+        .expect("authoritative live edge count");
+    let construction = &evidence["storage"]["construction"];
+    let merge_read_bytes = construction["merge_read_bytes"]
+        .as_u64()
+        .expect("merge read bytes");
+    let merge_write_bytes = construction["merge_written_bytes"]
+        .as_u64()
+        .expect("merge write bytes");
+    let shape_block_components = [
+        construction["merge_read_blocks"]
+            .as_u64()
+            .expect("merge read block authority"),
+        construction["merge_write_blocks"]
+            .as_u64()
+            .expect("merge write block authority"),
     ];
-    let mut baseline: Option<BTreeMap<String, [u64; 7]>> = None;
-    for factor in [1_u32, 2, 4] {
-        let root = TempDir::new().expect("full lifecycle ladder root");
-        let evidence =
-            run_integrated_certification_with_edge_factor(root.path(), None, Some(factor));
-        assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
-        let phases = evidence["storage"]["application_io_phases"]["phases"]
-            .as_object()
-            .expect("phase evidence object");
-        let attribution: graphforge_storage::ConstructionPhaseAttribution =
-            serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
-                .expect("decode phase evidence");
-        attribution
-            .validate_for_qualification()
-            .expect("full lifecycle phase qualification");
-        let recovery = &phases["recovery_reauthentication"];
-        assert!(
-            recovery["read_bytes"].as_u64().unwrap_or(0) > 0,
-            "{factor}x interrupted-finalization recovery must report authenticated bytes"
+    let canonical_artifact_objects = construction["canonical_artifact_objects"]
+        .as_u64()
+        .expect("canonical artifact inventory");
+    let encode_fsync_components = [
+        construction["encode_output_fsync_operations"]
+            .as_u64()
+            .expect("encode output fsyncs"),
+        construction["encode_source_spool_fsync_operations"]
+            .as_u64()
+            .expect("encode spool fsyncs"),
+        construction["encode_membership_fsync_operations"]
+            .as_u64()
+            .expect("encode membership fsyncs"),
+        construction["encode_ordinal_fsync_operations"]
+            .as_u64()
+            .expect("encode ordinal fsyncs"),
+    ];
+    let hydration_files_copied = construction["hydration_files_copied"]
+        .as_u64()
+        .expect("hydration copied-file inventory");
+    let hydration_file_fsync_operations = construction["hydration_file_fsync_operations"]
+        .as_u64()
+        .expect("hydration file barrier inventory");
+    let hydration_directory_fsync_operations = construction["hydration_directory_fsync_operations"]
+        .as_u64()
+        .expect("hydration directory barrier inventory");
+    let shape_read_component_calls = [
+        construction["shape_input_validation_read_operations"]
+            .as_u64()
+            .expect("shape input reads"),
+        construction["merge_read_operations"]
+            .as_u64()
+            .expect("merge reads"),
+        construction["parquet_read_operations"]
+            .as_u64()
+            .expect("Parquet reads"),
+        construction["shaped_output_authentication_operations"]
+            .as_u64()
+            .expect("shape authentication reads"),
+        construction["parent_catalog_read_operations"]
+            .as_u64()
+            .expect("parent catalog reads"),
+        construction["retained_probe_block_loads"]
+            .as_u64()
+            .expect("retained probe reads"),
+    ];
+    let shape_write_component_calls = [
+        construction["merge_write_operations"]
+            .as_u64()
+            .expect("merge writes"),
+        construction["parquet_write_operations"]
+            .as_u64()
+            .expect("Parquet writes"),
+    ];
+    let encode_write_component_calls = [
+        construction["encode_output_write_operations"]
+            .as_u64()
+            .expect("encode output writes"),
+        construction["encode_membership_write_operations"]
+            .as_u64()
+            .expect("encode membership writes"),
+        construction["encode_source_spool_write_operations"]
+            .as_u64()
+            .expect("encode spool writes"),
+        construction["encode_ordinal_artifact_write_operations"]
+            .as_u64()
+            .expect("ordinal artifact writes"),
+        construction["encode_ordinal_publication_write_operations"]
+            .as_u64()
+            .expect("ordinal publication writes"),
+    ];
+    let mut category_metrics = BTreeMap::new();
+    let mut category_authority_metrics = BTreeMap::new();
+    for owner in ["source", "clean_import"] {
+        let categories =
+            exact_category_map(evidence["storage"][owner]["categories"].clone(), owner);
+        let authorities = exact_category_map(
+            evidence["storage"][owner]["category_authorities"].clone(),
+            &format!("{owner} authorities"),
         );
-        assert!(
-            recovery["read_calls"].as_u64().unwrap_or(0) > 0,
-            "{factor}x interrupted-finalization recovery must report authenticated calls"
-        );
-        let observations = phases
-            .iter()
-            .map(|(name, values)| {
-                let counters = std::array::from_fn(|index| {
-                    values[FIELDS[index]]
-                        .as_u64()
-                        .expect("phase counter is an integer")
-                });
-                (name.clone(), counters)
-            })
-            .collect::<BTreeMap<_, _>>();
-        if let Some(base) = &baseline {
-            assert_eq!(
-                base.keys().collect::<Vec<_>>(),
-                observations.keys().collect::<Vec<_>>()
+        for category in graphforge_storage::ArtifactCategory::ALL {
+            let fields = artifact_fields(&categories[&category]);
+            let authority = artifact_fields(&authorities[&category]);
+            category_metrics.insert(
+                format!("{owner}.{}", category_name(category)),
+                [
+                    fields[0], fields[1], fields[2], fields[3], fields[4], fields[4],
+                ],
             );
-            for (phase, current) in &observations {
-                for (index, value) in current.iter().enumerate() {
-                    let first = base[phase][index];
-                    if first == 0 {
-                        assert_eq!(
-                            *value, 0,
-                            "{phase}.{} appeared only at a larger rung",
-                            FIELDS[index]
-                        );
-                    } else {
-                        assert!(
-                            *value <= first.saturating_mul(u64::from(factor)).saturating_mul(2),
-                            "{phase}.{} exceeded the documented 2x constant-factor ceiling",
-                            FIELDS[index]
-                        );
+            category_authority_metrics.insert(
+                format!("{owner}.{}", category_name(category)),
+                [
+                    authority[0],
+                    authority[1],
+                    authority[2],
+                    authority[3],
+                    authority[4],
+                    authority[4],
+                ],
+            );
+        }
+    }
+    let construction_categories = exact_category_map(
+        construction["storage_current"].clone(),
+        "construction current",
+    );
+    let construction_peaks: BTreeMap<graphforge_storage::ArtifactCategory, u64> =
+        serde_json::from_value(construction["storage_transient_peak_allocated_bytes"].clone())
+            .expect("typed construction peak categories");
+    let construction_authorities = exact_category_map(
+        construction["storage_category_authorities"].clone(),
+        "construction authorities",
+    );
+    let construction_peak_authorities: BTreeMap<graphforge_storage::ArtifactCategory, u64> =
+        serde_json::from_value(construction["storage_transient_peak_authorities"].clone())
+            .expect("typed construction peak authorities");
+    assert_eq!(
+        construction_peaks.keys().copied().collect::<BTreeSet<_>>(),
+        graphforge_storage::ArtifactCategory::ALL
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        "construction peak category inventory"
+    );
+    for category in graphforge_storage::ArtifactCategory::ALL {
+        let fields = artifact_fields(&construction_categories[&category]);
+        category_metrics.insert(
+            format!("construction.{}", category_name(category)),
+            [
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                construction_peaks[&category],
+            ],
+        );
+        let authority = artifact_fields(&construction_authorities[&category]);
+        category_authority_metrics.insert(
+            format!("construction.{}", category_name(category)),
+            [
+                authority[0],
+                authority[1],
+                authority[2],
+                authority[3],
+                authority[4],
+                construction_peak_authorities[&category],
+            ],
+        );
+    }
+    let phase_disk_peaks = evidence["phases"]
+        .as_array()
+        .expect("lifecycle phase evidence")
+        .iter()
+        .map(|phase| {
+            (
+                phase["id"].as_str().expect("phase id").to_owned(),
+                phase["disk_peak_bytes"].as_u64().expect("phase disk peak"),
+            )
+        })
+        .collect();
+    LifecycleLinearityObservation {
+        phases,
+        retained,
+        append_objects,
+        input_rows,
+        live_nodes,
+        live_edges,
+        shape_merge_bytes: [merge_read_bytes, merge_write_bytes],
+        shape_block_components,
+        canonical_artifact_objects,
+        cas_publication_io: serde_json::from_value(construction["cas_publication_io"].clone())
+            .expect("native CAS component evidence"),
+        encode_fsync_components,
+        hydration_files_copied,
+        hydration_file_fsync_operations,
+        hydration_directory_fsync_operations,
+        shape_read_component_calls,
+        shape_write_component_calls,
+        encode_write_component_calls,
+        category_metrics,
+        category_authority_metrics,
+        phase_disk_peaks,
+    }
+}
+
+const ATTRIBUTION_CATEGORY_NAMES: [&str; 10] = [
+    "topology_nodes",
+    "topology_edges",
+    "properties",
+    "uuid_and_surrogates",
+    "adjacency",
+    "catalog_and_manifests",
+    "construction_staging",
+    "portable_package",
+    "clean_imported_project",
+    "other",
+];
+const ATTRIBUTION_TOTAL_FIELDS: [(&str, &str); 5] = [
+    ("logical_references", "logical_references"),
+    ("logical_bytes", "logical_bytes"),
+    ("physical_objects", "physical_objects"),
+    ("physical_logical_bytes", "physical_logical_bytes"),
+    ("allocated_bytes", "allocated_bytes"),
+];
+
+fn evidence_u64(value: &Value, pointer: &str) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing integer storage evidence at {pointer}"))
+}
+
+fn validate_category_authority_context(
+    context: &graphforge_storage::ArtifactCategoryAuthorityContext,
+    owner: &str,
+) -> Result<(), String> {
+    let expected_categories = graphforge_storage::ArtifactCategory::ALL
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if context.contract != CATEGORY_AUTHORITY_CONTRACT
+        || context.version != 1
+        || context.owner != owner
+        || context.rung == 0
+        || context.live_nodes == 0
+        || context.live_edges == 0
+        || context
+            .native_category_identity_authority_sha256
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != expected_categories
+        || [
+            context.generation_sha256.as_str(),
+            context.receipt_authority_sha256.as_str(),
+            context.native_identity_authority_sha256.as_str(),
+        ]
+        .into_iter()
+        .chain(
+            context
+                .native_category_identity_authority_sha256
+                .values()
+                .map(String::as_str),
+        )
+        .any(|digest| {
+            digest.len() != 71
+                || !digest.starts_with("sha256:")
+                || !digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(format!("{owner} category authority context is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_attribution_owner(evidence: &Value, owner: &str) -> Result<(), String> {
+    let owner_value = evidence
+        .pointer(&format!("/storage/{owner}"))
+        .ok_or_else(|| format!("missing storage owner {owner}"))?;
+    let categories = owner_value["categories"]
+        .as_object()
+        .ok_or_else(|| format!("{owner} categories are absent"))?;
+    let authorities = owner_value["category_authorities"]
+        .as_object()
+        .ok_or_else(|| format!("{owner} category authorities are absent"))?;
+    if categories != authorities {
+        return Err(format!(
+            "{owner} category totals differ from storage-owned authorities"
+        ));
+    }
+    let typed_authorities = exact_category_map(
+        owner_value["category_authorities"].clone(),
+        &format!("{owner} category authorities"),
+    );
+    let commitments = owner_value["category_authority_sha256"]
+        .as_object()
+        .ok_or_else(|| format!("{owner} category commitments are absent"))?;
+    if commitments.len() != graphforge_storage::ArtifactCategory::ALL.len() {
+        return Err(format!(
+            "{owner} category commitment inventory is incomplete"
+        ));
+    }
+    let context: graphforge_storage::ArtifactCategoryAuthorityContext =
+        serde_json::from_value(owner_value["category_authority_context"].clone())
+            .map_err(|error| format!("{owner} category authority context: {error}"))?;
+    validate_category_authority_context(&context, owner)?;
+    for category in graphforge_storage::ArtifactCategory::ALL {
+        let name = category_name(category);
+        let expected = graphforge_storage::artifact_category_authority_commitment(
+            &context,
+            category,
+            &typed_authorities[&category],
+        );
+        if commitments.get(name).and_then(Value::as_str) != Some(expected.as_str()) {
+            return Err(format!(
+                "{owner}.{name} differs from its receipt-bound category commitment"
+            ));
+        }
+    }
+    let observed = categories
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = ATTRIBUTION_CATEGORY_NAMES
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if observed != expected {
+        return Err(format!(
+            "{owner} category inventory differs: observed={observed:?}"
+        ));
+    }
+    for (category, totals) in categories {
+        let fields = totals
+            .as_object()
+            .ok_or_else(|| format!("{owner}.{category} totals are not an object"))?;
+        let observed_fields = fields.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let expected_fields = ATTRIBUTION_TOTAL_FIELDS
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect::<BTreeSet<_>>();
+        if observed_fields != expected_fields {
+            return Err(format!("{owner}.{category} quantity inventory differs"));
+        }
+        let references = totals["logical_references"]
+            .as_u64()
+            .ok_or_else(|| format!("{owner}.{category} references are absent"))?;
+        let objects = totals["physical_objects"]
+            .as_u64()
+            .ok_or_else(|| format!("{owner}.{category} objects are absent"))?;
+        if objects > references {
+            return Err(format!(
+                "{owner}.{category} physical objects exceed logical references"
+            ));
+        }
+    }
+    for (category_field, owner_field) in ATTRIBUTION_TOTAL_FIELDS {
+        let sum = categories.values().try_fold(0_u64, |sum, category| {
+            sum.checked_add(
+                category[category_field]
+                    .as_u64()
+                    .ok_or_else(|| format!("{owner}.{category_field} is absent"))?,
+            )
+            .ok_or_else(|| format!("{owner}.{category_field} sum overflow"))
+        })?;
+        let reported = owner_value[owner_field]
+            .as_u64()
+            .ok_or_else(|| format!("{owner}.{owner_field} is absent"))?;
+        if sum != reported {
+            return Err(format!(
+                "{owner}.{owner_field} does not reconcile: categories={sum} reported={reported}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// This validates closed sanitized reconciliation, not provenance. Certification
+// authority is established outside this process by the provider-result digest
+// that binds the exact ordinary evidence bytes.
+fn validate_retained_reconciliation(evidence: &Value) -> Result<(), String> {
+    validate_attribution_owner(evidence, "source")?;
+    validate_attribution_owner(evidence, "clean_import")?;
+    let live_nodes = evidence_u64(evidence, "/source_nodes")?;
+    let live_edges = evidence_u64(evidence, "/source_edges")?;
+    if live_nodes == 0 || live_edges == 0 {
+        return Err("retained evidence has an invalid live-count denominator".into());
+    }
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        for (field, _) in ATTRIBUTION_TOTAL_FIELDS {
+            let source = evidence_u64(
+                evidence,
+                &format!("/storage/source/categories/{category}/{field}"),
+            )?;
+            let imported = evidence_u64(
+                evidence,
+                &format!("/storage/clean_import/categories/{category}/{field}"),
+            )?;
+            if source != imported {
+                return Err(format!(
+                    "round-trip category {category}.{field} differs between source and import"
+                ));
+            }
+        }
+    }
+    for owner in ["source", "clean_import"] {
+        let node_bytes = evidence_u64(
+            evidence,
+            &format!("/storage/{owner}/categories/topology_nodes/logical_bytes"),
+        )?;
+        let edge_bytes = evidence_u64(
+            evidence,
+            &format!("/storage/{owner}/categories/topology_edges/logical_bytes"),
+        )?;
+        if node_bytes < live_nodes || edge_bytes < live_edges {
+            return Err(format!(
+                "{owner} canonical category bytes are below live-count denominators"
+            ));
+        }
+        let topology_rows = live_nodes
+            .checked_add(live_edges)
+            .ok_or_else(|| "live topology denominator overflow".to_owned())?;
+        for category in ["uuid_and_surrogates", "adjacency"] {
+            let logical_bytes = evidence_u64(
+                evidence,
+                &format!("/storage/{owner}/categories/{category}/logical_bytes"),
+            )?;
+            if logical_bytes < topology_rows {
+                return Err(format!(
+                    "{owner}.{category} is below the topology denominator"
+                ));
+            }
+        }
+    }
+
+    let portable_references =
+        evidence_u64(evidence, "/storage/portable_package/logical_references")?;
+    let portable_objects = evidence_u64(evidence, "/storage/portable_package/physical_objects")?;
+    if portable_references == 0 || portable_references != portable_objects {
+        return Err("portable receipt inventory does not reconcile".into());
+    }
+    let portable_authority = &evidence["storage"]["portable_package"]["category_authority"];
+    for field in [
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "allocated_bytes",
+    ] {
+        if portable_authority[field] != evidence["storage"]["portable_package"][field] {
+            return Err(format!(
+                "portable {field} differs from writer-owned category authority"
+            ));
+        }
+    }
+    let typed_portable_authority: graphforge_storage::ArtifactStorageTotals =
+        serde_json::from_value(portable_authority.clone())
+            .map_err(|error| format!("portable category authority: {error}"))?;
+    let portable_context: graphforge_storage::ArtifactCategoryAuthorityContext =
+        serde_json::from_value(
+            evidence["storage"]["portable_package"]["category_authority_context"].clone(),
+        )
+        .map_err(|error| format!("portable category authority context: {error}"))?;
+    validate_category_authority_context(&portable_context, "portable_package")?;
+    let expected_portable_commitment = graphforge_storage::artifact_category_authority_commitment(
+        &portable_context,
+        graphforge_storage::ArtifactCategory::PortablePackage,
+        &typed_portable_authority,
+    );
+    if evidence["storage"]["portable_package"]["category_authority_sha256"].as_str()
+        != Some(expected_portable_commitment.as_str())
+    {
+        return Err("portable package differs from writer authority commitment".into());
+    }
+
+    let current = evidence["storage"]["construction"]["storage_current"]
+        .as_object()
+        .ok_or_else(|| "construction current category evidence is absent".to_owned())?;
+    let transient = evidence["storage"]["construction"]["storage_transient_peak_allocated_bytes"]
+        .as_object()
+        .ok_or_else(|| "construction transient category evidence is absent".to_owned())?;
+    let construction_authorities =
+        evidence["storage"]["construction"]["storage_category_authorities"]
+            .as_object()
+            .ok_or_else(|| "construction category authorities are absent".to_owned())?;
+    if current != construction_authorities {
+        return Err("construction categories differ from receipt/identity authorities".into());
+    }
+    let peak_authorities =
+        evidence["storage"]["construction"]["storage_transient_peak_authorities"]
+            .as_object()
+            .ok_or_else(|| "construction peak authorities are absent".to_owned())?;
+    if transient != peak_authorities {
+        return Err("construction peaks differ from receipt authorities".into());
+    }
+    let typed_construction_authorities = exact_category_map(
+        evidence["storage"]["construction"]["storage_category_authorities"].clone(),
+        "construction category authorities",
+    );
+    let typed_peak_authorities: BTreeMap<graphforge_storage::ArtifactCategory, u64> =
+        serde_json::from_value(
+            evidence["storage"]["construction"]["storage_transient_peak_authorities"].clone(),
+        )
+        .map_err(|error| format!("construction peak authorities: {error}"))?;
+    let category_commitments =
+        evidence["storage"]["construction"]["storage_category_authority_sha256"]
+            .as_object()
+            .ok_or_else(|| "construction category commitments are absent".to_owned())?;
+    let peak_commitments =
+        evidence["storage"]["construction"]["storage_transient_peak_authority_sha256"]
+            .as_object()
+            .ok_or_else(|| "construction peak commitments are absent".to_owned())?;
+    let construction_context: graphforge_storage::ArtifactCategoryAuthorityContext =
+        serde_json::from_value(
+            evidence["storage"]["construction"]["storage_category_authority_context"].clone(),
+        )
+        .map_err(|error| format!("construction category authority context: {error}"))?;
+    validate_category_authority_context(&construction_context, "construction")?;
+    for category in graphforge_storage::ArtifactCategory::ALL {
+        let name = category_name(category);
+        let expected_category = graphforge_storage::artifact_category_authority_commitment(
+            &construction_context,
+            category,
+            &typed_construction_authorities[&category],
+        );
+        let expected_peak = graphforge_storage::artifact_category_peak_authority_commitment(
+            &construction_context,
+            category,
+            typed_peak_authorities[&category],
+        );
+        if category_commitments.get(name).and_then(Value::as_str)
+            != Some(expected_category.as_str())
+            || peak_commitments.get(name).and_then(Value::as_str) != Some(expected_peak.as_str())
+        {
+            return Err(format!(
+                "construction.{name} differs from its receipt-bound category commitment"
+            ));
+        }
+    }
+    let known_categories = ATTRIBUTION_CATEGORY_NAMES
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let current_categories = current.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let transient_categories = transient
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if current_categories != known_categories || transient_categories != known_categories {
+        return Err("construction current/transient category inventory differs".into());
+    }
+    let mut maximum_current = 0_u64;
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        let current_totals = &current[category];
+        let fields = current_totals
+            .as_object()
+            .ok_or_else(|| format!("{category} construction totals are not an object"))?;
+        let observed_fields = fields.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let expected_fields = ATTRIBUTION_TOTAL_FIELDS
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect::<BTreeSet<_>>();
+        if observed_fields != expected_fields {
+            return Err(format!(
+                "{category} construction quantity inventory differs"
+            ));
+        }
+        let current_allocated = current_totals["allocated_bytes"]
+            .as_u64()
+            .ok_or_else(|| format!("{category} construction allocation is absent"))?;
+        let references = current_totals["logical_references"]
+            .as_u64()
+            .ok_or_else(|| format!("{category} construction references are absent"))?;
+        let objects = current_totals["physical_objects"]
+            .as_u64()
+            .ok_or_else(|| format!("{category} construction objects are absent"))?;
+        if objects > references {
+            return Err(format!("{category} construction objects exceed references"));
+        }
+        let category_peak = transient[category]
+            .as_u64()
+            .ok_or_else(|| format!("{category} transient peak is absent"))?;
+        if category_peak < current_allocated {
+            return Err(format!(
+                "{category} transient allocation is below current allocation"
+            ));
+        }
+        maximum_current = maximum_current.max(current_allocated);
+    }
+    let total_peak = evidence_u64(
+        evidence,
+        "/storage/construction/storage_transient_peak_total_allocated_bytes",
+    )?;
+    if total_peak < maximum_current {
+        return Err("construction total peak is below a current category".into());
+    }
+
+    let source_allocated = evidence_u64(evidence, "/storage/source/allocated_bytes")?;
+    let imported_allocated = evidence_u64(evidence, "/storage/clean_import/allocated_bytes")?;
+    let package_allocated = evidence_u64(evidence, "/storage/portable_package/allocated_bytes")?;
+    let source_project = evidence_u64(evidence, "/storage/source_project_current_allocated_bytes")?;
+    if source_project < source_allocated {
+        return Err("source project allocation is below its generation snapshot".into());
+    }
+    let workspace = evidence_u64(evidence, "/storage/workspace_current_allocated_bytes")?;
+    let components = evidence["storage"]["workspace_components"]
+        .as_object()
+        .ok_or_else(|| "workspace component unions are absent".to_owned())?;
+    let expected_components = [
+        "source_project_and_construction",
+        "portable_package",
+        "clean_import_project",
+        "drill_project_and_construction",
+        "drill_package",
+        "corrupt_drill_package",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if components
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_components
+    {
+        return Err("workspace component-union inventory differs".into());
+    }
+    let component_sum = components.values().try_fold(0_u64, |sum, value| {
+        sum.checked_add(
+            value
+                .as_u64()
+                .ok_or_else(|| "workspace component is not an integer".to_owned())?,
+        )
+        .ok_or_else(|| "workspace component sum overflow".to_owned())
+    })?;
+    if component_sum != workspace {
+        return Err("workspace authoritative identity unions do not reconcile".into());
+    }
+    if components["portable_package"].as_u64() != Some(package_allocated) {
+        return Err("portable owner union differs from its writer receipt".into());
+    }
+    if components["source_project_and_construction"]
+        .as_u64()
+        .is_none_or(|value| value < source_project)
+        || components["clean_import_project"]
+            .as_u64()
+            .is_none_or(|value| value < imported_allocated)
+    {
+        return Err("project owner union is below its generation attribution".into());
+    }
+    let workspace_peak = evidence_u64(evidence, "/storage/workspace_peak_allocated_bytes")?;
+    let phase_peak = evidence["phases"]
+        .as_array()
+        .ok_or_else(|| "phase peak evidence is absent".to_owned())?
+        .iter()
+        .map(|phase| phase["disk_peak_bytes"].as_u64())
+        .collect::<Option<Vec<_>>>()
+        .and_then(|values| values.into_iter().max())
+        .ok_or_else(|| "phase disk peak is absent".to_owned())?;
+    if workspace_peak != phase_peak || workspace_peak < workspace {
+        return Err("lifecycle peak does not reconcile to phase peaks/current union".into());
+    }
+    Ok(())
+}
+
+fn validate_axis_denominators(
+    axis: LinearityAxis,
+    observations: &[LifecycleLinearityObservation; 3],
+) -> Result<[u64; 3], String> {
+    let nodes = std::array::from_fn(|index| observations[index].live_nodes);
+    let edges = std::array::from_fn(|index| observations[index].live_edges);
+    if nodes.contains(&0) || edges.contains(&0) {
+        return Err(format!(
+            "{axis:?} has a zero authoritative denominator: nodes={nodes:?} edges={edges:?}"
+        ));
+    }
+    let (varying, controlled, varying_name, controlled_name) = match axis {
+        LinearityAxis::Nodes => (nodes, edges, "nodes", "edges"),
+        LinearityAxis::Edges => (edges, nodes, "edges", "nodes"),
+    };
+    if varying[0] >= varying[1] || varying[1] >= varying[2] {
+        return Err(format!(
+            "{axis:?} {varying_name} denominators are not strictly increasing: {varying:?}"
+        ));
+    }
+    if controlled[0] != controlled[1] || controlled[0] != controlled[2] {
+        return Err(format!(
+            "{axis:?} controlled {controlled_name} axis changed: {controlled:?}"
+        ));
+    }
+    Ok(varying)
+}
+
+fn checked_product(name: &str, factors: &[u128]) -> Result<u128, String> {
+    factors.iter().try_fold(1_u128, |product, factor| {
+        product
+            .checked_mul(*factor)
+            .ok_or_else(|| format!("{name} rational product overflows"))
+    })
+}
+
+fn checked_ceil_div(name: &str, numerator: u64, denominator: u64) -> Result<u64, String> {
+    if denominator == 0 {
+        return Err(format!("{name} has a zero quantization denominator"));
+    }
+    (numerator / denominator)
+        .checked_add(u64::from(numerator % denominator != 0))
+        .ok_or_else(|| format!("{name} ceil division overflows"))
+}
+
+/// Prove `fixed + slope * authoritative_denominator` without rounded ratios.
+///
+/// Cross multiplication compares the two adjacent rational slopes within a
+/// factor of two. The intercept and legacy constant-factor ceiling are also
+/// checked against the actual reopened live-count denominators.
+fn validate_affine_metric(
+    name: &str,
+    values: [u64; 3],
+    denominators: [u64; 3],
+) -> Result<(), String> {
+    let [one, two, four] = values;
+    if one == 0 {
+        return Err(format!(
+            "{name} designated scale-bearing metric is zero at its baseline: {values:?}"
+        ));
+    }
+    let base_denominator = u128::from(denominators[0]);
+    for rung in 1..3 {
+        let observed = checked_product(name, &[u128::from(values[rung]), base_denominator])?;
+        let ceiling = checked_product(name, &[u128::from(one), u128::from(denominators[rung]), 2])?;
+        if observed > ceiling {
+            return Err(format!(
+                "{name} exceeds the denominator-normalized constant-factor ceiling: values={values:?} denominators={denominators:?}"
+            ));
+        }
+    }
+    let d12 = two
+        .checked_sub(one)
+        .filter(|difference| *difference > 0)
+        .ok_or_else(|| format!("{name} has no positive 1x-to-2x growth: {values:?}"))?;
+    let d24 = four
+        .checked_sub(two)
+        .filter(|difference| *difference > 0)
+        .ok_or_else(|| format!("{name} has no positive 2x-to-4x growth: {values:?}"))?;
+    let denominator_12 = denominators[1] - denominators[0];
+    let denominator_24 = denominators[2] - denominators[1];
+    if checked_product(name, &[u128::from(d12), base_denominator])?
+        > checked_product(name, &[u128::from(one), u128::from(denominator_12)])?
+    {
+        return Err(format!(
+            "{name} implies a negative fixed-overhead intercept: values={values:?} denominators={denominators:?}"
+        ));
+    }
+    let first_slope = checked_product(name, &[u128::from(d12), u128::from(denominator_24)])?;
+    let second_slope = checked_product(name, &[u128::from(d24), u128::from(denominator_12)])?;
+    if first_slope > checked_product(name, &[second_slope, 2])?
+        || second_slope > checked_product(name, &[first_slope, 2])?
+    {
+        return Err(format!(
+            "{name} has unstable rational first-difference slopes: values={values:?} denominators={denominators:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseMetricPolicy {
+    ScaleBearing,
+    NodeBearingBytes,
+    BufferedCalls {
+        byte_field: usize,
+        max_bytes_per_call: u64,
+    },
+    InventoryControlBytes {
+        maximum: u64,
+    },
+    ShapeReadComponentCalls,
+    ShapeWriteComponentCalls,
+    EncodeWriteComponentCalls,
+    AppendObjectInventory,
+    ShapeBlockInventory,
+    CasFsyncInventory,
+    CasReadComponentCalls,
+    CasWriteComponentCalls,
+    EncodeFsyncInventory,
+    HydrationFsyncInventory,
+    StructurallyZero,
+}
+
+#[derive(Clone, Copy)]
+struct PhasePolicyRow {
+    phase: &'static str,
+    fields: [PhaseMetricPolicy; LINEARITY_PHASE_FIELDS.len()],
+}
+
+const ZERO: PhaseMetricPolicy = PhaseMetricPolicy::StructurallyZero;
+const SCALE: PhaseMetricPolicy = PhaseMetricPolicy::ScaleBearing;
+const ENCODING_BUFFER_BYTES: u64 =
+    graphforge_storage::GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES as u64;
+const OBJECT_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_OBJECT_IO_BUFFER_BYTES as u64;
+const HYDRATION_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_FILES_IO_BUFFER_BYTES as u64;
+const STAGING_BUFFER_BYTES: u64 = graphforge_storage::STAGE_FILE_BLOCK_BYTES as u64;
+
+// This is deliberately exhaustive: adding a storage phase or counter requires
+// choosing semantics here instead of silently inheriting an affine assertion.
+const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
+    PhasePolicyRow {
+        phase: "append_merge",
+        fields: [
+            ZERO,
+            SCALE,
+            ZERO,
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 1,
+                max_bytes_per_call: STAGING_BUFFER_BYTES,
+            },
+            PhaseMetricPolicy::AppendObjectInventory,
+            ZERO,
+            ZERO,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "seal_authentication",
+        fields: [ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ZERO],
+    },
+    PhasePolicyRow {
+        phase: "shape_consume_reauthentication",
+        fields: [
+            SCALE,
+            SCALE,
+            PhaseMetricPolicy::ShapeReadComponentCalls,
+            PhaseMetricPolicy::ShapeWriteComponentCalls,
+            ZERO,
+            PhaseMetricPolicy::ShapeBlockInventory,
+            ZERO,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "encode_write_postwrite_authentication",
+        fields: [
+            SCALE,
+            SCALE,
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 0,
+                max_bytes_per_call: ENCODING_BUFFER_BYTES,
+            },
+            PhaseMetricPolicy::EncodeWriteComponentCalls,
+            ZERO,
+            ZERO,
+            PhaseMetricPolicy::EncodeFsyncInventory,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "publication_preauthentication",
+        fields: [
+            PhaseMetricPolicy::InventoryControlBytes {
+                maximum: ENCODING_BUFFER_BYTES,
+            },
+            ZERO,
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 0,
+                max_bytes_per_call: ENCODING_BUFFER_BYTES,
+            },
+            ZERO,
+            ZERO,
+            ZERO,
+            ZERO,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "cas_install_read_write",
+        fields: [
+            SCALE,
+            SCALE,
+            PhaseMetricPolicy::CasReadComponentCalls,
+            PhaseMetricPolicy::CasWriteComponentCalls,
+            ZERO,
+            ZERO,
+            PhaseMetricPolicy::CasFsyncInventory,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "hydration_verification",
+        fields: [
+            SCALE,
+            PhaseMetricPolicy::NodeBearingBytes,
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 0,
+                max_bytes_per_call: HYDRATION_BUFFER_BYTES,
+            },
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 1,
+                max_bytes_per_call: HYDRATION_BUFFER_BYTES,
+            },
+            ZERO,
+            ZERO,
+            PhaseMetricPolicy::HydrationFsyncInventory,
+        ],
+    },
+    PhasePolicyRow {
+        phase: "fsync_synchronization",
+        fields: [ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, SCALE],
+    },
+    PhasePolicyRow {
+        phase: "recovery_reauthentication",
+        fields: [
+            SCALE,
+            ZERO,
+            PhaseMetricPolicy::BufferedCalls {
+                byte_field: 0,
+                max_bytes_per_call: ENCODING_BUFFER_BYTES,
+            },
+            ZERO,
+            ZERO,
+            ZERO,
+            ZERO,
+        ],
+    },
+];
+
+fn validate_phase_policy_table(
+    observed: &BTreeMap<String, [u64; LINEARITY_PHASE_FIELDS.len()]>,
+) -> Result<(), String> {
+    let policy_names = PHASE_METRIC_POLICIES
+        .iter()
+        .map(|row| row.phase)
+        .collect::<BTreeSet<_>>();
+    let observed_names = observed.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if policy_names.len() != PHASE_METRIC_POLICIES.len() || policy_names != observed_names {
+        return Err(format!(
+            "phase policy inventory differs from evidence: policy={policy_names:?} observed={observed_names:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_protocol_metric(
+    name: &str,
+    values: [u64; 3],
+    minimum: u64,
+    maximum: u64,
+) -> Result<(), String> {
+    if minimum == 0 || minimum > maximum {
+        return Err(format!("{name} has an invalid fixed-protocol policy"));
+    }
+    if values.windows(2).any(|pair| pair[1] < pair[0]) {
+        return Err(format!("{name} fixed protocol count decreased: {values:?}"));
+    }
+    if values
+        .iter()
+        .any(|value| !(minimum..=maximum).contains(value))
+    {
+        return Err(format!(
+            "{name} is outside fixed protocol bounds {minimum}..={maximum}: {values:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_buffered_calls(
+    name: &str,
+    calls: [u64; 3],
+    bytes: [u64; 3],
+    max_bytes_per_call: u64,
+) -> Result<(), String> {
+    if calls.windows(2).any(|pair| pair[1] < pair[0]) {
+        return Err(format!("{name} buffered calls decreased: {calls:?}"));
+    }
+    for (rung, (calls, bytes)) in calls.into_iter().zip(bytes).enumerate() {
+        if bytes == 0 || calls == 0 {
+            return Err(format!("{name} rung {rung} lacks paired buffered evidence"));
+        }
+        let minimum_calls = checked_ceil_div(name, bytes, max_bytes_per_call)?;
+        if calls < minimum_calls || calls > bytes {
+            return Err(format!(
+                "{name} rung {rung} violates buffered bounds {minimum_calls}..={bytes}: calls={calls}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_shape_block_inventory(
+    name: &str,
+    observed: u64,
+    observation: &LifecycleLinearityObservation,
+    rung: usize,
+) -> Result<(), String> {
+    let expected = observation
+        .shape_block_components
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| format!("{name} native component sum overflows at rung {rung}"))?;
+    if observed != expected {
+        return Err(format!(
+            "{name} does not reconcile to merge_read_blocks + merge_write_blocks at rung {rung}: observed={observed} expected={expected}"
+        ));
+    }
+    for (direction, blocks, bytes) in [
+        (
+            "read",
+            observation.shape_block_components[0],
+            observation.shape_merge_bytes[0],
+        ),
+        (
+            "write",
+            observation.shape_block_components[1],
+            observation.shape_merge_bytes[1],
+        ),
+    ] {
+        if bytes == 0 {
+            if blocks != 0 {
+                return Err(format!(
+                    "{name} {direction} blocks lack merge bytes at rung {rung}"
+                ));
+            }
+            continue;
+        }
+        // Production accumulates ceil(artifact_bytes / block_bytes) for every
+        // authenticated artifact. Therefore ceil(total_bytes / block_bytes) is
+        // a strict lower bound, while one-byte blocks are the fail-closed upper
+        // bound without exposing per-artifact sizes.
+        let minimum = checked_ceil_div(name, bytes, STAGING_BUFFER_BYTES)?;
+        if blocks < minimum || blocks > bytes {
+            return Err(format!(
+                "{name} {direction} component violates per-artifact ceiling bounds {minimum}..={bytes} at rung {rung}: blocks={blocks}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_quantized_allocation(
+    name: &str,
+    values: [u64; 3],
+    denominators: [u64; 3],
+) -> Result<(), String> {
+    if values[0] == 0 || values.windows(2).any(|pair| pair[1] < pair[0]) {
+        return Err(format!(
+            "{name} filesystem-quantized allocation is missing or decreasing: {values:?}"
+        ));
+    }
+    validate_positive_normalized_ceiling(name, values, denominators)
+}
+
+fn validate_positive_normalized_ceiling(
+    name: &str,
+    values: [u64; 3],
+    denominators: [u64; 3],
+) -> Result<(), String> {
+    if values.contains(&0) || denominators.contains(&0) {
+        return Err(format!("{name} lacks positive values/denominators"));
+    }
+    for rung in 1..3 {
+        let observed = checked_product(
+            name,
+            &[u128::from(values[rung]), u128::from(denominators[0])],
+        )?;
+        let ceiling = checked_product(
+            name,
+            &[u128::from(values[0]), u128::from(denominators[rung]), 2],
+        )?;
+        if observed > ceiling {
+            return Err(format!(
+                "{name} exceeds its denominator ceiling: values={values:?} denominators={denominators:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum CategoryBehavior {
+    NodeBearing,
+    EdgeBearing,
+    Mixed,
+    FixedInventory,
+    StructurallyZero,
+}
+
+fn category_behavior(category: &str) -> Result<CategoryBehavior, String> {
+    match category {
+        "topology_nodes" => Ok(CategoryBehavior::NodeBearing),
+        // The controlled fixture adds isolated nodes on its node axis. Sparse
+        // CSR shards do not append trailing rows without edges; its adjacency
+        // payload therefore grows on the edge axis. This is fixture-specific.
+        "topology_edges" | "adjacency" => Ok(CategoryBehavior::EdgeBearing),
+        "uuid_and_surrogates" => Ok(CategoryBehavior::Mixed),
+        "catalog_and_manifests" => Ok(CategoryBehavior::FixedInventory),
+        "properties"
+        | "construction_staging"
+        | "portable_package"
+        | "clean_imported_project"
+        | "other" => Ok(CategoryBehavior::StructurallyZero),
+        _ => Err(format!("unclassified storage category {category}")),
+    }
+}
+
+fn validate_category_taxonomy(
+    axis: LinearityAxis,
+    observations: &[LifecycleLinearityObservation; 3],
+    denominators: [u64; 3],
+) -> Result<(), String> {
+    let expected = ["source", "clean_import", "construction"]
+        .into_iter()
+        .flat_map(|owner| {
+            ATTRIBUTION_CATEGORY_NAMES
+                .into_iter()
+                .map(move |category| format!("{owner}.{category}"))
+        })
+        .collect::<BTreeSet<_>>();
+    for observation in observations {
+        if observation.category_metrics != observation.category_authority_metrics {
+            return Err("retained category totals differ from storage-owned authorities".into());
+        }
+        let observed = observation
+            .category_metrics
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if observed != expected {
+            return Err("retained category/quantity inventory differs from policy".into());
+        }
+        for category in ATTRIBUTION_CATEGORY_NAMES {
+            if observation.category_metrics[&format!("source.{category}")]
+                != observation.category_metrics[&format!("clean_import.{category}")]
+            {
+                return Err(format!(
+                    "source/import category {category} does not reconcile field-for-field"
+                ));
+            }
+        }
+    }
+
+    for owner in ["source", "clean_import"] {
+        for category in ATTRIBUTION_CATEGORY_NAMES {
+            let behavior = category_behavior(category)?;
+            let key = format!("{owner}.{category}");
+            for field in 0..6 {
+                let values =
+                    std::array::from_fn(|rung| observations[rung].category_metrics[&key][field]);
+                let name = format!("{key}.field_{field}");
+                match (behavior, field) {
+                    (CategoryBehavior::StructurallyZero, _) if values == [0, 0, 0] => {}
+                    (CategoryBehavior::StructurallyZero, _) => {
+                        return Err(format!("{name} must be structurally zero: {values:?}"));
+                    }
+                    (CategoryBehavior::FixedInventory, 1 | 3) => {
+                        // Catalog shape/object count is fixed; textual numeric
+                        // lengths in its JSON manifests can gain digits.
+                        validate_positive_normalized_ceiling(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::FixedInventory, 4 | 5) => {
+                        validate_quantized_allocation(&name, values, denominators)?;
+                    }
+                    (_, 0 | 2)
+                        if values[0] > 0 && values[0] == values[1] && values[0] == values[2] => {}
+                    (_, 0 | 2) => {
+                        return Err(format!("{name} object inventory changed: {values:?}"));
+                    }
+                    (CategoryBehavior::NodeBearing, 1 | 3)
+                        if matches!(axis, LinearityAxis::Nodes) =>
+                    {
+                        validate_affine_metric(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::EdgeBearing, 1 | 3)
+                        if matches!(axis, LinearityAxis::Edges) =>
+                    {
+                        validate_affine_metric(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::Mixed, 1 | 3) => {
+                        validate_affine_metric(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::NodeBearing, 4 | 5)
+                        if matches!(axis, LinearityAxis::Nodes) =>
+                    {
+                        validate_quantized_allocation(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::EdgeBearing, 4 | 5)
+                        if matches!(axis, LinearityAxis::Edges) =>
+                    {
+                        validate_quantized_allocation(&name, values, denominators)?;
+                    }
+                    (CategoryBehavior::Mixed, 4 | 5) => {
+                        validate_quantized_allocation(&name, values, denominators)?;
+                    }
+                    (_, 1 | 3 | 4 | 5) if values[0] == values[1] && values[0] == values[2] => {}
+                    _ => {
+                        return Err(format!("{name} changed on its controlled axis: {values:?}"));
                     }
                 }
             }
-        } else {
-            baseline = Some(observations);
         }
-        let interrupted = evidence["phases"]
-            .as_array()
-            .expect("lifecycle phases")
-            .iter()
-            .find(|phase| phase["id"] == "drill_interrupted_finalization")
-            .expect("interrupted-finalization recovery drill");
-        assert_eq!(interrupted["status"], "pass");
     }
+
+    let staging_key = "construction.construction_staging";
+    for field in 0..6 {
+        let values =
+            std::array::from_fn(|rung| observations[rung].category_metrics[staging_key][field]);
+        if field < 4 {
+            validate_affine_metric(
+                &format!("{staging_key}.field_{field}"),
+                values,
+                denominators,
+            )?;
+        } else {
+            validate_quantized_allocation(
+                &format!("{staging_key}.field_{field}"),
+                values,
+                denominators,
+            )?;
+        }
+    }
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        if category == "construction_staging" {
+            continue;
+        }
+        let key = format!("construction.{category}");
+        for rung in observations {
+            if rung.category_metrics[&key] != [0; 6] {
+                return Err(format!("{key} must be structurally zero"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn checked_category_sum(
+    observation: &LifecycleLinearityObservation,
+    prefix: &str,
+    field: usize,
+) -> Result<u64, String> {
+    observation
+        .category_metrics
+        .iter()
+        .filter(|(key, _)| key.starts_with(prefix))
+        .try_fold(0_u64, |total, (_, fields)| {
+            total
+                .checked_add(fields[field])
+                .ok_or_else(|| format!("{prefix} category inventory overflows"))
+        })
+}
+
+fn validate_fresh_cas_control_bound(
+    observation: &LifecycleLinearityObservation,
+) -> Result<(), String> {
+    let io = &observation.cas_publication_io;
+    let paths = observation.canonical_artifact_objects;
+    if io.publications != 1 || io.initial_entries != 0 || io.changed_paths != paths {
+        return Err("CAS growth proof requires one fresh publication with every changed path in the canonical inventory".into());
+    }
+    // A radix update consumes at least one of 64 nibbles per recursive branch.
+    // A split installs at most three nodes; a collapse can load one extra child.
+    // The fresh empty root adds one install before the P updates.
+    let installs = paths
+        .checked_mul(67)
+        .and_then(|value| value.checked_add(1))
+        .ok_or("CAS manifest install bound overflows")?;
+    let reads = paths
+        .checked_mul(130)
+        .ok_or("CAS manifest read bound overflows")?;
+    let inventory_bytes = observation.phases["publication_preauthentication"][0];
+    // Encoding inventory contains each path, byte length and digest verbatim.
+    // Manifest entries add at most 43 bytes of keys/role; the 1319-byte maximal
+    // branch also bounds the leaf header. Storage tests verify both constants
+    // with maximal branches, every role, escaped paths and u64 byte lengths.
+    let node_bytes = paths
+        .checked_mul(graphforge_storage::GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES)
+        .and_then(|value| value.checked_add(inventory_bytes))
+        .and_then(|value| value.checked_add(graphforge_storage::GRAPH_MANIFEST_BRANCH_MAX_BYTES))
+        .ok_or("CAS manifest encoded-node bound overflows")?;
+    let requests = io
+        .manifest
+        .installed_objects
+        .checked_add(io.manifest.reused_objects)
+        .ok_or("CAS manifest request count overflows")?;
+    let minimum_requests = paths
+        .checked_add(1)
+        .ok_or("CAS minimum request bound overflows")?;
+    if requests < minimum_requests
+        || io.manifest.read_calls < requests
+        || io.manifest_reads.read_calls < paths
+    {
+        return Err("CAS manifest work is below mandatory bootstrap/update authentication".into());
+    }
+    let install_bytes = installs
+        .checked_mul(node_bytes)
+        .ok_or("CAS manifest install-byte bound overflows")?;
+    let path_bytes = reads
+        .checked_mul(node_bytes)
+        .ok_or("CAS manifest path-byte bound overflows")?;
+    if requests > installs
+        || io.manifest.read_bytes > install_bytes
+        || io.manifest.write_bytes > install_bytes
+        || io.manifest.installed_bytes > io.manifest.write_bytes
+        || io.manifest.write_calls != io.manifest.install_attempts
+        || io.manifest_reads.read_bytes > path_bytes
+    {
+        return Err("CAS manifest work exceeds native path/object/encoded-inventory bounds".into());
+    }
+    for component in [&io.manifest, &io.manifest_reads] {
+        // Read may legally return fewer bytes than requested. Keep the physical
+        // nonempty-read bounds instead of inventing one syscall per node.
+        if component.read_calls < component.read_bytes.div_ceil(OBJECT_BUFFER_BYTES)
+            || component.read_calls > component.read_bytes
+        {
+            return Err("CAS manifest reads violate native buffer bounds".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_metric_policies_for_axis(
+    axis: LinearityAxis,
+    observations: &[LifecycleLinearityObservation; 3],
+) -> Result<(), String> {
+    let baseline = &observations[0];
+    let denominators = validate_axis_denominators(axis, observations)?;
+    validate_phase_policy_table(&baseline.phases)?;
+    for observation in &observations[1..] {
+        if observation.phases.keys().ne(baseline.phases.keys()) {
+            return Err("application-I/O phase inventories differ between rungs".into());
+        }
+        if observation.retained.keys().ne(baseline.retained.keys()) {
+            return Err("retained-output metric inventories differ between rungs".into());
+        }
+    }
+    for (rung, observation) in observations.iter().enumerate() {
+        let append_write_bytes = observation.phases["append_merge"][1];
+        if append_write_bytes < observation.input_rows {
+            return Err(format!(
+                "append bytes are below accepted row count at rung {rung}"
+            ));
+        }
+        for (metric, denominator) in [
+            (
+                "source.canonical_nodes.logical_bytes",
+                observation.live_nodes,
+            ),
+            (
+                "clean_import.canonical_nodes.logical_bytes",
+                observation.live_nodes,
+            ),
+            (
+                "source.canonical_edges.logical_bytes",
+                observation.live_edges,
+            ),
+            (
+                "clean_import.canonical_edges.logical_bytes",
+                observation.live_edges,
+            ),
+        ] {
+            if observation.retained[metric] < denominator {
+                return Err(format!(
+                    "{metric} is below its authoritative live-count denominator at rung {rung}"
+                ));
+            }
+        }
+        let topology_rows = observation
+            .live_nodes
+            .checked_add(observation.live_edges)
+            .ok_or_else(|| "live topology denominator overflow".to_owned())?;
+        for owner in ["source", "clean_import"] {
+            for category in ["uuid_and_surrogates", "adjacency"] {
+                let key = format!("{owner}.{category}");
+                if observation.category_metrics[&key][1] < topology_rows {
+                    return Err(format!(
+                        "{key} logical bytes are below the authoritative topology-row denominator at rung {rung}"
+                    ));
+                }
+            }
+        }
+    }
+    for policy_row in PHASE_METRIC_POLICIES {
+        let phase = policy_row.phase;
+        for (index, (field, policy)) in LINEARITY_PHASE_FIELDS
+            .iter()
+            .zip(policy_row.fields)
+            .enumerate()
+        {
+            let name = format!("{phase}.{field}");
+            let values = [
+                baseline.phases[phase][index],
+                observations[1].phases[phase][index],
+                observations[2].phases[phase][index],
+            ];
+            match policy {
+                PhaseMetricPolicy::ScaleBearing => {
+                    validate_affine_metric(&name, values, denominators)?;
+                }
+                PhaseMetricPolicy::NodeBearingBytes => {
+                    // Only private ordinal-V4 files are copied during this
+                    // fresh hydration; other immutable objects are hardlinked.
+                    // The controlled edge axis retains the identical node map.
+                    if matches!(axis, LinearityAxis::Nodes) {
+                        validate_affine_metric(&name, values, denominators)?;
+                    } else {
+                        validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
+                    }
+                }
+                PhaseMetricPolicy::BufferedCalls {
+                    byte_field,
+                    max_bytes_per_call,
+                } => {
+                    validate_buffered_calls(
+                        &name,
+                        values,
+                        [
+                            baseline.phases[phase][byte_field],
+                            observations[1].phases[phase][byte_field],
+                            observations[2].phases[phase][byte_field],
+                        ],
+                        max_bytes_per_call,
+                    )?;
+                }
+                PhaseMetricPolicy::InventoryControlBytes { maximum } => {
+                    if values[0] == 0
+                        || values.windows(2).any(|pair| pair[1] < pair[0])
+                        || values.iter().any(|value| *value > maximum)
+                    {
+                        return Err(format!(
+                            "{name} inventory-control bytes violate 1..={maximum}: {values:?}"
+                        ));
+                    }
+                }
+                PhaseMetricPolicy::ShapeReadComponentCalls
+                | PhaseMetricPolicy::ShapeWriteComponentCalls
+                | PhaseMetricPolicy::EncodeWriteComponentCalls => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let components: &[u64] = match policy {
+                            PhaseMetricPolicy::ShapeReadComponentCalls => {
+                                &observation.shape_read_component_calls
+                            }
+                            PhaseMetricPolicy::ShapeWriteComponentCalls => {
+                                &observation.shape_write_component_calls
+                            }
+                            PhaseMetricPolicy::EncodeWriteComponentCalls => {
+                                &observation.encode_write_component_calls
+                            }
+                            _ => unreachable!("matched component policy"),
+                        };
+                        let expected = components.iter().try_fold(0_u64, |total, value| {
+                            total
+                                .checked_add(*value)
+                                .ok_or_else(|| format!("{name} component sum overflows"))
+                        })?;
+                        if expected == 0 || values[rung] != expected {
+                            return Err(format!(
+                                "{name} does not reconcile to native component calls at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::AppendObjectInventory => {
+                    validate_affine_metric(&name, values, denominators)?;
+                    for (rung, observation) in observations.iter().enumerate() {
+                        if values[rung] != observation.append_objects {
+                            return Err(format!(
+                                "{name} does not reconcile to append inventory at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::ShapeBlockInventory => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        validate_shape_block_inventory(&name, values[rung], observation, rung)?;
+                    }
+                }
+                PhaseMetricPolicy::CasReadComponentCalls
+                | PhaseMetricPolicy::CasWriteComponentCalls => {
+                    let read = policy == PhaseMetricPolicy::CasReadComponentCalls;
+                    let payload_calls = observations.each_ref().map(|observation| {
+                        let payload = &observation.cas_publication_io.payload;
+                        if read {
+                            payload.read_calls
+                        } else {
+                            payload.write_calls
+                        }
+                    });
+                    let payload_bytes = observations.each_ref().map(|observation| {
+                        let payload = &observation.cas_publication_io.payload;
+                        if read {
+                            payload.read_bytes
+                        } else {
+                            payload.write_bytes
+                        }
+                    });
+                    validate_buffered_calls(
+                        &format!("{name}.payload"),
+                        payload_calls,
+                        payload_bytes,
+                        OBJECT_BUFFER_BYTES,
+                    )?;
+                    for observation in observations {
+                        validate_fresh_cas_control_bound(observation)?;
+                    }
+                }
+                PhaseMetricPolicy::CasFsyncInventory => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let components = &observation.cas_publication_io;
+                        let totals = components.totals().map_err(|error| error.to_string())?;
+                        let expected = totals
+                            .file_fsync_calls
+                            .checked_add(totals.directory_fsync_calls)
+                            .ok_or_else(|| format!("{name} component sum overflows"))?;
+                        let expected_phase = [
+                            totals.read_bytes,
+                            totals.write_bytes,
+                            totals.read_calls,
+                            totals.write_calls,
+                            0,
+                            0,
+                            expected,
+                        ];
+                        if observation.phases["cas_install_read_write"] != expected_phase {
+                            return Err(format!(
+                                "{name} native CAS components do not reconcile at rung {rung}"
+                            ));
+                        }
+                        let requests = components
+                            .payload
+                            .installed_objects
+                            .checked_add(components.payload.reused_objects)
+                            .ok_or_else(|| format!("{name} payload inventory overflows"))?;
+                        if requests != observation.canonical_artifact_objects {
+                            return Err(format!(
+                                "{name} payload requests differ from canonical inventory at rung {rung}"
+                            ));
+                        }
+                        for (kind, component) in [
+                            ("payload", &components.payload),
+                            ("manifest", &components.manifest),
+                        ] {
+                            let requests = component
+                                .installed_objects
+                                .checked_add(component.reused_objects)
+                                .ok_or_else(|| format!("{name} object request total overflows"))?;
+                            if component.install_attempts < component.installed_objects
+                                || component.install_attempts > requests
+                                || component.install_attempts.checked_mul(2)
+                                    != Some(component.directory_fsync_calls)
+                                || component.file_fsync_calls < component.install_attempts
+                                || (kind == "manifest"
+                                    && component.file_fsync_calls != component.install_attempts)
+                            {
+                                return Err(format!(
+                                    "{name} {kind} durability components differ at rung {rung}"
+                                ));
+                            }
+                        }
+                        let reads = &components.manifest_reads;
+                        if reads.write_bytes != 0
+                            || reads.write_calls != 0
+                            || reads.file_fsync_calls != 0
+                            || reads.directory_fsync_calls != 0
+                            || reads.installed_objects != 0
+                            || reads.install_attempts != 0
+                            || reads.reused_objects != 0
+                            || reads.installed_bytes != 0
+                        {
+                            return Err(format!(
+                                "{name} path authentication reports non-read work at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::EncodeFsyncInventory => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let expected = observation
+                            .encode_fsync_components
+                            .into_iter()
+                            .try_fold(0_u64, |total, value| total.checked_add(value))
+                            .ok_or_else(|| format!("{name} component sum overflows"))?;
+                        if values[rung] != expected {
+                            return Err(format!(
+                                "{name} does not reconcile output/spool/membership/ordinal barriers at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::HydrationFsyncInventory => {
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let expected = observation
+                            .hydration_file_fsync_operations
+                            .checked_add(observation.hydration_directory_fsync_operations)
+                            .ok_or_else(|| format!("{name} protocol bound overflow"))?;
+                        if observation.hydration_files_copied == 0
+                            || expected == 0
+                            || values[rung] != expected
+                        {
+                            return Err(format!(
+                                "{name} does not reconcile file plus directory barriers at rung {rung}"
+                            ));
+                        }
+                    }
+                }
+                PhaseMetricPolicy::StructurallyZero if values == [0, 0, 0] => {}
+                PhaseMetricPolicy::StructurallyZero => {
+                    return Err(format!("{name} must remain structurally zero: {values:?}"));
+                }
+            }
+        }
+    }
+    let retained_policy_names = LINEARITY_RETAINED_FIELDS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<BTreeSet<_>>();
+    let retained_names = baseline
+        .retained
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if retained_policy_names != retained_names {
+        return Err("retained-output policy inventory differs from evidence".into());
+    }
+    for (name, _, policy) in LINEARITY_RETAINED_FIELDS {
+        let values = [
+            baseline.retained[name],
+            observations[1].retained[name],
+            observations[2].retained[name],
+        ];
+        match policy {
+            RetainedMetricPolicy::ScaleBearing => {
+                validate_affine_metric(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::FilesystemQuantized => {
+                validate_quantized_allocation(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::NodeBearing if matches!(axis, LinearityAxis::Nodes) => {
+                validate_affine_metric(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::EdgeBearing if matches!(axis, LinearityAxis::Edges) => {
+                validate_affine_metric(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::NodeFilesystemQuantized
+                if matches!(axis, LinearityAxis::Nodes) =>
+            {
+                validate_quantized_allocation(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::EdgeFilesystemQuantized
+                if matches!(axis, LinearityAxis::Edges) =>
+            {
+                validate_quantized_allocation(name, values, denominators)?;
+            }
+            RetainedMetricPolicy::InventoryDerived => {
+                for (rung, observation) in observations.iter().enumerate() {
+                    let expected = match name {
+                        "source.logical_references" => {
+                            checked_category_sum(observation, "source.", 0)?
+                        }
+                        "source.physical_objects" => {
+                            checked_category_sum(observation, "source.", 2)?
+                        }
+                        "clean_import.logical_references" => {
+                            checked_category_sum(observation, "clean_import.", 0)?
+                        }
+                        "clean_import.physical_objects" => {
+                            checked_category_sum(observation, "clean_import.", 2)?
+                        }
+                        "portable_package.logical_references"
+                        | "portable_package.physical_objects" => 1,
+                        _ => return Err(format!("unclassified retained inventory {name}")),
+                    };
+                    if values[rung] != expected {
+                        return Err(format!(
+                            "{name} does not reconcile to authoritative inventory at rung {rung}"
+                        ));
+                    }
+                }
+            }
+            RetainedMetricPolicy::NodeBearing
+            | RetainedMetricPolicy::EdgeBearing
+            | RetainedMetricPolicy::NodeFilesystemQuantized
+            | RetainedMetricPolicy::EdgeFilesystemQuantized => {
+                validate_fixed_protocol_metric(name, values, values[0], values[0])?;
+            }
+        }
+    }
+    validate_category_taxonomy(axis, observations, denominators)?;
+    let expected_phase_peaks = CERTIFICATION_PHASES.into_iter().collect::<BTreeSet<_>>();
+    for observation in observations {
+        let observed = observation
+            .phase_disk_peaks
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if observed != expected_phase_peaks {
+            return Err("lifecycle phase disk-peak inventory differs".into());
+        }
+    }
+    for phase in CERTIFICATION_PHASES {
+        let values = std::array::from_fn(|rung| observations[rung].phase_disk_peaks[phase]);
+        if values != [0, 0, 0] {
+            validate_quantized_allocation(
+                &format!("{phase}.disk_peak_bytes"),
+                values,
+                denominators,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_metric_policies(
+    observations: &[LifecycleLinearityObservation; 3],
+) -> Result<(), String> {
+    validate_lifecycle_metric_policies_for_axis(LinearityAxis::Nodes, observations)
+}
+
+fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<String, [u64; 6]> {
+    let mut metrics = BTreeMap::new();
+    for owner in ["source", "clean_import"] {
+        for category in ATTRIBUTION_CATEGORY_NAMES {
+            let bearing = match category_behavior(category).unwrap() {
+                CategoryBehavior::NodeBearing => matches!(axis, LinearityAxis::Nodes),
+                CategoryBehavior::EdgeBearing => matches!(axis, LinearityAxis::Edges),
+                CategoryBehavior::Mixed => true,
+                CategoryBehavior::FixedInventory => false,
+                CategoryBehavior::StructurallyZero => {
+                    metrics.insert(format!("{owner}.{category}"), [0; 6]);
+                    continue;
+                }
+            };
+            let scale = if bearing { factor } else { 1 };
+            metrics.insert(
+                format!("{owner}.{category}"),
+                [
+                    1,
+                    100 + 900 * scale,
+                    1,
+                    100 + 900 * scale,
+                    4096 * scale,
+                    4096 * scale,
+                ],
+            );
+        }
+    }
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        metrics.insert(format!("construction.{category}"), [0; 6]);
+    }
+    metrics.insert(
+        "construction.construction_staging".into(),
+        [
+            6 + 2 * factor,
+            100 + 900 * factor,
+            6 + 2 * factor,
+            100 + 900 * factor,
+            4096 * factor,
+            8192 * factor,
+        ],
+    );
+    metrics
+}
+
+fn synthetic_linearity_observations_for_axis(
+    axis: LinearityAxis,
+) -> [LifecycleLinearityObservation; 3] {
+    [1_u64, 2, 4].map(|factor| {
+        let append_objects = 6 + 2 * factor;
+        let (live_nodes, live_edges) = match axis {
+            LinearityAxis::Nodes => (100 * factor, 80),
+            LinearityAxis::Edges => (100, 70 * factor),
+        };
+        LifecycleLinearityObservation {
+            phases: BTreeMap::from([
+                (
+                    "append_merge".into(),
+                    [0, 100 + 800 * factor, 0, factor, append_objects, 0, 0],
+                ),
+                ("seal_authentication".into(), [0, 0, 0, 0, 0, 0, 0]),
+                (
+                    "shape_consume_reauthentication".into(),
+                    [
+                        100 + 900 * factor,
+                        100 + 800 * factor,
+                        factor,
+                        factor,
+                        0,
+                        6 + 2 * factor,
+                        0,
+                    ],
+                ),
+                (
+                    "encode_write_postwrite_authentication".into(),
+                    [
+                        100 + 900 * factor,
+                        100 + 800 * factor,
+                        807,
+                        factor,
+                        0,
+                        0,
+                        43,
+                    ],
+                ),
+                (
+                    "publication_preauthentication".into(),
+                    [512, 0, 1, 0, 0, 0, 0],
+                ),
+                (
+                    "cas_install_read_write".into(),
+                    [
+                        119 + 900 * factor,
+                        100 + 800 * factor,
+                        19 * factor + 39,
+                        19 * factor + 1,
+                        0,
+                        0,
+                        60,
+                    ],
+                ),
+                (
+                    "hydration_verification".into(),
+                    [
+                        100 + 900 * factor,
+                        if matches!(axis, LinearityAxis::Nodes) {
+                            100 + 800 * factor
+                        } else {
+                            900
+                        },
+                        factor,
+                        factor,
+                        0,
+                        0,
+                        38,
+                    ],
+                ),
+                (
+                    "fsync_synchronization".into(),
+                    [0, 0, 0, 0, 0, 0, 2 * factor],
+                ),
+                (
+                    "recovery_reauthentication".into(),
+                    [100 + 900 * factor, 0, factor, 0, 0, 0, 0],
+                ),
+            ]),
+            retained: LINEARITY_RETAINED_FIELDS
+                .iter()
+                .map(|(name, _, policy)| {
+                    let value = match policy {
+                        RetainedMetricPolicy::ScaleBearing => 100 + 900 * factor,
+                        RetainedMetricPolicy::FilesystemQuantized => 4096 * factor,
+                        RetainedMetricPolicy::InventoryDerived => {
+                            if name.starts_with("portable_package") {
+                                1
+                            } else {
+                                5
+                            }
+                        }
+                        RetainedMetricPolicy::NodeBearing => {
+                            if matches!(axis, LinearityAxis::Nodes) {
+                                100 + 900 * factor
+                            } else {
+                                900
+                            }
+                        }
+                        RetainedMetricPolicy::EdgeBearing => {
+                            if matches!(axis, LinearityAxis::Edges) {
+                                100 + 900 * factor
+                            } else {
+                                900
+                            }
+                        }
+                        RetainedMetricPolicy::NodeFilesystemQuantized => {
+                            if matches!(axis, LinearityAxis::Nodes) {
+                                4096 * factor
+                            } else {
+                                4096
+                            }
+                        }
+                        RetainedMetricPolicy::EdgeFilesystemQuantized => {
+                            if matches!(axis, LinearityAxis::Edges) {
+                                4096 * factor
+                            } else {
+                                4096
+                            }
+                        }
+                    };
+                    ((*name).to_owned(), value)
+                })
+                .collect(),
+            append_objects,
+            input_rows: live_nodes + live_edges,
+            live_nodes,
+            live_edges,
+            shape_merge_bytes: [100 + 900 * factor, 100 + 800 * factor],
+            shape_block_components: [3 + factor, 3 + factor],
+            canonical_artifact_objects: 19,
+            cas_publication_io: graphforge_storage::GraphPublicationIo {
+                publications: 1,
+                initial_entries: 0,
+                changed_paths: 19,
+                payload: graphforge_storage::GraphObjectIoTotals {
+                    read_bytes: 900 * factor,
+                    read_calls: 19 * factor,
+                    write_bytes: 800 * factor,
+                    write_calls: 19 * factor,
+                    file_fsync_calls: 19,
+                    directory_fsync_calls: 38,
+                    installed_objects: 19,
+                    install_attempts: 19,
+                    installed_bytes: 800 * factor,
+                    ..Default::default()
+                },
+                manifest: graphforge_storage::GraphObjectIoTotals {
+                    read_bytes: 100,
+                    read_calls: 20,
+                    reused_objects: 19,
+                    write_bytes: 100,
+                    write_calls: 1,
+                    file_fsync_calls: 1,
+                    directory_fsync_calls: 2,
+                    installed_objects: 1,
+                    install_attempts: 1,
+                    installed_bytes: 100,
+                    ..Default::default()
+                },
+                manifest_reads: graphforge_storage::GraphObjectIoTotals {
+                    read_bytes: 19,
+                    read_calls: 19,
+                    ..Default::default()
+                },
+            },
+            encode_fsync_components: [10, 5, 8, 20],
+            hydration_files_copied: 19,
+            hydration_file_fsync_operations: 19,
+            hydration_directory_fsync_operations: 19,
+            shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
+            shape_write_component_calls: [factor, 0],
+            encode_write_component_calls: [factor, 0, 0, 0, 0],
+            category_metrics: synthetic_category_metrics(axis, factor),
+            category_authority_metrics: synthetic_category_metrics(axis, factor),
+            phase_disk_peaks: CERTIFICATION_PHASES
+                .into_iter()
+                .map(|phase| (phase.to_owned(), 4096 * factor))
+                .collect(),
+        }
+    })
+}
+
+fn synthetic_linearity_observations() -> [LifecycleLinearityObservation; 3] {
+    synthetic_linearity_observations_for_axis(LinearityAxis::Nodes)
+}
+
+fn synthetic_authority_context(
+    owner: &str,
+) -> graphforge_storage::ArtifactCategoryAuthorityContext {
+    let native_category_identity_authority_sha256 = graphforge_storage::ArtifactCategory::ALL
+        .into_iter()
+        .map(|category| {
+            (
+                category,
+                safe_authority_digest(
+                    b"synthetic-category-identity-authority\0",
+                    &[owner.as_bytes(), category_name(category).as_bytes()],
+                ),
+            )
+        })
+        .collect();
+    graphforge_storage::ArtifactCategoryAuthorityContext {
+        contract: CATEGORY_AUTHORITY_CONTRACT.to_owned(),
+        version: 1,
+        rung: 1,
+        generation_sha256: format!("sha256:{}", "a".repeat(64)),
+        owner: owner.to_owned(),
+        receipt_authority_sha256: safe_authority_digest(
+            b"synthetic-receipt-authority\0",
+            &[owner.as_bytes()],
+        ),
+        native_identity_authority_sha256: safe_authority_digest(
+            b"synthetic-native-identity-authority\0",
+            &[owner.as_bytes()],
+        ),
+        native_category_identity_authority_sha256,
+        live_nodes: 100,
+        live_edges: 80,
+    }
+}
+
+fn category_commitments(
+    context: &graphforge_storage::ArtifactCategoryAuthorityContext,
+    categories: &serde_json::Map<String, Value>,
+) -> Value {
+    Value::Object(
+        graphforge_storage::ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| {
+                let name = category_name(category);
+                let totals: graphforge_storage::ArtifactStorageTotals =
+                    serde_json::from_value(categories[name].clone()).unwrap();
+                (
+                    name.to_owned(),
+                    json!(graphforge_storage::artifact_category_authority_commitment(
+                        context, category, &totals
+                    )),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn peak_commitments(
+    context: &graphforge_storage::ArtifactCategoryAuthorityContext,
+    peaks: &serde_json::Map<String, Value>,
+) -> Value {
+    Value::Object(
+        graphforge_storage::ArtifactCategory::ALL
+            .into_iter()
+            .map(|category| {
+                let name = category_name(category);
+                (
+                    name.to_owned(),
+                    json!(
+                        graphforge_storage::artifact_category_peak_authority_commitment(
+                            context,
+                            category,
+                            peaks[name].as_u64().unwrap(),
+                        )
+                    ),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn synthetic_attribution_owner(
+    owner: &str,
+) -> (Value, graphforge_storage::ArtifactCategoryAuthorityContext) {
+    let mut categories = serde_json::Map::new();
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        categories.insert(
+            category.to_owned(),
+            json!({
+                "logical_references": 0,
+                "logical_bytes": 0,
+                "physical_objects": 0,
+                "physical_logical_bytes": 0,
+                "allocated_bytes": 0,
+            }),
+        );
+    }
+    categories.insert(
+        "topology_nodes".into(),
+        json!({
+            "logical_references": 1,
+            "logical_bytes": 100,
+            "physical_objects": 1,
+            "physical_logical_bytes": 100,
+            "allocated_bytes": 4096,
+        }),
+    );
+    categories.insert(
+        "topology_edges".into(),
+        json!({
+            "logical_references": 1,
+            "logical_bytes": 80,
+            "physical_objects": 1,
+            "physical_logical_bytes": 80,
+            "allocated_bytes": 4096,
+        }),
+    );
+    for category in ["uuid_and_surrogates", "adjacency"] {
+        categories.insert(
+            category.into(),
+            json!({
+                "logical_references": 1,
+                "logical_bytes": 180,
+                "physical_objects": 1,
+                "physical_logical_bytes": 180,
+                "allocated_bytes": 4096,
+            }),
+        );
+    }
+    let context = synthetic_authority_context(owner);
+    let authority_sha256 = category_commitments(&context, &categories);
+    (
+        json!({
+        "categories": categories.clone(),
+        "category_authorities": categories,
+        "category_authority_context": context.clone(),
+        "category_authority_sha256": authority_sha256,
+        "logical_references": 4,
+        "logical_bytes": 540,
+        "physical_objects": 4,
+        "physical_logical_bytes": 540,
+        "allocated_bytes": 16384,
+        }),
+        context,
+    )
+}
+
+fn synthetic_retained_evidence() -> Value {
+    let mut construction_current = serde_json::Map::new();
+    let mut construction_peaks = serde_json::Map::new();
+    for category in ATTRIBUTION_CATEGORY_NAMES {
+        construction_current.insert(
+            category.to_owned(),
+            json!({
+                "logical_references": 0,
+                "logical_bytes": 0,
+                "physical_objects": 0,
+                "physical_logical_bytes": 0,
+                "allocated_bytes": 0,
+            }),
+        );
+        construction_peaks.insert(category.to_owned(), json!(0));
+    }
+    construction_current.insert(
+        "construction_staging".into(),
+        json!({
+            "logical_references": 1,
+            "logical_bytes": 100,
+            "physical_objects": 1,
+            "physical_logical_bytes": 100,
+            "allocated_bytes": 4096,
+        }),
+    );
+    construction_peaks.insert("construction_staging".into(), json!(8192));
+    let construction_context = synthetic_authority_context("construction");
+    let construction_authority_sha256 =
+        category_commitments(&construction_context, &construction_current);
+    let construction_peak_authority_sha256 =
+        peak_commitments(&construction_context, &construction_peaks);
+    let portable_authority = graphforge_storage::ArtifactStorageTotals {
+        logical_references: 1,
+        logical_bytes: 200,
+        physical_objects: 1,
+        physical_logical_bytes: 200,
+        allocated_bytes: 4096,
+    };
+    let portable_context = synthetic_authority_context("portable_package");
+    let portable_authority_sha256 = graphforge_storage::artifact_category_authority_commitment(
+        &portable_context,
+        graphforge_storage::ArtifactCategory::PortablePackage,
+        &portable_authority,
+    );
+    let (source, _) = synthetic_attribution_owner("source");
+    let (clean_import, _) = synthetic_attribution_owner("clean_import");
+    json!({
+        "source_nodes": 100,
+        "source_edges": 80,
+        "storage": {
+            "source": source,
+            "clean_import": clean_import,
+            "portable_package": {
+                "logical_references": 1,
+                "logical_bytes": 200,
+                "physical_objects": 1,
+                "allocated_bytes": 4096,
+                "category_authority": portable_authority,
+                "category_authority_context": portable_context,
+                "category_authority_sha256": portable_authority_sha256,
+            },
+            "construction": {
+                "storage_current": construction_current.clone(),
+                "storage_category_authorities": construction_current,
+                "storage_category_authority_context": construction_context,
+                "storage_category_authority_sha256": construction_authority_sha256,
+                "storage_transient_peak_allocated_bytes": construction_peaks.clone(),
+                "storage_transient_peak_authorities": construction_peaks,
+                "storage_transient_peak_authority_sha256": construction_peak_authority_sha256,
+                "storage_transient_peak_total_allocated_bytes": 8192,
+            },
+            "source_project_current_allocated_bytes": 16384,
+            "workspace_current_allocated_bytes": 49152,
+            "workspace_peak_allocated_bytes": 57344,
+            "workspace_components": {
+                "source_project_and_construction": 16384,
+                "portable_package": 4096,
+                "clean_import_project": 16384,
+                "drill_project_and_construction": 4096,
+                "drill_package": 4096,
+                "corrupt_drill_package": 4096,
+            },
+        },
+        "phases": [
+            {"id": "ingest", "disk_peak_bytes": 49152},
+            {"id": "import", "disk_peak_bytes": 57344},
+        ],
+    })
+}
+
+#[test]
+fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
+    let mut observations = synthetic_linearity_observations();
+    for (observation, installed) in observations.iter_mut().zip([1, 2, 1]) {
+        let io = &mut observation.cas_publication_io;
+        io.manifest.installed_objects = installed;
+        io.manifest.install_attempts = installed;
+        io.manifest.read_calls = installed + io.manifest.reused_objects;
+        io.manifest.write_calls = installed;
+        io.manifest.file_fsync_calls = installed;
+        io.manifest.directory_fsync_calls = 2 * installed;
+        let totals = io.totals().unwrap();
+        observation.phases.insert(
+            "cas_install_read_write".into(),
+            [
+                totals.read_bytes,
+                totals.write_bytes,
+                totals.read_calls,
+                totals.write_calls,
+                0,
+                0,
+                totals.file_fsync_calls + totals.directory_fsync_calls,
+            ],
+        );
+    }
+    validate_lifecycle_metric_policies(&observations).unwrap();
+    let mut missing_manifest = observations[0].clone();
+    missing_manifest.cas_publication_io.manifest = Default::default();
+    missing_manifest.cas_publication_io.manifest_reads = Default::default();
+    let totals = missing_manifest.cas_publication_io.totals().unwrap();
+    missing_manifest.phases.insert(
+        "cas_install_read_write".into(),
+        [
+            totals.read_bytes,
+            totals.write_bytes,
+            totals.read_calls,
+            totals.write_calls,
+            0,
+            0,
+            totals.file_fsync_calls + totals.directory_fsync_calls,
+        ],
+    );
+    assert!(
+        validate_fresh_cas_control_bound(&missing_manifest)
+            .unwrap_err()
+            .contains("mandatory bootstrap")
+    );
+    let mut excessive = observations[0].clone();
+    let installed = 67 * excessive.canonical_artifact_objects + 2;
+    let manifest = &mut excessive.cas_publication_io.manifest;
+    manifest.installed_objects = installed;
+    manifest.install_attempts = installed;
+    manifest.read_calls = installed + manifest.reused_objects;
+    manifest.read_bytes = manifest.read_calls;
+    manifest.write_calls = installed;
+    manifest.file_fsync_calls = installed;
+    manifest.directory_fsync_calls = 2 * installed;
+    let totals = excessive.cas_publication_io.totals().unwrap();
+    excessive.phases.insert(
+        "cas_install_read_write".into(),
+        [
+            totals.read_bytes,
+            totals.write_bytes,
+            totals.read_calls,
+            totals.write_calls,
+            0,
+            0,
+            totals.file_fsync_calls + totals.directory_fsync_calls,
+        ],
+    );
+    assert!(
+        validate_fresh_cas_control_bound(&excessive)
+            .unwrap_err()
+            .contains("native path/object")
+    );
+    for invalid in ["repeated", "prior", "tombstoned"] {
+        let mut changed = observations[0].clone();
+        match invalid {
+            "repeated" => changed.cas_publication_io.publications = 2,
+            "prior" => changed.cas_publication_io.initial_entries = 1,
+            "tombstoned" => changed.cas_publication_io.changed_paths += 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            validate_fresh_cas_control_bound(&changed)
+                .unwrap_err()
+                .contains("one fresh publication")
+        );
+    }
+    let mut excess_bytes = observations[0].clone();
+    excess_bytes.cas_publication_io.manifest_reads.read_bytes = u64::MAX;
+    excess_bytes.cas_publication_io.manifest_reads.read_calls = u64::MAX;
+    assert!(validate_fresh_cas_control_bound(&excess_bytes).is_err());
+}
+
+#[test]
+fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut observations = synthetic_linearity_observations_for_axis(axis);
+        for (rung, observation) in observations.iter_mut().enumerate() {
+            for owner in ["source", "clean_import"] {
+                let key = format!("{owner}.catalog_and_manifests");
+                for metrics in [
+                    &mut observation.category_metrics,
+                    &mut observation.category_authority_metrics,
+                ] {
+                    for field in [1, 3] {
+                        metrics.get_mut(&key).unwrap()[field] += rung as u64;
+                    }
+                }
+            }
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &observations)
+            .expect("catalog text lengths may gain digits without adding objects");
+        for (category, field) in [
+            ("catalog_and_manifests", 1),
+            ("catalog_and_manifests", 3),
+            ("catalog_and_manifests", 4),
+            ("catalog_and_manifests", 5),
+            ("adjacency", 1),
+            ("adjacency", 3),
+        ] {
+            for value in [0, u64::MAX] {
+                let mut invalid = observations.clone();
+                for owner in ["source", "clean_import"] {
+                    let key = format!("{owner}.{category}");
+                    invalid[2].category_metrics.get_mut(&key).unwrap()[field] = value;
+                    invalid[2].category_authority_metrics.get_mut(&key).unwrap()[field] = value;
+                }
+                let error = validate_lifecycle_metric_policies_for_axis(axis, &invalid)
+                    .expect_err("coherent category mutations still fail native growth policy");
+                assert!(error.contains(category), "{error}");
+            }
+        }
+        for value in [0, u64::MAX] {
+            let mut invalid = observations.clone();
+            invalid[2].phases.get_mut("hydration_verification").unwrap()[1] = value;
+            let error = validate_lifecycle_metric_policies_for_axis(axis, &invalid)
+                .expect_err("private ordinal copies cannot omit bytes or exceed their axis bound");
+            assert!(error.contains("hydration_verification"), "{error}");
+        }
+        let mut omitted_copies = observations;
+        for observation in &mut omitted_copies {
+            observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap()[1] = 0;
+        }
+        assert!(validate_lifecycle_metric_policies_for_axis(axis, &omitted_copies).is_err());
+    }
+}
+
+#[test]
+fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_growth() {
+    let observations = synthetic_linearity_observations();
+    validate_lifecycle_metric_policies(&observations)
+        .expect("scale-bearing slopes and bounded fixed protocol overhead");
+    let retained_evidence = synthetic_retained_evidence();
+    validate_retained_reconciliation(&retained_evidence)
+        .expect("synthetic retained evidence reconciles");
+
+    let mut category_underreport = retained_evidence.clone();
+    category_underreport["storage"]["source"]["categories"]["topology_nodes"]["logical_bytes"] =
+        json!(99);
+    assert!(validate_retained_reconciliation(&category_underreport).is_err());
+
+    let mut inventory_mismatch = retained_evidence.clone();
+    inventory_mismatch["storage"]["portable_package"]["physical_objects"] = json!(2);
+    assert!(validate_retained_reconciliation(&inventory_mismatch).is_err());
+
+    let mut transient_underreport = retained_evidence.clone();
+    transient_underreport["storage"]["construction"]["storage_transient_peak_allocated_bytes"]["construction_staging"] =
+        json!(2048);
+    assert!(validate_retained_reconciliation(&transient_underreport).is_err());
+
+    let mut retained_owner_underreport = retained_evidence.clone();
+    retained_owner_underreport["storage"]["workspace_current_allocated_bytes"] = json!(8192);
+    assert!(validate_retained_reconciliation(&retained_owner_underreport).is_err());
+
+    let mut missing_construction_category = retained_evidence.clone();
+    missing_construction_category["storage"]["construction"]["storage_current"]
+        .as_object_mut()
+        .unwrap()
+        .remove("properties");
+    assert!(validate_retained_reconciliation(&missing_construction_category).is_err());
+
+    let mut extra_construction_category = retained_evidence.clone();
+    extra_construction_category["storage"]["construction"]["storage_transient_peak_allocated_bytes"]
+        ["unknown"] = json!(0);
+    assert!(validate_retained_reconciliation(&extra_construction_category).is_err());
+
+    let mut double_counted_component = retained_evidence.clone();
+    double_counted_component["storage"]["workspace_components"]["clean_import_project"] =
+        json!(20_480);
+    assert!(validate_retained_reconciliation(&double_counted_component).is_err());
+
+    let mut overflowing_components = retained_evidence.clone();
+    overflowing_components["storage"]["workspace_components"]["source_project_and_construction"] =
+        json!(u64::MAX);
+    overflowing_components["storage"]["workspace_components"]["clean_import_project"] =
+        json!(u64::MAX);
+    assert!(validate_retained_reconciliation(&overflowing_components).is_err());
+
+    assert!(checked_product("boundary", &[u128::MAX, 2]).is_err());
+    assert!(checked_lifecycle_peak_allocation(u64::MAX, 1).is_err());
+    assert!(
+        validate_affine_metric(
+            "boundary",
+            [u64::MAX - 2, u64::MAX - 1, u64::MAX],
+            [u64::MAX - 2, u64::MAX - 1, u64::MAX],
+        )
+        .is_err()
+    );
+
+    let shared = BTreeMap::from([("cas-object".to_owned(), 4096)]);
+    let mut allocation = graphforge_storage::StorageAllocationLifecycle::default();
+    allocation
+        .replace_owner("source", &shared)
+        .expect("install source CAS identity");
+    allocation
+        .replace_owner("import", &shared)
+        .expect("shared CAS identity is a second reference, not a second allocation");
+    assert_eq!(allocation.current_allocated_bytes(), 4096);
+    assert!(
+        allocation
+            .replace_owner(
+                "invalid",
+                &BTreeMap::from([("cas-object".to_owned(), 8192)])
+            )
+            .is_err(),
+        "the same CAS identity with contradictory allocation must fail"
+    );
+
+    for (phase, field, field_name) in [
+        ("append_merge", 1, "append write bytes"),
+        ("append_merge", 4, "append objects"),
+        ("shape_consume_reauthentication", 5, "shape logical blocks"),
+        ("fsync_synchronization", 6, "append/merge fsync work"),
+        ("recovery_reauthentication", 0, "recovery read bytes"),
+    ] {
+        let mut held_constant = observations.clone();
+        held_constant[1].phases.get_mut(phase).unwrap()[field] =
+            held_constant[0].phases[phase][field];
+        held_constant[2].phases.get_mut(phase).unwrap()[field] =
+            held_constant[0].phases[phase][field];
+        assert!(
+            validate_lifecycle_metric_policies(&held_constant).is_err(),
+            "held-constant {field_name} must fail"
+        );
+
+        let mut underreported = observations.clone();
+        underreported[2].phases.get_mut(phase).unwrap()[field] =
+            underreported[1].phases[phase][field] + 1;
+        assert!(
+            validate_lifecycle_metric_policies(&underreported).is_err(),
+            "underreported 4x {field_name} must fail"
+        );
+    }
+    let mut missing_phase = observations.clone();
+    missing_phase[1].phases.remove("hydration_verification");
+    assert!(validate_lifecycle_metric_policies(&missing_phase).is_err());
+
+    let mut underreported_shape_aggregate = observations.clone();
+    underreported_shape_aggregate[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[5] -= 1;
+    assert!(validate_lifecycle_metric_policies(&underreported_shape_aggregate).is_err());
+
+    let mut overreported_shape_aggregate = observations.clone();
+    overreported_shape_aggregate[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[5] += 1;
+    assert!(validate_lifecycle_metric_policies(&overreported_shape_aggregate).is_err());
+
+    let mut underreported_shape_component = observations.clone();
+    underreported_shape_component[2].shape_block_components[0] = 0;
+    underreported_shape_component[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[5] = underreported_shape_component[2].shape_block_components[1];
+    assert!(validate_lifecycle_metric_policies(&underreported_shape_component).is_err());
+
+    let mut overreported_shape_component = observations.clone();
+    overreported_shape_component[2].shape_block_components[1] = overreported_shape_component[2]
+        .shape_merge_bytes[1]
+        .checked_add(1)
+        .expect("synthetic overreported component");
+    overreported_shape_component[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[5] = overreported_shape_component[2]
+        .shape_block_components
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .expect("synthetic component total");
+    assert!(validate_lifecycle_metric_policies(&overreported_shape_component).is_err());
+
+    let mut overflowing_shape_components = observations.clone();
+    overflowing_shape_components[2].shape_block_components = [u64::MAX, 1];
+    overflowing_shape_components[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[5] = u64::MAX;
+    assert!(validate_lifecycle_metric_policies(&overflowing_shape_components).is_err());
+
+    let mut nonzero_structural_field = observations.clone();
+    nonzero_structural_field[2]
+        .phases
+        .get_mut("append_merge")
+        .unwrap()[0] = 1;
+    assert!(validate_lifecycle_metric_policies(&nonzero_structural_field).is_err());
+
+    for field in [0, 2] {
+        let mut nonzero_seal_field = observations.clone();
+        nonzero_seal_field[2]
+            .phases
+            .get_mut("seal_authentication")
+            .unwrap()[field] = 1;
+        assert!(
+            validate_lifecycle_metric_policies(&nonzero_seal_field).is_err(),
+            "seal structural field {field} must remain zero"
+        );
+    }
+
+    let mut zero_scale_phase = observations.clone();
+    for observation in &mut zero_scale_phase {
+        observation
+            .phases
+            .get_mut("encode_write_postwrite_authentication")
+            .unwrap()[1] = 0;
+    }
+    assert!(validate_lifecycle_metric_policies(&zero_scale_phase).is_err());
+
+    let mut zero_scale_retained = observations.clone();
+    for observation in &mut zero_scale_retained {
+        observation
+            .retained
+            .insert("source.logical_bytes".into(), 0);
+    }
+    assert!(validate_lifecycle_metric_policies(&zero_scale_retained).is_err());
+
+    let mut underreported_buffered_calls = observations.clone();
+    underreported_buffered_calls[2]
+        .phases
+        .get_mut("hydration_verification")
+        .unwrap()[2] = 0;
+    assert!(validate_lifecycle_metric_policies(&underreported_buffered_calls).is_err());
+
+    let mut underreported_shape_calls = observations.clone();
+    underreported_shape_calls[2]
+        .phases
+        .get_mut("shape_consume_reauthentication")
+        .unwrap()[2] = 1;
+    assert!(validate_lifecycle_metric_policies(&underreported_shape_calls).is_err());
+
+    let mut inflated_encode_calls = observations.clone();
+    inflated_encode_calls[2]
+        .phases
+        .get_mut("encode_write_postwrite_authentication")
+        .unwrap()[3] += 1;
+    assert!(validate_lifecycle_metric_policies(&inflated_encode_calls).is_err());
+
+    let mut component_call_plateau = observations.clone();
+    for observation in &mut component_call_plateau {
+        observation
+            .phases
+            .get_mut("shape_consume_reauthentication")
+            .unwrap()[2] = 2;
+        observation.shape_read_component_calls = [2, 0, 0, 0, 0, 0];
+    }
+    validate_lifecycle_metric_policies(&component_call_plateau)
+        .expect("native component-call plateau");
+
+    let mut oversized_inventory_control = observations.clone();
+    oversized_inventory_control[2]
+        .phases
+        .get_mut("publication_preauthentication")
+        .unwrap()[0] = ENCODING_BUFFER_BYTES + 1;
+    assert!(validate_lifecycle_metric_policies(&oversized_inventory_control).is_err());
+
+    let mut zero_denominator = observations.clone();
+    zero_denominator[1].live_nodes = 0;
+    assert!(validate_lifecycle_metric_policies(&zero_denominator).is_err());
+    let mut nonmonotone_denominator = observations.clone();
+    nonmonotone_denominator[2].live_nodes = nonmonotone_denominator[1].live_nodes;
+    assert!(validate_lifecycle_metric_policies(&nonmonotone_denominator).is_err());
+    let mut changed_controlled_axis = observations.clone();
+    changed_controlled_axis[2].live_edges += 1;
+    assert!(validate_lifecycle_metric_policies(&changed_controlled_axis).is_err());
+
+    let mut below_row_bound = observations.clone();
+    below_row_bound[2].phases.get_mut("append_merge").unwrap()[1] =
+        below_row_bound[2].input_rows - 1;
+    assert!(validate_lifecycle_metric_policies(&below_row_bound).is_err());
+
+    let mut compensated_category_shift = observations.clone();
+    for observation in &mut compensated_category_shift {
+        for owner in ["source", "clean_import"] {
+            let node_key = format!("{owner}.topology_nodes");
+            let edge_key = format!("{owner}.topology_edges");
+            for field in [1, 3] {
+                observation.category_metrics.get_mut(&node_key).unwrap()[field] -= 1;
+                observation.category_metrics.get_mut(&edge_key).unwrap()[field] += 1;
+            }
+        }
+    }
+    assert_eq!(
+        validate_lifecycle_metric_policies(&compensated_category_shift),
+        Err("retained category totals differ from storage-owned authorities".into())
+    );
+
+    let edge_observations = synthetic_linearity_observations_for_axis(LinearityAxis::Edges);
+    validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &edge_observations)
+        .expect("edge-axis denominator proof");
+    let mut edge_underreport = edge_observations;
+    edge_underreport[2].retained.insert(
+        "source.canonical_edges.logical_bytes".into(),
+        edge_underreport[1].retained["source.canonical_edges.logical_bytes"],
+    );
+    assert!(
+        validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &edge_underreport)
+            .is_err()
+    );
+    for (retained, _, policy) in LINEARITY_RETAINED_FIELDS {
+        if !matches!(
+            policy,
+            RetainedMetricPolicy::ScaleBearing | RetainedMetricPolicy::NodeBearing
+        ) {
+            continue;
+        }
+        let mut held_constant = observations.clone();
+        held_constant[1]
+            .retained
+            .insert(retained.to_owned(), held_constant[0].retained[retained]);
+        held_constant[2]
+            .retained
+            .insert(retained.to_owned(), held_constant[0].retained[retained]);
+        assert!(
+            validate_lifecycle_metric_policies(&held_constant).is_err(),
+            "held-constant retained metric {retained} must fail"
+        );
+
+        let mut underreported = observations.clone();
+        underreported[2]
+            .retained
+            .insert(retained.to_owned(), underreported[1].retained[retained] + 1);
+        assert!(
+            validate_lifecycle_metric_policies(&underreported).is_err(),
+            "underreported 4x retained metric {retained} must fail"
+        );
+    }
+    let mut decreasing_allocated = observations.clone();
+    decreasing_allocated[2]
+        .retained
+        .insert("source.allocated_bytes".into(), 1);
+    assert!(validate_lifecycle_metric_policies(&decreasing_allocated).is_err());
+
+    let mut quantized_plateau = observations.clone();
+    for rung in 1..3 {
+        for owner in ["source", "clean_import"] {
+            let key = format!("{owner}.topology_nodes");
+            for field in [4, 5] {
+                let baseline = quantized_plateau[0].category_metrics[&key][field];
+                quantized_plateau[rung]
+                    .category_metrics
+                    .get_mut(&key)
+                    .unwrap()[field] = baseline;
+                quantized_plateau[rung]
+                    .category_authority_metrics
+                    .get_mut(&key)
+                    .unwrap()[field] = baseline;
+            }
+        }
+    }
+    validate_lifecycle_metric_policies(&quantized_plateau)
+        .expect("legitimate filesystem-allocation plateau");
+
+    let mut quantized_upper_bound = observations.clone();
+    for owner in ["source", "clean_import"] {
+        let key = format!("{owner}.topology_nodes");
+        quantized_upper_bound[2]
+            .category_metrics
+            .get_mut(&key)
+            .unwrap()[4] = u64::MAX;
+        quantized_upper_bound[2]
+            .category_authority_metrics
+            .get_mut(&key)
+            .unwrap()[4] = u64::MAX;
+    }
+    assert!(validate_lifecycle_metric_policies(&quantized_upper_bound).is_err());
+
+    let mut changed_retained_inventory = observations.clone();
+    changed_retained_inventory[2]
+        .retained
+        .insert("source.physical_objects".into(), 20);
+    assert!(validate_lifecycle_metric_policies(&changed_retained_inventory).is_err());
+
+    let mut excess_retained_shape = observations.clone();
+    excess_retained_shape[2].retained.insert(
+        "construction.current_merge_temporary_allocated_bytes".into(),
+        u64::MAX,
+    );
+    assert!(validate_lifecycle_metric_policies(&excess_retained_shape).is_err());
+
+    let fsync_index = LINEARITY_PHASE_FIELDS
+        .iter()
+        .position(|field| *field == "fsync_calls")
+        .unwrap();
+    let mut decreasing_fixed = observations.clone();
+    decreasing_fixed[1]
+        .phases
+        .get_mut("cas_install_read_write")
+        .unwrap()[fsync_index] = 38;
+    assert!(
+        validate_lifecycle_metric_policies(&decreasing_fixed).is_err(),
+        "decreasing fixed protocol count must fail"
+    );
+
+    let mut inflated_fixed = observations.clone();
+    inflated_fixed[2]
+        .phases
+        .get_mut("cas_install_read_write")
+        .unwrap()[fsync_index] = 40;
+    assert!(
+        validate_lifecycle_metric_policies(&inflated_fixed).is_err(),
+        "inflated fixed protocol count must fail"
+    );
+    let mut changed_canonical_inventory = observations.clone();
+    changed_canonical_inventory[2].canonical_artifact_objects += 1;
+    assert!(validate_lifecycle_metric_policies(&changed_canonical_inventory).is_err());
+
+    let mut changed_encode_inventory = observations.clone();
+    changed_encode_inventory[2].encode_fsync_components[0] += 1;
+    assert!(validate_lifecycle_metric_policies(&changed_encode_inventory).is_err());
+
+    for (file_delta, directory_delta) in [(1_i64, 0_i64), (-1, 0), (0, 1), (0, -1)] {
+        let mut changed_hydration_inventory = observations.clone();
+        let observation = &mut changed_hydration_inventory[2];
+        observation.hydration_file_fsync_operations = observation
+            .hydration_file_fsync_operations
+            .checked_add_signed(file_delta)
+            .unwrap();
+        observation.hydration_directory_fsync_operations = observation
+            .hydration_directory_fsync_operations
+            .checked_add_signed(directory_delta)
+            .unwrap();
+        assert!(validate_lifecycle_metric_policies(&changed_hydration_inventory).is_err());
+    }
+
+    let read_calls_index = LINEARITY_PHASE_FIELDS
+        .iter()
+        .position(|field| *field == "read_calls")
+        .unwrap();
+    validate_buffered_calls(
+        "legitimate plateau",
+        [2, 2, 2],
+        [
+            ENCODING_BUFFER_BYTES + 1,
+            ENCODING_BUFFER_BYTES + 2,
+            ENCODING_BUFFER_BYTES + 3,
+        ],
+        ENCODING_BUFFER_BYTES,
+    )
+    .expect("quantized call plateau");
+    assert!(
+        validate_buffered_calls(
+            "below derived bound",
+            [1, 1, 1],
+            [ENCODING_BUFFER_BYTES + 1; 3],
+            ENCODING_BUFFER_BYTES,
+        )
+        .is_err()
+    );
+    assert!(
+        validate_buffered_calls(
+            "above derived bound",
+            [2, 2, 3],
+            [2, 2, 2],
+            ENCODING_BUFFER_BYTES,
+        )
+        .is_err()
+    );
+
+    let mut missing_encoding_reads = observations;
+    for observation in &mut missing_encoding_reads {
+        observation
+            .phases
+            .get_mut("encode_write_postwrite_authentication")
+            .unwrap()[read_calls_index] = 0;
+    }
+    assert!(validate_lifecycle_metric_policies(&missing_encoding_reads).is_err());
+
+    let mut decreasing_encoding_fsyncs = synthetic_linearity_observations();
+    decreasing_encoding_fsyncs[1]
+        .phases
+        .get_mut("encode_write_postwrite_authentication")
+        .unwrap()[fsync_index] = 42;
+    assert!(
+        validate_lifecycle_metric_policies(&decreasing_encoding_fsyncs).is_err(),
+        "decreasing encoding fsync count must fail"
+    );
+
+    let mut inflated_encoding_fsyncs = synthetic_linearity_observations();
+    inflated_encoding_fsyncs[2]
+        .phases
+        .get_mut("encode_write_postwrite_authentication")
+        .unwrap()[fsync_index] = 44;
+    assert!(
+        validate_lifecycle_metric_policies(&inflated_encoding_fsyncs).is_err(),
+        "inflated encoding fsync count must fail"
+    );
+
+    let mut missing_encoding_fsyncs = synthetic_linearity_observations();
+    for observation in &mut missing_encoding_fsyncs {
+        observation
+            .phases
+            .get_mut("encode_write_postwrite_authentication")
+            .unwrap()[fsync_index] = 0;
+    }
+    assert!(
+        validate_lifecycle_metric_policies(&missing_encoding_fsyncs).is_err(),
+        "missing encoding fsync evidence must fail"
+    );
+}
+
+#[test]
+fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_metric_policies() {
+    let mut failures = Vec::new();
+    for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
+        let mut observations = Vec::new();
+        let mut live_counts = Vec::new();
+        for factor in [1_u32, 2, 4] {
+            let root = TempDir::new().expect("full lifecycle ladder root");
+            let integrated = run_integrated_certification_for_linearity(root.path(), axis, factor);
+            let evidence = integrated.value;
+            assert_eq!(evidence["source_nodes"], evidence["imported_nodes"]);
+            assert_eq!(evidence["source_edges"], evidence["imported_edges"]);
+            live_counts.push((
+                evidence["source_nodes"]
+                    .as_u64()
+                    .expect("source node count"),
+                evidence["source_edges"]
+                    .as_u64()
+                    .expect("source edge count"),
+            ));
+            let attribution: graphforge_storage::ConstructionPhaseAttribution =
+                serde_json::from_value(evidence["storage"]["application_io_phases"].clone())
+                    .expect("decode phase evidence");
+            attribution
+                .validate_for_qualification()
+                .expect("full lifecycle phase qualification");
+            validate_retained_reconciliation(&evidence)
+                .expect("full lifecycle retained/category reconciliation");
+            let recovery = &evidence["storage"]["application_io_phases"]["phases"]["recovery_reauthentication"];
+            assert!(
+                recovery["read_bytes"].as_u64().unwrap_or(0) > 0,
+                "{axis:?} {factor}x recovery must report authenticated bytes"
+            );
+            assert!(
+                recovery["read_calls"].as_u64().unwrap_or(0) > 0,
+                "{axis:?} {factor}x recovery must report authenticated calls"
+            );
+            observations.push(lifecycle_linearity_observation(&evidence));
+            let interrupted = evidence["phases"]
+                .as_array()
+                .expect("lifecycle phases")
+                .iter()
+                .find(|phase| phase["id"] == "drill_interrupted_finalization")
+                .expect("interrupted-finalization recovery drill");
+            assert_eq!(interrupted["status"], "pass");
+        }
+        match axis {
+            LinearityAxis::Nodes => {
+                assert_eq!(live_counts[1].0, live_counts[0].0 * 2);
+                assert_eq!(live_counts[2].0, live_counts[0].0 * 4);
+                assert_eq!(live_counts[0].1, live_counts[1].1);
+                assert_eq!(live_counts[0].1, live_counts[2].1);
+            }
+            LinearityAxis::Edges => {
+                assert_eq!(live_counts[0].0, live_counts[1].0);
+                assert_eq!(live_counts[0].0, live_counts[2].0);
+                assert!(live_counts[0].1 < live_counts[1].1);
+                assert!(live_counts[1].1 < live_counts[2].1);
+            }
+        }
+        let observations: [LifecycleLinearityObservation; 3] = observations
+            .try_into()
+            .expect("exact 1x/2x/4x observations");
+        if let Err(error) = validate_lifecycle_metric_policies_for_axis(axis, &observations) {
+            failures.push(format!(
+                "{axis:?} full lifecycle metric proof failed: {error}; live_counts={live_counts:?}; categories={:?}; phases={:?}; retained={:?}",
+                observations.each_ref().map(|observation| &observation.category_metrics),
+                observations.each_ref().map(|observation| &observation.phases),
+                observations.each_ref().map(|observation| &observation.retained)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -4005,7 +7541,8 @@ fn million_edge_sink_uses_sixteen_durable_chunks_and_replays_stably() {
 fn submitted_chunk_count(evidence: &graphforge_storage::GraphConstructionEvidence) -> u64 {
     evidence
         .input_batches
-        .saturating_add(evidence.replayed_chunks)
+        .checked_add(evidence.replayed_chunks)
+        .expect("submitted construction chunk count overflow")
 }
 
 #[test]
@@ -4149,8 +7686,11 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
                     assert!(
                         *observed
                             <= base
-                                .saturating_mul(factor)
-                                .saturating_add(fixed_edge_merge_window_bytes),
+                                .checked_mul(factor)
+                                .and_then(|bound| {
+                                    bound.checked_add(fixed_edge_merge_window_bytes)
+                                })
+                                .expect("merge footprint bound overflow"),
                         "disk-backed merge footprint exceeded linear work: baseline={base} observed={observed} factor={factor}"
                     );
                     continue;
@@ -4163,7 +7703,10 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
                     continue;
                 }
                 assert!(
-                    *observed <= base.saturating_add(tolerance),
+                    *observed
+                        <= base
+                            .checked_add(tolerance)
+                            .expect("saturated peak tolerance overflow"),
                     "saturated peak field {index} grew with scale: baseline={base} observed={observed} tolerance={tolerance}"
                 );
             }
@@ -4176,7 +7719,8 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(current_generation_uuid(&graph), receipt.generation_uuid);
         let phases =
-            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence);
+            graphforge_storage::ConstructionPhaseAttribution::from_construction(&progress.evidence)
+                .unwrap();
         phases.validate_reconciliation().unwrap();
         let shape =
             &phases.phases[&graphforge_storage::StorageIoPhase::ShapeConsumeReauthentication];
@@ -4187,25 +7731,30 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             progress
                 .evidence
                 .merge_written_bytes
-                .saturating_add(progress.evidence.parquet_write_bytes)
+                .checked_add(progress.evidence.parquet_write_bytes)
+                .expect("shape write-byte reconciliation overflow")
         );
         assert_eq!(
             shape.write_calls,
             progress
                 .evidence
                 .merge_write_operations
-                .saturating_add(progress.evidence.parquet_write_operations)
+                .checked_add(progress.evidence.parquet_write_operations)
+                .expect("shape write-operation reconciliation overflow")
         );
         assert_eq!(
             shape.read_calls,
-            progress
-                .evidence
-                .shape_input_validation_read_operations
-                .saturating_add(progress.evidence.merge_read_operations)
-                .saturating_add(progress.evidence.parquet_read_operations)
-                .saturating_add(progress.evidence.shaped_output_authentication_operations)
-                .saturating_add(progress.evidence.parent_catalog_read_operations)
-                .saturating_add(progress.evidence.retained_probe_block_loads)
+            [
+                progress.evidence.shape_input_validation_read_operations,
+                progress.evidence.merge_read_operations,
+                progress.evidence.parquet_read_operations,
+                progress.evidence.shaped_output_authentication_operations,
+                progress.evidence.parent_catalog_read_operations,
+                progress.evidence.retained_probe_block_loads,
+            ]
+            .into_iter()
+            .try_fold(0_u64, u64::checked_add)
+            .expect("shape read-operation reconciliation overflow")
         );
         let phase_observation = (
             phases.totals.read_bytes,
@@ -4217,7 +7766,11 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             // Each lifecycle has fixed authenticated control work. Preserve a
             // documented 2x constant-factor ceiling around ideal linear growth
             // instead of pretending the intercept is zero at the 1x fixture.
-            let ceiling = |base: u64| base.saturating_mul(factor).saturating_mul(2);
+            let ceiling = |base: u64| {
+                base.checked_mul(factor)
+                    .and_then(|bound| bound.checked_mul(2))
+                    .expect("phase I/O ceiling overflow")
+            };
             assert!(phase_observation.0 <= ceiling(baseline.0));
             assert!(phase_observation.1 <= ceiling(baseline.1));
             assert!(phase_observation.2 <= ceiling(baseline.2));
@@ -4238,11 +7791,17 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
         );
         if let Some((base_logical, base_allocated)) = baseline_storage {
             assert!(
-                storage.logical_bytes <= base_logical.saturating_mul(factor),
+                storage.logical_bytes
+                    <= base_logical
+                        .checked_mul(factor)
+                        .expect("storage logical-byte bound overflow"),
                 "authenticated logical bytes exceeded linear growth"
             );
             assert!(
-                storage.allocated_bytes <= base_allocated.saturating_mul(factor),
+                storage.allocated_bytes
+                    <= base_allocated
+                        .checked_mul(factor)
+                        .expect("storage allocation bound overflow"),
                 "deduplicated allocated bytes exceeded linear growth"
             );
         } else {
