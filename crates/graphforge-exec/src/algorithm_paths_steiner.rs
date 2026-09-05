@@ -1,7 +1,7 @@
 //! Shared normalization for exact Steiner path algorithms.
 
 use graphforge_core::PathsOptions;
-use graphforge_core::algorithms::{Algorithm, AlgorithmResultSchema, PathAlgorithm};
+use graphforge_core::algorithms::PathAlgorithm;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
@@ -35,23 +35,13 @@ impl SteinerKind {
 /// Canonical mandatory terminals consumed by a later Steiner kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NormalizedSteinerInvocation {
-    kind: SteinerKind,
     terminal_uuids: Vec<[u8; 16]>,
 }
 
 impl NormalizedSteinerInvocation {
-    pub(crate) const fn kind(&self) -> SteinerKind {
-        self.kind
-    }
-
     pub(crate) fn terminal_uuids(&self) -> &[[u8; 16]] {
         &self.terminal_uuids
     }
-}
-
-/// Return the dedicated non-null four-column schema for this Steiner kind.
-pub(crate) const fn steiner_schema(kind: SteinerKind) -> AlgorithmResultSchema {
-    Algorithm::Paths(kind.algorithm()).result_schema()
 }
 
 /// Normalize and validate one graph-layer Steiner invocation atomically.
@@ -100,10 +90,7 @@ pub(crate) fn normalize_steiner_invocation(
         }
     }
 
-    Ok(NormalizedSteinerInvocation {
-        kind,
-        terminal_uuids,
-    })
+    Ok(NormalizedSteinerInvocation { terminal_uuids })
 }
 
 fn validate_closed_options(
@@ -210,7 +197,6 @@ mod tests {
             &normalization_control,
         )
         .unwrap();
-        assert_eq!(normalized.kind(), SteinerKind::MinimumTree);
         assert_eq!(normalized.terminal_uuids(), &[uuid(1), uuid(2), uuid(3)]);
         assert_eq!(normalization_control.consume_states(4), Ok(4));
 
@@ -403,7 +389,8 @@ mod tests {
     #[test]
     fn schema_is_exact_non_null_single_tree_shape() {
         for kind in [SteinerKind::MinimumTree, SteinerKind::PrizeCollecting] {
-            let schema = steiner_schema(kind);
+            let schema =
+                graphforge_core::algorithms::Algorithm::Paths(kind.algorithm()).result_schema();
             assert_eq!(
                 schema
                     .fields

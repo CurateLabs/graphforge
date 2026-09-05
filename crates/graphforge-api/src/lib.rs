@@ -6419,6 +6419,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prize_steiner_validates_property_types_before_kernel_dispatch() {
+        for prize in [
+            PropValue::Int(2),
+            PropValue::Int(-1),
+            PropValue::Int(i64::MAX),
+            PropValue::Null,
+            PropValue::Bool(true),
+            PropValue::Str("not a number".into()),
+        ] {
+            let valid = prize == PropValue::Int(2);
+            let graph = GraphForge::new(None).unwrap();
+            let node = graph
+                .add_node("Person", &HashMap::from([("prize".into(), prize.clone())]))
+                .unwrap();
+            let result = graph.paths(None, None, prize_steiner_options(&[&node], None, "prize"));
+            if valid {
+                assert_eq!(result.unwrap().num_rows(), 0);
+            } else {
+                assert!(result.is_err(), "invalid prize accepted: {prize:?}");
+            }
+            assert_eq!(graph.node_count("Person").unwrap(), 1);
+        }
+    }
+
     fn is_dag_options(directed: bool, via: Option<&str>) -> AnalyzeOptions {
         AnalyzeOptions {
             by: AnalyzeAlgorithm::IsDag,

@@ -4,6 +4,9 @@
 //! tasks through the instance-owned private compute pool. Each walk keeps the
 //! exact serial RNG stream and choice ordering, and worker outputs merge by
 //! canonical task ordinal so the public row order remains byte-identical.
+//!
+//! The RNG contract is splitmix64-v1. Changing the generator, seed derivation,
+//! draw conversion, or choice ordering requires a new contract version.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -11,10 +14,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
-
-/// Changing the generator, seed derivation, draw conversion, or choice ordering
-/// requires a new contract version.
-pub(crate) const RANDOM_WALK_RNG_CONTRACT: &str = "splitmix64-v1";
 
 /// Estimated transitions below which random_walk stays on the serial path (#553).
 ///
@@ -422,7 +421,6 @@ mod tests {
                 vec![uuid(2)],
             ]
         );
-        assert_eq!(RANDOM_WALK_RNG_CONTRACT, "splitmix64-v1");
     }
 
     #[test]

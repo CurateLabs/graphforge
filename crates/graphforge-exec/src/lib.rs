@@ -19,115 +19,53 @@
 
 pub mod adjacency;
 mod algorithm_analyze;
-#[allow(
-    dead_code,
-    reason = "issue 2106 provides the foundation for exact automorphism counting"
-)]
 pub(crate) mod algorithm_analyze_automorphism;
-#[allow(
-    dead_code,
-    reason = "issue 2111 provides the exact kernel before handler activation"
-)]
 pub(crate) mod algorithm_analyze_automorphism_count;
-#[allow(
-    dead_code,
-    reason = "issue 1223 registers the bipartite matching kernel"
-)]
 pub(crate) mod algorithm_analyze_bipartite;
-#[allow(dead_code, reason = "issue 1223 registers the Hopcroft-Karp kernel")]
 pub(crate) mod algorithm_analyze_bipartite_matching;
-#[allow(dead_code, reason = "issue 1214 registers the chromatic-number kernel")]
 pub(crate) mod algorithm_analyze_chromatic_number;
 pub(crate) mod algorithm_analyze_conductance;
-#[allow(dead_code, reason = "issue 1206 registers the dag-longest-path kernel")]
 pub(crate) mod algorithm_analyze_dag_longest_path;
-#[allow(
-    dead_code,
-    reason = "issue 1208 registers the weighted dag-longest-path kernel"
-)]
 pub(crate) mod algorithm_analyze_dag_longest_path_weighted;
-#[allow(dead_code, reason = "issue 1741 adds the shared DAG-family kernel")]
 pub(crate) mod algorithm_analyze_dag_topology;
-#[allow(dead_code, reason = "issue 1884 registers the dyad-census kernel")]
 pub(crate) mod algorithm_analyze_dyad_census;
-#[allow(dead_code, reason = "issue 1212 registers the edge-coloring kernel")]
 pub(crate) mod algorithm_analyze_edge_coloring;
-#[allow(
-    dead_code,
-    reason = "issue 2104 provides shared Euler construction before leaf activation"
-)]
 pub(crate) mod algorithm_analyze_euler;
-#[allow(dead_code, reason = "issue 1204 registers the find-cycles kernel")]
 pub(crate) mod algorithm_analyze_find_cycles;
-#[allow(dead_code, reason = "issue 1227 registers the Euler-circuit predicate")]
 pub(crate) mod algorithm_analyze_has_euler_circuit;
-#[allow(dead_code, reason = "issue 1228 registers the Euler-path predicate")]
 pub(crate) mod algorithm_analyze_has_euler_path;
-#[allow(dead_code, reason = "issue 1229 registers the planarity predicate")]
 pub(crate) mod algorithm_analyze_is_planar;
-#[allow(dead_code, reason = "issue 1217 registers the k1-coloring kernel")]
 pub(crate) mod algorithm_analyze_k1_coloring;
-#[allow(dead_code, reason = "issues 1230 and 1231 register this shared kernel")]
 pub(crate) mod algorithm_analyze_lowlink;
-#[allow(
-    dead_code,
-    reason = "issue 1221 registers the maximum-cardinality matching kernel"
-)]
 pub(crate) mod algorithm_analyze_max_cardinality_matching;
-#[allow(dead_code, reason = "#1198 dispatch integration registers this kernel")]
 pub(crate) mod algorithm_analyze_minimum_k_spanning_tree;
 pub(crate) mod algorithm_analyze_minimum_spanning_forest;
-#[allow(dead_code, reason = "issue 1234 registers the modularity kernel")]
 pub(crate) mod algorithm_analyze_modularity;
 pub(crate) mod algorithm_analyze_node_coloring;
 pub(crate) mod algorithm_analyze_transitivity;
-#[allow(dead_code, reason = "issue 1885 registers the triad-census kernel")]
 pub(crate) mod algorithm_analyze_triad_census;
-#[allow(dead_code, reason = "issue 1232 registers the triangle-count kernel")]
 pub(crate) mod algorithm_analyze_triangle_count;
 mod algorithm_cluster;
 pub(crate) mod algorithm_cluster_biconnected;
 pub(crate) mod algorithm_cluster_hdbscan;
 pub(crate) mod algorithm_cluster_kmeans;
 pub(crate) mod algorithm_cluster_max_cut;
-#[allow(dead_code)]
 pub(crate) mod algorithm_cluster_scc;
 pub(crate) mod algorithm_cluster_spectral;
-#[allow(dead_code)]
 pub(crate) mod algorithm_cluster_spinglass;
 pub(crate) mod algorithm_cluster_walktrap;
 pub(crate) mod algorithm_dispatch;
-#[allow(
-    dead_code,
-    reason = "embedding kernels consume this shared control foundation"
-)]
 pub(crate) mod algorithm_embedding_control;
 pub(crate) mod algorithm_embedding_fastrp;
 pub(crate) mod algorithm_embedding_graphsage;
 pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
-#[allow(
-    dead_code,
-    reason = "embedding leaf dispatches consume the shared typed option boundary"
-)]
 pub(crate) mod algorithm_embedding_options;
 pub use algorithm_embedding_options::validate_embedding_options;
 pub use algorithm_graph::AlgorithmProjectionFingerprint;
 pub(crate) mod algorithm_arrow_sink;
-#[allow(
-    dead_code,
-    reason = "Node2Vec activation consumes the deterministic walk corpus"
-)]
 pub(crate) mod algorithm_embedding_node2vec;
-#[allow(
-    dead_code,
-    reason = "embedding kernels consume this canonical output foundation"
-)]
 pub(crate) mod algorithm_embedding_output;
-#[allow(
-    dead_code,
-    reason = "embedding kernels consume this shared RNG foundation"
-)]
 pub(crate) mod algorithm_embedding_rng;
 pub(crate) mod algorithm_graph;
 pub(crate) mod algorithm_k_core;
@@ -135,50 +73,21 @@ pub(crate) mod algorithm_matching_blossom;
 pub(crate) mod algorithm_matching_state;
 pub(crate) mod algorithm_neighbors;
 pub(crate) mod algorithm_output;
-#[allow(
-    dead_code,
-    reason = "issues 1223 and 1233 consume the shared partition mapping"
-)]
 pub(crate) mod algorithm_partition;
 mod algorithm_paths;
-#[allow(dead_code, reason = "issue 1683 registers this kernel")]
 pub(crate) mod algorithm_paths_astar;
-#[allow(dead_code, reason = "issue 1691 registers this kernel")]
 pub(crate) mod algorithm_paths_bellman_ford;
-#[allow(dead_code, reason = "issue 1706 registers this kernel")]
 pub(crate) mod algorithm_paths_delta_stepping;
-#[allow(
-    dead_code,
-    reason = "issue 1220 registers the depth-first-search kernel"
-)]
 pub(crate) mod algorithm_paths_dfs;
-#[allow(dead_code, reason = "issue 1665 registers this kernel")]
 pub(crate) mod algorithm_paths_dijkstra;
-#[allow(dead_code, reason = "issue 1701 registers this kernel")]
 pub(crate) mod algorithm_paths_floyd_warshall;
-#[allow(
-    dead_code,
-    reason = "issue 2121 provides the Gomory-Hu kernel before activation"
-)]
 pub(crate) mod algorithm_paths_gomory_hu;
-#[allow(dead_code, reason = "issue 1209 registers both maximum-flow views")]
 pub(crate) mod algorithm_paths_max_flow;
-#[allow(dead_code, reason = "issue 1213 registers both min-cost flow views")]
 pub(crate) mod algorithm_paths_min_cost_flow;
-#[allow(dead_code, reason = "issue 1211 registers both minimum-cut views")]
 pub(crate) mod algorithm_paths_min_cut;
 pub(crate) mod algorithm_paths_min_steiner;
-#[allow(
-    dead_code,
-    reason = "production graph properties normalize to f64; exact scalar variants retain kernel boundary coverage"
-)]
 pub(crate) mod algorithm_paths_prize_steiner;
-#[allow(dead_code, reason = "issue 1222 registers the random-walk kernel")]
 pub(crate) mod algorithm_paths_random_walk;
-#[allow(
-    dead_code,
-    reason = "issue 2159 provides Steiner normalization before activation"
-)]
 pub(crate) mod algorithm_paths_steiner;
 pub(crate) mod algorithm_paths_transitive_closure;
 pub(crate) mod algorithm_paths_yens;

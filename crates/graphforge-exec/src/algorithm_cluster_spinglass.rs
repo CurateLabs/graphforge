@@ -216,6 +216,7 @@ impl SpinglassGraph {
         finite(energy, "Spinglass energy is not finite")
     }
 
+    #[cfg(test)]
     pub(crate) fn move_delta(
         &self,
         component: &[usize],
