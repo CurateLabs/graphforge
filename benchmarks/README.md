@@ -12,6 +12,14 @@ repository root. Benchmark-only dependencies must never be added to GraphForge
 product crates or bindings. Product-only behavior, feature flags, and benchmark
 hooks are prohibited.
 
+Live Rust runners may depend on this checkout's `graphforge-api` public facade.
+The Rust dependency check permits its transitive engine dependencies under
+`crates/` and keeps benchmark packages unpublishable. Workload runners cannot
+depend directly on engine internals. The existing certification runner retains
+its storage-attribution and filesystem primitives, and the generator retains
+its filesystem test helper; those dependencies are allowed only for their
+specific package and manifest paths. Unrelated local paths are rejected.
+
 The existing `algorithms/` scripts and benchmark documents predate this
 workspace and remain unchanged. Migration or retirement of that legacy harness
 belongs to issue #959, after parity is proven.
@@ -300,8 +308,9 @@ make -C benchmarks smoke
 
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
-checks the dependency-free Rust smoke runner. It does not run a benchmark,
-start a provider, or open a GraphForge project.
+checks the Rust runners and their public-facade dependency boundary. This includes
+the bounded in-memory Graphalytics fixture through the real GraphForge API. It
+does not start a provider or execute the host scale ladder.
 
 ## Native local admission
 
