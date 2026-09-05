@@ -126,7 +126,7 @@ jobs:
       # Keep maturin + cargo + napi on one sticky volume so dense L/XL case
       # workspaces are not competing with a second root-disk Cargo tree (#2765).
       - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
         with:
           # Per-certification workspace; cleanup_load_disk deletes it after load.
           key: ${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3
