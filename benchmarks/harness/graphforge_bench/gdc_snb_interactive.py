@@ -32,6 +32,7 @@ OPERATIONS = COMPLEX_READS + SHORT_READS + UPDATES
 
 JOB_SCHEMA = "graphforge-gdc-snb-interactive-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-interactive-evidence/1"
+LIVE_DATASET_ID = "snb-interactive-live-is1-synthetic-v1"
 
 UPDATE_CAUSE = "interactive_update_stream_not_exposed"
 IC14_CAUSE = "weighted_interaction_path_enumeration_not_exposed"
@@ -47,6 +48,12 @@ class SnbInteractiveSuiteError(ValueError):
 
 def identity_path(root: Path | None = None) -> Path:
     return (root or workspace_root()) / "profiles" / "gdc" / "snb-interactive-identity.json"
+
+
+def live_identity_path(root: Path | None = None) -> Path:
+    return (
+        (root or workspace_root()) / "profiles" / "gdc" / "snb-interactive-live-is1-identity.json"
+    )
 
 
 def runner_binary(root: Path | None = None) -> Path:
@@ -104,7 +111,7 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded snb-sf0.003 SNB Interactive suite through the Rust runner."""
+    """Replay the bounded synthetic SNB Interactive fixture through the Rust runner."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "snb-interactive-tiny" / fixture_name
     pin = load_pinned_identity(identity_path(base))
@@ -152,6 +159,34 @@ def run_tiny_suite(
         return evidence
 
 
+def run_live_is1(
+    *,
+    root: Path | None = None,
+    evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Orchestrate the trusted Rust-owned in-memory IS1 command."""
+    base = root or workspace_root()
+    with tempfile.TemporaryDirectory(prefix="gdc-snb-interactive-live-") as tmp:
+        out_evidence = evidence_path or (Path(tmp) / "evidence.json")
+        completed = _run_runner(["run-live-is1", str(out_evidence)], base)
+        if not out_evidence.is_file():
+            raise SnbInteractiveSuiteError(
+                "invalid_live_result",
+                f"trusted live runner did not emit evidence: {completed.stderr.strip()}",
+            )
+        evidence = json.loads(out_evidence.read_text(encoding="utf-8"))
+        if completed.returncode != 0:
+            raise SnbInteractiveSuiteError(
+                "live_execution",
+                completed.stderr.strip(),
+            )
+        if evidence.get("lane") != "live_in_memory" or evidence.get("certification") is not False:
+            raise SnbInteractiveSuiteError(
+                "invalid_document", "live evidence lane or certification marker is invalid"
+            )
+        return evidence
+
+
 def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
     completed = _run_runner(["map-operation", str(path)], root)
     if completed.returncode == 3:
@@ -189,6 +224,7 @@ __all__ = [
     "EVIDENCE_SCHEMA",
     "IC14_CAUSE",
     "JOB_SCHEMA",
+    "LIVE_DATASET_ID",
     "OPERATIONS",
     "SHORT_READS",
     "UPDATES",
@@ -198,6 +234,8 @@ __all__ = [
     "assert_separate_from_other_suites",
     "identity_path",
     "list_operation_rules",
+    "live_identity_path",
     "map_operation_file",
+    "run_live_is1",
     "run_tiny_suite",
 ]

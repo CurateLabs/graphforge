@@ -79,9 +79,16 @@ The SNB Interactive suite adapter is `graphforge_bench.gdc_snb_interactive`
 (runner `graphforge-benchmark-gdc-snb-interactive`). It maps LDBC SNB Interactive
 operations (complex reads IC1–IC14, short reads IS1–IS7, updates IU1–IU8) onto the
 public Cypher / analyst-verb surface, separates load/warmup/execution/validation
-phases, validates read outputs (exact and normalized) against pinned references,
-and fails closed with typed causes on update-stream and IC14 weighted-path
-semantics the public surface does not expose. Its evidence records
+phases, and fails closed with typed causes on update-stream and IC14 weighted-path
+semantics the public surface does not expose. `run_tiny_suite` is explicitly a
+legacy static-replay lane over committed `.out` files. `run_live_is1` is the
+thin Python orchestrator for the trusted Rust `run-live-is1` command. That
+command embeds and checksum-binds the committed synthetic fixture, job,
+reference, acquisition, and identity; creates `graphforge_api::GraphForge`
+in memory; loads through the public construction API; warms and executes IS1
+with fixed typed `personId`; and normalizes and validates Arrow rows itself.
+It accepts only an evidence output path, never caller rows or identities.
+Neither fixture is official Datagen scale-factor output. Evidence records
 `certification: false` and never masquerades as an audited GDC certification.
 
 The FinBench Transaction suite adapter is `graphforge_bench.gdc_finbench_transaction`
@@ -329,7 +336,7 @@ make -C benchmarks smoke
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
 checks the Rust runners and their public-facade dependency boundary. This includes
-the bounded in-memory Graphalytics and SNB BI2 fixtures through the real GraphForge
+the bounded in-memory Graphalytics, SNB BI2, and SNB Interactive IS1 fixtures through the real GraphForge
 API. It does not start a provider or execute the host scale ladder.
 
 ## Native local admission

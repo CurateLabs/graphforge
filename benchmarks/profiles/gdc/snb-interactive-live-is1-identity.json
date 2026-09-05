@@ -1,39 +1,41 @@
 {
-  "schema": "graphforge-gdc-acquisition/1",
+  "schema": "graphforge-gdc-pinned-identity/1",
   "suite_id": "snb-interactive",
-  "recorded_spec": {
+  "disposition": "executable",
+  "spec": {
     "name": "ldbc_snb_docs",
     "source": "https://github.com/ldbc/ldbc_snb_docs",
     "release": "v2.2.4",
     "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
   },
-  "recorded_generator": {
+  "generator": {
     "name": "ldbc_snb_datagen_spark",
     "source": "https://github.com/ldbc/ldbc_snb_datagen_spark",
     "release": "v0.5.1",
     "commit": "2459f4e45834c78902a50511fc64a05c48dd4029"
   },
-  "recorded_driver": {
+  "driver": {
     "name": "ldbc_snb_interactive_v1_impls",
     "source": "https://github.com/ldbc/ldbc_snb_interactive_v1_impls",
     "release": "1.0.0",
     "commit": "f9c394a92cd55e535893f6c9907b141d6533c817"
   },
-  "assets": [
+  "datasets": [
     {
-      "id": "snb-interactive-static-synthetic-v1",
-      "path": "snb-interactive-static-synthetic-v1.graph",
-      "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+      "id": "snb-interactive-live-is1-synthetic-v1",
+      "role": "other",
+      "checksum_sha256": "58e3c52a4ac2d74456439a322211adf1e8f560a7762e3fd2d376bbe96d243d6f",
       "license": "Apache-2.0",
-      "acquisition": "fixture"
+      "acquisition": "fixture",
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ],
   "references": [
     {
-      "dataset_id": "snb-interactive-static-synthetic-v1",
-      "workload_key": "interactive-validation",
-      "path": "interactive-validation.ref",
-      "checksum_sha256": "20368ad845455de99ef737732930bf7d07d9d44adde19a31ec7ba6ec332b25db"
+      "dataset_id": "snb-interactive-live-is1-synthetic-v1",
+      "workload_key": "IS1-independent",
+      "checksum_sha256": "71465ea5b672abd79693590e316cb4cc023cd25737c57d8daa13467542972385",
+      "source": "https://github.com/CurateLabs/graphforge"
     }
   ]
 }

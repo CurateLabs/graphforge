@@ -12,11 +12,17 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::{self, Write as _};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+
+use arrow::array::Array;
+use arrow::datatypes::DataType;
+use arrow::util::display::array_value_to_string;
+use graphforge_api::{GraphForge, IrLiteral, PropValue};
+use sha2::{Digest, Sha256};
 
 pub const EVIDENCE_SCHEMA: &str = "graphforge-gdc-snb-interactive-evidence/1";
 pub const JOB_SCHEMA: &str = "graphforge-gdc-snb-interactive-job/1";
@@ -24,7 +30,36 @@ pub const LADDER_SCHEMA: &str = "graphforge-gdc-snb-interactive-ladder/1";
 pub const SUITE_ID: &str = "snb-interactive";
 
 /// The bounded engineering fixture dataset every ladder and suite run begins on.
-pub const BOUNDED_TINY_DATASET: &str = "snb-sf0.003";
+pub const BOUNDED_TINY_DATASET: &str = "snb-interactive-static-synthetic-v1";
+pub const LIVE_IS1_DATASET: &str = "snb-interactive-live-is1-synthetic-v1";
+pub const LIVE_IS1_QUERY: &str = "\
+MATCH (person:Person)-[:IS_LOCATED_IN]->(city:City)
+WHERE person.id = $personId
+RETURN person.firstName AS firstName,
+       person.lastName AS lastName,
+       person.birthday AS birthday,
+       person.locationIP AS locationIP,
+       person.browserUsed AS browserUsed,
+       city.id AS cityId,
+       person.gender AS gender,
+       person.creationDate AS creationDate";
+
+const LIVE_GRAPH: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/graph.json");
+const LIVE_JOB: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/IS1.json");
+const LIVE_REFERENCE: &str = include_str!("../../../fixtures/gdc/snb-interactive-live-is1/IS1.ref");
+const LIVE_ACQUISITION: &str =
+    include_str!("../../../fixtures/gdc/snb-interactive-live-is1/acquisition.json");
+const LIVE_IDENTITY: &str =
+    include_str!("../../../profiles/gdc/snb-interactive-live-is1-identity.json");
+
+const LIVE_GRAPH_SHA256: &str = "58e3c52a4ac2d74456439a322211adf1e8f560a7762e3fd2d376bbe96d243d6f";
+const LIVE_JOB_SHA256: &str = "0143a649da769c093d5e235e66c6036a4aa38ab05a5c68f5744ad4025a503831";
+const LIVE_REFERENCE_SHA256: &str =
+    "71465ea5b672abd79693590e316cb4cc023cd25737c57d8daa13467542972385";
+const LIVE_ACQUISITION_SHA256: &str =
+    "fe8167c8b9cb939306495a937b45c375ea09b08725772a439c487099363f25e2";
+const LIVE_IDENTITY_SHA256: &str =
+    "a7b31720ac9ba61a5968f752d4e8eb8d709353226f36a2dcd065016657d4f030";
 
 /// SNB Interactive workload category.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +325,8 @@ pub struct OperationJob {
     pub suite_id: String,
     pub dataset_id: String,
     pub operation: Operation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 impl OperationJob {
@@ -385,6 +422,58 @@ pub enum OperationStatus {
     SemanticIncompatibility,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceLane {
+    StaticReplay,
+    LiveInMemory,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseStatus {
+    Passed,
+    Failed,
+    NotExecuted,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PhaseEvidence {
+    pub phase: String,
+    pub status: PhaseStatus,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveParameterContext {
+    pub name: String,
+    pub data_type: String,
+    pub value: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveRowField {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveExecutionContext {
+    pub operation: Operation,
+    pub parameter: LiveParameterContext,
+    pub fixture_sha256: String,
+    pub job_sha256: String,
+    pub reference_sha256: String,
+    pub acquisition_sha256: String,
+    pub identity_sha256: String,
+    pub public_api: String,
+    pub mode: String,
+    pub query: String,
+    pub row_schema: Vec<LiveRowField>,
+    pub row_order: Vec<String>,
+    pub normalization: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OperationOutcome {
     pub operation: Operation,
@@ -431,10 +520,14 @@ pub struct SuiteEvidence {
     pub schema: String,
     pub suite_id: String,
     pub dataset_id: String,
+    pub lane: EvidenceLane,
     pub status: OperationStatus,
     /// Engineering evidence flag: never an audited GDC certification.
     pub certification: bool,
     pub phases: Vec<String>,
+    pub phase_evidence: Vec<PhaseEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_context: Option<LiveExecutionContext>,
     pub identities: serde_json::Value,
     pub operations: Vec<OperationOutcome>,
 }
@@ -443,6 +536,7 @@ pub struct SuiteEvidence {
 pub enum SuiteError {
     InvalidDocument(String),
     ReferenceMismatch(String),
+    LiveExecution(String),
     SemanticIncompatibility { cause: String, detail: String },
 }
 
@@ -451,6 +545,7 @@ impl fmt::Display for SuiteError {
         match self {
             Self::InvalidDocument(message) => write!(output, "invalid_document: {message}"),
             Self::ReferenceMismatch(message) => write!(output, "reference_mismatch: {message}"),
+            Self::LiveExecution(message) => write!(output, "live_execution: {message}"),
             Self::SemanticIncompatibility { cause, detail } => {
                 write!(output, "semantic_incompatibility:{cause}: {detail}")
             }
@@ -557,8 +652,10 @@ pub fn map_operation(operation: Operation) -> MappingOutcome {
         },
         Operation::Is1 => compatible(
             "cypher",
-            "MATCH (p:Person {id:$id}) RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed",
-            "person profile lookup by id",
+            "MATCH (p:Person)-[:IS_LOCATED_IN]->(city:City) WHERE p.id=$personId \
+             RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed, \
+             city.id, p.gender, p.creationDate",
+            "SNB IS1 person profile lookup by explicit personId, including residence city",
         ),
         Operation::Is2 => compatible(
             "cypher",
@@ -768,9 +865,476 @@ pub fn assemble_evidence(
         schema: EVIDENCE_SCHEMA.into(),
         suite_id: SUITE_ID.into(),
         dataset_id: dataset_id.into(),
+        lane: EvidenceLane::StaticReplay,
         status,
         certification: false,
         phases: phase_names(),
+        phase_evidence: Phase::ALL
+            .iter()
+            .map(|phase| PhaseEvidence {
+                phase: phase.name().into(),
+                status: PhaseStatus::NotExecuted,
+                detail: "static replay reads committed system-output rows; no GraphForge execution"
+                    .into(),
+            })
+            .collect(),
+        live_context: None,
+        identities,
+        operations: outcomes,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveGraphFixture {
+    classification: String,
+    nodes: Vec<LiveFixtureNode>,
+    edges: Vec<LiveFixtureEdge>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveFixtureNode {
+    key: String,
+    label: String,
+    properties: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveFixtureEdge {
+    source: String,
+    #[serde(rename = "type")]
+    rel_type: String,
+    destination: String,
+}
+
+#[derive(Clone, Copy)]
+struct TrustedLiveAssets<'a> {
+    graph: &'a str,
+    job: &'a str,
+    reference: &'a str,
+    acquisition: &'a str,
+    identity: &'a str,
+}
+
+fn embedded_live_assets() -> TrustedLiveAssets<'static> {
+    TrustedLiveAssets {
+        graph: LIVE_GRAPH,
+        job: LIVE_JOB,
+        reference: LIVE_REFERENCE,
+        acquisition: LIVE_ACQUISITION,
+        identity: LIVE_IDENTITY,
+    }
+}
+
+fn sha256(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn require_sha(label: &str, text: &str, expected: &str) -> Result<(), SuiteError> {
+    let actual = sha256(text);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(SuiteError::InvalidDocument(format!(
+            "trusted live {label} checksum mismatch: expected {expected}, got {actual}"
+        )))
+    }
+}
+
+fn validate_trusted_live_assets(
+    assets: TrustedLiveAssets<'_>,
+) -> Result<
+    (
+        LiveGraphFixture,
+        OperationJob,
+        ResultRows,
+        serde_json::Value,
+    ),
+    SuiteError,
+> {
+    for (label, text, digest) in [
+        ("fixture", assets.graph, LIVE_GRAPH_SHA256),
+        ("job", assets.job, LIVE_JOB_SHA256),
+        ("reference", assets.reference, LIVE_REFERENCE_SHA256),
+        ("acquisition", assets.acquisition, LIVE_ACQUISITION_SHA256),
+        ("identity", assets.identity, LIVE_IDENTITY_SHA256),
+    ] {
+        require_sha(label, text, digest)?;
+    }
+
+    let fixture: LiveGraphFixture = serde_json::from_str(assets.graph)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid live fixture: {error}")))?;
+    if fixture.classification != "synthetic_engineering_fixture" {
+        return Err(SuiteError::InvalidDocument(
+            "live fixture classification must be synthetic_engineering_fixture".into(),
+        ));
+    }
+    let job: OperationJob = serde_json::from_str(assets.job)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid live job: {error}")))?;
+    validate_live_job(&job)?;
+
+    let identity: serde_json::Value = serde_json::from_str(assets.identity)
+        .map_err(|error| SuiteError::InvalidDocument(format!("invalid live identity: {error}")))?;
+    let acquisition: serde_json::Value =
+        serde_json::from_str(assets.acquisition).map_err(|error| {
+            SuiteError::InvalidDocument(format!("invalid live acquisition: {error}"))
+        })?;
+    if identity["suite_id"] != SUITE_ID
+        || identity["datasets"][0]["id"] != LIVE_IS1_DATASET
+        || identity["datasets"][0]["role"] != "other"
+        || identity["datasets"][0]["checksum_sha256"] != LIVE_GRAPH_SHA256
+        || identity["references"][0]["checksum_sha256"] != LIVE_REFERENCE_SHA256
+        || acquisition["recorded_spec"] != identity["spec"]
+        || acquisition["recorded_generator"] != identity["generator"]
+        || acquisition["recorded_driver"] != identity["driver"]
+        || acquisition["assets"][0]["checksum_sha256"] != LIVE_GRAPH_SHA256
+        || acquisition["references"][0]["checksum_sha256"] != LIVE_REFERENCE_SHA256
+    {
+        return Err(SuiteError::InvalidDocument(
+            "trusted live identity or acquisition context is inconsistent".into(),
+        ));
+    }
+    let identities = serde_json::json!({
+        "spec": identity["spec"].clone(),
+        "generator": identity["generator"].clone(),
+        "driver": identity["driver"].clone(),
+        "fixture": {"classification": "synthetic_engineering_fixture"},
+        "runner": {
+            "name": "graphforge-benchmark-gdc-snb-interactive",
+            "release": "workspace",
+            "commit": null
+        }
+    });
+    Ok((
+        fixture,
+        job,
+        assets
+            .reference
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| encode_live_fields(&line.split('\t').collect::<Vec<_>>()))
+            .collect(),
+        identities,
+    ))
+}
+
+fn validate_live_job(job: &OperationJob) -> Result<(), SuiteError> {
+    job.validate_schema()?;
+    if job.operation != Operation::Is1 {
+        return Err(SuiteError::InvalidDocument(
+            "trusted live lane supports only IS1".into(),
+        ));
+    }
+    if job.dataset_id != LIVE_IS1_DATASET {
+        return Err(SuiteError::InvalidDocument(
+            "trusted live IS1 requires its fixed synthetic fixture".into(),
+        ));
+    }
+    let Some(parameters) = &job.parameters else {
+        return Err(SuiteError::InvalidDocument(
+            "trusted live IS1 requires explicit parameters".into(),
+        ));
+    };
+    if parameters.len() != 1
+        || parameters
+            .get("personId")
+            .and_then(serde_json::Value::as_i64)
+            != Some(1001)
+    {
+        return Err(SuiteError::InvalidDocument(
+            "trusted live IS1 requires exactly personId:int64=1001".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn fixture_property(value: &serde_json::Value) -> Result<PropValue, SuiteError> {
+    match value {
+        serde_json::Value::String(value) => Ok(PropValue::Str(value.clone())),
+        serde_json::Value::Number(value) => value.as_i64().map(PropValue::Int).ok_or_else(|| {
+            SuiteError::InvalidDocument("fixture numbers must be signed 64-bit integers".into())
+        }),
+        serde_json::Value::Bool(value) => Ok(PropValue::Bool(*value)),
+        _ => Err(SuiteError::InvalidDocument(
+            "fixture properties must be non-null scalar strings, integers, or booleans".into(),
+        )),
+    }
+}
+
+fn load_live_fixture(forge: &GraphForge, fixture: LiveGraphFixture) -> Result<(), SuiteError> {
+    let mut handles = BTreeMap::new();
+    for node in fixture.nodes {
+        let properties = node
+            .properties
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), fixture_property(value)?)))
+            .collect::<Result<HashMap<_, _>, SuiteError>>()?;
+        let handle = forge
+            .add_node(&node.label, &properties)
+            .map_err(|error| SuiteError::LiveExecution(error.to_string()))?;
+        if handles.insert(node.key, handle).is_some() {
+            return Err(SuiteError::InvalidDocument(
+                "fixture node keys must be unique".into(),
+            ));
+        }
+    }
+    for edge in fixture.edges {
+        let source = handles.get(&edge.source).ok_or_else(|| {
+            SuiteError::InvalidDocument("fixture edge source key is missing".into())
+        })?;
+        let destination = handles.get(&edge.destination).ok_or_else(|| {
+            SuiteError::InvalidDocument("fixture edge destination key is missing".into())
+        })?;
+        forge
+            .add_edge(source, &edge.rel_type, destination, &HashMap::new())
+            .map_err(|error| SuiteError::LiveExecution(error.to_string()))?;
+    }
+    Ok(())
+}
+
+// JSON arrays preserve column boundaries, empty strings, and whitespace in values.
+fn encode_live_fields(fields: &[impl AsRef<str>]) -> String {
+    serde_json::to_string(&fields.iter().map(AsRef::as_ref).collect::<Vec<_>>())
+        .expect("string fields always serialize")
+}
+
+fn normalize_live_result(
+    result: &graphforge_api::ExecutionResult,
+) -> Result<ResultRows, SuiteError> {
+    let expected = [
+        ("firstName", DataType::Utf8),
+        ("lastName", DataType::Utf8),
+        ("birthday", DataType::Utf8),
+        ("locationIP", DataType::Utf8),
+        ("browserUsed", DataType::Utf8),
+        ("cityId", DataType::Int64),
+        ("gender", DataType::Utf8),
+        ("creationDate", DataType::Utf8),
+    ];
+    if result.schema.fields().len() != expected.len()
+        || result
+            .schema
+            .fields()
+            .iter()
+            .zip(expected.iter())
+            .any(|(actual, (name, data_type))| {
+                actual.name() != name || actual.data_type() != data_type
+            })
+    {
+        return Err(SuiteError::LiveExecution(format!(
+            "IS1 Arrow schema drifted: expected {expected:?}, got {:?}",
+            result.schema
+        )));
+    }
+    let mut rows = Vec::new();
+    for batch in &result.batches {
+        for row_index in 0..batch.num_rows() {
+            let mut values = Vec::with_capacity(expected.len());
+            for column in batch.columns() {
+                if column.is_null(row_index) {
+                    return Err(SuiteError::LiveExecution(
+                        "IS1 returned a null field".into(),
+                    ));
+                }
+                values.push(
+                    array_value_to_string(column.as_ref(), row_index)
+                        .map_err(|error| SuiteError::LiveExecution(error.to_string()))?,
+                );
+            }
+            rows.push(encode_live_fields(&values));
+        }
+    }
+    Ok(rows)
+}
+
+pub fn run_trusted_live_is1() -> Result<SuiteEvidence, SuiteError> {
+    let (fixture, job, reference, identities) =
+        validate_trusted_live_assets(embedded_live_assets())?;
+    let forge = GraphForge::new(None)
+        .map_err(|error| SuiteError::LiveExecution(format!("in-memory open failed: {error}")))?;
+    load_live_fixture(&forge, fixture)?;
+    let parameters = HashMap::from([("personId".into(), IrLiteral::Int(1001))]);
+    forge
+        .execute_with_params(LIVE_IS1_QUERY, &parameters)
+        .map_err(|error| SuiteError::LiveExecution(format!("warmup failed: {error}")))?;
+    let execution = forge
+        .execute_with_params(LIVE_IS1_QUERY, &parameters)
+        .map_err(|error| SuiteError::LiveExecution(format!("execution failed: {error}")))?;
+    let system = normalize_live_result(&execution)?;
+    let outcome = run_live_is1_job(&job, &reference, &system);
+    if !matches!(outcome.status, OperationStatus::Passed) {
+        return Err(SuiteError::ReferenceMismatch(
+            outcome
+                .cause
+                .clone()
+                .unwrap_or_else(|| "trusted live IS1 validation failed".into()),
+        ));
+    }
+    Ok(assemble_live_is1_evidence(
+        LIVE_IS1_DATASET,
+        identities,
+        outcome,
+    ))
+}
+
+fn run_live_is1_job(
+    job: &OperationJob,
+    reference: &ResultRows,
+    system: &ResultRows,
+) -> OperationOutcome {
+    if let Err(error) = validate_live_job(job) {
+        return failed_live_is1(job.operation, &error.to_string());
+    }
+    run_job(job, Some(reference), Some(system))
+}
+
+fn failed_live_is1(operation: Operation, cause: &str) -> OperationOutcome {
+    OperationOutcome {
+        operation,
+        category: operation.category().name().into(),
+        status: OperationStatus::Failed,
+        validation_mode: ValidationMode::Exact.name().into(),
+        cause: Some(format!("invalid_live_job: {cause}")),
+        public_api: None,
+    }
+}
+
+fn assemble_live_is1_evidence(
+    dataset_id: &str,
+    identities: serde_json::Value,
+    is1: OperationOutcome,
+) -> SuiteEvidence {
+    let validation_status = if matches!(is1.status, OperationStatus::Passed) {
+        PhaseStatus::Passed
+    } else {
+        PhaseStatus::Failed
+    };
+    let mut outcomes = vec![is1];
+    outcomes.push(run_job(
+        &OperationJob {
+            schema: JOB_SCHEMA.into(),
+            suite_id: SUITE_ID.into(),
+            dataset_id: dataset_id.into(),
+            operation: Operation::Ic14,
+            parameters: None,
+        },
+        None,
+        None,
+    ));
+    for operation in [
+        Operation::Iu1,
+        Operation::Iu2,
+        Operation::Iu3,
+        Operation::Iu4,
+        Operation::Iu5,
+        Operation::Iu6,
+        Operation::Iu7,
+        Operation::Iu8,
+    ] {
+        outcomes.push(run_job(
+            &OperationJob {
+                schema: JOB_SCHEMA.into(),
+                suite_id: SUITE_ID.into(),
+                dataset_id: dataset_id.into(),
+                operation,
+                parameters: None,
+            },
+            None,
+            None,
+        ));
+    }
+    let status = if matches!(outcomes[0].status, OperationStatus::Passed) {
+        OperationStatus::Passed
+    } else {
+        OperationStatus::Failed
+    };
+    SuiteEvidence {
+        schema: EVIDENCE_SCHEMA.into(),
+        suite_id: SUITE_ID.into(),
+        dataset_id: dataset_id.into(),
+        lane: EvidenceLane::LiveInMemory,
+        status,
+        certification: false,
+        phases: phase_names(),
+        phase_evidence: [
+            (
+                "load",
+                "synthetic fixture loaded with public GraphForge construction API",
+            ),
+            (
+                "warmup",
+                "IS1 executed once with explicit parameters through public GraphForge.execute",
+            ),
+            (
+                "execution",
+                "IS1 executed through the real in-memory engine and returned an Arrow table",
+            ),
+            (
+                "validation",
+                "Arrow rows normalized then checked by the Rust authoritative validator",
+            ),
+        ]
+        .into_iter()
+        .map(|(phase, detail)| PhaseEvidence {
+            phase: phase.into(),
+            status: if phase == "validation" {
+                validation_status
+            } else {
+                PhaseStatus::Passed
+            },
+            detail: detail.into(),
+        })
+        .collect(),
+        live_context: Some(LiveExecutionContext {
+            operation: Operation::Is1,
+            parameter: LiveParameterContext {
+                name: "personId".into(),
+                data_type: "int64".into(),
+                value: 1001,
+            },
+            fixture_sha256: LIVE_GRAPH_SHA256.into(),
+            job_sha256: LIVE_JOB_SHA256.into(),
+            reference_sha256: LIVE_REFERENCE_SHA256.into(),
+            acquisition_sha256: LIVE_ACQUISITION_SHA256.into(),
+            identity_sha256: LIVE_IDENTITY_SHA256.into(),
+            public_api: "graphforge_api::GraphForge".into(),
+            mode: "in_memory".into(),
+            query: LIVE_IS1_QUERY.into(),
+            row_schema: [
+                ("firstName", "utf8"),
+                ("lastName", "utf8"),
+                ("birthday", "utf8"),
+                ("locationIP", "utf8"),
+                ("browserUsed", "utf8"),
+                ("cityId", "int64"),
+                ("gender", "utf8"),
+                ("creationDate", "utf8"),
+            ]
+            .into_iter()
+            .map(|(name, data_type)| LiveRowField {
+                name: name.into(),
+                data_type: data_type.into(),
+            })
+            .collect(),
+            row_order: vec![
+                "firstName".into(),
+                "lastName".into(),
+                "birthday".into(),
+                "locationIP".into(),
+                "browserUsed".into(),
+                "cityId".into(),
+                "gender".into(),
+                "creationDate".into(),
+            ],
+            normalization: "Arrow scalar display encoded as field-preserving JSON arrays".into(),
+        }),
         identities,
         operations: outcomes,
     }
@@ -815,6 +1379,7 @@ mod tests {
             suite_id: SUITE_ID.into(),
             dataset_id: BOUNDED_TINY_DATASET.into(),
             operation,
+            parameters: None,
         }
     }
 
@@ -910,6 +1475,120 @@ mod tests {
     }
 
     #[test]
+    fn live_arrow_comparison_preserves_column_boundaries_and_whitespace() {
+        use arrow::array::StringArray;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let (fixture, _, reference, _) =
+            validate_trusted_live_assets(embedded_live_assets()).unwrap();
+        let forge = GraphForge::new(None).unwrap();
+        load_live_fixture(&forge, fixture).unwrap();
+        let mut result = forge
+            .execute_with_params(
+                LIVE_IS1_QUERY,
+                &HashMap::from([("personId".into(), IrLiteral::Int(1001))]),
+            )
+            .unwrap();
+        assert_eq!(normalize_live_result(&result).unwrap(), reference);
+        let original = result.batches[0].clone();
+        for (first, last) in [
+            ("Ada Lovelace", ""),
+            ("Ada ", "Lovelace"),
+            ("Ada\tLovelace", ""),
+        ] {
+            let mut columns = original.columns().to_vec();
+            columns[0] = Arc::new(StringArray::from(vec![first]));
+            columns[1] = Arc::new(StringArray::from(vec![last]));
+            result.batches = vec![RecordBatch::try_new(result.schema.clone(), columns).unwrap()];
+            assert!(
+                validate_result(
+                    ValidationMode::Exact,
+                    &reference,
+                    &normalize_live_result(&result).unwrap()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_live_runner_executes_graphforge_and_binds_complete_context() {
+        let evidence = run_trusted_live_is1().unwrap();
+        assert_eq!(evidence.lane, EvidenceLane::LiveInMemory);
+        assert_eq!(evidence.status, OperationStatus::Passed);
+        assert!(!evidence.certification);
+        assert!(
+            evidence
+                .phase_evidence
+                .iter()
+                .all(|phase| { phase.status == PhaseStatus::Passed && !phase.detail.is_empty() })
+        );
+        let context = evidence.live_context.unwrap();
+        assert_eq!(context.operation, Operation::Is1);
+        assert_eq!(context.parameter.name, "personId");
+        assert_eq!(context.parameter.data_type, "int64");
+        assert_eq!(context.parameter.value, 1001);
+        assert_eq!(context.fixture_sha256, LIVE_GRAPH_SHA256);
+        assert_eq!(context.job_sha256, LIVE_JOB_SHA256);
+        assert_eq!(context.reference_sha256, LIVE_REFERENCE_SHA256);
+        assert_eq!(context.acquisition_sha256, LIVE_ACQUISITION_SHA256);
+        assert_eq!(context.identity_sha256, LIVE_IDENTITY_SHA256);
+        assert_eq!(context.public_api, "graphforge_api::GraphForge");
+        assert_eq!(context.mode, "in_memory");
+        assert_eq!(context.query, LIVE_IS1_QUERY);
+        assert_eq!(context.row_schema.len(), 8);
+        assert_eq!(context.row_order.len(), 8);
+        assert_eq!(
+            evidence.identities["fixture"]["classification"],
+            "synthetic_engineering_fixture"
+        );
+        assert_eq!(
+            evidence.identities["spec"]["commit"],
+            "5f7956e07a214373c363b371a3b88bc83ddcd118"
+        );
+        assert_eq!(
+            evidence.identities["generator"]["commit"],
+            "2459f4e45834c78902a50511fc64a05c48dd4029"
+        );
+        assert_eq!(
+            evidence.identities["driver"]["commit"],
+            "f9c394a92cd55e535893f6c9907b141d6533c817"
+        );
+    }
+
+    #[test]
+    fn every_trusted_live_asset_mutation_fails_before_execution() {
+        let original = embedded_live_assets();
+        let mutations = [
+            TrustedLiveAssets {
+                graph: "{}",
+                ..original
+            },
+            TrustedLiveAssets {
+                job: "{}",
+                ..original
+            },
+            TrustedLiveAssets {
+                reference: "Ada Lovelace",
+                ..original
+            },
+            TrustedLiveAssets {
+                acquisition: "{}",
+                ..original
+            },
+            TrustedLiveAssets {
+                identity: "{}",
+                ..original
+            },
+        ];
+        for mutation in mutations {
+            let error = validate_trusted_live_assets(mutation).unwrap_err();
+            assert!(error.to_string().contains("checksum mismatch"));
+        }
+    }
+
+    #[test]
     fn run_job_passes_compatible_read_and_reports_incompatibility() {
         let reference = parse_result_rows("1 x\n");
         let system = parse_result_rows("1 x\n");
@@ -998,5 +1677,51 @@ mod tests {
         );
         assert_eq!(evidence.status, OperationStatus::Passed);
         assert!(!evidence.certification);
+        assert_eq!(evidence.lane, EvidenceLane::StaticReplay);
+        assert!(
+            evidence
+                .phase_evidence
+                .iter()
+                .all(|phase| phase.status == PhaseStatus::NotExecuted)
+        );
+    }
+
+    #[test]
+    fn live_is1_requires_explicit_parameters_and_keeps_gaps_typed() {
+        let reference = parse_result_rows(
+            "Ada Lovelace 1815-12-10 192.0.2.10 Firefox 2001 female 2026-01-02T03:04:05Z",
+        );
+        let mut job = sample_job(Operation::Is1);
+        job.dataset_id = LIVE_IS1_DATASET.into();
+        assert_eq!(
+            run_live_is1_job(&job, &reference, &reference).status,
+            OperationStatus::Failed
+        );
+        job.parameters = Some(BTreeMap::from([(
+            "personId".into(),
+            serde_json::json!(1001),
+        )]));
+        assert_eq!(
+            run_live_is1_job(&job, &reference, &reference).status,
+            OperationStatus::Passed
+        );
+        assert!(matches!(
+            map_operation(Operation::Ic14),
+            MappingOutcome::SemanticIncompatibility {
+                cause: "weighted_interaction_path_enumeration_not_exposed",
+                ..
+            }
+        ));
+        for operation in Operation::ALL {
+            if operation.category() == Category::Update {
+                assert!(matches!(
+                    map_operation(operation),
+                    MappingOutcome::SemanticIncompatibility {
+                        cause: "interactive_update_stream_not_exposed",
+                        ..
+                    }
+                ));
+            }
+        }
     }
 }

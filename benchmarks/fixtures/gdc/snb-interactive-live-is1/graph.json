@@ -1,0 +1,53 @@
+{
+  "classification": "synthetic_engineering_fixture",
+  "nodes": [
+    {
+      "key": "person-1001",
+      "label": "Person",
+      "properties": {
+        "id": 1001,
+        "firstName": "Ada",
+        "lastName": "Lovelace",
+        "birthday": "1815-12-10",
+        "locationIP": "192.0.2.10",
+        "browserUsed": "Firefox",
+        "gender": "female",
+        "creationDate": "2026-01-02T03:04:05Z"
+      }
+    },
+    {
+      "key": "city-2001",
+      "label": "City",
+      "properties": {
+        "id": 2001,
+        "name": "London"
+      }
+    },
+    {
+      "key": "person-1002",
+      "label": "Person",
+      "properties": {
+        "id": 1002,
+        "firstName": "Grace",
+        "lastName": "Hopper",
+        "birthday": "1906-12-09",
+        "locationIP": "192.0.2.11",
+        "browserUsed": "Safari",
+        "gender": "female",
+        "creationDate": "2026-01-03T04:05:06Z"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "person-1001",
+      "type": "IS_LOCATED_IN",
+      "destination": "city-2001"
+    },
+    {
+      "source": "person-1002",
+      "type": "IS_LOCATED_IN",
+      "destination": "city-2001"
+    }
+  ]
+}

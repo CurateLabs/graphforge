@@ -1,0 +1,9 @@
+{
+  "schema": "graphforge-gdc-snb-interactive-job/1",
+  "suite_id": "snb-interactive",
+  "dataset_id": "snb-interactive-live-is1-synthetic-v1",
+  "operation": "IS1",
+  "parameters": {
+    "personId": 1001
+  }
+}

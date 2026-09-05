@@ -1,6 +1,6 @@
 use graphforge_benchmark_gdc_snb_interactive::{
     JOB_SCHEMA, MappingOutcome, Operation, OperationJob, OperationStatus, assemble_evidence,
-    load_result_rows, map_operation, operation_rules, run_job,
+    load_result_rows, map_operation, operation_rules, run_job, run_trusted_live_is1,
 };
 use std::env;
 use std::fs;
@@ -11,7 +11,8 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
         eprintln!(
-            "usage: graphforge-benchmark-gdc-snb-interactive <list-operations|map-operation|run-suite> ..."
+            "usage: graphforge-benchmark-gdc-snb-interactive \
+             <list-operations|map-operation|run-suite|run-live-is1> ..."
         );
         return ExitCode::from(2);
     };
@@ -82,11 +83,38 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "run-live-is1" => {
+            let Some(evidence_path) = args.next() else {
+                eprintln!("usage: run-live-is1 EVIDENCE.json");
+                return ExitCode::from(2);
+            };
+            if args.next().is_some() {
+                eprintln!("run-live-is1 accepts only EVIDENCE.json");
+                return ExitCode::from(2);
+            }
+            match run_live_is1(&evidence_path) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
             ExitCode::from(2)
         }
     }
+}
+
+fn run_live_is1(evidence_path: &str) -> Result<ExitCode, String> {
+    if PathBuf::from(evidence_path).exists() {
+        return Err("refusing to overwrite existing live evidence".into());
+    }
+    let evidence = run_trusted_live_is1().map_err(|error| error.to_string())?;
+    let payload = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
+    fs::write(evidence_path, format!("{payload}\n")).map_err(|error| error.to_string())?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn load_job(path: &str) -> Result<OperationJob, String> {

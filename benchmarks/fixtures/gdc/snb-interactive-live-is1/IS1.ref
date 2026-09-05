@@ -1,0 +1,3 @@
+# Independently derived from graph.json and SNB Interactive v1 IS1 semantics:
+# personId=1001 selects Person 1001 and its IS_LOCATED_IN City 2001.
+Ada	Lovelace	1815-12-10	192.0.2.10	Firefox	2001	female	2026-01-02T03:04:05Z
