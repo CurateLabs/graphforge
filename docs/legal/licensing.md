@@ -34,6 +34,12 @@ Third-party crates and other incorporated materials retain their own licenses.
   relevant third-party notices alongside `LICENSE` and `NOTICE`.
 - Vendored openCypher TCK material under `tests/tck/` keeps its own Apache-2.0
   `LICENSE` and `NOTICE`.
+- The benchmark generator's ported Graph500 vertex scramble and independent
+  C reference retain Indiana University's copyright and
+  [Boost Software License 1.0](../../benchmarks/runners/graph500-generator/LICENSE_1_0.txt).
+  [Source provenance](../../benchmarks/runners/graph500-generator/README.md#reference-provenance-and-verification)
+  identifies the incorporated portion; it is not relicensed as first-party
+  Apache-2.0 work.
 
 ## Previously published MIT artifacts
 

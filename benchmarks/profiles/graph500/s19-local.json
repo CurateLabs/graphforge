@@ -18,7 +18,7 @@
       "phase": "generate",
       "action": {
         "interface": "benchmark_generator",
-        "identity": "sha256:0ffb58a6c80c0c83fc728ab3f930156cd2c99c1935031e1ac31c52a1dc38abae",
+        "identity": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
         "executable": "graphforge-benchmark-graph500-generator",
         "args": [
           "--scale",
@@ -273,7 +273,7 @@
     }
   ],
   "generator": {
-    "identity": "sha256:0ffb58a6c80c0c83fc728ab3f930156cd2c99c1935031e1ac31c52a1dc38abae",
+    "identity": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
     "edge_factor": 16,
     "seed": 13907095936298285200
   },

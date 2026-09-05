@@ -1258,6 +1258,9 @@ jobs:
           cargo build --locked --manifest-path benchmarks/Cargo.toml \
             --bin graphforge-benchmark-certify \
             --bin graphforge-benchmark-graph500-generator
+          python3 benchmarks/runners/graph500-generator/tests/reference/verify_vectors.py
+          cargo test --locked --manifest-path benchmarks/Cargo.toml \
+            -p graphforge-benchmark-graph500-generator
           bazelisk build --config=ci //crates/graphforge-cli:gf
           gf_bin=$(bazelisk cquery --config=ci --output=files //crates/graphforge-cli:gf | tail -n 1)
           test -x "$gf_bin"
