@@ -95,7 +95,7 @@ jobs:
         run: python3 scripts/ci/check-m6-benchmarks.py
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
           mode: simulation
           run: cargo codspeed run
@@ -120,7 +120,7 @@ jobs:
           tool: cargo-codspeed@5.0.1
       - name: Build durable filesystem benchmarks only
         run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
-      - uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+      - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
           mode: walltime
           run: cargo codspeed run
