@@ -553,6 +553,7 @@ pub struct V4OrdinalIdentityHandle {
     tombstone_cache: TombstoneBlockCache,
     limits: V4OrdinalIdentityLimits,
     admission: V4OrdinalAdmissionMetrics,
+    uuid_order_matches_ordinals: bool,
 }
 
 impl V4OrdinalIdentityHandle {
@@ -705,6 +706,8 @@ impl V4OrdinalIdentityHandle {
         }
         validate_unique_forward_runs(&mut forward, &mut admission)?;
         let mut ranges = Vec::with_capacity(manifest.ordinal_ranges.len());
+        let mut prior_uuid = None;
+        let mut uuid_order_matches_ordinals = true;
         for range in &manifest.ordinal_ranges {
             if !names.insert(range.artifact.name.clone()) {
                 return Err(V4OrdinalIdentityError::InvalidDescriptor(
@@ -718,6 +721,8 @@ impl V4OrdinalIdentityHandle {
                     range,
                     &mut ordinal_commitment,
                     &mut admission,
+                    &mut prior_uuid,
+                    &mut uuid_order_matches_ordinals,
                 )?,
             });
         }
@@ -760,6 +765,7 @@ impl V4OrdinalIdentityHandle {
             tombstone_cache: TombstoneBlockCache::default(),
             limits,
             admission,
+            uuid_order_matches_ordinals,
         })))
     }
 
@@ -773,6 +779,20 @@ impl V4OrdinalIdentityHandle {
     #[must_use]
     pub const fn topology_generation(&self) -> u64 {
         self.topology_generation
+    }
+
+    /// Whether authenticated UUIDs increase strictly across all ordinal ranges.
+    /// This conservative proof includes tombstoned identities: removing any of
+    /// them preserves ordering. It requires no additional reads or durable data.
+    #[must_use]
+    pub const fn uuid_order_matches_ordinals(&self) -> bool {
+        self.uuid_order_matches_ordinals
+    }
+
+    /// Maximum request entries accepted by this admitted handle per lookup.
+    #[must_use]
+    pub const fn max_requested_ids(&self) -> usize {
+        self.limits.max_requested
     }
 
     /// Resolve a bounded caller batch while preserving caller order.
@@ -1186,6 +1206,8 @@ fn admit_ordinal_artifact(
     range: &V4OrdinalRange,
     commitment: &mut MappingCommitment,
     metrics: &mut V4OrdinalAdmissionMetrics,
+    prior_uuid: &mut Option<[u8; UUID_WIDTH_USIZE]>,
+    uuid_order_matches_ordinals: &mut bool,
 ) -> Result<OpenArtifact, V4OrdinalIdentityError> {
     let mut artifact = open_admission_file(root, &range.artifact)?;
     let block_bytes =
@@ -1226,6 +1248,10 @@ fn admit_ordinal_artifact(
                 .first_node_id
                 .checked_add(ordinal)
                 .ok_or(V4OrdinalIdentityError::Authentication)?;
+            if prior_uuid.is_some_and(|prior| prior >= uuid) {
+                *uuid_order_matches_ordinals = false;
+            }
+            *prior_uuid = Some(uuid);
             commitment.add(&uuid, node_id);
             ordinal = ordinal.saturating_add(1);
         }
@@ -2341,6 +2367,70 @@ mod tests {
         fixture.publish();
 
         let _handle = fixture.open(V4OrdinalIdentityLimits::default());
+    }
+
+    #[test]
+    fn admitted_uuid_order_proof_spans_sparse_ranges_and_tombstones() {
+        for (uuids, expected) in [
+            ([1_u128, 2, 3, 4], true),
+            ([1, 2, 4, 3], false),
+            ([3, 4, 1, 2], false),
+        ] {
+            let mut fixture = Fixture::new(&[2, 2], &[2]);
+            let index = fixture.root.path().join(INDEX_DIR);
+            let mut mappings = Vec::new();
+            for (range, values) in fixture
+                .manifest
+                .ordinal_ranges
+                .iter_mut()
+                .zip(uuids.chunks_exact(2))
+            {
+                let bytes = values
+                    .iter()
+                    .flat_map(|value| Uuid::from_u128(*value).into_bytes())
+                    .collect::<Vec<_>>();
+                fs::write(index.join(&range.artifact.name), &bytes).unwrap();
+                range.artifact = artifact(
+                    range.artifact.name.clone(),
+                    V4OrdinalArtifactKind::OrdinalUuids,
+                    7,
+                    &bytes,
+                );
+                range.blocks = ordinal_blocks(&bytes);
+                mappings.extend(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, uuid)| (*uuid, range.first_node_id + offset as u64)),
+                );
+            }
+            mappings.sort_unstable();
+            let bytes = mappings
+                .iter()
+                .flat_map(|(uuid, id)| {
+                    Uuid::from_u128(*uuid)
+                        .into_bytes()
+                        .into_iter()
+                        .chain(id.to_be_bytes())
+                })
+                .collect::<Vec<_>>();
+            fs::write(index.join("forward.uuidx"), &bytes).unwrap();
+            fixture.manifest.forward_identities = vec![artifact(
+                "forward.uuidx".into(),
+                V4OrdinalArtifactKind::ForwardIdentities,
+                7,
+                &bytes,
+            )];
+            fixture.publish();
+            let mut handle = fixture.open(V4OrdinalIdentityLimits::default());
+            assert_eq!(handle.uuid_order_matches_ordinals(), expected);
+            let lookup = handle.lookup_node_uuids(&[1, 2, 6, 7]).unwrap();
+            assert!(
+                lookup.values[1].is_none(),
+                "tombstoned identity remains absent"
+            );
+            assert_eq!(lookup.values[0], Some(Uuid::from_u128(uuids[0])));
+        }
     }
 
     #[test]

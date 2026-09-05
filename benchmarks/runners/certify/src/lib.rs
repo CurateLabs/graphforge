@@ -1198,11 +1198,12 @@ fn sanitized_query_evidence(value: &serde_json::Value) -> bool {
         && sanitized_operator_rss(object.get("operator_rss"))
 }
 
-const QUERY_HOP_KEYS: [&str; 25] = [
+const QUERY_HOP_KEYS: [&str; 26] = [
     "ordinal",
     "input_batches",
     "input_rows",
     "candidates_generated",
+    "adjacency_rows_examined",
     "rows_emitted",
     "projected_chunks",
     "projected_rows",
@@ -1860,6 +1861,65 @@ mod tests {
         leaked_recovery["kind"] = serde_json::json!("/private/project");
         let encoded = serde_json::to_vec(&leaked_recovery).expect("leaked recovery receipt JSON");
         assert!(parse_receipts(&encoded, true).is_err());
+    }
+
+    #[test]
+    fn query_receipts_preserve_typed_adjacency_probe_evidence() {
+        let query = serde_json::json!({
+            "contract": "graphforge-result-sink/2",
+            "destination": "/private/query.arrow",
+            "format": "ArrowIpc", "rows": 2, "batches": 1, "bytes": 64,
+            "complete": true, "result_sha256": "a".repeat(64), "scalar_u64": null,
+            "query_evidence": {
+                "contract": "graphforge-query-evidence/1",
+                "hops": [{
+                    "ordinal": 0, "input_batches": 0, "input_rows": 0,
+                    "candidates_generated": 2, "adjacency_rows_examined": 3,
+                    "rows_emitted": 2, "projected_chunks": 1, "projected_rows": 2,
+                    "projected_columns": 1, "edge_projected_columns": 0,
+                    "node_projected_columns": 0, "edge_reader_calls": 0,
+                    "edge_rows_returned": 0, "edge_logical_rows_scanned": 0,
+                    "edge_full_reads": 0, "node_reader_calls": 0,
+                    "node_rows_returned": 0, "node_logical_rows_scanned": 0,
+                    "node_full_reads": 0, "identity_reader_calls": 1,
+                    "identity_logical_bytes": 64, "identity_ranges_selected": 1,
+                    "identity_peak_buffer_bytes": 64, "identity_per_record_seeks": 0,
+                    "identity_revalidation_calls": 1, "identity_revalidation_bytes": 0
+                }],
+                "sorts": [],
+                "operator_rss": [{
+                    "ordinal": 0, "operator": "ordered_one_hop",
+                    "before_bytes": 100, "peak_bytes": 120, "after_bytes": 110
+                }],
+                "max_in_flight_reads": 0, "memory_reserved_before": 0,
+                "memory_reserved_after": 0, "returned_batch_bytes": 32,
+                "execution_batch_rows": 8192, "peak_rss_bytes": 120,
+                "rss_after_release_bytes": 110
+            }
+        });
+        let accepted = parse_receipts(&serde_json::to_vec(&query).unwrap(), true).unwrap();
+        assert_eq!(accepted[0]["query_evidence"], query["query_evidence"]);
+        assert!(accepted[0].get("destination").is_none());
+        for bad_value in [
+            serde_json::json!(-1),
+            serde_json::json!("3"),
+            serde_json::Value::Null,
+        ] {
+            let mut invalid = query.clone();
+            invalid["query_evidence"]["hops"][0]["adjacency_rows_examined"] = bad_value;
+            assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
+        }
+        for field in ["adjacency_rows_examined", "identity_reader_calls"] {
+            let mut invalid = query.clone();
+            invalid["query_evidence"]["hops"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
+        }
+        let mut invalid = query;
+        invalid["query_evidence"]["hops"][0]["project_path"] = serde_json::json!("/private");
+        assert!(parse_receipts(&serde_json::to_vec(&invalid).unwrap(), true).is_err());
     }
 
     #[test]

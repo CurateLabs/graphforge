@@ -717,6 +717,7 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
             "input_batches": hop.input_batches,
             "input_rows": hop.input_rows,
             "candidates_generated": hop.candidates_generated,
+            "adjacency_rows_examined": hop.adjacency_rows_examined,
             "rows_emitted": hop.rows_emitted,
             "edge_reads_started": hop.edge_reads_started,
             "edge_reads_completed": hop.edge_reads_completed,
@@ -764,10 +765,10 @@ fn query_work_evidence(snapshot: &DemandSnapshot) -> Value {
 const MAX_IDENTITY_BUFFER_BYTES: u64 = 16 * 1024 * 1024;
 
 fn released_memory_is_bounded(snapshot: &DemandSnapshot) -> bool {
-    snapshot.memory_reserved_after
-        <= snapshot
-            .memory_reserved_before
-            .saturating_add(snapshot.returned_batch_bytes)
+    snapshot
+        .memory_reserved_before
+        .checked_add(snapshot.returned_batch_bytes)
+        .is_some_and(|bound| snapshot.memory_reserved_after <= bound)
 }
 
 fn has_no_materializing_reads(hop: &demand::HopSnapshot) -> bool {
@@ -787,37 +788,106 @@ fn has_no_materializing_reads(hop: &demand::HopSnapshot) -> bool {
         && hop.node_projected_columns == 0
 }
 
-fn bounded_counting_ordered_two_hop(snapshot: &DemandSnapshot, limit: usize) -> bool {
+fn bounded_ordered_leaf(
+    snapshot: &DemandSnapshot,
+    expected_hops: usize,
+    limit: usize,
+    live_nodes: u64,
+    expected_rows: u64,
+) -> bool {
     let Some(hop) = snapshot.hops.values().next() else {
         return false;
     };
+    let [operator] = snapshot.operator_rss.as_slice() else {
+        return false;
+    };
+    let expected_operator = match expected_hops {
+        1 => "ordered_one_hop",
+        2 => "ordered_two_hop",
+        _ => return false,
+    };
     snapshot.hops.len() == 1
+        && snapshot.filters.is_empty()
         && snapshot.sorts.is_empty()
-        && snapshot.operator_rss.is_empty()
+        && operator.ordinal == 0
+        && operator.operator == expected_operator
+        && operator.peak_bytes >= operator.before_bytes
+        && operator.peak_bytes >= operator.after_bytes
+        && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
         && snapshot.execution_batch_rows > 0
         && hop.input_batches == 0
         && hop.input_rows == 0
-        && hop.rows_emitted == limit as u64
+        && hop.rows_emitted == expected_rows
         && hop.candidates_generated >= hop.rows_emitted
-        && hop.candidates_generated <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
+        && (expected_hops != 1 || hop.candidates_generated == hop.rows_emitted)
+        // Each optimized leaf probes destinations once in ordinal order.
+        // Empty rows count as probes, not emitted candidates, and may exceed K.
+        && hop.adjacency_rows_examined > 0
+        && hop.adjacency_rows_examined <= live_nodes
+        && (limit as u64)
+            .checked_add(snapshot.execution_batch_rows)
+            .is_some_and(|bound| hop.candidates_generated <= bound)
         && has_no_materializing_reads(hop)
         && hop.projected_chunks > 0
-        && hop.projected_chunks == hop.projected_rows
+        && hop.projected_chunks <= hop.projected_rows
+        && (expected_hops != 2 || hop.projected_chunks == hop.projected_rows)
+        && hop.projected_rows <= hop.adjacency_rows_examined
         && hop.projected_rows <= limit as u64
         && hop.projected_columns == 1
         && hop.identity_ranges_selected > 0
         && hop.identity_ranges_selected <= hop.projected_rows
-        && hop.identity_read_calls
-            <= hop
-                .identity_ranges_selected
-                .saturating_mul(2)
-                .saturating_add(2)
-        && hop.identity_bytes_read
-            <= hop
-                .identity_read_calls
-                .saturating_mul(MAX_IDENTITY_BUFFER_BYTES)
+        && hop.identity_read_calls > 0
+        && hop.identity_bytes_read > 0
+        && hop.identity_peak_buffer_bytes > 0
+        && hop
+            .identity_ranges_selected
+            .checked_mul(2)
+            .and_then(|bound| bound.checked_add(2))
+            .is_some_and(|bound| hop.identity_read_calls <= bound)
+        && hop
+            .identity_read_calls
+            .checked_mul(MAX_IDENTITY_BUFFER_BYTES)
+            .is_some_and(|bound| hop.identity_bytes_read <= bound)
         && hop.identity_peak_buffer_bytes <= MAX_IDENTITY_BUFFER_BYTES
         && hop.identity_per_record_seeks == 0
+        && hop.reads_after_cancel == 0
+        && snapshot.cancellations == 0
+        && snapshot.max_in_flight_reads == 0
+        && released_memory_is_bounded(snapshot)
+}
+
+fn bounded_no_sort_one_hop(snapshot: &DemandSnapshot, limit: usize, expected_rows: u64) -> bool {
+    let Some(hop) = snapshot.hops.values().next() else {
+        return false;
+    };
+    let canonical_batch_rows =
+        u64::try_from(graphforge_exec::SessionResourceConfig::default().batch_size).ok();
+    let row_bound = canonical_batch_rows.and_then(|batch_rows| {
+        (snapshot.execution_batch_rows == batch_rows)
+            .then_some(batch_rows)
+            .and_then(|batch_rows| u64::try_from(limit).ok()?.checked_add(batch_rows))
+    });
+    let Some(row_bound) = row_bound else {
+        return false;
+    };
+    let [operator] = snapshot.operator_rss.as_slice() else {
+        return false;
+    };
+    snapshot.hops.len() == 1
+        && snapshot.filters.is_empty()
+        && snapshot.sorts.is_empty()
+        && operator.ordinal == 0
+        && operator.operator == "expand"
+        && operator.peak_bytes >= operator.before_bytes
+        && operator.peak_bytes >= operator.after_bytes
+        && (operator.after_bytes > 0 || !cfg!(target_os = "linux"))
+        && hop.input_batches > 0
+        && hop.input_batches <= hop.input_rows
+        && hop.input_rows <= row_bound
+        && hop.rows_emitted >= expected_rows
+        && hop.rows_emitted <= row_bound
+        && hop.candidates_generated >= hop.rows_emitted
+        && hop.candidates_generated <= row_bound
         && hop.reads_after_cancel == 0
         && snapshot.cancellations == 0
         && snapshot.max_in_flight_reads == 0
@@ -836,10 +906,13 @@ fn bounded_streaming_ordered_limit(
         // DataFusion's baseline output counter is charged before its final
         // fetch wrapper slices the terminal batch, so it may include at most
         // one physical batch beyond the returned TopK rows.
-        && snapshot.sorts[0].output_rows
-            <= (limit as u64).saturating_add(snapshot.execution_batch_rows)
+        && (limit as u64)
+            .checked_add(snapshot.execution_batch_rows)
+            .is_some_and(|bound| snapshot.sorts[0].output_rows <= bound)
         && snapshot.sorts[0].retained_bytes == 0
-        && snapshot.operator_rss.len() == expected_hops.saturating_add(1)
+        && expected_hops
+            .checked_add(1)
+            .is_some_and(|expected| snapshot.operator_rss.len() == expected)
         && snapshot.operator_rss.iter().all(|operator| {
             operator.peak_bytes >= operator.before_bytes
                 && operator.peak_bytes >= operator.after_bytes
@@ -852,29 +925,154 @@ fn bounded_streaming_ordered_limit(
             .all(|hop| hop.reads_after_cancel == 0)
 }
 
-fn bounded_ordered_limit(snapshot: &DemandSnapshot, expected_hops: usize, limit: usize) -> bool {
-    let optimized_two_hop_shape = expected_hops == 2
-        && snapshot.hops.len() == 1
-        && snapshot.sorts.is_empty()
-        && snapshot.operator_rss.is_empty();
-    if optimized_two_hop_shape {
-        bounded_counting_ordered_two_hop(snapshot, limit)
+fn bounded_ordered_limit(
+    snapshot: &DemandSnapshot,
+    expected_hops: usize,
+    limit: usize,
+    live_nodes: u64,
+    live_edges: u64,
+) -> bool {
+    let expected_rows = if expected_hops == 1 {
+        (limit as u64).min(live_edges)
     } else {
-        bounded_streaming_ordered_limit(snapshot, expected_hops, limit)
+        limit as u64
+    };
+    if snapshot.sorts.is_empty() {
+        if snapshot.operator_rss.first().is_some_and(|operator| {
+            matches!(operator.operator, "ordered_one_hop" | "ordered_two_hop")
+        }) {
+            return bounded_ordered_leaf(snapshot, expected_hops, limit, live_nodes, expected_rows);
+        }
+        return expected_hops == 1 && bounded_no_sort_one_hop(snapshot, limit, expected_rows);
     }
+    bounded_streaming_ordered_limit(snapshot, expected_hops, limit)
 }
 
-fn counting_snapshot(limit: usize) -> DemandSnapshot {
+fn no_sort_one_hop_snapshot(limit: usize) -> DemandSnapshot {
+    let batch_rows = u64::try_from(graphforge_exec::SessionResourceConfig::default().batch_size)
+        .expect("canonical execution batch rows fit u64");
     let mut snapshot = DemandSnapshot {
-        execution_batch_rows: 8_192,
-        returned_batch_bytes: (limit as u64).saturating_mul(16),
+        execution_batch_rows: batch_rows,
+        returned_batch_bytes: u64::try_from(limit)
+            .expect("synthetic limit fits u64")
+            .checked_mul(16)
+            .expect("synthetic returned-byte count overflow"),
+        operator_rss: vec![demand::OperatorRssSnapshot {
+            ordinal: 0,
+            operator: "expand",
+            before_bytes: 100,
+            peak_bytes: 120,
+            after_bytes: 110,
+        }],
         ..DemandSnapshot::default()
     };
     snapshot.hops.insert(
         1,
         demand::HopSnapshot {
-            candidates_generated: (limit as u64).saturating_add(10),
+            input_batches: 1,
+            input_rows: 1_024,
+            // Truthful no-sort one-hop observation. 4_310 was the stale mix
+            // 3_300 (late one-hop) + 1_010 (fused two-hop) and must not be
+            // treated as a legitimate one-hop baseline.
+            candidates_generated: 3_300,
+            rows_emitted: 3_300,
+            ..demand::HopSnapshot::default()
+        },
+    );
+    snapshot
+}
+
+#[test]
+fn no_sort_one_hop_budget_requires_exact_expand_and_bounded_rows() {
+    let limit = 1_000;
+    let baseline = no_sort_one_hop_snapshot(limit);
+    assert!(bounded_ordered_limit(&baseline, 1, limit, 16_384, 16_384));
+    assert!(
+        !bounded_ordered_limit(&baseline, 2, limit, 16_384, 16_384),
+        "the no-sort one-hop policy must not weaken optimized two-hop classification"
+    );
+
+    macro_rules! reject_mutation {
+        ($name:literal, $mutate:expr) => {{
+            let mut snapshot = baseline.clone();
+            $mutate(&mut snapshot);
+            assert!(
+                !bounded_ordered_limit(&snapshot, 1, limit, 16_384, 16_384),
+                "accepted {}: {snapshot:#?}",
+                $name
+            );
+        }};
+    }
+    reject_mutation!("missing expand", |s: &mut DemandSnapshot| {
+        s.operator_rss.clear();
+    });
+    reject_mutation!("extra expand", |s: &mut DemandSnapshot| {
+        s.operator_rss.push(demand::OperatorRssSnapshot {
+            ordinal: 1,
+            operator: "expand",
+            before_bytes: 100,
+            peak_bytes: 120,
+            after_bytes: 110,
+        });
+    });
+    reject_mutation!("wrong operator", |s: &mut DemandSnapshot| {
+        s.operator_rss[0].operator = "sort";
+    });
+    reject_mutation!("unexpected sort", |s: &mut DemandSnapshot| {
+        s.sorts.push(demand::SortSnapshot {
+            fetch: Some(limit),
+            ..demand::SortSnapshot::default()
+        });
+    });
+    let row_bound = u64::try_from(limit)
+        .expect("synthetic limit fits u64")
+        .checked_add(baseline.execution_batch_rows)
+        .expect("synthetic row bound");
+    reject_mutation!("input row bound exceeded", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().input_rows =
+            row_bound.checked_add(1).expect("synthetic excess input");
+    });
+    reject_mutation!("candidate row bound exceeded", |s: &mut DemandSnapshot| {
+        s.hops.get_mut(&1).unwrap().candidates_generated = row_bound
+            .checked_add(1)
+            .expect("synthetic excess candidates");
+    });
+    reject_mutation!("emitted row bound exceeded", |s: &mut DemandSnapshot| {
+        let excess = row_bound.checked_add(1).expect("synthetic excess output");
+        let hop = s.hops.get_mut(&1).unwrap();
+        hop.rows_emitted = excess;
+        hop.candidates_generated = excess;
+    });
+    reject_mutation!("row bound overflow", |s: &mut DemandSnapshot| {
+        s.execution_batch_rows = u64::MAX;
+    });
+}
+
+fn counting_snapshot(limit: usize) -> DemandSnapshot {
+    // Fused two-hop work retains actual rejected candidate visits and identity
+    // reads, while its leaf consumes no Arrow input batches.
+    let mut snapshot = DemandSnapshot {
+        execution_batch_rows: 8_192,
+        operator_rss: vec![demand::OperatorRssSnapshot {
+            ordinal: 0,
+            operator: "ordered_two_hop",
+            before_bytes: 100,
+            peak_bytes: 120,
+            after_bytes: 110,
+        }],
+        returned_batch_bytes: (limit as u64)
+            .checked_mul(16)
+            .expect("synthetic returned-byte count overflow"),
+        ..DemandSnapshot::default()
+    };
+    snapshot.hops.insert(
+        1,
+        demand::HopSnapshot {
+            candidates_generated: (limit as u64)
+                .checked_add(10)
+                .expect("synthetic candidate count overflow"),
             rows_emitted: limit as u64,
+            adjacency_rows_examined: 53,
             projected_chunks: 52,
             projected_rows: 52,
             projected_columns: 1,
@@ -889,22 +1087,100 @@ fn counting_snapshot(limit: usize) -> DemandSnapshot {
 }
 
 #[test]
+fn optimized_leaf_budget_requires_rss_probes_and_actual_identity_work() {
+    let limit = 1_000;
+    let live_nodes = 16_384;
+    for expected_hops in [1, 2] {
+        let mut baseline = counting_snapshot(limit);
+        if expected_hops == 1 {
+            baseline.operator_rss[0].operator = "ordered_one_hop";
+            let hop = baseline.hops.get_mut(&1).unwrap();
+            hop.candidates_generated = limit as u64;
+            hop.projected_chunks = 1;
+        }
+        // Sparse leading rows may outnumber K without generating candidates.
+        baseline.hops.get_mut(&1).unwrap().adjacency_rows_examined = 12_000;
+        assert!(bounded_ordered_limit(
+            &baseline,
+            expected_hops,
+            limit,
+            live_nodes,
+            16_384
+        ));
+        for mutation in 0..11 {
+            let mut invalid = baseline.clone();
+            match mutation {
+                0 => invalid.operator_rss.clear(),
+                1 => invalid.operator_rss[0].operator = "edge_count",
+                2 => invalid.operator_rss[0].peak_bytes = 0,
+                3 => invalid.hops.get_mut(&1).unwrap().adjacency_rows_examined = 0,
+                4 => invalid.hops.get_mut(&1).unwrap().adjacency_rows_examined = live_nodes + 1,
+                5 => invalid.hops.get_mut(&1).unwrap().input_batches = 1,
+                6 => invalid.hops.get_mut(&1).unwrap().input_rows = 1,
+                7 => invalid.hops.get_mut(&1).unwrap().identity_read_calls = 0,
+                8 => invalid.hops.get_mut(&1).unwrap().identity_bytes_read = 0,
+                9 => invalid.hops.get_mut(&1).unwrap().identity_peak_buffer_bytes = 0,
+                10 => invalid.hops.get_mut(&1).unwrap().node_full_reads = 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                !bounded_ordered_limit(&invalid, expected_hops, limit, live_nodes, 16_384),
+                "accepted optimized family {expected_hops} mutation {mutation}: {invalid:?}"
+            );
+        }
+        assert!(!bounded_ordered_limit(
+            &baseline,
+            expected_hops,
+            limit,
+            0,
+            16_384
+        ));
+    }
+}
+
+#[test]
+fn optimized_one_hop_underfilled_limit_uses_reopened_edge_count() {
+    let mut snapshot = counting_snapshot(1_000);
+    snapshot.operator_rss[0].operator = "ordered_one_hop";
+    let hop = snapshot.hops.get_mut(&1).unwrap();
+    hop.candidates_generated = 929;
+    hop.rows_emitted = 929;
+    hop.adjacency_rows_examined = 997;
+    hop.projected_chunks = 1;
+    assert!(bounded_ordered_limit(&snapshot, 1, 1_000, 1_024, 929));
+    for incorrect in [928, 930] {
+        let mut invalid = snapshot.clone();
+        let hop = invalid.hops.get_mut(&1).unwrap();
+        hop.candidates_generated = incorrect;
+        hop.rows_emitted = incorrect;
+        assert!(!bounded_ordered_limit(&invalid, 1, 1_000, 1_024, 929));
+    }
+    assert!(!bounded_ordered_limit(&snapshot, 1, 1_000, 1_024, 1_000));
+}
+
+#[test]
 fn optimized_two_hop_budget_requires_complete_counting_evidence() {
     let limit = 1_000;
     let baseline = counting_snapshot(limit);
-    assert!(bounded_ordered_limit(&baseline, 2, limit));
+    assert!(bounded_ordered_limit(&baseline, 2, limit, 16_384, 16_384));
     assert!(
-        !bounded_ordered_limit(&baseline, 1, limit),
+        !bounded_ordered_limit(&baseline, 1, limit, 16_384, 16_384),
         "the optimized exception must not weaken the one-hop budget"
     );
-    assert!(!bounded_ordered_limit(&DemandSnapshot::default(), 2, limit));
+    assert!(!bounded_ordered_limit(
+        &DemandSnapshot::default(),
+        2,
+        limit,
+        16_384,
+        16_384
+    ));
 
     macro_rules! reject_mutation {
         ($name:literal, $mutate:expr) => {{
             let mut snapshot = baseline.clone();
             $mutate(&mut snapshot);
             assert!(
-                !bounded_ordered_limit(&snapshot, 2, limit),
+                !bounded_ordered_limit(&snapshot, 2, limit, 16_384, 16_384),
                 "accepted {}: {snapshot:#?}",
                 $name
             );
@@ -940,6 +1216,23 @@ fn optimized_two_hop_budget_requires_complete_counting_evidence() {
     });
     reject_mutation!("node materialization", |s: &mut DemandSnapshot| {
         s.hops.get_mut(&1).unwrap().node_rows_scanned = 1;
+    });
+    reject_mutation!("stale one-hop mix", |s: &mut DemandSnapshot| {
+        // Process-global capture previously accepted late one-hop events into
+        // the next two-hop snapshot (4_310 = 3_300 + 1_010) together with
+        // leftover expand RSS and scanned rows.
+        let hop = s.hops.get_mut(&1).unwrap();
+        hop.candidates_generated = 4_310;
+        hop.input_batches = 1;
+        hop.input_rows = 1_024;
+        hop.edge_rows_scanned = 3_300;
+        s.operator_rss.push(demand::OperatorRssSnapshot {
+            ordinal: 0,
+            operator: "expand",
+            before_bytes: 100,
+            peak_bytes: 120,
+            after_bytes: 110,
+        });
     });
     reject_mutation!("unexpected cancellation", |s: &mut DemandSnapshot| {
         s.cancellations = 1;
@@ -1594,7 +1887,13 @@ fn run_rung(
                     violation = Some("execution_failure");
                 } else if rows != 1_000 {
                     violation = Some("result_mismatch");
-                } else if !bounded_ordered_limit(&work, expected_hops, 1_000) {
+                } else if !bounded_ordered_limit(
+                    &work,
+                    expected_hops,
+                    1_000,
+                    node_count,
+                    edge_count,
+                ) {
                     violation = Some("operator_budget_violation");
                 }
                 if let Some(class) = violation {
@@ -3027,8 +3326,13 @@ fn run_integrated_certification_with_edge_factor(
     let (source_1hop_result, source_1hop_work) =
         certification_query(&graph, ONE_HOP, "source_query_1hop", phase, &mut journal);
     assert!(
-        bounded_ordered_limit(&source_1hop_work, 1, 1_000),
+        bounded_ordered_limit(&source_1hop_work, 1, 1_000, source_nodes, source_edges),
         "{source_1hop_work:#?}"
+    );
+    assert_eq!(
+        row_count(&source_1hop_result) as u64,
+        1_000_u64.min(source_edges),
+        "unrestricted directed one-hop returns one row per live edge up to LIMIT"
     );
     let source_1hop = result_fingerprint(&source_1hop_result);
     journal.pass_with_detail(
@@ -3041,7 +3345,7 @@ fn run_integrated_certification_with_edge_factor(
     let (source_2hop_result, source_2hop_work) =
         certification_query(&graph, TWO_HOP, "source_query_2hop", phase, &mut journal);
     assert!(
-        bounded_ordered_limit(&source_2hop_work, 2, 1_000),
+        bounded_ordered_limit(&source_2hop_work, 2, 1_000, source_nodes, source_edges),
         "{source_2hop_work:#?}"
     );
     let source_2hop = result_fingerprint(&source_2hop_result);
@@ -3167,8 +3471,19 @@ fn run_integrated_certification_with_edge_factor(
         &mut journal,
     );
     assert!(
-        bounded_ordered_limit(&imported_1hop_work, 1, 1_000),
+        bounded_ordered_limit(
+            &imported_1hop_work,
+            1,
+            1_000,
+            imported_nodes,
+            imported_edges
+        ),
         "{imported_1hop_work:#?}"
+    );
+    assert_eq!(
+        row_count(&imported_1hop_result) as u64,
+        1_000_u64.min(imported_edges),
+        "unrestricted directed one-hop returns one row per live edge up to LIMIT"
     );
     let imported_1hop = result_fingerprint(&imported_1hop_result);
     assert_eq!(source_1hop, imported_1hop);
@@ -3187,7 +3502,13 @@ fn run_integrated_certification_with_edge_factor(
         &mut journal,
     );
     assert!(
-        bounded_ordered_limit(&imported_2hop_work, 2, 1_000),
+        bounded_ordered_limit(
+            &imported_2hop_work,
+            2,
+            1_000,
+            imported_nodes,
+            imported_edges
+        ),
         "{imported_2hop_work:#?}"
     );
     let imported_2hop = result_fingerprint(&imported_2hop_result);

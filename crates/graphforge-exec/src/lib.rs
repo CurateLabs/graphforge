@@ -189,6 +189,8 @@ pub(crate) mod algorithm_similar_knn;
 pub(crate) mod algorithm_weighted_undirected;
 #[doc(hidden)]
 pub mod demand;
+mod edge_count;
+mod ordered_one_hop;
 mod ordered_two_hop;
 pub use adjacency::{
     Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, PersistentAdjacencyProvider,
@@ -3205,6 +3207,20 @@ pub(crate) struct V4OrdinalIdentitySession {
 }
 
 impl V4OrdinalIdentitySession {
+    pub(crate) fn max_requested_ids(&self) -> usize {
+        self.handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .max_requested_ids()
+    }
+
+    pub(crate) fn uuid_order_matches_ordinals(&self) -> bool {
+        self.handle
+            .lock()
+            .expect("ordinal identity handle poisoned")
+            .uuid_order_matches_ordinals()
+    }
+
     pub(crate) fn lookup_node_uuids(
         &self,
         requested: &[u64],

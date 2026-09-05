@@ -273,6 +273,47 @@ impl Adjacency {
         self.inner.is_empty()
     }
 
+    /// Exclusive node ID extent. CSR and overlay views read retained metadata;
+    /// scan-built maps inspect their keys without traversing edge entries.
+    pub(crate) fn node_extent(&self) -> u64 {
+        self.inner.node_extent()
+    }
+
+    /// Count neighbors without materializing a sharded or undirected payload.
+    pub(crate) fn degree(&self, node_id: u64) -> Result<u64, GfError> {
+        self.inner.degree(node_id)
+    }
+
+    /// Copy a bounded chunk of one directed row, without materializing the rest.
+    pub(crate) fn neighbor_chunk(
+        &self,
+        node_id: u64,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64)>, GfError> {
+        match &self.inner {
+            AdjacencyInner::Sharded(base) => base.row_chunk(node_id, skip, limit),
+            AdjacencyInner::ShardedOverlay { base, replaced, .. } => match replaced.get(&node_id) {
+                Some(row) => Ok(row.iter().copied().skip(skip).take(limit).collect()),
+                None => base.row_chunk(node_id, skip, limit),
+            },
+            AdjacencyInner::Undirected { .. } => Err(GfError::Execution(
+                "bounded ordered traversal requires a directed adjacency view".into(),
+            )),
+            _ => Ok(self
+                .neighbors(node_id)
+                .iter()
+                .skip(skip)
+                .take(limit)
+                .collect()),
+        }
+    }
+
+    /// Total adjacency entries, including both orientations in undirected views.
+    pub fn edge_entry_count(&self) -> Result<u64, GfError> {
+        self.inner.edge_entry_count()
+    }
+
     /// Visit every node that may have adjacency entries.
     ///
     /// CSR-native backings yield dense `0..node_extent` ids (empty rows
@@ -285,6 +326,52 @@ impl Adjacency {
 }
 
 impl AdjacencyInner {
+    fn edge_entry_count(&self) -> Result<u64, GfError> {
+        Ok(match self {
+            Self::Empty => 0,
+            Self::Map(map) => map.values().map(|row| row.len() as u64).sum(),
+            Self::Csr(csr) => csr.edge_count(),
+            Self::Sharded(csr) => csr.edge_count(),
+            Self::ShardedOverlay { base, replaced, .. } => {
+                let mut total = base.edge_count();
+                for (node, row) in replaced {
+                    total = total - base.row_len(*node)? + row.len() as u64;
+                }
+                total
+            }
+            Self::Overlay(overlay) => {
+                let mut total = overlay.base.edge_count();
+                for (node, row) in &overlay.replaced {
+                    total = total - overlay.base.row(*node).len() as u64 + row.len() as u64;
+                }
+                total
+            }
+            Self::Undirected { out, inbound } => out
+                .edge_entry_count()?
+                .saturating_add(inbound.edge_entry_count()?),
+        })
+    }
+
+    fn degree(&self, node_id: u64) -> Result<u64, GfError> {
+        Ok(match self {
+            Self::Empty => 0,
+            Self::Map(map) => map.get(&node_id).map_or(0, |row| row.len() as u64),
+            Self::Csr(csr) => csr.row(node_id).len() as u64,
+            Self::Sharded(csr) => csr.row_len(node_id)?,
+            Self::ShardedOverlay { base, replaced, .. } => match replaced.get(&node_id) {
+                Some(row) => row.len() as u64,
+                None => base.row_len(node_id)?,
+            },
+            Self::Overlay(overlay) => match overlay.row(node_id) {
+                graphforge_storage::adjacency_delta::OverlayRow::Base(row) => row.len() as u64,
+                graphforge_storage::adjacency_delta::OverlayRow::Replaced(row) => row.len() as u64,
+            },
+            Self::Undirected { out, inbound } => out
+                .degree(node_id)?
+                .saturating_add(inbound.degree(node_id)?),
+        })
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Self::Empty => true,

@@ -1,12 +1,10 @@
-//! Order-aware two-hop path counting for `ORDER BY destination_uuid LIMIT K` (#966).
+//! Order-aware one-hop emission for `ORDER BY destination_uuid LIMIT K` (#1094).
 //!
-//! When the terminal sort is a single ascending key on the destination node UUID
-//! and both hops are fixed, identity-only expansions, materializing every
-//! intermediate candidate before TopK is correct but scales with total path count.
-//! This module replaces the expand chain with destination-order path counting:
-//! iterate destinations in node-id order (equivalent to UUID order for monotonic
-//! ordinal identity), count two-hop paths with optional edge-disjointness, emit
-//! path multiplicity until the limit is satisfied.
+//! Canonical ladder one-hop queries are identity-only expands into TopK Sort.
+//! Streaming every adjacency entry before the limit retains process RSS ~linear
+//! in edge count. Mirror the two-hop rewrite: walk destinations in node-id
+//! order (UUID order for monotonic ordinal identity), emit each destination's
+//! inbound multiplicity until the limit is satisfied, then stop.
 
 use std::fmt;
 use std::pin::Pin;
@@ -17,10 +15,8 @@ use arrow::array::{ArrayRef, FixedSizeBinaryBuilder};
 use arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::ScalarFunctionExpr;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
@@ -37,12 +33,12 @@ use crate::ExpandExec;
 use crate::adjacency::AdjacencyProvider;
 use crate::demand;
 
-/// Rewrite ordered two-hop identity-only plans to path counting when matched.
-pub fn try_rewrite_ordered_two_hop(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
-    let Some(spec) = detect_ordered_two_hop(&plan) else {
+/// Rewrite ordered one-hop identity-only plans when matched.
+pub fn try_rewrite_ordered_one_hop(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+    let Some(spec) = detect_ordered_one_hop(&plan) else {
         return Ok(plan);
     };
-    let replacement = Arc::new(OrderedTwoHopPathCountExec::new(spec)) as Arc<dyn ExecutionPlan>;
+    let replacement = Arc::new(OrderedOneHopExec::new(spec)) as Arc<dyn ExecutionPlan>;
     replace_peeled_projection(&plan, replacement)
 }
 
@@ -69,14 +65,14 @@ fn replace_peeled_projection(
     Ok(replacement)
 }
 
-struct OrderedTwoHopSpec {
+struct OrderedOneHopSpec {
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     fetch: usize,
     rel_type_name: String,
+    direction: Direction,
     provider: Arc<dyn AdjacencyProvider>,
     ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
-    require_edge_disjoint: bool,
 }
 
 fn peel_plan(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -105,7 +101,7 @@ fn peel_expand_transport(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan
     Arc::clone(plan)
 }
 
-fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHopSpec> {
+fn detect_ordered_one_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedOneHopSpec> {
     let plan = peel_plan(plan);
     let projection = plan.downcast_ref::<ProjectionExec>()?;
     if projection.expr().len() != 1 {
@@ -136,37 +132,25 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
     if sort.input().schema().field(sort_column.index()).name() != "node_uuid" {
         return None;
     }
-    let (expand2_plan, require_edge_disjoint) =
-        if let Some(filter) = sort.children().first()?.downcast_ref::<FilterExec>() {
-            let disjoint = filter
-                .predicate()
-                .downcast_ref::<ScalarFunctionExpr>()
-                .is_some_and(|function| function.name() == "cypher_relationship_disjoint");
-            if !disjoint {
-                return None;
-            }
-            (peel_expand_transport(filter.children().first()?), true)
-        } else {
-            (peel_expand_transport(sort.children().first()?), false)
-        };
-    let expand2 = expand2_plan.downcast_ref::<ExpandExec>()?;
-    let expand1 = expand2.children().first()?.downcast_ref::<ExpandExec>()?;
-    if !expand1.is_intermediate_topology_only() || !expand2.is_destination_identity_only() {
+    let expand_plan = peel_expand_transport(sort.children().first()?);
+    let expand = expand_plan.downcast_ref::<ExpandExec>()?;
+    // Two-hop plans are handled separately; refuse stacked expands here.
+    if expand.children().first().is_some_and(|child| {
+        let peeled = peel_expand_transport(child);
+        peeled.downcast_ref::<ExpandExec>().is_some()
+    }) {
         return None;
     }
-    if expand1.rel_type_name() != expand2.rel_type_name()
-        || expand1.direction() != expand2.direction()
-        || expand2.direction() != Direction::Out
-    {
+    if !expand.is_destination_identity_only() || expand.direction() != Direction::Out {
         return None;
     }
-    let ordinal_identities = expand2.ordinal_identities()?;
-    if !crate::edge_count::has_complete_frontier(expand1)
+    let ordinal_identities = expand.ordinal_identities()?;
+    if !crate::edge_count::has_complete_frontier(expand)
         || !ordinal_identities.uuid_order_matches_ordinals()
     {
         return None;
     }
-    Some(OrderedTwoHopSpec {
+    Some(OrderedOneHopSpec {
         schema: plan.schema(),
         props: Arc::new(
             plan.properties()
@@ -175,61 +159,61 @@ fn detect_ordered_two_hop(plan: &Arc<dyn ExecutionPlan>) -> Option<OrderedTwoHop
                 .with_partitioning(Partitioning::UnknownPartitioning(1)),
         ),
         fetch,
-        rel_type_name: expand2.rel_type_name().to_owned(),
-        provider: Arc::clone(expand2.provider()),
+        rel_type_name: expand.rel_type_name().to_owned(),
+        direction: expand.direction(),
+        provider: Arc::clone(expand.provider()),
         ordinal_identities,
-        require_edge_disjoint,
     })
 }
 
-pub struct OrderedTwoHopPathCountExec {
+pub struct OrderedOneHopExec {
     schema: SchemaRef,
     props: Arc<PlanProperties>,
     fetch: usize,
     rel_type_name: String,
+    direction: Direction,
     provider: Arc<dyn AdjacencyProvider>,
     ordinal_identities: Arc<crate::V4OrdinalIdentitySession>,
-    require_edge_disjoint: bool,
     capture_epoch: u64,
 }
 
-impl OrderedTwoHopPathCountExec {
-    fn new(spec: OrderedTwoHopSpec) -> Self {
+impl OrderedOneHopExec {
+    fn new(spec: OrderedOneHopSpec) -> Self {
         Self {
             schema: spec.schema,
             props: spec.props,
             fetch: spec.fetch,
             rel_type_name: spec.rel_type_name,
+            direction: spec.direction,
             provider: spec.provider,
             ordinal_identities: spec.ordinal_identities,
-            require_edge_disjoint: spec.require_edge_disjoint,
             capture_epoch: demand::stamp_capture_epoch().unwrap_or(0),
         }
     }
 }
 
-impl fmt::Debug for OrderedTwoHopPathCountExec {
+impl fmt::Debug for OrderedOneHopExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OrderedTwoHopPathCountExec")
+        f.debug_struct("OrderedOneHopExec")
             .field("fetch", &self.fetch)
             .field("rel", &self.rel_type_name)
             .finish_non_exhaustive()
     }
 }
 
-impl DisplayAs for OrderedTwoHopPathCountExec {
+impl DisplayAs for OrderedOneHopExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "OrderedTwoHopPathCountExec: rel={}, fetch={}",
-            self.rel_type_name, self.fetch
+            "OrderedOneHopExec: rel={}, dir={:?}, fetch={}",
+            self.rel_type_name, self.direction, self.fetch
         )
     }
 }
 
-impl ExecutionPlan for OrderedTwoHopPathCountExec {
+impl ExecutionPlan for OrderedOneHopExec {
     fn name(&self) -> &str {
-        "OrderedTwoHopPathCountExec"
+        "OrderedOneHopExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -237,19 +221,20 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
+        Vec::new()
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        if !children.is_empty() {
-            return Err(DataFusionError::Internal(
-                "OrderedTwoHopPathCountExec has no children".into(),
-            ));
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(DataFusionError::Internal(
+                "OrderedOneHopExec has no children".into(),
+            ))
         }
-        Ok(self)
     }
 
     fn execute(
@@ -259,9 +244,10 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
     ) -> Result<SendableRecordBatchStream> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
-                "OrderedTwoHopPathCountExec only has partition 0, got {partition}"
+                "OrderedOneHopExec only has partition 0, got {partition}"
             )));
         }
+        // Inbound view: destinations ordered by node id, multiplicity = in-degree.
         let inbound = self
             .provider
             .adjacency(&self.rel_type_name, Direction::In)
@@ -269,53 +255,53 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
         let node_extent = inbound.node_extent();
 
         let mut remaining = self.fetch;
-        let mut uuids = Vec::new();
+        let mut destinations = Vec::new();
         let mut candidates = 0_u64;
         let epoch = self.capture_epoch;
         for destination in 0..node_extent {
             if remaining == 0 {
                 break;
             }
-            demand::record_adjacency_row(self.capture_epoch, 1);
-            let (path_count, examined) = count_two_hop_paths_to(
-                &inbound,
-                destination,
-                self.require_edge_disjoint,
-                remaining,
-            )
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
-            candidates = candidates.saturating_add(examined);
-            if path_count == 0 {
+            demand::record_adjacency_row(self.capture_epoch, 0);
+            let in_degree = inbound
+                .degree(destination)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            if in_degree == 0 {
                 continue;
             }
-            let lookup = self
-                .ordinal_identities
-                .lookup_node_uuids(&[destination])
-                .map_err(|error| DataFusionError::External(Box::new(error)))?;
-            demand::record_identity_projection(epoch, 1, 1, 1, &lookup.metrics);
-            let uuid = *lookup.values[0]
-                .as_ref()
-                .ok_or_else(|| DataFusionError::Internal("missing destination uuid".into()))?
-                .as_bytes();
-            let emit = usize_from_u64(path_count).min(remaining);
-            uuids.extend(std::iter::repeat_n(uuid, emit));
+            let emit = usize_from_u64(in_degree).min(remaining);
+            candidates = candidates.saturating_add(emit as u64);
+            destinations.push((destination, emit));
             remaining -= emit;
         }
 
-        demand::record_candidates(epoch, 1, usize_from_u64(candidates));
-        demand::record_emitted(epoch, 1, uuids.len());
+        demand::record_candidates(epoch, 0, usize_from_u64(candidates));
+        demand::record_emitted(epoch, 0, self.fetch - remaining);
 
-        let mut builder = FixedSizeBinaryBuilder::with_capacity(uuids.len(), 16);
-        for uuid in uuids {
-            builder
-                .append_value(uuid)
+        let mut builder = FixedSizeBinaryBuilder::with_capacity(self.fetch - remaining, 16);
+        for destinations in destinations.chunks(self.ordinal_identities.max_requested_ids()) {
+            let requested = destinations.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            let lookup = self
+                .ordinal_identities
+                .lookup_node_uuids(&requested)
                 .map_err(|error| DataFusionError::External(Box::new(error)))?;
+            demand::record_identity_projection(epoch, 0, requested.len(), 1, &lookup.metrics);
+            for ((_, copies), uuid) in destinations.iter().zip(&lookup.values) {
+                let uuid = uuid
+                    .as_ref()
+                    .ok_or_else(|| DataFusionError::Internal("missing destination uuid".into()))?;
+                for _ in 0..*copies {
+                    builder
+                        .append_value(uuid.as_bytes())
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                }
+            }
         }
         let column: ArrayRef = Arc::new(builder.finish());
         let batch =
             arrow::record_batch::RecordBatch::try_new(Arc::clone(&self.schema), vec![column])
                 .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
-        Ok(Box::pin(OrderedTwoHopStream {
+        Ok(Box::pin(OrderedOneHopStream {
             schema: Arc::clone(&self.schema),
             batch: Some(batch),
         }))
@@ -326,50 +312,12 @@ fn usize_from_u64(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-fn count_two_hop_paths_to(
-    inbound: &crate::Adjacency,
-    destination: u64,
-    require_edge_disjoint: bool,
-    remaining: usize,
-) -> std::result::Result<(u64, u64), graphforge_core::GfError> {
-    const CHUNK: usize = 256;
-    let mut count = 0_u64;
-    let mut examined = 0_u64;
-    let mut outer_offset = 0;
-    loop {
-        let outer = inbound.neighbor_chunk(destination, outer_offset, CHUNK)?;
-        if outer.is_empty() {
-            return Ok((count, examined));
-        }
-        outer_offset += outer.len();
-        for (r2, middle) in outer {
-            let mut inner_offset = 0;
-            loop {
-                let inner = inbound.neighbor_chunk(middle, inner_offset, CHUNK)?;
-                if inner.is_empty() {
-                    break;
-                }
-                inner_offset += inner.len();
-                for (r1, _) in inner {
-                    examined = examined.saturating_add(1);
-                    if !require_edge_disjoint || r1 != r2 {
-                        count = count.saturating_add(1);
-                        if count >= remaining as u64 {
-                            return Ok((count, examined));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct OrderedTwoHopStream {
+struct OrderedOneHopStream {
     schema: SchemaRef,
     batch: Option<arrow::record_batch::RecordBatch>,
 }
 
-impl Stream for OrderedTwoHopStream {
+impl Stream for OrderedOneHopStream {
     type Item = Result<arrow::record_batch::RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -377,7 +325,7 @@ impl Stream for OrderedTwoHopStream {
     }
 }
 
-impl RecordBatchStream for OrderedTwoHopStream {
+impl RecordBatchStream for OrderedOneHopStream {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }

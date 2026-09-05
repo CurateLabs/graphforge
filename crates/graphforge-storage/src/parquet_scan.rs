@@ -89,6 +89,35 @@ fn footer_num_rows(path: &Path) -> Option<usize> {
     usize::try_from(builder.metadata().file_metadata().num_rows()).ok()
 }
 
+/// Prove that a physical leaf emits every topology node ID exactly once.
+/// Only this module's unbounded topology scans and ordered partition wrapper
+/// qualify; filters, joins, limits and arbitrary sources do not.
+#[must_use]
+pub fn is_complete_node_id_scan(plan: &dyn ExecutionPlan, column: usize) -> bool {
+    if let Some(ordered) = plan.downcast_ref::<OrderedPartitionStreamExec>() {
+        return is_complete_node_id_scan(ordered.input.as_ref(), column);
+    }
+    let Some(scan) = plan.downcast_ref::<GraphForgeParquetExec>() else {
+        return false;
+    };
+    let base_column = match &scan.projection {
+        Some(indices) => indices.get(column).copied(),
+        None => Some(column),
+    };
+    scan.limit.is_none()
+        && scan.base_schema.as_ref() == crate::TOPOLOGY_NODES_SCHEMA.as_ref()
+        && base_column.is_some_and(|index| {
+            scan.base_schema
+                .fields()
+                .get(index)
+                .is_some_and(|field| field.name() == "node_id")
+        })
+        && scan
+            .fragments
+            .iter()
+            .all(|fragment| fragment.normalize_topology)
+}
+
 /// Session extension carrying the #337 I/O concurrency semaphore.
 #[derive(Clone, Debug)]
 pub struct IoConcurrencyExt(pub Arc<tokio::sync::Semaphore>);

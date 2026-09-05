@@ -56,10 +56,19 @@ fn measured_identity_query(forge: &GraphForge, query: &str) -> (Vec<Vec<u8>>, De
     let io = io_stats::snapshot();
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
-    let optimized_two_hop = query == ORDERED_TWO_HOP;
-    if optimized_two_hop {
+    let optimized_ordered = query == ORDERED_ONE_HOP || query == ORDERED_TWO_HOP;
+    if optimized_ordered {
         assert!(snapshot.sorts.is_empty(), "{snapshot:#?}");
-        assert!(snapshot.operator_rss.is_empty(), "{snapshot:#?}");
+        assert_eq!(snapshot.operator_rss.len(), 1, "{snapshot:#?}");
+        assert_eq!(
+            snapshot.operator_rss[0].operator,
+            if query == ORDERED_ONE_HOP {
+                "ordered_one_hop"
+            } else {
+                "ordered_two_hop"
+            },
+            "{snapshot:#?}"
+        );
     } else {
         assert_eq!(snapshot.sorts.len(), 1, "{snapshot:#?}");
         let sort = &snapshot.sorts[0];
@@ -343,10 +352,14 @@ fn stable_fixture_uuid(kind: u8, ordinal: usize) -> Uuid {
 }
 
 fn generate_semantic_v4_graph(dir: &Path) -> Vec<Uuid> {
-    let workspace = TempDir::new().unwrap();
     let nodes = (1..=3)
         .map(|ordinal| stable_fixture_uuid(3, ordinal))
         .collect::<Vec<_>>();
+    generate_semantic_v4_graph_with_nodes(dir, nodes)
+}
+
+fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uuid> {
+    let workspace = TempDir::new().unwrap();
     let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
     for (node, name) in nodes.iter().zip(["A", "B", "C"]) {
         writer.create_node(*node, NODE_TYPE).unwrap();
@@ -379,6 +392,332 @@ fn generate_semantic_v4_graph(dir: &Path) -> Vec<Uuid> {
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace_v4(dir, workspace.path());
     nodes
+}
+
+#[test]
+fn regression1094_property_free_shortcuts() {
+    let _guard = IO_GUARD.lock().unwrap();
+    for ordinals in [[3, 1, 2], [1, 2, 3]] {
+        let dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let nodes = ordinals.map(|ordinal| stable_fixture_uuid(3, ordinal));
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        for node in nodes {
+            writer.create_node(node, NODE_TYPE).unwrap();
+        }
+        for (ordinal, (source, destination)) in
+            [(0, 1), (0, 1), (0, 0), (1, 2)].into_iter().enumerate()
+        {
+            writer
+                .create_edge(
+                    stable_fixture_uuid(4, ordinal + 1),
+                    "LINK",
+                    &nodes[source],
+                    &nodes[destination],
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        build_adjacency_index(workspace.path(), TS).unwrap();
+        project_fixture::publish_graph_workspace_v4(dir.path(), workspace.path());
+        let forge = open_forge(dir.path());
+        let mut failures = Vec::new();
+        for (query, expected) in [
+            ("MATCH ()-[r]->() RETURN count(r) AS n", 4),
+            ("MATCH ()-[r]->() RETURN count(NULL) AS n", 0),
+            ("MATCH ()-[r]->() RETURN count(1) AS n", 4),
+            ("MATCH (a:Missing)-[r]->() RETURN count(r) AS n", 0),
+            ("MATCH ()-[r]-() RETURN count(r) AS n", 7),
+            (
+                "MATCH ()-[r]->() RETURN count(CASE WHEN true THEN NULL ELSE 1 END) AS n",
+                0,
+            ),
+            (
+                "MATCH (a) WITH a LIMIT 0 MATCH (a)-[r]->(b) RETURN count(r) AS n",
+                0,
+            ),
+        ] {
+            let plan = forge.explain(query).unwrap();
+            let should_optimize = query == "MATCH ()-[r]->() RETURN count(r) AS n"
+                || query == "MATCH ()-[r]->() RETURN count(1) AS n";
+            assert_eq!(plan.contains("EdgeCountExec"), should_optimize, "{plan}");
+            let result = forge.execute(query).unwrap();
+            let actual = int64_values(&result, "n");
+            if actual != vec![expected] {
+                failures.push(format!("{query}: {actual:?} != {expected}; {plan}"));
+            }
+        }
+        for query in [
+            "MATCH (a)-[r]->(b) RETURN b.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            "MATCH (a)-[r]->(b)-[s]->(c) RETURN c.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+        ] {
+            let plan = forge.explain(query).unwrap();
+            assert_eq!(
+                plan.contains("OrderedOneHopExec") || plan.contains("OrderedTwoHopPathCountExec"),
+                ordinals == [1, 2, 3],
+                "{plan}"
+            );
+            let (result, evidence) = demand::capture(|| forge.execute(query));
+            let result = result.unwrap();
+            if ordinals == [1, 2, 3] && query.contains("[s]") {
+                // First destination has only its self-loop pair, which must be
+                // counted as examined even though disjointness rejects it.
+                assert_eq!(
+                    evidence.hops.values().next().unwrap().candidates_generated,
+                    3
+                );
+            }
+            if result
+                .batches
+                .iter()
+                .any(|batch| batch.column_by_name("renamed").is_none())
+            {
+                failures.push(format!("{query}: wrong batch schema; {plan}"));
+            }
+            let actual = result
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    let values = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .unwrap();
+                    (0..batch.num_rows())
+                        .map(|row| values.value(row).to_vec())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let destinations = if query.contains("[s]") {
+                [nodes[2], nodes[2], nodes[1], nodes[1]]
+            } else {
+                [nodes[1], nodes[1], nodes[0], nodes[2]]
+            };
+            let mut expected = destinations.map(|uuid| uuid.as_bytes().to_vec()).to_vec();
+            expected.sort();
+            expected.truncate(2);
+            if actual != expected {
+                failures.push(format!("{query}: {actual:?} != {expected:?}; {plan}"));
+            }
+        }
+        if ordinals == [1, 2, 3] {
+            for (query, destinations) in [
+                (
+                    "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 9223372036854775807",
+                    [nodes[0], nodes[1], nodes[1], nodes[2]],
+                ),
+                (
+                    "MATCH (a)-[r]->(b)-[s]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 9223372036854775807",
+                    [nodes[1], nodes[1], nodes[2], nodes[2]],
+                ),
+            ] {
+                let plan = forge.explain(query).unwrap();
+                assert!(
+                    plan.contains("OrderedOneHopExec")
+                        || plan.contains("OrderedTwoHopPathCountExec"),
+                    "{plan}"
+                );
+                let result = forge.execute(query).unwrap();
+                assert_eq!(
+                    fixed_binary_values(&result, "id"),
+                    destinations.map(|uuid| uuid.as_bytes().to_vec())
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn regression1094_recount_and_ordered_frontier_semantics() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let nodes = generate_semantic_v4_graph_with_nodes(
+        dir.path(),
+        [3, 1, 2]
+            .map(|ordinal| stable_fixture_uuid(3, ordinal))
+            .to_vec(),
+    );
+    let forge = open_forge(dir.path());
+    let mut failures = Vec::new();
+    for (query, expected) in [
+        ("MATCH ()-[r:LINK]->() RETURN count(r) AS n", 4),
+        ("MATCH ()-[r:LINK]->() RETURN count(NULL) AS n", 0),
+        ("MATCH ()-[r:LINK]->() RETURN count(1) AS n", 4),
+        (
+            "MATCH (a)-[r:LINK]->() WHERE a.name = 'B' RETURN count(r) AS n",
+            1,
+        ),
+        ("MATCH (a:Missing)-[r:LINK]->() RETURN count(r) AS n", 0),
+        ("MATCH ()-[r:LINK]-() RETURN count(r) AS n", 7),
+    ] {
+        let plan = forge.explain(query).unwrap();
+        match forge.execute(query) {
+            Ok(result) => {
+                let actual = int64_values(&result, "n");
+                if actual != vec![expected] {
+                    failures.push(format!("{query}: {actual:?} != {expected}; {plan}"));
+                }
+            }
+            Err(error) => failures.push(format!("{query}: {error}; {plan}")),
+        }
+    }
+    for (query, expected) in [
+        (
+            "MATCH (a)-[:LINK]->(b) RETURN b.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            vec![nodes[1], nodes[1]],
+        ),
+        (
+            "MATCH (a)-[:LINK]->(b) WHERE a.name = 'B' RETURN b.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            vec![nodes[2]],
+        ),
+        (
+            "MATCH (a:Missing)-[:LINK]->(b) RETURN b.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            vec![],
+        ),
+        (
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN c.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            vec![nodes[1], nodes[1]],
+        ),
+        (
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) WHERE a.name = 'B' RETURN c.node_uuid AS renamed ORDER BY renamed LIMIT 2",
+            vec![],
+        ),
+    ] {
+        let plan = forge.explain(query).unwrap();
+        match forge.execute(query) {
+            Ok(result) => {
+                if result
+                    .batches
+                    .iter()
+                    .any(|batch| batch.column_by_name("renamed").is_none())
+                {
+                    failures.push(format!("{query}: incorrect batch schema; {plan}"));
+                }
+                let actual = result
+                    .batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let values = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap();
+                        (0..batch.num_rows())
+                            .map(|row| values.value(row).to_vec())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let expected = expected
+                    .iter()
+                    .map(|uuid| uuid.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                if actual != expected {
+                    failures.push(format!("{query}: {actual:?} != {expected:?}; {plan}"));
+                }
+            }
+            Err(error) => failures.push(format!("{query}: {error}; {plan}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn regression1094_identity_lookup_limit_is_chunked() {
+    let _guard = IO_GUARD.lock().unwrap();
+    let dir = TempDir::new().unwrap();
+    let limit = graphforge_storage::V4OrdinalIdentityLimits::default().max_requested + 1;
+    generate_graph(dir.path(), limit + 1, 1, true);
+    let forge = open_forge(dir.path());
+    let query =
+        format!("MATCH (a)-[r]->(b) RETURN b.node_uuid AS renamed ORDER BY renamed LIMIT {limit}");
+    assert!(forge.explain(&query).unwrap().contains("OrderedOneHopExec"));
+    let (result, evidence) = demand::capture(|| forge.execute(&query));
+    let expected = (0..limit)
+        .map(|index| fixture_node_uuid(index).as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_binary_values(&result.unwrap(), "renamed"), expected);
+    let hop = evidence.hops.values().next().unwrap();
+    assert_eq!(hop.projected_chunks, 2);
+    assert_eq!(hop.projected_rows, limit as u64);
+    assert_eq!(hop.candidates_generated, limit as u64);
+}
+
+#[test]
+fn regression1094_sharded_hubs_keep_one_and_two_hop_work_bounded() {
+    let _guard = IO_GUARD.lock().unwrap();
+    for degree in [16_384, 32_768] {
+        let dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        let nodes = [stable_fixture_uuid(3, 1), stable_fixture_uuid(3, 2)];
+        let mut writer =
+            GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+        for node in nodes {
+            writer.create_node(node, NODE_TYPE).unwrap();
+        }
+        writer.flush().unwrap();
+        for start in (0..degree * 2).step_by(WRITE_WINDOW) {
+            let mut writer =
+                GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
+            writer.register_existing_endpoints(&nodes).unwrap();
+            for index in start..(start + WRITE_WINDOW).min(degree * 2) {
+                let source = usize::from(index >= degree);
+                writer
+                    .create_edge(
+                        stable_fixture_uuid(4, index + 1),
+                        "LINK",
+                        &nodes[source],
+                        &nodes[1 - source],
+                    )
+                    .unwrap();
+            }
+            writer.flush().unwrap();
+        }
+        let mut options = graphforge_storage::adjacency::AdjacencyBuildOptions::default();
+        options.shard_max_edges = 4_096;
+        let (_, build) = graphforge_storage::adjacency::build_adjacency_index_into_with_metrics(
+            workspace.path(),
+            workspace.path(),
+            TS,
+            &options,
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(build.peak_shard_edges <= 4_096);
+        project_fixture::publish_graph_workspace_v4(dir.path(), workspace.path());
+        let forge = open_forge(dir.path());
+        for query in [ORDERED_ONE_HOP, ORDERED_TWO_HOP] {
+            let plan = forge.explain(query).unwrap();
+            assert!(
+                !plan.contains("SortExec") && !plan.contains("ExpandExec"),
+                "{plan}"
+            );
+            let (result, evidence) = demand::capture(|| forge.execute(query));
+            assert_eq!(
+                fixed_binary_values(&result.unwrap(), "id"),
+                vec![nodes[0].as_bytes().to_vec(); LIMIT]
+            );
+            let hop = evidence.hops.values().next().unwrap();
+            assert_eq!(hop.candidates_generated, LIMIT as u64);
+            assert!(hop.adjacency_rows_examined <= 2);
+            assert_eq!(
+                (hop.input_batches, hop.input_rows, hop.projected_rows),
+                (0, 0, 1)
+            );
+            assert_eq!(evidence.operator_rss.len(), 1);
+            assert!(evidence.operator_rss[0].before_bytes > 0 || !cfg!(target_os = "linux"));
+            println!(
+                "hub degree={degree} query={query} rss={:?}",
+                evidence.operator_rss
+            );
+        }
+        let reopened = open_forge(dir.path());
+        let result = reopened
+            .execute("MATCH ()-[r]->() RETURN count(r) AS total")
+            .unwrap();
+        assert_eq!(int64_values(&result, "total"), vec![(degree * 2) as i64]);
+    }
 }
 
 /// Build a graph whose first productive edge ids are localized but whose
@@ -613,11 +952,12 @@ fn scale_fixture_uses_bounded_bulk_publications() {
 
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
-    assert!(plan.contains("adjacency=hit"), "{plan}");
-    assert!(plan.contains("identity=v4"), "{plan}");
+    assert!(plan.contains("OrderedOneHopExec"), "{plan}");
     io_stats::reset();
-    let result = forge.execute(ORDERED_ONE_HOP).unwrap();
+    let (result, demand) = demand::capture(|| forge.execute(ORDERED_ONE_HOP));
+    let result = result.unwrap();
     assert_eq!(result.stats.rows_produced, LIMIT as u64);
+    assert!(demand.hops.values().all(|hop| hop.identity_read_calls > 0));
     assert_projected_identity_io(&io_stats::snapshot());
 }
 
@@ -697,10 +1037,11 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
     generate_graph(dir.path(), nodes, FAN_OUT, true);
     let forge = open_forge(dir.path());
     let plan = forge.explain(ORDERED_ONE_HOP).unwrap();
-    assert!(plan.contains("ExpandExec"), "{plan}");
-    assert!(plan.contains("identity=v4"), "{plan}");
-    assert!(plan.contains("SortExec"), "{plan}");
-    assert!(plan.contains("projection=1"), "{plan}");
+    assert!(plan.contains("OrderedOneHopExec"), "{plan}");
+    assert!(
+        !plan.contains("ExpandExec") && !plan.contains("SortExec"),
+        "{plan}"
+    );
 
     io_stats::reset();
     demand::reset();
@@ -726,13 +1067,62 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
     assert_eq!(io.edge_full_reads + io.edge_filtered_reads, 0, "{io:#?}");
     assert_eq!(io.node_full_reads + io.node_filtered_reads, 0, "{io:#?}");
     let hop = snapshot.hops.values().next().expect("one projected hop");
-    assert!(hop.projected_chunks > 1, "{snapshot:#?}");
-    assert_eq!(hop.projected_rows, (nodes * FAN_OUT) as u64);
+    assert_eq!(hop.projected_chunks, 1, "{snapshot:#?}");
+    assert_eq!(hop.projected_rows, LIMIT.div_ceil(FAN_OUT) as u64);
+    assert_eq!(hop.candidates_generated, LIMIT as u64);
+    // Bulk construction assigns IDs from one; the first degree probe is empty.
+    assert_eq!(
+        hop.adjacency_rows_examined,
+        LIMIT.div_ceil(FAN_OUT) as u64 + 1
+    );
+    assert_eq!(hop.input_batches, 0);
+    assert_eq!(hop.input_rows, 0);
+    assert!(snapshot.sorts.is_empty());
+    assert_eq!(snapshot.operator_rss.len(), 1);
+    assert_eq!(snapshot.operator_rss[0].operator, "ordered_one_hop");
     assert_eq!(hop.projected_columns, 1);
     assert_eq!(hop.identity_per_record_seeks, 0);
     assert!(hop.identity_read_calls > 0, "{snapshot:#?}");
     assert!(hop.identity_bytes_read > 0, "{snapshot:#?}");
     assert!(hop.identity_peak_buffer_bytes <= 16 * 1024 * 1024);
+
+    let recount_query = "MATCH ()-[r]->() RETURN count(r) AS total";
+    assert!(
+        forge
+            .explain(recount_query)
+            .unwrap()
+            .contains("EdgeCountExec")
+    );
+    io_stats::reset();
+    let (recount, recount_demand) = demand::capture(|| forge.execute(recount_query));
+    assert_eq!(
+        int64_values(&recount.unwrap(), "total"),
+        vec![(nodes * FAN_OUT) as i64]
+    );
+    let recount_io = io_stats::snapshot();
+    assert_eq!(
+        recount_io.edge_full_reads
+            + recount_io.edge_filtered_reads
+            + recount_io.node_full_reads
+            + recount_io.node_filtered_reads,
+        0
+    );
+    let count_hop = recount_demand.hops.values().next().unwrap();
+    assert_eq!(
+        (
+            count_hop.candidates_generated,
+            count_hop.input_batches,
+            count_hop.input_rows,
+            count_hop.rows_emitted
+        ),
+        (0, 0, 0, 1)
+    );
+    assert_eq!(recount_demand.operator_rss.len(), 1);
+    assert_eq!(recount_demand.operator_rss[0].operator, "edge_count");
+    println!(
+        "recount nodes={nodes} rss={:?}",
+        recount_demand.operator_rss
+    );
 
     let repeated = forge.execute(ORDERED_ONE_HOP).unwrap();
     assert_eq!(
@@ -759,7 +1149,7 @@ fn destination_uuid_projection_uses_authenticated_legacy_hydration_without_v4_au
 }
 
 #[test]
-fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
+fn ordered_destination_uuid_projection_is_exact_and_bounded_at_1x_2x_4x() {
     let _guard = IO_GUARD.lock().unwrap();
     let mut work = Vec::new();
     for nodes in [4_096, 8_192, 16_384] {
@@ -767,30 +1157,15 @@ fn ordered_destination_uuid_projection_is_exact_and_linear_at_1x_2x_4x() {
         let hop = snapshot.hops.values().next().unwrap();
         work.push((
             hop.projected_rows,
-            hop.identity_bytes_read,
-            hop.identity_read_calls,
-            hop.identity_revalidation_calls,
-            snapshot.sorts[0].fetch,
-            snapshot.sorts[0].retained_bytes,
+            hop.candidates_generated,
+            hop.adjacency_rows_examined,
         ));
-    }
-    for pair in work.windows(2) {
-        let (prior_rows, prior_bytes, prior_calls, prior_revalidation, prior_fetch, prior_retained) =
-            pair[0];
-        let (next_rows, next_bytes, next_calls, next_revalidation, next_fetch, next_retained) =
-            pair[1];
-        assert_eq!(next_rows, prior_rows * 2, "{work:?}");
-        // Fixed block/range boundaries may add one coalesced read, but neither
-        // bytes nor calls may acquire a chunk-times-graph multiplier.
-        assert!(next_bytes <= prior_bytes * 2 + 2 * 1024 * 1024, "{work:?}");
-        assert!(next_calls <= prior_calls * 2 + 2, "{work:?}");
-        assert_eq!((prior_fetch, next_fetch), (Some(LIMIT), Some(LIMIT)));
-        assert_eq!((prior_retained, next_retained), (0, 0));
-        assert!(
-            next_revalidation <= prior_revalidation * 2 + 2,
-            "session authentication must be linear in retained artifacts: {work:?}"
+        println!(
+            "ordered nodes={nodes} identity_bytes={} identity_calls={} rss={:?}",
+            hop.identity_bytes_read, hop.identity_read_calls, snapshot.operator_rss
         );
     }
+    assert!(work.windows(2).all(|pair| pair[0] == pair[1]), "{work:?}");
 }
 
 #[test]
@@ -818,13 +1193,20 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
             .unwrap();
         assert_eq!(receipt.evidence.contract, "graphforge-query-evidence/1");
         assert_eq!(receipt.evidence.hops.len(), 1);
-        if ordinal == 0 {
-            assert_eq!(receipt.evidence.sorts.len(), 1);
-            assert_eq!(receipt.evidence.sorts[0].fetch_rows, Some(LIMIT));
-            assert_eq!(receipt.evidence.sorts[0].retained_bytes, 0);
-        } else {
-            assert!(receipt.evidence.sorts.is_empty());
-        }
+        assert!(receipt.evidence.sorts.is_empty());
+        assert_eq!(receipt.evidence.operator_rss.len(), 1);
+        assert_eq!(
+            receipt.evidence.operator_rss[0].operator,
+            if ordinal == 0 {
+                "ordered_one_hop"
+            } else {
+                "ordered_two_hop"
+            }
+        );
+        println!(
+            "ordered evidence {}",
+            serde_json::to_string(&receipt.evidence).unwrap()
+        );
         assert!(
             receipt.evidence.memory_reserved_after
                 <= receipt
@@ -1209,13 +1591,18 @@ fn selective_filter_tops_up_without_crossing_blockers() {
     for query in [
         "MATCH ()-[r]->(b) RETURN b.node_id AS id ORDER BY id DESC LIMIT 5",
         "MATCH ()-[r]->(b) RETURN DISTINCT b.node_id AS id LIMIT 5",
-        "MATCH ()-[r]->() RETURN count(r) AS total LIMIT 1",
     ] {
         let plan = forge.explain(query).unwrap();
         assert!(plan.contains("demand_batch=all"), "{plan}");
         assert!(plan.contains("cancel=none"), "{plan}");
         assert!(!plan.contains("DemandGuardExec"), "{plan}");
     }
+
+    let recount = forge
+        .explain("MATCH ()-[r]->() RETURN count(r) AS total LIMIT 1")
+        .unwrap();
+    assert!(recount.contains("EdgeCountExec"), "{recount}");
+    assert!(!recount.contains("ExpandExec"), "{recount}");
 
     let unlimited = forge
         .explain("MATCH ()-[r1]->()-[r2]->() RETURN r1, r2")
