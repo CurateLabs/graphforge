@@ -185,7 +185,9 @@ and [testing.md](testing.md) for command recipes and suite layout.
 
 ### PR Size Guidelines
 
-Keep PRs small and focused. CI tools work best with small, reviewable diffs.
+Keep each PR focused on one issue and one concern, with the tests needed to
+prove its acceptance criteria. Size is advisory: split XL work or independently
+reviewable concerns when the review benefit justifies another CI cycle.
 
 **Good:**
 - Single feature or bug fix
@@ -196,15 +198,20 @@ Keep PRs small and focused. CI tools work best with small, reviewable diffs.
 - Multiple unrelated changes
 - Refactoring + new feature + bug fixes combined
 
-**Example — breaking up a Rust feature:**
+For example, a bounded Cypher feature may need parser, IR, lowering, execution,
+and regression-test changes in one PR to demonstrate working behavior. Do not
+split solely at crate boundaries or defer a change's acceptance tests to a
+later PR. When a split is justified, each PR must have independently verifiable
+acceptance criteria, and dependencies must be explicit.
 
-```
-PR 1: "graphforge-cypher: add WITH clause grammar and AST node"
-PR 2: "graphforge-ir: add WithOp graph IR operator"
-PR 3: "graphforge-rel: lower WITH to DataFusion logical plan"
-PR 4: "graphforge-exec: integrate WITH in execution pipeline"
-PR 5: "tests: WITH clause unit + integration + TCK"
-```
+### Merge cadence
+
+Finish and merge reviewed work before starting more implementation. Coordinated
+agent teams have a limit of three unmerged changes across all agents, including
+draft PRs and implemented local branches. The coordinating agent owns the merge
+queue; prioritize existing PRs and shared CI blockers, and integrate dependent
+changes in order. See [the work-in-progress rules in AGENTS.md](../../AGENTS.md#finish-and-merge-before-starting-more-work)
+for counting, the bounded blocker exception, and handling an inherited backlog.
 
 ### No Bandaid Fixes
 

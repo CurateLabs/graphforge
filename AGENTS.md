@@ -16,6 +16,15 @@ Every change follows:
 
 Narrow sub-issues may split a canonical issue only to satisfy existing acceptance criteria, isolate a verified blocker, or separate an XL independently reviewable concern. They must be native sub-issues, block the canonical issue, avoid overlap, and never expand scope. The canonical issue remains the close gate.
 
+### Finish and merge before starting more work
+
+- Limit a coordinated agent team's work in progress to **three unmerged changes total**, across all agents and worktrees. Count open PRs (including drafts) and implemented local branches without PRs. Multiple branches for one concern count once; unrelated contributors' and automated dependency PRs do not consume these slots.
+- Before starting or delegating implementation, inspect the live PR queue and existing local work. If the team is at or above the limit, review, test, fix, and merge existing changes before starting another concern. Preserve inherited work; do not close PRs or hide work in local branches to satisfy the limit.
+- The coordinating agent owns integration. Prioritize a PR that can meet the merge gate now, respecting live dependencies, and merge it as soon as the gate passes and merge authorization exists. Do not wait for the milestone or the rest of the batch to finish. Recheck the queue after each merge and before assigning more implementation.
+- Refresh and run final integration CI for the next merge candidate first. After it merges, refresh the next candidate against current `main`. Avoid rebasing and restarting CI across the entire queue after every merge. Start dependent implementation after its prerequisite merges; use waiting time for review, diagnosis, or acceptance-test planning.
+- When a shared build or CI defect blocks the queue, prioritize its root-cause fix. A bounded fix needed to unblock an existing change may temporarily exceed the limit; identify the blocked PRs and drain the queue after the fix lands. This exception does not permit unrelated new work.
+- Delegate review and validation of existing changes before opening more implementation streams. Report progress in merged outcomes and concrete remaining blockers; a completed branch or green draft is still unfinished work.
+
 ## Architecture
 
 Rust owns behavior. Python and Node are thin bindings—never fallback engines.
