@@ -338,6 +338,44 @@ class GdcContractTests(unittest.TestCase):
             validate_acquisition(self.static_pin, acquisition, self.fixtures / "identity-drift")
         self.assertEqual(raised.exception.cause, "identity_drift")
 
+    def test_content_addressed_tool_identity_is_narrowly_snb_bi_only(self) -> None:
+        pin_path = self.root / "profiles" / "gdc" / "snb-bi-identity.json"
+        pin = load_pinned_identity(pin_path)
+        self.assertEqual(
+            pin["generator"]["provenance_kind"],
+            "content_addressed_synthetic",
+        )
+        self.assertNotIn("release", pin["generator"])
+        self.assertNotIn("commit", pin["generator"])
+        self.assertEqual(pin["driver"]["provenance_kind"], "repository_source")
+        self.assertNotIn("release", pin["driver"])
+        self.assertNotIn("commit", pin["driver"])
+
+        acquisition_path = self.fixtures / "snb-bi-tiny" / "compatible" / "acquisition.json"
+        acquisition = load_acquisition(acquisition_path)
+        evidence = validate_acquisition(
+            pin,
+            acquisition,
+            self.fixtures / "snb-bi-tiny" / "compatible",
+        )
+        self.assertEqual(evidence["status"], "passed")
+
+        pin_schema = Draft202012Validator(
+            json.loads(
+                (self.root / "schemas" / "gdc-pinned-identity.json").read_text(encoding="utf-8")
+            )
+        )
+        foreign_pin = copy.deepcopy(pin)
+        foreign_pin["suite_id"] = "graphalytics"
+        self.assertTrue(list(pin_schema.iter_errors(foreign_pin)))
+
+        acquisition_schema = Draft202012Validator(
+            json.loads((self.root / "schemas" / "gdc-acquisition.json").read_text(encoding="utf-8"))
+        )
+        foreign_acquisition = copy.deepcopy(acquisition)
+        foreign_acquisition["suite_id"] = "graphalytics"
+        self.assertTrue(list(acquisition_schema.iter_errors(foreign_acquisition)))
+
     def test_inventory_only_spb_shares_contracts_without_workload_assets(self) -> None:
         pin = load_pinned_identity(self.root / "profiles" / "gdc" / "spb-identity.json")
         acquisition = {

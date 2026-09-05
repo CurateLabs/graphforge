@@ -110,14 +110,34 @@ PYTHONPATH=harness GRAPHFORGE_GDC_FINBENCH_TRANSACTION_BIN=target/debug/graphfor
 
 Per-suite adapters own workload semantics through their own Rust runner and
 harness module. The SNB BI suite (`gdc_snb_bi`) maps the 20 `BI*` analytical
-reads onto the public Cypher / analyst-verb surface, fails closed on weighted
-shortest-path reads and the `INS*`/`DEL*` batch maintenance stream, validates
-reads against pinned references, and records per-phase resources (load, query,
-spill, RSS, I/O) in a section kept distinct from correctness. Its evidence
-stamps `certification: false`:
+reads onto the public Cypher / analyst-verb surface and fails closed on weighted
+shortest-path reads and the `INS*`/`DEL*` batch maintenance stream. The
+`snb-bi-tiny` fixtures are legacy static validator-contract fixtures: their
+historical `snb-bi-sf0.003` identifier is not an official SF0.003 dataset, their
+`.graph`/`.out` bytes are synthetic replay inputs, and they provide no live
+engine evidence.
+
+The explicit `snb-bi-live` lane closes that static-replay gap for BI2. It loads
+the committed deterministic seed into `GraphForge::new(None)`, executes the BI2
+shape through `graphforge_api::GraphForge::execute_with_params`, validates the
+official `diff DESC, tag.name ASC` total order in the same trusted Rust process,
+and directly constructs the evidence. The command accepts no caller result
+rows, source label, parameter digest, or producer field. `run-static-suite` is
+the separate legacy replay command and cannot emit live evidence.
+
+The expected rows are independently derived from the seed. `identity.json`
+pins the complete closed operation context, official SNB specification and BI
+query release/commit, typed parameter names/kinds/values, content-addressed
+synthetic fixture, reference, normalization, and internal Rust driver contract.
+Runner evidence binds its actual executable digest; no nonexistent GraphForge
+release or commit is used. This lane does not claim LDBC datagen, official
+parameters, SF0.003, or certification. Live resource timings and row counts
+remain separate from correctness, and unobserved spill/RSS/I/O fields are named
+rather than invented. All evidence stamps `certification: false`:
 
 ```bash
-PYTHONPATH=harness uv run --locked python -m unittest tests.test_gdc_snb_bi
+PYTHONPATH=benchmarks/harness uv run python -m unittest \
+  benchmarks.tests.test_gdc_snb_bi
 ```
 
 ## Public-interface certification runner
@@ -309,8 +329,8 @@ make -C benchmarks smoke
 The smoke installs only the locked benchmark environment, imports ReFrame and
 BenchExec, discovers the checked-in fixtures, runs the Python unit tests, and
 checks the Rust runners and their public-facade dependency boundary. This includes
-the bounded in-memory Graphalytics fixture through the real GraphForge API. It
-does not start a provider or execute the host scale ladder.
+the bounded in-memory Graphalytics and SNB BI2 fixtures through the real GraphForge
+API. It does not start a provider or execute the host scale ladder.
 
 ## Native local admission
 

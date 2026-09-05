@@ -2,29 +2,31 @@
   "schema": "graphforge-gdc-acquisition/1",
   "suite_id": "snb-bi",
   "recorded_spec": {
-    "name": "ldbc-snb",
-    "source": "https://ldbcouncil.org/benchmarks/snb/",
-    "release": "engineering-pin",
-    "commit": null
+    "name": "ldbc_snb_docs",
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
   },
   "recorded_generator": {
-    "name": "ldbc_snb_datagen_spark",
-    "source": "https://github.com/ldbc/ldbc_snb_datagen_spark",
-    "release": null,
-    "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "name": "graphforge_synthetic_snb_bi_fixture",
+    "source": "https://github.com/CurateLabs/graphforge",
+    "provenance_kind": "content_addressed_synthetic",
+    "content_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
+    "content_description": "exact committed synthetic static fixture bytes"
   },
   "recorded_driver": {
-    "name": "ldbc_snb_bi_driver",
-    "source": "https://github.com/ldbc/ldbc_snb_bi_opensource",
-    "release": null,
-    "commit": "dddddddddddddddddddddddddddddddddddddddd"
+    "name": "graphforge_benchmark_gdc_snb_bi",
+    "source": "https://github.com/CurateLabs/graphforge",
+    "provenance_kind": "repository_source",
+    "content_sha256": "377f162c73b34c877420bc860b6c0a349de78bdbea4ccf2548bbc50612e808d2",
+    "content_description": "sha256 of sorted runner Cargo.toml and src path-content framing"
   },
   "assets": [
     {
       "id": "snb-bi-sf0.003",
       "path": "snb-bi-sf0.003.graph",
       "checksum_sha256": "c0fd57903065bb4950244cc77023e9ce0803f723596922b114141f190ea521d8",
-      "license": "LDBC-SNB-terms",
+      "license": "Apache-2.0",
       "acquisition": "fixture"
     }
   ],

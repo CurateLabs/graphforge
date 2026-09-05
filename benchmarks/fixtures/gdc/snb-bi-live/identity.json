@@ -1,0 +1,57 @@
+{
+  "schema": "graphforge-gdc-snb-bi-live-identity/2",
+  "suite_id": "snb-bi",
+  "operation": "BI2",
+  "source_mode": "runner_owned_rust_api",
+  "certification": false,
+  "upstream_spec": {
+    "source": "https://github.com/ldbc/ldbc_snb_docs",
+    "release": "v2.2.4",
+    "commit": "5f7956e07a214373c363b371a3b88bc83ddcd118"
+  },
+  "upstream_query": {
+    "source": "https://github.com/ldbc/ldbc_snb_bi",
+    "release": "v1.0.0",
+    "commit": "abf8cd4862f2b96ba9267e6298a1f7402439040b",
+    "path": "cypher/queries/bi-2.cypher"
+  },
+  "fixture": {
+    "dataset_id": "snb-bi-synthetic-minimal",
+    "kind": "synthetic_minimal_snb_shaped",
+    "provenance_kind": "content_addressed_committed_fixture",
+    "seed": 963,
+    "scale_factor": null,
+    "path": "seed.json",
+    "sha256": "9dc8c9987d4ce403a30808c268d25a6f9fdb451b7a5c68fbd2d37d700b4cb88e"
+  },
+  "parameters": {
+    "kind": "typed_internal_deterministic_bi2_parameters",
+    "path": "parameters.json",
+    "file_sha256": "55a5c78e5573909531b6290a38ccc7d670b1a8eb09136ebfc4b4668c45646d7a",
+    "names_kinds_values_sha256": "79ef56283a4ac9320c82415977eb1f2c27574970bccb247e04cfaf02e59384b5"
+  },
+  "reference": {
+    "authority": "independent_semantic_derivation_from_seed",
+    "captured_from_engine": false,
+    "validation": "exact_order_numeric_text_normalized",
+    "path": "expected-bi2.ref",
+    "sha256": "bd4c037d3aae1881e9329e148743d153d4bf671afc1f35d3d7ab4eaab0748d7b"
+  },
+  "driver": {
+    "kind": "internal_rust_public_api_driver",
+    "source_mode": "runner_executes_query_no_caller_result",
+    "interface": "graphforge_api::GraphForge::execute_with_params",
+    "durable": false,
+    "validator": "same_process_exact_order"
+  },
+  "normalization": {
+    "upstream_temporal_window": "$date plus 100-day durations",
+    "internal_equivalent": "precomputed integer day boundaries [0,100), [100,200)",
+    "reason": "exercise supported Cypher while not claiming temporal-literal parity",
+    "result_order": [
+      "diff DESC",
+      "tag.name ASC"
+    ],
+    "numeric_format": "base10_i64"
+  }
+}

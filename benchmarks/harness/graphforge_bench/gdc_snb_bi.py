@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from typing import Any
@@ -35,6 +36,9 @@ OPERATIONS = ANALYTICAL_READS + BATCH_INSERTS + BATCH_DELETES
 JOB_SCHEMA = "graphforge-gdc-snb-bi-job/1"
 EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-evidence/1"
 RESOURCE_SCHEMA = "graphforge-gdc-snb-bi-resources/1"
+LIVE_EVIDENCE_SCHEMA = "graphforge-gdc-snb-bi-live-evidence/2"
+LIVE_OPERATION = "BI2"
+LIVE_FIXTURE = "snb-bi-live"
 
 BATCH_UPDATE_CAUSE = "bi_batch_update_stream_not_exposed"
 WEIGHTED_PATH_CAUSE = "weighted_shortest_path_not_exposed"
@@ -82,6 +86,66 @@ def _run_runner(args: list[str], root: Path | None = None) -> subprocess.Complet
     )
 
 
+def _raise_live_error(completed: subprocess.CompletedProcess[str]) -> None:
+    message = completed.stderr.strip()
+    if "reference_mismatch" in message:
+        raise SnbBiSuiteError("reference_mismatch", message)
+    if "parameter" in message:
+        raise SnbBiSuiteError("parameter_identity_mismatch", message)
+    if "identity" in message:
+        raise SnbBiSuiteError("identity_drift", message)
+    if "checksum" in message:
+        raise SnbBiSuiteError("checksum_mismatch", message)
+    raise SnbBiSuiteError("invalid_document", message)
+
+
+def validate_live_fixture(
+    fixture: Path,
+    *,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Ask the trusted Rust runner to validate the complete closed context."""
+    base = root or workspace_root()
+    completed = _run_runner(["validate-live-context", str(fixture)], base)
+    if completed.returncode != 0:
+        _raise_live_error(completed)
+    return json.loads((fixture / "identity.json").read_text(encoding="utf-8"))
+
+
+def run_live_bi2(
+    *,
+    root: Path | None = None,
+    parameters_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the trusted Rust-owned in-memory API execution and evidence path."""
+    base = root or workspace_root()
+    fixture = base / "fixtures" / "gdc" / LIVE_FIXTURE
+    with tempfile.TemporaryDirectory(prefix="gdc-snb-bi-live-") as tmp:
+        temp = Path(tmp)
+        execution_fixture = fixture
+        if parameters_override:
+            execution_fixture = temp / "fixture"
+            shutil.copytree(fixture, execution_fixture)
+            parameter_path = execution_fixture / "parameters.json"
+            parameters = json.loads(parameter_path.read_text(encoding="utf-8"))
+            for name, value in parameters_override.items():
+                parameters["bindings"][name]["value"] = value
+            parameter_path.write_text(json.dumps(parameters, indent=2) + "\n", encoding="utf-8")
+        evidence_path = temp / "evidence.json"
+        completed = _run_runner(
+            ["run-live", str(execution_fixture), str(evidence_path)],
+            base,
+        )
+        if completed.returncode != 0:
+            _raise_live_error(completed)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
+        raise SnbBiSuiteError("invalid_document", "unexpected live evidence schema")
+    if evidence.get("certification") is not False:
+        raise SnbBiSuiteError("invalid_document", "live evidence must set certification=false")
+    return evidence
+
+
 def list_operation_rules(root: Path | None = None) -> dict[str, dict[str, str]]:
     completed = _run_runner(["list-operations"], root)
     if completed.returncode != 0:
@@ -110,7 +174,7 @@ def run_tiny_suite(
     root: Path | None = None,
     evidence_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded snb-bi-sf0.003 SNB BI suite through the Rust runner."""
+    """Replay the legacy synthetic static contract fixture through Rust."""
     base = root or workspace_root()
     fixture = base / "fixtures" / "gdc" / "snb-bi-tiny" / fixture_name
     pin = load_pinned_identity(identity_path(base))
@@ -125,7 +189,7 @@ def run_tiny_suite(
         out_evidence = evidence_path or (tmp_path / "evidence.json")
         completed = _run_runner(
             [
-                "run-suite",
+                "run-static-suite",
                 str(fixture / "jobs"),
                 str(fixture / "references"),
                 str(fixture / "system-outputs"),
@@ -174,11 +238,11 @@ def map_operation_file(path: Path, root: Path | None = None) -> dict[str, Any]:
 
 
 def assert_large_scale_factors_are_opt_in(root: Path | None = None) -> None:
-    """Only the bounded tiny fixture is executed by default; larger SFs are opt-in.
+    """Only the synthetic tiny fixture is replayed by default; scale runs are opt-in.
 
-    The suite declaration must advertise exactly the bounded ``snb-bi-sf0.003``
-    fixture. Any larger scale factor is external/opt-in and must never be baked
-    into the default declaration.
+    ``snb-bi-sf0.003`` is a historical synthetic fixture identifier, not an
+    official scale-factor claim. Real generated scale factors are external and
+    opt-in.
     """
     base = root or workspace_root()
     suite = json.loads((base / "suites" / "gdc-snb-bi.json").read_text(encoding="utf-8"))
@@ -229,6 +293,9 @@ __all__ = [
     "BOUNDED_TINY_DATASET",
     "EVIDENCE_SCHEMA",
     "JOB_SCHEMA",
+    "LIVE_EVIDENCE_SCHEMA",
+    "LIVE_FIXTURE",
+    "LIVE_OPERATION",
     "OPERATIONS",
     "RESOURCE_SCHEMA",
     "WEIGHTED_PATH_CAUSE",
@@ -240,5 +307,7 @@ __all__ = [
     "identity_path",
     "list_operation_rules",
     "map_operation_file",
+    "run_live_bi2",
     "run_tiny_suite",
+    "validate_live_fixture",
 ]
