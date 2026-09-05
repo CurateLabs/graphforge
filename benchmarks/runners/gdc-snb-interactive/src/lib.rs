@@ -1015,7 +1015,12 @@ fn validate_trusted_live_assets(
     Ok((
         fixture,
         job,
-        parse_result_rows(assets.reference),
+        assets
+            .reference
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| encode_live_fields(&line.split('\t').collect::<Vec<_>>()))
+            .collect(),
         identities,
     ))
 }
@@ -1094,6 +1099,12 @@ fn load_live_fixture(forge: &GraphForge, fixture: LiveGraphFixture) -> Result<()
     Ok(())
 }
 
+// JSON arrays preserve column boundaries, empty strings, and whitespace in values.
+fn encode_live_fields(fields: &[impl AsRef<str>]) -> String {
+    serde_json::to_string(&fields.iter().map(AsRef::as_ref).collect::<Vec<_>>())
+        .expect("string fields always serialize")
+}
+
 fn normalize_live_result(
     result: &graphforge_api::ExecutionResult,
 ) -> Result<ResultRows, SuiteError> {
@@ -1137,7 +1148,7 @@ fn normalize_live_result(
                         .map_err(|error| SuiteError::LiveExecution(error.to_string()))?,
                 );
             }
-            rows.push(normalize_row(&values.join("\t")));
+            rows.push(encode_live_fields(&values));
         }
     }
     Ok(rows)
@@ -1322,8 +1333,7 @@ fn assemble_live_is1_evidence(
                 "gender".into(),
                 "creationDate".into(),
             ],
-            normalization: "Arrow scalar display followed by authoritative row normalization"
-                .into(),
+            normalization: "Arrow scalar display encoded as field-preserving JSON arrays".into(),
         }),
         identities,
         operations: outcomes,
@@ -1465,15 +1475,55 @@ mod tests {
     }
 
     #[test]
+    fn live_arrow_comparison_preserves_column_boundaries_and_whitespace() {
+        use arrow::array::StringArray;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let (fixture, _, reference, _) =
+            validate_trusted_live_assets(embedded_live_assets()).unwrap();
+        let forge = GraphForge::new(None).unwrap();
+        load_live_fixture(&forge, fixture).unwrap();
+        let mut result = forge
+            .execute_with_params(
+                LIVE_IS1_QUERY,
+                &HashMap::from([("personId".into(), IrLiteral::Int(1001))]),
+            )
+            .unwrap();
+        assert_eq!(normalize_live_result(&result).unwrap(), reference);
+        let original = result.batches[0].clone();
+        for (first, last) in [
+            ("Ada Lovelace", ""),
+            ("Ada ", "Lovelace"),
+            ("Ada\tLovelace", ""),
+        ] {
+            let mut columns = original.columns().to_vec();
+            columns[0] = Arc::new(StringArray::from(vec![first]));
+            columns[1] = Arc::new(StringArray::from(vec![last]));
+            result.batches = vec![RecordBatch::try_new(result.schema.clone(), columns).unwrap()];
+            assert!(
+                validate_result(
+                    ValidationMode::Exact,
+                    &reference,
+                    &normalize_live_result(&result).unwrap()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn trusted_live_runner_executes_graphforge_and_binds_complete_context() {
         let evidence = run_trusted_live_is1().unwrap();
         assert_eq!(evidence.lane, EvidenceLane::LiveInMemory);
         assert_eq!(evidence.status, OperationStatus::Passed);
         assert!(!evidence.certification);
-        assert!(evidence
-            .phase_evidence
-            .iter()
-            .all(|phase| { phase.status == PhaseStatus::Passed && !phase.detail.is_empty() }));
+        assert!(
+            evidence
+                .phase_evidence
+                .iter()
+                .all(|phase| { phase.status == PhaseStatus::Passed && !phase.detail.is_empty() })
+        );
         let context = evidence.live_context.unwrap();
         assert_eq!(context.operation, Operation::Is1);
         assert_eq!(context.parameter.name, "personId");
@@ -1548,11 +1598,13 @@ mod tests {
 
         let update = run_job(&sample_job(Operation::Iu1), None, None);
         assert_eq!(update.status, OperationStatus::SemanticIncompatibility);
-        assert!(update
-            .cause
-            .as_deref()
-            .unwrap()
-            .contains("interactive_update_stream_not_exposed"));
+        assert!(
+            update
+                .cause
+                .as_deref()
+                .unwrap()
+                .contains("interactive_update_stream_not_exposed")
+        );
 
         let missing_output = run_job(&sample_job(Operation::Is1), Some(&reference), None);
         assert_eq!(missing_output.status, OperationStatus::Failed);
@@ -1626,10 +1678,12 @@ mod tests {
         assert_eq!(evidence.status, OperationStatus::Passed);
         assert!(!evidence.certification);
         assert_eq!(evidence.lane, EvidenceLane::StaticReplay);
-        assert!(evidence
-            .phase_evidence
-            .iter()
-            .all(|phase| phase.status == PhaseStatus::NotExecuted));
+        assert!(
+            evidence
+                .phase_evidence
+                .iter()
+                .all(|phase| phase.status == PhaseStatus::NotExecuted)
+        );
     }
 
     #[test]
