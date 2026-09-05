@@ -1058,7 +1058,7 @@ fn summary_batch(schema: &SchemaRef, tally: &CreateTally) -> Result<RecordBatch,
             Arc::new(UInt64Array::from(vec![tally.labels_added])),
         ],
     )
-    .map_err(|e| GfError::Execution(e.to_string()))
+    .map_err(GfError::from_execution_error)
 }
 
 /// Running CREATE side-effect tallies accumulated across input batches (#601):
@@ -1128,12 +1128,12 @@ fn merge_computed(
         return Ok(());
     };
     for (name, array) in cols {
-        let scalar = ScalarValue::try_from_array(array, row)
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        let scalar =
+            ScalarValue::try_from_array(array, row).map_err(GfError::from_execution_error)?;
         if scalar.is_null() {
             continue;
         }
-        let lit = scalar_to_ir_literal(&scalar).map_err(|e| GfError::Execution(e.to_string()))?;
+        let lit = scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?;
         props.insert(name.clone(), lit);
     }
     Ok(())
@@ -1328,8 +1328,7 @@ fn emit_batch_creates(
     for spec in cfg.nodes.iter().filter(|s| !s.is_reference) {
         append_created_node_output_cols(spec, n, computed, &recorder, &mut out_cols)?;
     }
-    RecordBatch::try_new(cfg.out_schema.clone(), out_cols)
-        .map_err(|e| GfError::Execution(e.to_string()))
+    RecordBatch::try_new(cfg.out_schema.clone(), out_cols).map_err(GfError::from_execution_error)
 }
 
 fn append_created_node_output_cols(
@@ -1365,7 +1364,7 @@ fn append_created_node_output_cols(
     for uuid in uuids {
         uuid_b
             .append_value(uuid)
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
     }
     out_cols.push(Arc::new(uuid_b.finish()));
     out_cols.push(Arc::new(UInt64Array::from(node_ids.to_vec())));
@@ -1377,7 +1376,7 @@ fn append_created_node_output_cols(
         out_cols.push(
             scalar
                 .to_array_of_size(rows)
-                .map_err(|e| GfError::Execution(e.to_string()))?,
+                .map_err(GfError::from_execution_error)?,
         );
     }
     if let Some(cols) = computed.get(&spec.var) {
@@ -1669,7 +1668,7 @@ fn delete_summary_batch(
             Arc::new(UInt64Array::from(vec![edges])),
         ],
     )
-    .map_err(|e| GfError::Execution(e.to_string()))
+    .map_err(GfError::from_execution_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -1682,7 +1681,7 @@ fn count_summary_batch(schema: &SchemaRef, count: u64) -> Result<RecordBatch, Gf
         schema.clone(),
         vec![Arc::new(UInt64Array::from(vec![count]))],
     )
-    .map_err(|e| GfError::Execution(e.to_string()))
+    .map_err(GfError::from_execution_error)
 }
 
 /// Resolve a write target's input-column locations: the identity UUID column and
@@ -1968,7 +1967,7 @@ fn accumulate_set_batch(
         let values = phys
             .evaluate(batch)
             .and_then(|cv| cv.into_array(n))
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         let id_col = batch.column(col.uuid_idx);
         for row in 0..n {
             if id_col.is_null(row) {
@@ -1976,10 +1975,9 @@ fn accumulate_set_batch(
             }
             let uuid =
                 graphforge_core::uuid::to_bytes(&fixed_binary_uuid(batch, col.uuid_idx, row)?);
-            let scalar = ScalarValue::try_from_array(&values, row)
-                .map_err(|e| GfError::Execution(e.to_string()))?;
-            let lit =
-                scalar_to_ir_literal(&scalar).map_err(|e| GfError::Execution(e.to_string()))?;
+            let scalar =
+                ScalarValue::try_from_array(&values, row).map_err(GfError::from_execution_error)?;
+            let lit = scalar_to_ir_literal(&scalar).map_err(GfError::from_execution_error)?;
             let stem = col.stem_for_row(batch, row, mode, type_map)?;
             acc.record(col.is_edge, stem, uuid, col.prop_name.clone(), lit);
         }
@@ -3185,7 +3183,7 @@ impl V4OrdinalIdentityResolver {
             .lock()
             .expect("ordinal identity handle poisoned")
             .revalidate_for_session()
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         Ok(V4OrdinalIdentityPin {
             session: Some(Arc::new(V4OrdinalIdentitySession {
                 handle,
@@ -3216,7 +3214,7 @@ impl V4OrdinalIdentitySession {
             .lock()
             .expect("ordinal identity handle poisoned")
             .lookup_node_uuids_pinned(requested)
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         if self.attribution_available.swap(false, Ordering::AcqRel) {
             lookup.metrics.revalidation_calls = self.revalidation.calls;
             lookup.metrics.revalidation_bytes = self.revalidation.bytes_read;
@@ -3703,7 +3701,7 @@ fn unused_expand_column(field: &Field, rows: usize) -> Result<ArrayRef, GfError>
             FixedSizeBinaryArray::try_from_iter(
                 (0..rows).map(|_| vec![0_u8; usize::try_from(*width).unwrap_or(0)]),
             )
-            .map_err(|error| GfError::Execution(error.to_string()))?,
+            .map_err(GfError::from_execution_error)?,
         ),
         DataType::UInt64 => Arc::new(UInt64Array::from(vec![0_u64; rows])),
         DataType::UInt32 => Arc::new(UInt32Array::from(vec![0_u32; rows])),
@@ -5301,11 +5299,11 @@ impl ExecutionSession {
             .state()
             .create_physical_plan(&logical)
             .await
-            .map_err(|e| GfError::Plan(e.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
 
         let batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
             .await
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
 
         let schema = batches
             .first()
@@ -5462,10 +5460,10 @@ impl ExecutionSession {
             .state()
             .create_physical_plan(&logical)
             .await
-            .map_err(|e| GfError::Plan(e.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
         let batches = collect(physical, self.ctx.task_ctx())
             .await
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         let mut frontier = write_driver::Frontier { df_schema, batches };
 
         // Phase loop: buffer every effect, then one staged commit.
@@ -5534,7 +5532,7 @@ impl ExecutionSession {
         write_driver::commit_statement(&mut wctx, &self.dir)?;
         self.catalog
             .refresh_property_inventory(&self.dir)
-            .map_err(|error| GfError::Execution(error.to_string()))?;
+            .map_err(GfError::from_execution_error)?;
         self.adjacency_provider.invalidate();
 
         let c = wctx.counters;
@@ -5749,7 +5747,7 @@ impl ExecutionSession {
             returned_batch_bytes,
             task_ctx.session_config().batch_size(),
         );
-        let mut batches = collected.map_err(|e| GfError::Execution(e.to_string()))?;
+        let mut batches = collected.map_err(GfError::from_execution_error)?;
 
         // DataFusion's collect may return zero batches for an empty stream.
         // Public callers (and DF54-era optimistic publish tests) index
@@ -5806,28 +5804,26 @@ impl ExecutionSession {
             };
             let vars = graphforge_rel::VarMap::new();
             let lowerer = graphforge_rel::ExprLowerer::new(&exprs, self.ontology.as_ref(), &vars);
-            let expr = lowerer
-                .lower(expr)
-                .map_err(|error| GfError::Plan(error.to_string()))?;
+            let expr = lowerer.lower(expr).map_err(GfError::from_plan_error)?;
             let logical = LogicalPlanBuilder::empty(true)
                 .project(vec![expr.alias("__gf_row_count")])
                 .and_then(LogicalPlanBuilder::build)
-                .map_err(|error| GfError::Plan(error.to_string()))?;
+                .map_err(GfError::from_plan_error)?;
             let logical = bind_query_params(logical, params)?;
             let physical = self
                 .ctx
                 .state()
                 .create_physical_plan(&logical)
                 .await
-                .map_err(|error| GfError::Plan(error.to_string()))?;
+                .map_err(GfError::from_plan_error)?;
             let batches = collect(physical, self.ctx.task_ctx())
                 .await
-                .map_err(|error| GfError::Execution(error.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
             let batch = batches.first().ok_or_else(|| {
                 GfError::Execution(format!("{keyword} expression returned no row"))
             })?;
             let value = ScalarValue::try_from_array(batch.column(0), 0)
-                .map_err(|error| GfError::Execution(error.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
             let count = match value {
                 ScalarValue::Int64(Some(value)) => u64::try_from(value).ok(),
                 ScalarValue::UInt64(Some(value)) => Some(value),
@@ -5870,7 +5866,7 @@ impl ExecutionSession {
         let memory_reserved_before = task_ctx.memory_pool().reserved();
         let stream =
             datafusion::physical_plan::execute_stream(Arc::clone(&physical), Arc::clone(&task_ctx))
-                .map_err(|e| GfError::Execution(e.to_string()))?;
+                .map_err(GfError::from_execution_error)?;
         let schema = stream.schema();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
@@ -5920,7 +5916,7 @@ impl ExecutionSession {
                 .state()
                 .create_physical_plan(&logical)
                 .await
-                .map_err(|e| GfError::Plan(e.to_string()))?;
+                .map_err(GfError::from_plan_error)?;
             return Ok(datafusion::physical_plan::displayable(physical.as_ref())
                 .indent(false)
                 .to_string());
@@ -5982,7 +5978,7 @@ impl ExecutionSession {
             .state()
             .create_physical_plan(&logical)
             .await
-            .map_err(|e| GfError::Plan(e.to_string()))?;
+            .map_err(GfError::from_plan_error)?;
         Ok((physical, fallback_schema))
     }
 
@@ -6056,7 +6052,7 @@ fn bind_query_params(
         .collect();
     logical
         .with_param_values(values)
-        .map_err(|e| GfError::Plan(e.to_string()))
+        .map_err(GfError::from_plan_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -6071,6 +6067,9 @@ const _: fn() = || {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod error_conversion_tests;
 
 #[cfg(test)]
 mod tests {

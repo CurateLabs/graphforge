@@ -130,7 +130,7 @@ async fn inspection_from_node_stream(
     while let Some(batch) = stream.next().await {
         accumulate_node_batch(
             &mut inspection,
-            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+            &batch.map_err(GfError::from_execution_error)?,
         )?;
     }
     Ok(inspection)
@@ -143,7 +143,7 @@ async fn inspection_from_relationship_stream(
     while let Some(batch) = stream.next().await {
         accumulate_relationship_batch(
             &mut inspection,
-            &batch.map_err(|error| GfError::Execution(error.to_string()))?,
+            &batch.map_err(GfError::from_execution_error)?,
         )?;
     }
     Ok(inspection)
