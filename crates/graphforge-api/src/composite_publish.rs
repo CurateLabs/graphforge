@@ -1513,6 +1513,23 @@ mod tests {
 
     #[test]
     fn composite_endpoint_resolution_uses_index_without_topology_decode() {
+        // Process-global I/O counters require isolation from parallel API tests.
+        const CHILD: &str = "GRAPHFORGE_COMPOSITE_ENDPOINT_IO_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("composite_publish::tests::composite_endpoint_resolution_uses_index_without_topology_decode")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated composite endpoint I/O proof failed"
+            );
+            return;
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let existing = uuid7(180);
         let mut seed =
