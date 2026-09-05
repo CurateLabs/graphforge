@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "b86739fcc00c0ff528956d8c6e28a5350455393d0b3cf75c84913efdad3a9ff2",
+  "sha256": "890639e5808d505c6f8cc21684c84716b278f4e6e075e9e2161682a75964f767",
   "entries": [
     {
       "name": "graphforge-api",
@@ -892,7 +892,9 @@
     {
       "name": "graphforge-exec",
       "version": "0.5.2",
-      "features": [],
+      "features": [
+        "differential-testing"
+      ],
       "dependencies": [
         {
           "name": "anyhow",
@@ -1643,7 +1645,9 @@
     {
       "name": "graphforge-rel",
       "version": "0.5.2",
-      "features": [],
+      "features": [
+        "differential-testing"
+      ],
       "dependencies": [
         {
           "name": "arrow-data",

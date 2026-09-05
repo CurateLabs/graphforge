@@ -7,6 +7,10 @@ license.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
+[features]
+# Explicit opt-in for the independent fixed-hop differential oracle.
+differential-testing = ["graphforge-rel/differential-testing"]
+
 [dependencies]
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
@@ -30,6 +34,10 @@ insta = { workspace = true, features = ["filters"] }
 tempfile = "3"
 tokio = { workspace = true }
 parquet = { workspace = true }
+
+[[test]]
+name = "differential_traversal"
+required-features = ["differential-testing"]
 
 [lints]
 workspace = true

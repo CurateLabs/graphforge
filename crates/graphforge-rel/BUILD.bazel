@@ -24,6 +24,16 @@ gf_rust_library(
     deps = _REL_DEPS,
 )
 
+# Only the differential traversal suite can depend on the reference switch.
+gf_rust_library(
+    name = "graphforge_rel_differential",
+    crate_name = "graphforge_rel",
+    crate_features = ["differential-testing"],
+    testonly = True,
+    visibility = ["//crates/graphforge-exec:__pkg__"],
+    deps = _REL_DEPS,
+)
+
 gf_rust_test(
     name = "graphforge_rel_test",
     crate = ":graphforge_rel",

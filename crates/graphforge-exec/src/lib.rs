@@ -4941,7 +4941,8 @@ pub struct ExecutionSession {
     /// invalidate its memoized state and loaded views — a same-session
     /// read → write → read must observe post-write adjacency.
     adjacency_provider: Arc<PersistentAdjacencyProvider>,
-    /// Doc-hidden differential-test strategy; production sessions leave false.
+    /// Differential-test strategy, absent from ordinary builds.
+    #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
 }
 
@@ -5155,12 +5156,14 @@ impl ExecutionSession {
             mode,
             semantic_composition_fingerprint,
             adjacency_provider,
+            #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
         }
     }
 
     /// Use the relational fixed-hop implementation as an independent test
-    /// oracle. The public `GraphForge` facade never enables this strategy.
+    /// oracle. Available only with the non-default `differential-testing` feature.
+    #[cfg(feature = "differential-testing")]
     #[doc(hidden)]
     #[must_use]
     pub fn with_relational_fixed_hop_reference(mut self) -> Self {
@@ -5868,7 +5871,7 @@ impl ExecutionSession {
         // session cannot read persisted data, so reject scan plans up front
         // (mirroring `execute_create`'s write-target guard) and lower the rest
         // schema-only so pure computed/`RETURN` plans still run.
-        let mut lowerer = if self.dir.as_os_str().is_empty() {
+        let lowerer = if self.dir.as_os_str().is_empty() {
             if plan_reads_persisted_data(plan) {
                 return Err(GfError::Execution(
                     "execute_plan requires a project directory to read persisted nodes/edges; \
@@ -5885,9 +5888,12 @@ impl ExecutionSession {
                 self.mode,
             )
         };
-        if self.relational_fixed_hop_reference {
-            lowerer = lowerer.with_relational_fixed_hop_reference();
-        }
+        #[cfg(feature = "differential-testing")]
+        let lowerer = if self.relational_fixed_hop_reference {
+            lowerer.with_relational_fixed_hop_reference()
+        } else {
+            lowerer
+        };
         let logical = lowerer.lower_plan(plan)?;
 
         // Bind `$name` query parameters to their values, replacing the
