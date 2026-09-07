@@ -162,7 +162,7 @@ gf_rust_integration_test(
     rustc_env = _CLI_BIN_ENV,
     size = "large",
     timeout = "long",
-    deps = _CLI_DEPS,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
 )
 
 gf_rust_integration_test(
