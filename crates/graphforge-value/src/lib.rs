@@ -13,3 +13,6 @@ pub use ids::{
     RelationTypeId, RelationTypeSelection, RuntimeEntityId, RuntimePropId, RuntimeRelationId,
     TYPE_LOCAL_ID_LIMIT, TaggedTypeId, TypeIdKind,
 };
+
+mod literal;
+pub use literal::Literal;
