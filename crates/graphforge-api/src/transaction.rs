@@ -13,6 +13,7 @@ use std::time::Instant;
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, ProjectErrorCode, PropValue};
+use graphforge_exec::mutation::MutationLifecycle;
 use graphforge_ir::IrLiteral;
 use uuid::Uuid;
 
@@ -500,43 +501,55 @@ impl GraphTransaction {
             });
         }
 
-        for (query, params) in &cypher {
-            graph
-                .execute_write_without_publish(query, params)
-                .inspect_err(|_| {
-                    let _ = crate::rematerialize_graph_workspace(&prior, &graph.dir);
-                })?;
-        }
+        let prior_catalog = graph
+            .runtime_catalog
+            .lock()
+            .expect("runtime catalog poisoned")
+            .clone();
+        // Inner statements stage against the current private workspace. The outer
+        // owner restores the transaction's original authority on every later
+        // failure, including clock and publication failures.
+        let mut lifecycle = crate::mutation_transaction::FacadeMutationLifecycle::new(
+            graph,
+            prior_catalog,
+            true,
+            None,
+        )?;
+        let result = (|| {
+            for (query, params) in &cypher {
+                graph.execute_write_without_publish(query, params)?;
+            }
 
-        if request.graph_mutations.is_empty() && knowledge_row_count(&request.knowledge) == 0 {
-            let recorded_at = (graph.clock.lock().expect("clock lock poisoned"))()?;
-            let receipt = graphforge_exec::MutationReceipt::default();
-            graph.publish_graph_mutation_with_context(
-                &receipt,
-                self.context.operation_uuid.0,
-                self.context.actor_uuid,
-                recorded_at,
-            )?;
-            let generation = *graph
-                .current_generation_uuid
-                .lock()
-                .expect("generation UUID lock poisoned");
-            return Ok(TransactionCommitReceipt {
-                generation_uuid: generation,
-                composite_receipt: None,
-            });
-        }
+            if request.graph_mutations.is_empty() && knowledge_row_count(&request.knowledge) == 0 {
+                let recorded_at = (graph.clock.lock().expect("clock lock poisoned"))()?;
+                let receipt = graphforge_exec::MutationReceipt::default();
+                graph.publish_graph_mutation_with_context(
+                    &receipt,
+                    self.context.operation_uuid.0,
+                    self.context.actor_uuid,
+                    recorded_at,
+                )?;
+                let generation = *graph
+                    .current_generation_uuid
+                    .lock()
+                    .expect("generation UUID lock poisoned");
+                return Ok(TransactionCommitReceipt {
+                    generation_uuid: generation,
+                    composite_receipt: None,
+                });
+            }
 
-        let receipt = graph
-            .publish_composite_transaction_admitted(request)
-            .inspect_err(|_| {
-                let _ = crate::rematerialize_graph_workspace(&prior, &graph.dir);
-            })?;
-        let generation_uuid = generation_from_receipt(&receipt)?;
-        Ok(TransactionCommitReceipt {
-            generation_uuid,
-            composite_receipt: Some(receipt),
-        })
+            let receipt = graph.publish_composite_transaction_admitted(request)?;
+            let generation_uuid = generation_from_receipt(&receipt)?;
+            Ok(TransactionCommitReceipt {
+                generation_uuid,
+                composite_receipt: Some(receipt),
+            })
+        })();
+        if result.is_err() {
+            lifecycle.abort()?;
+        }
+        result
     }
 
     /// Abandon staged work without publishing.
@@ -725,6 +738,143 @@ mod tests {
             operation_uuid: OperationId(uuid7(seed)),
             actor_uuid: None,
         }
+    }
+
+    #[test]
+    fn later_cypher_failure_restores_outer_catalog_data_and_reopen() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph.execute("CREATE (:Person {name:'retained'})").unwrap();
+        let catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
+        let files = graphforge_storage::capture_graph_files(&graph.dir)
+            .unwrap()
+            .0;
+        let generation = *graph.current_generation_uuid.lock().unwrap();
+        let tx = graph.begin_transaction(context(71)).unwrap();
+        tx.stage_cypher("CREATE (:Temporary {transaction_metric:1})", HashMap::new())
+            .unwrap();
+        tx.stage_cypher(
+            "MATCH (n:Temporary) DELETE n SET n.transaction_metric=2",
+            HashMap::new(),
+        )
+        .unwrap();
+        assert!(tx.commit(&graph).is_err());
+        assert_eq!(
+            graph.runtime_catalog.lock().unwrap().to_record_batch(),
+            catalog
+        );
+        assert_eq!(
+            graphforge_storage::capture_graph_files(&graph.dir)
+                .unwrap()
+                .0,
+            files
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        for owner in [&graph, &reopened] {
+            assert!(
+                !owner
+                    .runtime_catalog
+                    .lock()
+                    .unwrap()
+                    .contains_property("transaction_metric", None)
+            );
+            assert_eq!(owner.node_count("Person").unwrap(), 1);
+            let result = owner.execute("MATCH (n) RETURN n").unwrap();
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(|batch| batch.num_rows())
+                    .sum::<usize>(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn outer_transaction_post_current_helper() {
+        let Ok(root) = std::env::var("GF_OUTER_MUTATION_ROOT") else {
+            return;
+        };
+        let graph = GraphForge::new(Some(&root)).unwrap();
+        assert!(
+            !graph
+                .runtime_catalog
+                .lock()
+                .unwrap()
+                .contains_property("outer_metric", None)
+        );
+        let before = *graph.current_generation_uuid.lock().unwrap();
+        let tx = graph.begin_transaction(context(72)).unwrap();
+        tx.stage_cypher(
+            "CREATE (a:Person {name:'committed'}) SET a.outer_metric=1",
+            HashMap::new(),
+        )
+        .unwrap();
+        let error = tx.commit(&graph).unwrap_err();
+        assert!(
+            error.to_string().contains("cause=injected_failpoint"),
+            "{error}"
+        );
+        let selected = graphforge_storage::resolve_project_generation(std::path::Path::new(&root))
+            .unwrap()
+            .generation_uuid();
+        assert_ne!(selected, before);
+        let reopened = GraphForge::new(Some(&root)).unwrap();
+        let committed_catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
+        assert_eq!(
+            reopened.runtime_catalog.lock().unwrap().to_record_batch(),
+            committed_catalog
+        );
+        for owner in [&graph, &reopened] {
+            assert_eq!(*owner.current_generation_uuid.lock().unwrap(), selected);
+            assert!(
+                owner
+                    .runtime_catalog
+                    .lock()
+                    .unwrap()
+                    .contains_property("outer_metric", None)
+            );
+            assert_eq!(owner.node_count("Person").unwrap(), 2);
+            let result = owner
+                .execute("MATCH (n:Person) WHERE n.name='committed' AND n.outer_metric=1 RETURN n")
+                .unwrap();
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(|batch| batch.num_rows())
+                    .sum::<usize>(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn outer_transaction_post_current_failure_preserves_selected_authority() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph.execute("CREATE (:Person {name:'retained'})").unwrap();
+        drop(graph);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "transaction::tests::outer_transaction_post_current_helper",
+                "--nocapture",
+            ])
+            .env("GF_OUTER_MUTATION_ROOT", directory.path())
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINTS",
+                "graphforge-internal-subprocess-v1",
+            )
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINT",
+                "project.after_current_replace.error",
+            )
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
     }
 
     #[test]

@@ -18,7 +18,8 @@
 //! statement end — a failure in any phase aborts with the prior on-disk
 //! state fully intact.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::mutation::WriteCounters;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,7 +39,7 @@ use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::scalar::ScalarValue;
 use datafusion_datasource::memory::MemorySourceConfig;
 
-use graphforge_core::uuid::{Uuid, to_bytes};
+use graphforge_core::uuid::to_bytes;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::plan::GraphOp;
 use graphforge_ir::{
@@ -233,19 +234,6 @@ fn collect_expr_vars(
 // Statement write context
 // ---------------------------------------------------------------------------
 
-/// The openCypher write counters a statement reports.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WriteCounters {
-    pub nodes_created: u64,
-    pub edges_created: u64,
-    pub nodes_deleted: u64,
-    pub edges_deleted: u64,
-    pub properties_set: u64,
-    pub properties_removed: u64,
-    pub labels_added: u64,
-    pub labels_removed: u64,
-}
-
 /// Mutable state shared by every write phase of one statement.
 ///
 /// One [`GraphWriter`](graphforge_storage::GraphWriter) buffers every CREATE in the
@@ -270,16 +258,7 @@ pub(crate) struct StatementWriteContext {
     /// Label tokens already present before, or introduced during, this statement.
     pub known_labels: HashSet<EntityTypeId>,
     pub removed_label_tokens: HashSet<EntityTypeId>,
-    /// Entity/property pairs SET at least once in this statement.
-    pub property_sets: HashSet<(bool, [u8; 16], String)>,
-    pub counters: WriteCounters,
-    mutation_effects: BTreeMap<
-        crate::MutationKind,
-        (
-            HashSet<crate::MutationSubject>,
-            HashSet<crate::MutationSubject>,
-        ),
-    >,
+    pub mutation: crate::mutation::MutationState,
 }
 
 impl StatementWriteContext {
@@ -316,9 +295,7 @@ impl StatementWriteContext {
             label_removals: HashMap::new(),
             known_labels,
             removed_label_tokens: HashSet::new(),
-            property_sets: HashSet::new(),
-            counters: WriteCounters::default(),
-            mutation_effects: BTreeMap::new(),
+            mutation: crate::mutation::MutationState::default(),
         })
     }
 
@@ -339,14 +316,8 @@ impl StatementWriteContext {
         subject_kind: crate::MutationSubjectKind,
         uuid: [u8; 16],
     ) {
-        self.mutation_effects
-            .entry(kind)
-            .or_default()
-            .0
-            .insert(crate::MutationSubject {
-                uuid,
-                kind: subject_kind,
-            });
+        self.mutation
+            .record_mutation_input(kind, subject_kind, uuid);
     }
 
     fn record_mutation_output(
@@ -355,44 +326,33 @@ impl StatementWriteContext {
         subject_kind: crate::MutationSubjectKind,
         uuid: [u8; 16],
     ) {
-        self.mutation_effects
-            .entry(kind)
-            .or_default()
-            .1
-            .insert(crate::MutationSubject {
-                uuid,
-                kind: subject_kind,
-            });
+        self.mutation
+            .record_mutation_output(kind, subject_kind, uuid);
     }
 
     pub(crate) fn mutation_receipt(&self) -> crate::MutationReceipt {
-        crate::MutationReceipt::from_accumulators(self.mutation_effects.clone())
+        self.mutation.mutation_receipt()
     }
 
     fn record_label_tokens(&mut self, labels: impl IntoIterator<Item = EntityTypeId>) {
         for label in labels {
             if self.removed_label_tokens.remove(&label) {
-                self.counters.labels_removed -= 1;
+                self.mutation.counters.labels_removed -= 1;
             }
             if self.known_labels.insert(label) {
-                self.counters.labels_added += 1;
+                self.mutation.counters.labels_added += 1;
             }
         }
     }
 
     fn record_property_set(&mut self, is_edge: bool, uuid: [u8; 16], name: &str) -> bool {
-        if self.property_sets.insert((is_edge, uuid, name.to_owned())) {
-            self.counters.properties_set += 1;
-            true
-        } else {
-            false
-        }
+        self.mutation.record_property_set(is_edge, uuid, name)
     }
 
     fn record_removed_label_tokens(&mut self, labels: impl IntoIterator<Item = EntityTypeId>) {
         for label in labels {
             if self.removed_label_tokens.insert(label) {
-                self.counters.labels_removed += 1;
+                self.mutation.counters.labels_removed += 1;
             }
         }
     }
@@ -1657,9 +1617,9 @@ fn run_create_phase(
                 .flat_map(|node| node.label_ids.iter().copied()),
         );
     }
-    ctx.counters.nodes_created += tally.nodes_created;
-    ctx.counters.edges_created += tally.edges_created;
-    ctx.counters.properties_set += tally.properties_set;
+    ctx.mutation.counters.nodes_created += tally.nodes_created;
+    ctx.mutation.counters.edges_created += tally.edges_created;
+    ctx.mutation.counters.properties_set += tally.properties_set;
     recorder.record_create_receipt(ctx);
     recorder.extend_frontier(
         frontier,
@@ -1767,8 +1727,8 @@ fn create_single_merge_node(
         spec.label_names.first().map(String::as_str),
         spec.properties.iter().cloned().collect(),
     )?;
-    ctx.counters.nodes_created += 1;
-    ctx.counters.properties_set += spec.properties.len() as u64;
+    ctx.mutation.counters.nodes_created += 1;
+    ctx.mutation.counters.properties_set += spec.properties.len() as u64;
     ctx.record_label_tokens(spec.label_ids.iter().copied());
     let type_id = spec.label_ids.first().copied().map_or_else(
         graphforge_value::PrimaryEntityTypeId::absent,
@@ -2087,8 +2047,8 @@ fn run_relationship_merge_phase(
             created.push(true);
             input_rows.push(input_row);
             input_row += 1;
-            ctx.counters.edges_created += 1;
-            ctx.counters.properties_set += row_spec.properties.len() as u64;
+            ctx.mutation.counters.edges_created += 1;
+            ctx.mutation.counters.properties_set += row_spec.properties.len() as u64;
         }
     }
     frontier.take_rows(&input_rows)?;
@@ -2623,17 +2583,17 @@ fn run_delete_phase(
         .collect();
     let committed_edges: HashSet<[u8; 16]> =
         edge_targets.difference(&pending_edges).copied().collect();
-    ctx.counters.properties_removed +=
+    ctx.mutation.counters.properties_removed +=
         graphforge_storage::count_entity_properties(env.dir, &committed_edges, true)?;
-    ctx.counters.edges_deleted += edge_targets.len() as u64;
+    ctx.mutation.counters.edges_deleted += edge_targets.len() as u64;
     ctx.writer.cancel_edges(&pending_edges);
     ctx.pending_edge_deletes.extend(&committed_edges);
     ctx.deleted.extend(edge_targets.iter().copied());
 
     // Nodes, likewise.
-    ctx.counters.properties_removed +=
+    ctx.mutation.counters.properties_removed +=
         graphforge_storage::count_entity_properties(env.dir, &committed_nodes, false)?;
-    ctx.counters.nodes_deleted += node_targets.len() as u64;
+    ctx.mutation.counters.nodes_deleted += node_targets.len() as u64;
     ctx.writer.cancel_nodes(&pending_nodes);
     ctx.pending_node_deletes.extend(committed_nodes);
     ctx.deleted.extend(node_targets);
@@ -2885,7 +2845,7 @@ fn run_set_phase_masked(
                         &HashSet::from([item.prop_name.clone()]),
                     );
                     if present {
-                        ctx.counters.properties_removed += 1;
+                        ctx.mutation.counters.properties_removed += 1;
                         ctx.record_mutation_output(
                             crate::MutationKind::RemoveProperty,
                             if is_edge {
@@ -2935,7 +2895,7 @@ fn run_set_phase_masked(
                     ctx.record_property_set(is_edge, uuid, &item.prop_name)
                 };
                 if recorded && replaced {
-                    ctx.counters.properties_removed += 1;
+                    ctx.mutation.counters.properties_removed += 1;
                 }
                 ctx.record_mutation_output(
                     crate::MutationKind::SetProperty,
@@ -3060,7 +3020,7 @@ fn run_set_map_phase_with_input(
                         0
                     };
                     remove_map_complement(ctx, is_edge, &uuid, &stem, &removals);
-                    ctx.counters.properties_removed += (removals.len() + replaced) as u64;
+                    ctx.mutation.counters.properties_removed += (removals.len() + replaced) as u64;
                     for name in updates.keys() {
                         let _ = ctx.record_property_set(is_edge, uuid, name);
                     }
@@ -3144,8 +3104,8 @@ fn run_set_map_phase_with_input(
                     );
                 }
                 remove_map_complement(ctx, is_edge, &uuid, &stem, &removals);
-                ctx.counters.properties_removed += replaced as u64;
-                ctx.counters.properties_set += updates.len() as u64;
+                ctx.mutation.counters.properties_removed += replaced as u64;
+                ctx.mutation.counters.properties_set += updates.len() as u64;
                 apply_map_updates(ctx, is_edge, &uuid, &stem, updates)?;
             }
         }
@@ -3371,7 +3331,7 @@ fn run_remove_phase(
                     ctx.remove_acc
                         .record(is_edge, stem, uuid, item.prop_name.clone());
                 }
-                ctx.counters.properties_removed += 1;
+                ctx.mutation.counters.properties_removed += 1;
                 ctx.record_mutation_output(
                     crate::MutationKind::RemoveProperty,
                     if is_edge {
@@ -3511,7 +3471,10 @@ fn run_label_phase(
 /// A statement whose net batch stages topology files bumps the project
 /// `topology_generation` counter exactly once, before the commit (#759);
 /// SET/REMOVE-only statements do not bump.
-pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> Result<(), GfError> {
+pub(crate) fn stage_statement(
+    ctx: &mut StatementWriteContext,
+    dir: &Path,
+) -> Result<graphforge_storage::RewriteBatch, GfError> {
     // Writes to entities deleted later in the statement are unobservable —
     // they must not resurrect rows in the rewrite.
     ctx.set_acc.scrub(&ctx.deleted);
@@ -3530,36 +3493,7 @@ pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> R
     graphforge_storage::stage_delete_nodes(&mut staged, dir, &ctx.pending_node_deletes)?;
     ctx.writer.flush_into(&mut staged)?;
 
-    // Adjacency delta segment (#765): a statement is pure-append iff it stages
-    // no deletes (SET/REMOVE never touch topology). Pure-append → record the
-    // created edges so the index serves them without a rebuild; otherwise the
-    // statement breaks the chain at this generation (a DELETE invalidates the
-    // incremental path), so write no segment and clear any stale file there.
-    let pure_append = ctx.pending_node_deletes.is_empty() && ctx.pending_edge_deletes.is_empty();
-    let pending = ctx.writer.take_pending_delta();
-    let deleted_nodes = ctx
-        .pending_node_deletes
-        .iter()
-        .copied()
-        .map(Uuid::from_bytes)
-        .collect::<Vec<_>>();
-    let deleted_edges = ctx
-        .pending_edge_deletes
-        .iter()
-        .copied()
-        .map(Uuid::from_bytes)
-        .collect::<Vec<_>>();
-    if let Some(generation) =
-        ctx.writer
-            .commit_topology_aware_with_uuid_index(staged, deleted_nodes, deleted_edges)?
-    {
-        if pure_append {
-            ctx.writer.write_segment_best_effort(generation, &pending);
-        } else {
-            graphforge_storage::adjacency_delta::discard_segment(dir, generation);
-        }
-    }
-    Ok(())
+    Ok(staged)
 }
 
 /// The unified write-statement summary schema: six openCypher write counters.
@@ -3776,8 +3710,8 @@ mod tests {
         ctx.record_removed_label_tokens([EntityTypeId::decode(7).unwrap()]);
         ctx.record_label_tokens([EntityTypeId::decode(7).unwrap()]);
 
-        assert_eq!(ctx.counters.labels_removed, 0);
-        assert_eq!(ctx.counters.labels_added, 0);
+        assert_eq!(ctx.mutation.counters.labels_removed, 0);
+        assert_eq!(ctx.mutation.counters.labels_added, 0);
     }
 
     #[test]
@@ -4270,8 +4204,8 @@ mod tests {
                 "wrong accumulated value for is_edge={is_edge}"
             );
             assert_eq!(accumulated.len(), 1, "duplicate rows must coalesce");
-            assert_eq!(ctx.counters.properties_set, 1);
-            assert_eq!(ctx.counters.properties_removed, 1);
+            assert_eq!(ctx.mutation.counters.properties_set, 1);
+            assert_eq!(ctx.mutation.counters.properties_removed, 1);
         }
     }
 
@@ -4332,7 +4266,7 @@ mod tests {
             assert_eq!(accumulated[&[7; 16]], HashSet::from(["score".into()]));
             assert_eq!(accumulated[&[8; 16]], HashSet::from(["score".into()]));
             assert_eq!(accumulated.len(), 2);
-            assert_eq!(ctx.counters.properties_removed, 2);
+            assert_eq!(ctx.mutation.counters.properties_removed, 2);
         }
     }
 
@@ -4397,7 +4331,7 @@ mod tests {
         );
         assert!(ctx.set_acc.nodes.is_empty());
         assert!(ctx.set_acc.edges.is_empty());
-        assert_eq!(ctx.counters, WriteCounters::default());
+        assert_eq!(ctx.mutation.counters, WriteCounters::default());
 
         let mut malformed_route = write_frontier(true);
         malformed_route.batches[0] = RecordBatch::try_new(
@@ -4431,7 +4365,7 @@ mod tests {
         );
         assert!(ctx.remove_acc.nodes.is_empty());
         assert!(ctx.remove_acc.edges.is_empty());
-        assert_eq!(ctx.counters, WriteCounters::default());
+        assert_eq!(ctx.mutation.counters, WriteCounters::default());
 
         let mut pending_ctx =
             StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
@@ -4479,7 +4413,7 @@ mod tests {
             err.to_string(),
             "execution error: rel_type_name is not a string column"
         );
-        assert_eq!(pending_ctx.counters, WriteCounters::default());
+        assert_eq!(pending_ctx.mutation.counters, WriteCounters::default());
     }
 
     #[test]
@@ -4584,7 +4518,7 @@ mod tests {
                 &mut ctx,
             )
             .unwrap();
-            assert_eq!(ctx.counters.properties_removed, 2);
+            assert_eq!(ctx.mutation.counters.properties_removed, 2);
         }
     }
 

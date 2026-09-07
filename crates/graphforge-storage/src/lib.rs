@@ -64,9 +64,9 @@ pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
     GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
     GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
-    capture_graph_files, decode_inventory, encode_inventory, graph_tree_root,
-    inventory_participant, materialize_graph_tree, pinned_open_evidence, stage_graph_tree,
-    verify_graph_tree,
+    GraphWorkspaceCheckpoint, GraphWorkspaceRestoration, capture_graph_files, decode_inventory,
+    encode_inventory, graph_tree_root, inventory_participant, materialize_graph_tree,
+    pinned_open_evidence, stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 
@@ -438,14 +438,14 @@ pub use schemas::{
 
 pub mod writer;
 pub use writer::{
-    GraphWriter, GraphWriterLimits, count_entity_properties, decode_spatial_property_value,
-    read_entity_properties, read_entity_property_keys, read_node_property_rows,
-    remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
-    set_node_properties, stage_property_tombstones_authenticated, stage_remove_edge_properties,
-    stage_remove_edge_properties_authenticated, stage_remove_node_properties,
-    stage_remove_node_properties_authenticated, stage_set_edge_properties,
-    stage_set_edge_properties_authenticated, stage_set_node_properties,
-    stage_set_node_properties_authenticated,
+    GraphWriter, GraphWriterLimits, NodePropertySetCounts, count_entity_properties,
+    decode_spatial_property_value, read_entity_properties, read_entity_property_keys,
+    read_node_property_rows, remove_edge_properties, remove_node_properties,
+    set_edge_properties_rewrite, set_node_properties, stage_property_tombstones_authenticated,
+    stage_remove_edge_properties, stage_remove_edge_properties_authenticated,
+    stage_remove_node_properties, stage_remove_node_properties_authenticated,
+    stage_set_edge_properties, stage_set_edge_properties_authenticated, stage_set_node_properties,
+    stage_set_node_properties_authenticated, stage_set_node_properties_authenticated_with_counts,
 };
 
 pub mod mutator;

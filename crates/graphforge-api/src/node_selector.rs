@@ -18,6 +18,7 @@ const MAX_SELECTOR_ROWS: usize = 1_000_000;
 impl GraphForge {
     /// Resolve one typed selector to a UUID without invoking Cypher or an algorithm.
     pub(crate) fn resolve_node_selector(&self, selector: &NodeSelector) -> Result<Uuid, GfError> {
+        self.graph_visibility.health.check()?;
         match selector {
             NodeSelector::Uuid(uuid) => self.require_node(*uuid),
             NodeSelector::Handle(handle) => {

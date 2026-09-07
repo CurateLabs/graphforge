@@ -250,6 +250,8 @@ impl GraphForge {
 
     fn refresh_worker_handle(&self) -> Self {
         Self {
+            #[cfg(test)]
+            last_mutation_outcome: std::sync::Mutex::new(None),
             identity: self.identity.clone(),
             path: self.path.clone(),
             lifecycle_mode: self.lifecycle_mode,

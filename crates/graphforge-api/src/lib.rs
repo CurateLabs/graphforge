@@ -99,6 +99,9 @@ mod invocation_descriptor;
 mod knowledge;
 mod maintenance;
 mod multi_ontology;
+mod mutation_transaction;
+#[cfg(test)]
+mod mutation_transaction_fault_tests;
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
     BridgeUpdateRequest, CompositionValidationReceipt, ModuleAdoptionRequest, ModuleCandidate,
@@ -474,6 +477,8 @@ pub struct GraphForge {
     /// closes the remaining window for mutation APIs that still operate through
     /// this exact facade instance.
     /// Same-instance write admission and visibility coordinator.
+    #[cfg(test)]
+    last_mutation_outcome: Mutex<Option<graphforge_exec::mutation::MutationOutcome>>,
     pub(crate) graph_visibility: Arc<write_modes::WriteCoordinator>,
     /// Validated embedded write behavior for this facade.
     write_options: GraphForgeOptions,
@@ -637,6 +642,8 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            last_mutation_outcome: Mutex::new(None),
             graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&options)),
             write_options: options,
             heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
@@ -844,6 +851,8 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            last_mutation_outcome: Mutex::new(None),
             graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&write_options)),
             write_options,
             resource_policy,
@@ -909,14 +918,17 @@ impl GraphForge {
     }
 
     fn admit_heavy_query(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GfError> {
+        self.graph_visibility.health.check()?;
         self.heavy_query_admission.try_acquire()
     }
 
     fn admit_heavy_query_owned(&self) -> Result<tokio::sync::OwnedSemaphorePermit, GfError> {
+        self.graph_visibility.health.check()?;
         self.heavy_query_admission.try_acquire_owned()
     }
 
     fn generation_for_read(&self) -> Result<ResolvedProjectGeneration, GfError> {
+        self.graph_visibility.health.check()?;
         if self.read_only {
             Ok(self.resolved_generation.clone())
         } else {
@@ -1180,11 +1192,32 @@ impl GraphForge {
         if ast.clauses.is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
+        let is_mutation = ast.has_mutation_clauses();
+        if is_mutation && self.read_only {
+            return Err(GfError::Execution(
+                "GF_WRITE_RESOURCE_READ_ONLY: session does not authorize writes".into(),
+            ));
+        }
+        let _mutation_admission = (is_mutation && publish)
+            .then(|| self.graph_visibility.lock())
+            .transpose()?;
+        let transaction = is_mutation.then(|| {
+            graphforge_exec::mutation::MutationTransaction::new(
+                &self
+                    .runtime_catalog
+                    .lock()
+                    .expect("runtime catalog poisoned"),
+            )
+        });
+        let binding_catalog = transaction.as_ref().map_or_else(
+            || Arc::clone(&self.runtime_catalog),
+            graphforge_exec::mutation::MutationTransaction::catalog,
+        );
         validate_typed_parameter_binding(
             &ast,
             params,
             self.ontology.clone(),
-            &self.runtime_catalog,
+            &binding_catalog,
             self.ontology_mode,
             self.procedure_snapshot(),
         )?;
@@ -1194,7 +1227,7 @@ impl GraphForge {
         let plan = {
             let mut binder = Binder::new(
                 self.ontology.clone(),
-                self.runtime_catalog.clone(),
+                binding_catalog.clone(),
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
@@ -1229,6 +1262,8 @@ impl GraphForge {
             candidate,
             composition_mode,
             legacy_route_moves,
+            transaction,
+            is_mutation && publish,
         );
         let result = result.map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
@@ -1291,10 +1326,13 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        self.run_plan_with_publish_and_bindings(plan, params, publish, None, None, None)
+        self.run_plan_with_publish_and_bindings(
+            plan, params, publish, None, None, None, None, false,
+        )
     }
 
     #[allow(clippy::too_many_lines)] // one visibility lock spans execution and publication
+    #[allow(clippy::too_many_arguments)] // keep publication, binding and pre-admitted write context explicit
     fn run_plan_with_publish_and_bindings(
         &self,
         plan: &GraphPlan,
@@ -1303,6 +1341,8 @@ impl GraphForge {
         candidate_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
         composition_mode: Option<OntologyMode>,
         legacy_route_moves: Option<&[(std::path::PathBuf, std::path::PathBuf)]>,
+        transaction: Option<graphforge_exec::mutation::MutationTransaction>,
+        write_admission_held: bool,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -1324,27 +1364,44 @@ impl GraphForge {
             })
             .count();
         let is_write = write_ops > 0;
+        if is_write && self.read_only {
+            return Err(GfError::Execution(
+                "GF_WRITE_RESOURCE_READ_ONLY: session does not authorize writes".into(),
+            ));
+        }
         // Transaction commit already holds write admission when publish is false.
-        let _write_visibility = (is_write && publish)
+        let _write_visibility = (is_write && publish && !write_admission_held)
             .then(|| self.graph_visibility.lock())
             .transpose()?;
         let _read_visibility = (!is_write)
             .then(|| self.graph_visibility.read())
             .transpose()?;
-        let expected_generation_before_write = *self
-            .current_generation_uuid
+        let prior_catalog = self
+            .runtime_catalog
             .lock()
-            .expect("generation UUID lock poisoned");
-        // File-backed generations restore from the still-authoritative parent
-        // generation on publish failure instead of capturing a whole-workspace
-        // Arrow snapshot envelope.
-        let rollback_generation = (is_write && publish)
-            .then(|| {
-                graphforge_storage::resolve_project_generation(
-                    self.resolved_generation.container_root(),
-                )
-            })
-            .transpose()?;
+            .expect("runtime catalog poisoned")
+            .clone();
+        let mut transaction = if is_write {
+            Some(transaction.unwrap_or_else(|| {
+                graphforge_exec::mutation::MutationTransaction::new(&prior_catalog)
+            }))
+        } else {
+            None
+        };
+        let working_catalog = transaction.as_ref().map_or_else(
+            || Arc::clone(&self.runtime_catalog),
+            graphforge_exec::mutation::MutationTransaction::catalog,
+        );
+        let mut lifecycle = if is_write {
+            Some(mutation_transaction::FacadeMutationLifecycle::new(
+                self,
+                prior_catalog,
+                publish,
+                candidate_bindings,
+            )?)
+        } else {
+            None
+        };
         let mut legacy_migration = None;
         if legacy_route_moves.is_some_and(|moves| !moves.is_empty()) {
             if !is_write || !publish {
@@ -1362,10 +1419,7 @@ impl GraphForge {
         // Open a catalog snapshot reflecting the freshly-bound runtime catalog so
         // read scans resolve property names interned during bind.
         let catalog = {
-            let rc = self
-                .runtime_catalog
-                .lock()
-                .expect("runtime catalog poisoned");
+            let rc = working_catalog.lock().expect("runtime catalog poisoned");
             let installed = self
                 .semantic_storage_bindings
                 .lock()
@@ -1403,50 +1457,42 @@ impl GraphForge {
             session
         };
 
-        let result = self.block_on(async {
+        let execution = self.block_on(async {
             if is_write {
                 session
-                    .execute_write_statement_with_params(&plan, params)
+                    .prepare_write_statement_with_params(
+                        &plan,
+                        params,
+                        transaction.as_mut().expect("write transaction"),
+                    )
                     .await
             } else {
                 session.execute_plan_with_params(&plan, params).await
             }
-        })?;
-
-        // Persist the runtime catalog after a write so a later `GraphForge::new`
-        // on this directory reloads the types/properties the binder observed
-        // (the read side already loads it on open). In-memory instances skip
-        // this — their temp dir is discarded on drop. (#725)
-        if is_write && self.path.is_some() {
-            let rc = self
-                .runtime_catalog
-                .lock()
-                .expect("runtime catalog poisoned");
-            persist_runtime_catalog(&self.dir, &rc)?;
+        });
+        let result = match execution {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(transaction) = transaction.take() {
+                    return transaction.abort(lifecycle.as_mut().expect("write lifecycle"), error);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(transaction) = transaction.take() {
+            let resource = session.write_resource()?;
+            transaction.commit(
+                &resource,
+                true,
+                lifecycle.as_mut().expect("write lifecycle"),
+            )?;
         }
         if publish
-            && let Some(receipt) = result
+            && let Some(_receipt) = result
                 .mutation_receipt
                 .as_ref()
                 .filter(|receipt| !receipt.is_empty())
         {
-            let rollback_generation = rollback_generation
-                .as_ref()
-                .expect("write path resolved a rollback generation");
-            if let Err(error) =
-                self.publish_graph_mutation_with_bindings(receipt, candidate_bindings)
-            {
-                let still_prior = *self
-                    .current_generation_uuid
-                    .lock()
-                    .expect("generation UUID lock poisoned")
-                    == expected_generation_before_write;
-                if still_prior {
-                    rematerialize_graph_workspace(rollback_generation, &self.dir)?;
-                    self.adjacency_provider.invalidate();
-                }
-                return Err(error);
-            }
             if let Some(candidate) = candidate_bindings {
                 // The write visibility lock still covers this swap, so an
                 // older request can never overwrite a newer publication.
@@ -1834,11 +1880,11 @@ impl GraphForge {
         // stream is demand-driven and may outlive this call; holding the slot
         // for the full consumer lifetime would serialize all streaming clients.
         drop(admission);
-        Ok(shape_stream(
+        Ok(self.graph_visibility.health.guard_stream(shape_stream(
             stream,
             self.ontology_mode,
             self.ontology.as_ref(),
-        ))
+        )))
     }
 
     /// Streaming query plus a [`RuntimeGuard`] that keeps the instance's
@@ -1990,6 +2036,7 @@ impl GraphForge {
         label: &str,
         verb: &str,
     ) -> Result<(graphforge_value::EntityTypeSelection, String), GfError> {
+        self.graph_visibility.health.check()?;
         if label.is_empty() || label.trim() != label || label.chars().any(char::is_control) {
             return Err(GfError::Validation(format!(
                 "invalid {verb} label {label:?}"
@@ -2080,6 +2127,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Rank(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
@@ -2171,6 +2219,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Cluster(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
@@ -2260,6 +2309,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Similar(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
@@ -2455,6 +2505,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Analyze(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
@@ -2670,6 +2721,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Analyze(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
@@ -2819,6 +2871,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
+        self.graph_visibility.health.check()?;
         let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Paths(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(

@@ -60,6 +60,7 @@ impl GraphForgeOptions {
 }
 
 pub(crate) struct WriteCoordinator {
+    pub(crate) health: graphforge_exec::mutation::MutationHealth,
     mode: ProjectWriteMode,
     visibility: RwLock<()>,
     queued: Mutex<QueuedState>,
@@ -87,6 +88,7 @@ pub(crate) enum WritePermit<'a> {
 impl WriteCoordinator {
     pub(crate) fn new(options: &GraphForgeOptions) -> Self {
         Self {
+            health: graphforge_exec::mutation::MutationHealth::default(),
             mode: options.write_mode,
             visibility: RwLock::new(()),
             queued: Mutex::new(QueuedState::default()),
@@ -99,12 +101,16 @@ impl WriteCoordinator {
         &self,
         cancellation: Option<&CancellationToken>,
     ) -> Result<WritePermit<'_>, GfError> {
+        self.health.check()?;
         if self.mode != ProjectWriteMode::QueuedWriter {
             return self
                 .visibility
                 .write()
-                .map(|guard| WritePermit::Direct { _guard: guard })
-                .map_err(|_| validation("write coordinator lock poisoned"));
+                .map_err(|_| validation("write coordinator lock poisoned"))
+                .and_then(|guard| {
+                    self.health.check()?;
+                    Ok(WritePermit::Direct { _guard: guard })
+                });
         }
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(cancelled());
@@ -151,10 +157,12 @@ impl WriteCoordinator {
                     self.changed.notify_all();
                     return Err(cancelled());
                 }
-                return Ok(WritePermit::Queued {
+                let permit = WritePermit::Queued {
                     coordinator: self,
                     _guard: guard,
-                });
+                };
+                self.health.check()?;
+                return Ok(permit);
             }
             state = self
                 .changed
@@ -169,6 +177,7 @@ impl WriteCoordinator {
     }
 
     pub(crate) fn read(&self) -> Result<RwLockReadGuard<'_, ()>, GfError> {
+        self.health.check()?;
         if self.mode == ProjectWriteMode::QueuedWriter {
             let mut state = self
                 .queued
@@ -181,9 +190,12 @@ impl WriteCoordinator {
                     .map_err(|_| validation("write queue lock poisoned"))?;
             }
         }
-        self.visibility
+        let guard = self
+            .visibility
             .read()
-            .map_err(|_| validation("write coordinator lock poisoned"))
+            .map_err(|_| validation("write coordinator lock poisoned"))?;
+        self.health.check()?;
+        Ok(guard)
     }
 
     #[cfg(test)]
