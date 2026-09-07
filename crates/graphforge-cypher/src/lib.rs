@@ -253,8 +253,21 @@ mod tests {
     #[test]
     fn explain_stage_logical_plan_bind_error_surfaces_as_plan_error() {
         // `RETURN n` references an undeclared variable → binder rejects it.
-        let result = explain_stage("RETURN n", ExplainStage::LogicalPlan);
-        assert!(matches!(result, Err(GfError::Plan(_))), "got {result:?}");
+        let error = explain_stage("RETURN n", ExplainStage::LogicalPlan).unwrap_err();
+        assert_eq!(error.code(), "GF_PLAN");
+        assert_eq!(
+            error.to_string(),
+            "plan error: bind errors: variable `n` used before it was introduced"
+        );
+        let GfError::BindPlan { diagnostics, .. } = error else {
+            panic!("legacy plan error lost its binder diagnostics")
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].kind,
+            graphforge_core::BindErrorKind::UndeclaredVariable
+        );
+        assert_eq!(diagnostics[0].span, graphforge_core::Span::new(7, 8));
     }
 
     #[test]

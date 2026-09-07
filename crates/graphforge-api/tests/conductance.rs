@@ -189,12 +189,17 @@ fn conductance_rejects_undefined_or_invalid_weighted_projections() {
         "CREATE (a:Person {side:'alpha'}), (b:Person {side:'beta'}), \
          (a)-[:LINK {weight:-1}]->(b)",
     );
+    let error = negative_weight
+        .analyze(Some("Person"), options("side", Some("weight")))
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_EXECUTION");
+    assert_eq!(
+        error.to_string(),
+        "execution error: Rust algorithm execution failed: conductance weights must be finite and nonnegative"
+    );
     assert!(matches!(
-        negative_weight
-            .analyze(Some("Person"), options("side", Some("weight")))
-            .unwrap_err(),
-        GfError::Execution(message)
-            if message
-                == "Rust algorithm execution failed: conductance weights must be finite and nonnegative"
+        error,
+        GfError::Algorithm(graphforge_core::AlgorithmError::Execution { message })
+            if message == "conductance weights must be finite and nonnegative"
     ));
 }
