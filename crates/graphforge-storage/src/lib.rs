@@ -2,8 +2,7 @@
 //!
 //! Owns project admission, generation and participant publication, recovery,
 //! Parquet catalogs and write paths, derived indexes, and portable interchange.
-//! Runtime scans use [`GraphCatalog`] and DataFusion table providers; the legacy
-//! [`StorageProvider`] / [`ParquetProvider`] stubs are not the execution path.
+//! Runtime scans use [`GraphCatalog`] and DataFusion table providers.
 //!
 //! - [`schemas`] — Arrow schema constants for every Parquet file
 //! - [`catalog`] — DataFusion `TableProvider` / `CatalogProvider` implementations (#572)
@@ -459,36 +458,6 @@ pub mod staging;
 pub use staging::{RewriteBatch, STAGE_FILE_BLOCK_BYTES, remove_stale_temps};
 
 pub use graphforge_core::GfError;
-
-/// Minimal row type exchanged between the storage layer and the executor.
-/// Will be replaced by Arrow `RecordBatch` in Milestone 13.
-#[derive(Debug, Clone, Default)]
-pub struct StorageRow {
-    /// Column name → string value pairs (all types as strings at stub stage).
-    pub columns: Vec<(String, String)>,
-}
-
-/// Abstraction over different storage backends.
-pub trait StorageProvider: Send + Sync {
-    /// Scan all rows for the given node label.
-    ///
-    /// # Errors
-    /// Returns [`GfError`] on I/O failure or if the label is unknown.
-    fn scan_nodes(&self, label: &str) -> Result<Vec<StorageRow>, GfError>;
-}
-
-/// Parquet-backed storage provider stub.
-#[derive(Debug, Default)]
-pub struct ParquetProvider {
-    /// Optional path to the Parquet directory.
-    pub path: Option<std::path::PathBuf>,
-}
-
-impl StorageProvider for ParquetProvider {
-    fn scan_nodes(&self, _label: &str) -> Result<Vec<StorageRow>, GfError> {
-        Err(GfError::NotImplemented("scan_nodes"))
-    }
-}
 
 mod lowering_snapshot;
 pub use lowering_snapshot::lowering_snapshot;

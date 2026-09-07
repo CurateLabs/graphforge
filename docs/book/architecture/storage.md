@@ -11,14 +11,14 @@ The native directory authority, lifecycle policy, and adversarial checks are
 documented in [Directory capabilities](directory-capabilities.md).
 
 `graphforge-storage` owns project generations and participants, admission and
-recovery, Arrow schemas, Parquet catalogs and write paths, derived indexes, and
+recovery, Parquet catalogs and write paths, derived indexes, and
 portable interchange. Runtime scans use `GraphCatalog` and DataFusion
 `TableProvider` implementations over the selected project's data. Query-language
 semantics remain in the compiler and execution layers.
 
-The legacy `StorageProvider`, `StorageRow`, and `ParquetProvider` declarations
-are unused stubs: their `scan_nodes` path returns `NotImplemented`. They are not
-the runtime storage interface or a shipped backend-selection mechanism.
+Shared logical and physical Arrow schema definitions live in `graphforge-ir::arrow_schema`; storage reexports the existing public schema names. Relational compilation consumes neutral schema data and has no production storage dependency. Execution owns path hydration through retained catalog providers.
+
+The unused `StorageProvider`, `StorageRow`, and `ParquetProvider` stubs were removed in #1006. They had no consumers and their scan path returned `NotImplemented`; they never provided backend selection.
 
 ---
 
@@ -60,7 +60,7 @@ graphforge.query_id          = "01J..."
 graphforge.provenance_policy = "conservative_min"
 ```
 
-Project metadata and manifests use JSON. A future storage backend would need to satisfy the actual generation, admission, publication, and scan contracts; the unused `StorageProvider` stub does not establish that support.
+Project metadata and manifests use JSON. A future storage backend would need to satisfy the actual generation, admission, publication, and scan contracts; the removed `StorageProvider` stub did not establish that support.
 
 ---
 

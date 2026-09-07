@@ -524,3 +524,6 @@ mod tests {
 
 pub mod lowering_snapshot;
 pub use lowering_snapshot::LoweringSnapshot;
+
+/// Shared Arrow schema definitions, independent of storage implementations.
+pub mod arrow_schema;

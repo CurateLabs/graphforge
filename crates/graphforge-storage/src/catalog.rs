@@ -2616,6 +2616,31 @@ impl PropertyTable {
         }
     }
 
+    /// Visit node-property batches using this provider's retained admission.
+    ///
+    /// # Errors
+    /// Rejects unadmitted providers and propagates storage or visitor errors.
+    pub fn visit_authenticated_batches<F>(
+        &self,
+        batch_size: usize,
+        visit: F,
+    ) -> Result<(), DataFusionError>
+    where
+        F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+    {
+        let inventory = self.inventory.as_deref().ok_or_else(|| {
+            DataFusionError::Execution("property provider has no retained inventory".into())
+        })?;
+        visit_property_overlay_batched_with_inventory(
+            &self.project,
+            Some(inventory),
+            &self.route,
+            false,
+            batch_size,
+            visit,
+        )
+    }
+
     /// The property column schema (including the `node_uuid` join key).
     #[must_use]
     pub fn schema_ref(&self) -> SchemaRef {

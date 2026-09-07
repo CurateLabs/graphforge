@@ -188,6 +188,8 @@ pub struct DemandSnapshot {
     pub cancellations: u64,
     /// Maximum simultaneous filtered-read calls.
     pub max_in_flight_reads: u64,
+    /// Query-owned path hydration work, using physical operator metric names.
+    pub hydration: BTreeMap<String, u64>,
     /// Query memory-pool reservation before physical execution.
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every operator stream was dropped.
@@ -430,6 +432,9 @@ pub(crate) fn record_plan_completion(
             operator.peak_bytes = operator.peak_bytes.max(completion_rss);
         }
     }
+    let mut hydration = BTreeMap::new();
+    hydration_metrics(plan, &mut hydration);
+    state.snapshot.hydration = hydration;
     state.snapshot.sorts = sorts;
     state.snapshot.memory_reserved_before = memory_reserved_before as u64;
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
@@ -1590,6 +1595,22 @@ impl Drop for DemandGuardStream {
 impl RecordBatchStream for DemandGuardStream {
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
+    }
+}
+
+fn hydration_metrics(plan: &Arc<dyn ExecutionPlan>, result: &mut BTreeMap<String, u64>) {
+    if plan
+        .downcast_ref::<crate::path_hydration::HydrationExec>()
+        .is_some()
+        && let Some(metrics) = plan.metrics()
+    {
+        for metric in metrics.iter() {
+            let value = metric.value();
+            *result.entry(value.name().to_owned()).or_default() += value.as_usize() as u64;
+        }
+    }
+    for child in plan.children() {
+        hydration_metrics(child, result);
     }
 }
 

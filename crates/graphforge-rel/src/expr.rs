@@ -349,7 +349,7 @@ impl<'a> ExprLowerer<'a> {
                         .get(prop)
                         .cloned()
                         .unwrap_or_else(|| format!("prop_{prop}"));
-                    let is_topology = graphforge_storage::TOPOLOGY_NODES_SCHEMA
+                    let is_topology = graphforge_ir::arrow_schema::TOPOLOGY_NODES_SCHEMA
                         .field_with_name(&prop_name)
                         .is_ok();
                     if !is_topology && !shape.prop_names.contains(&prop_name) {
@@ -798,7 +798,7 @@ impl<'a> ExprLowerer<'a> {
             }
         }
         if let Some(shape) = self.node_shapes.get(&var_id.0) {
-            let is_topology = graphforge_storage::TOPOLOGY_NODES_SCHEMA
+            let is_topology = graphforge_ir::arrow_schema::TOPOLOGY_NODES_SCHEMA
                 .field_with_name(key)
                 .is_ok();
             if is_topology || shape.prop_names.iter().any(|p| p == key) {
@@ -3224,7 +3224,6 @@ impl<'a> ExprLowerer<'a> {
                 .then_with(|| left_name.cmp(right_name))
         });
         Ok(Some(PathNodeHydration {
-            dir: None,
             labels_by_type,
             prop_stems: stems,
             fields: fields.into(),
@@ -8863,7 +8862,7 @@ impl ScalarUDFImpl for CypherDurationBetween {
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::duration_struct_fields(),
+            graphforge_ir::arrow_schema::duration_struct_fields(),
         ))
     }
 
@@ -9105,7 +9104,7 @@ impl ScalarUDFImpl for CypherDurationParse {
     }
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::duration_struct_fields(),
+            graphforge_ir::arrow_schema::duration_struct_fields(),
         ))
     }
 
@@ -9164,7 +9163,7 @@ impl ScalarUDFImpl for CypherDurationAdd {
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::duration_struct_fields(),
+            graphforge_ir::arrow_schema::duration_struct_fields(),
         ))
     }
 
@@ -9240,7 +9239,7 @@ impl ScalarUDFImpl for CypherDurationScale {
     }
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::duration_struct_fields(),
+            graphforge_ir::arrow_schema::duration_struct_fields(),
         ))
     }
 
@@ -9506,23 +9505,25 @@ impl ScalarUDFImpl for CypherQuantifier {
             let phys = phys
                 .as_ref()
                 .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-            let verdict = (|| {
+            let verdict = (|| -> datafusion::error::Result<Option<bool>> {
                 let mut batch_cols: Vec<ArrayRef> = Vec::with_capacity(1 + self.outer_names.len());
                 batch_cols.push(elems);
                 for i in 0..self.outer_names.len() {
-                    let sv = ScalarValue::try_from_array(&cols[i + 1], row).ok()?;
-                    batch_cols.push(sv.to_array_of_size(n).ok()?);
+                    let sv = ScalarValue::try_from_array(&cols[i + 1], row)?;
+                    batch_cols.push(sv.to_array_of_size(n)?);
                 }
-                let batch = RecordBatch::try_new(Arc::clone(&schema), batch_cols).ok()?;
-                let evaluated = phys.evaluate(&batch).ok()?.into_array(n).ok()?;
+                let batch = RecordBatch::try_new(Arc::clone(&schema), batch_cols)?;
+                let evaluated = phys.evaluate(&batch)?.into_array(n)?;
                 // A typeless evaluation (`WHERE x` over untyped elements) is
                 // 3VL unknown per element, not a row failure.
                 if evaluated.data_type() == &DataType::Null {
-                    return reduce_quantifier(self.kind, &BooleanArray::new_null(n), n);
+                    return Ok(reduce_quantifier(self.kind, &BooleanArray::new_null(n), n));
                 }
-                let bools = evaluated.as_any().downcast_ref::<BooleanArray>()?;
-                reduce_quantifier(self.kind, bools, n)
-            })();
+                let Some(bools) = evaluated.as_any().downcast_ref::<BooleanArray>() else {
+                    return Ok(None);
+                };
+                Ok(reduce_quantifier(self.kind, bools, n))
+            })()?;
             out.append_option(verdict);
         }
         Ok(ColumnarValue::Array(std::sync::Arc::new(out.finish())))
@@ -9958,7 +9959,7 @@ impl ScalarUDFImpl for CypherDateProject {
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::date_struct_fields(),
+            graphforge_ir::arrow_schema::date_struct_fields(),
         ))
     }
 
@@ -10273,7 +10274,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
 /// self-describing on storage decode — a plain integer property would be
 /// indistinguishable — while spanning the full openCypher year range (#1011).
 fn date_fields() -> datafusion::arrow::datatypes::Fields {
-    graphforge_storage::schemas::date_struct_fields()
+    graphforge_ir::arrow_schema::date_struct_fields()
 }
 
 /// True if `dt` is the standalone `date` struct type (`Struct{epoch_day: Int64}`),
@@ -10328,7 +10329,7 @@ fn optional_i64_at(array: &datafusion::arrow::array::ArrayRef, row: usize) -> Op
 /// Time64(Nanosecond)}`. `date` is first so DataFusion's row-format sort orders
 /// chronologically (date, then time-of-day); `date` is i64 days (#1011).
 fn localdatetime_fields() -> datafusion::arrow::datatypes::Fields {
-    graphforge_storage::schemas::localdatetime_struct_fields()
+    graphforge_ir::arrow_schema::localdatetime_struct_fields()
 }
 
 /// True if `dt` is the `localdatetime` struct type (used to dispatch base
@@ -10425,7 +10426,7 @@ fn build_duration_struct(
     let nanos: Int64Array = rows.iter().map(|r| r.map(|d| d.nanos)).collect();
     let nulls = rows.iter().map(Option::is_some).collect::<NullBuffer>();
     datafusion::arrow::array::StructArray::new(
-        graphforge_storage::schemas::duration_struct_fields(),
+        graphforge_ir::arrow_schema::duration_struct_fields(),
         vec![
             std::sync::Arc::new(months),
             std::sync::Arc::new(days),
@@ -10842,7 +10843,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
 /// The Arrow fields of a `time` value — `Struct{time: Time64(Nanosecond),
 /// offset: Int32}` (nanoseconds-of-day + zone offset in seconds).
 fn time_fields() -> datafusion::arrow::datatypes::Fields {
-    graphforge_storage::schemas::time_struct_fields()
+    graphforge_ir::arrow_schema::time_struct_fields()
 }
 
 /// True if `dt` is the `time` struct type (dispatches base extraction/rendering
@@ -11174,7 +11175,7 @@ type DateTimeRow = Option<(i64, i64, i32, Option<String>)>;
 /// time-of-day, resolved zone offset in seconds, and an optional named-IANA-zone
 /// label). (#1011)
 fn datetime_fields() -> datafusion::arrow::datatypes::Fields {
-    graphforge_storage::schemas::datetime_struct_fields()
+    graphforge_ir::arrow_schema::datetime_struct_fields()
 }
 
 /// True if `dt` is the `datetime` struct type.
@@ -11842,7 +11843,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
 
     fn return_type(&self, _arg_types: &[DataType]) -> datafusion::error::Result<DataType> {
         Ok(DataType::Struct(
-            graphforge_storage::schemas::date_struct_fields(),
+            graphforge_ir::arrow_schema::date_struct_fields(),
         ))
     }
 
@@ -11963,16 +11964,14 @@ fn path_node_struct_fields() -> datafusion::arrow::datatypes::Fields {
 /// properties (#1024). Sorted `Vec`s rather than maps so the UDF stays
 /// `Hash`/`Eq`.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-struct PathNodeHydration {
-    /// The project directory the invoke reads node/property files from.
-    dir: Option<std::path::PathBuf>,
+pub struct PathNodeHydration {
     /// `type_id → label` (ontology + runtime catalog), sorted by id.
-    labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
+    pub labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
     /// The `properties/<stem>.parquet` stems whose fields form the union,
     /// sorted — the invoke coalesces each node's values across them.
-    prop_stems: Vec<String>,
+    pub prop_stems: Vec<String>,
     /// The full element fields: `node_uuid`, `labels`, then the property union.
-    fields: datafusion::arrow::datatypes::Fields,
+    pub fields: datafusion::arrow::datatypes::Fields,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -11981,80 +11980,51 @@ struct CypherPathNodes {
     hydrate: Option<PathNodeHydration>,
 }
 
-/// Bind graph-reading expressions to an execution-owned resource. Lowering
-/// leaves hydration unbound; only physical planning supplies the directory.
-pub fn bind_graph_read_expression(
+/// Rewrite expressions including the private expression trees retained by
+/// quantifiers and list comprehensions. The callback owns resource decisions;
+/// this traversal performs no storage admission or I/O.
+pub fn rewrite_embedded_expressions(
     expr: DfExpr,
-    dir: Option<&std::path::Path>,
-    labels: Option<&[(graphforge_value::EntityTypeId, String)]>,
+    rewrite: &mut impl FnMut(DfExpr) -> datafusion::common::Result<DfExpr>,
 ) -> datafusion::common::Result<DfExpr> {
     use datafusion::common::tree_node::{Transformed, TreeNode};
     expr.transform_up(|mut expr| {
         if let DfExpr::ScalarFunction(call) = &mut expr {
-            if let Some(nodes) = call.func.inner().downcast_ref::<CypherPathNodes>() {
-                if let Some(hydrate) = &nodes.hydrate {
-                    let dir = dir.ok_or_else(|| {
-                        datafusion::common::DataFusionError::Plan(
-                            "GF_READ_RESOURCE_MISSING: path hydration".into(),
-                        )
-                    })?;
-                    let stems = graphforge_storage::list_property_stems(dir);
-                    let mut fields = vec![
-                        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                        Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-                    ];
-                    let mut seen: std::collections::HashSet<String> =
-                        fields.iter().map(|f| f.name().clone()).collect();
-                    for stem in &stems {
-                        let table = graphforge_storage::PropertyTable::open_discovered(dir, stem);
-                        for field in table.schema_ref().fields() {
-                            if seen.insert(field.name().clone()) {
-                                fields.push(field.as_ref().clone().with_nullable(true));
-                            }
-                        }
-                    }
-                    if hydrate.prop_stems != stems
-                        || hydrate.fields != fields.into()
-                        || labels != Some(hydrate.labels_by_type.as_slice())
-                    {
-                        return Err(datafusion::common::DataFusionError::Plan(
-                            "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema or labels".into(),
-                        ));
-                    }
-                    let mut hydrate = hydrate.clone();
-                    hydrate.dir = Some(dir.to_path_buf());
-                    call.func = Arc::new(ScalarUDF::new_from_impl(
-                        CypherPathNodes::with_hydration(hydrate),
-                    ));
-                    return Ok(Transformed::yes(expr));
-                }
-            } else if let Some(quantifier) = call.func.inner().downcast_ref::<CypherQuantifier>() {
+            if let Some(quantifier) = call.func.inner().downcast_ref::<CypherQuantifier>() {
                 call.func = Arc::new(ScalarUDF::new_from_impl(CypherQuantifier::new(
                     quantifier.kind,
-                    bind_graph_read_expression(quantifier.predicate.clone(), dir, labels)?,
+                    rewrite_embedded_expressions(quantifier.predicate.clone(), rewrite)?,
                     quantifier.elem_name.clone(),
                     quantifier.outer_names.clone(),
                 )));
-                return Ok(Transformed::yes(expr));
             } else if let Some(comp) = call.func.inner().downcast_ref::<CypherListComp>() {
                 call.func = Arc::new(ScalarUDF::new_from_impl(CypherListComp::new(
                     comp.filter
                         .clone()
-                        .map(|e| bind_graph_read_expression(e, dir, labels))
+                        .map(|expr| rewrite_embedded_expressions(expr, rewrite))
                         .transpose()?,
                     comp.projection
                         .clone()
-                        .map(|e| bind_graph_read_expression(e, dir, labels))
+                        .map(|expr| rewrite_embedded_expressions(expr, rewrite))
                         .transpose()?,
                     comp.elem_name.clone(),
                     comp.outer_names.clone(),
                 )));
-                return Ok(Transformed::yes(expr));
             }
         }
-        Ok(Transformed::no(expr))
+        rewrite(expr).map(Transformed::yes)
     })
     .map(|result| result.data)
+}
+
+/// Inspect the neutral descriptor of a hydrated path-node function.
+#[must_use]
+pub fn path_node_hydration_descriptor(function: &ScalarUDF) -> Option<&PathNodeHydration> {
+    function
+        .inner()
+        .downcast_ref::<CypherPathNodes>()?
+        .hydrate
+        .as_ref()
 }
 
 impl CypherPathNodes {
@@ -12096,605 +12066,142 @@ impl ScalarUDFImpl for CypherPathNodes {
         ))
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "path hydration keeps offsets, selected rows, and graph identity columns in one checked pass"
-    )]
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
-        use datafusion::arrow::array::{
-            Array, ArrayRef, FixedSizeBinaryArray, ListArray, StructArray, new_empty_array,
-        };
-        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer};
-        use datafusion::arrow::datatypes::Field;
-        use datafusion::common::cast::as_list_array;
-        use datafusion::error::DataFusionError;
-        use std::sync::Arc;
+        if self.hydrate.is_some() {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "GF_READ_RESOURCE_MISSING: path hydration".into(),
+            ));
+        }
+        evaluate_path_nodes(&args, self.element_fields(), |_, _| Ok(Vec::new()))
+    }
+}
 
-        validate_heterogeneous_arguments(&args.args)?;
-        let exec_err = |m: String| DataFusionError::Execution(m);
-        let as_fsb16 =
-            |array: &dyn Array, what: &str| -> datafusion::error::Result<FixedSizeBinaryArray> {
-                array
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .filter(|a| a.value_length() == 16)
-                    .cloned()
-                    .ok_or_else(|| {
-                        exec_err(format!(
-                            "cypher_path_nodes: expected FixedSizeBinary(16) {what}, got {:?}",
-                            array.data_type()
-                        ))
-                    })
-            };
+/// Assemble path-node lists while an execution-owned callback supplies children.
+/// This function performs no storage reads and preserves expression-local evaluation.
+pub fn evaluate_path_nodes(
+    args: &ScalarFunctionArgs,
+    element_fields: datafusion::arrow::datatypes::Fields,
+    mut hydrate: impl FnMut(
+        &[[u8; 16]],
+        usize,
+    ) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>>,
+) -> datafusion::error::Result<ColumnarValue> {
+    use datafusion::arrow::array::{
+        Array, ArrayRef, FixedSizeBinaryArray, ListArray, StructArray, new_empty_array,
+    };
+    use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer};
+    use datafusion::arrow::datatypes::Field;
+    use datafusion::common::cast::as_list_array;
+    use datafusion::error::DataFusionError;
+    use std::sync::Arc;
 
-        let seeds = args.args[0].to_array(args.number_rows)?;
-        let seeds = as_fsb16(seeds.as_ref(), "start-node uuid")?;
-        let rels = args.args[1].to_array(args.number_rows)?;
-        let rels = as_list_array(&rels)?.clone();
-
-        // Walk each row's relationship list from its seed, flattening the node
-        // sequences: one uuid per visited node, one (length, validity) per row.
-        let mut flat: Vec<[u8; 16]> = Vec::new();
-        let mut lengths: Vec<usize> = Vec::with_capacity(rels.len());
-        let mut valid: Vec<bool> = Vec::with_capacity(rels.len());
-        for row in 0..rels.len() {
-            if seeds.is_null(row) || rels.is_null(row) {
-                lengths.push(0);
-                valid.push(false);
-                continue;
-            }
-            let start = flat.len();
-            let mut cur = [0u8; 16];
-            cur.copy_from_slice(seeds.value(row));
-            flat.push(cur);
-
-            let edges = rels.value(row);
-            let edges = edges
+    validate_heterogeneous_arguments(&args.args)?;
+    let exec_err = |m: String| DataFusionError::Execution(m);
+    let as_fsb16 =
+        |array: &dyn Array, what: &str| -> datafusion::error::Result<FixedSizeBinaryArray> {
+            array
                 .as_any()
-                .downcast_ref::<StructArray>()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .filter(|a| a.value_length() == 16)
+                .cloned()
                 .ok_or_else(|| {
-                    exec_err("cypher_path_nodes: relationship-list items must be structs".into())
-                })?;
-            // Topology children by name — property fields are appended after
-            // them, so positional access would be wrong (#755).
-            let src = edges.column_by_name("src_uuid").ok_or_else(|| {
-                exec_err("cypher_path_nodes: relationship struct has no src_uuid".into())
-            })?;
-            let src = as_fsb16(src.as_ref(), "src_uuid")?;
-            let dst = edges.column_by_name("dst_uuid").ok_or_else(|| {
-                exec_err("cypher_path_nodes: relationship struct has no dst_uuid".into())
-            })?;
-            let dst = as_fsb16(dst.as_ref(), "dst_uuid")?;
-
-            for i in 0..edges.len() {
-                let s = src.value(i);
-                let d = dst.value(i);
-                let next = if cur == s {
-                    d
-                } else if cur == d {
-                    s
-                } else {
-                    return Err(exec_err(format!(
-                        "cypher_path_nodes: edge {i} is disconnected from the \
-                         path (corrupt traversal emission)"
-                    )));
-                };
-                cur.copy_from_slice(next);
-                flat.push(cur);
-            }
-            lengths.push(flat.len() - start);
-            valid.push(true);
-        }
-
-        // node_uuid child — width-16 even when there are zero total nodes
-        // (`try_from_iter` would infer width 0 and fail the schema check).
-        let uuid_child: ArrayRef = if flat.is_empty() {
-            new_empty_array(&DataType::FixedSizeBinary(16))
-        } else {
-            Arc::new(
-                FixedSizeBinaryArray::try_from_iter(flat.iter())
-                    .map_err(|e| exec_err(e.to_string()))?,
-            )
+                    exec_err(format!(
+                        "cypher_path_nodes: expected FixedSizeBinary(16) {what}, got {:?}",
+                        array.data_type()
+                    ))
+                })
         };
-        let fields = self.element_fields();
-        let mut children: Vec<ArrayRef> = vec![uuid_child];
-        if let Some(h) = self.hydrate.as_ref() {
-            // Prefer the session/resource-policy batch size (#337 / #706).
-            let batch_size = args.config_options.execution.batch_size.max(1);
-            children.extend(hydrate_path_node_children(h, &flat, batch_size)?);
-        }
 
-        let struct_arr = StructArray::try_new(fields.clone(), children, None)
-            .map_err(|e| exec_err(e.to_string()))?;
-        let offsets = OffsetBuffer::<i32>::from_lengths(lengths);
-        let item = Arc::new(Field::new("item", DataType::Struct(fields), true));
-        let list = ListArray::try_new(
-            item,
-            offsets,
-            Arc::new(struct_arr),
-            Some(NullBuffer::from(valid)),
+    let seeds = args.args[0].to_array(args.number_rows)?;
+    let seeds = as_fsb16(seeds.as_ref(), "start-node uuid")?;
+    let rels = args.args[1].to_array(args.number_rows)?;
+    let rels = as_list_array(&rels)?.clone();
+
+    // Walk each row's relationship list from its seed, flattening the node
+    // sequences: one uuid per visited node, one (length, validity) per row.
+    let mut flat: Vec<[u8; 16]> = Vec::new();
+    let mut lengths: Vec<usize> = Vec::with_capacity(rels.len());
+    let mut valid: Vec<bool> = Vec::with_capacity(rels.len());
+    for row in 0..rels.len() {
+        if seeds.is_null(row) || rels.is_null(row) {
+            lengths.push(0);
+            valid.push(false);
+            continue;
+        }
+        let start = flat.len();
+        let mut cur = [0u8; 16];
+        cur.copy_from_slice(seeds.value(row));
+        flat.push(cur);
+
+        let edges = rels.value(row);
+        let edges = edges
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| {
+                exec_err("cypher_path_nodes: relationship-list items must be structs".into())
+            })?;
+        // Topology children by name — property fields are appended after
+        // them, so positional access would be wrong (#755).
+        let src = edges.column_by_name("src_uuid").ok_or_else(|| {
+            exec_err("cypher_path_nodes: relationship struct has no src_uuid".into())
+        })?;
+        let src = as_fsb16(src.as_ref(), "src_uuid")?;
+        let dst = edges.column_by_name("dst_uuid").ok_or_else(|| {
+            exec_err("cypher_path_nodes: relationship struct has no dst_uuid".into())
+        })?;
+        let dst = as_fsb16(dst.as_ref(), "dst_uuid")?;
+
+        for i in 0..edges.len() {
+            let s = src.value(i);
+            let d = dst.value(i);
+            let next = if cur == s {
+                d
+            } else if cur == d {
+                s
+            } else {
+                return Err(exec_err(format!(
+                    "cypher_path_nodes: edge {i} is disconnected from the \
+                         path (corrupt traversal emission)"
+                )));
+            };
+            cur.copy_from_slice(next);
+            flat.push(cur);
+        }
+        lengths.push(flat.len() - start);
+        valid.push(true);
+    }
+
+    // node_uuid child — width-16 even when there are zero total nodes
+    // (`try_from_iter` would infer width 0 and fail the schema check).
+    let uuid_child: ArrayRef = if flat.is_empty() {
+        new_empty_array(&DataType::FixedSizeBinary(16))
+    } else {
+        Arc::new(
+            FixedSizeBinaryArray::try_from_iter(flat.iter())
+                .map_err(|e| exec_err(e.to_string()))?,
         )
+    };
+    let fields = element_fields;
+    let mut children: Vec<ArrayRef> = vec![uuid_child];
+    let batch_size = args.config_options.execution.batch_size.max(1);
+    children.extend(hydrate(&flat, batch_size)?);
+
+    let struct_arr = StructArray::try_new(fields.clone(), children, None)
         .map_err(|e| exec_err(e.to_string()))?;
-        Ok(ColumnarValue::Array(Arc::new(list)))
-    }
+    let offsets = OffsetBuffer::<i32>::from_lengths(lengths);
+    let item = Arc::new(Field::new("item", DataType::Struct(fields), true));
+    let list = ListArray::try_new(
+        item,
+        offsets,
+        Arc::new(struct_arr),
+        Some(NullBuffer::from(valid)),
+    )
+    .map_err(|e| exec_err(e.to_string()))?;
+    Ok(ColumnarValue::Array(Arc::new(list)))
 }
-
-/// Build the `labels` + property-union children for hydrated path-node
-/// elements (#1024 / #706 / #807), one entry per flattened node uuid.
-///
-/// Demand-first: unique requested UUIDs are gathered once from batchwise
-/// topology/property reads (no full-stem `concat_batches`), then expanded back
-/// to flattened public positions so repeats keep identical values. Property
-/// rows for the same UUID are retained across stems and coalesced on expand.
-fn hydrate_path_node_children(
-    h: &PathNodeHydration,
-    flat: &[[u8; 16]],
-    batch_size: usize,
-) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
-    let unique = unique_path_uuids(flat);
-    path_hydration_stats::record_request(unique.len() as u64);
-    let labels_of = gather_path_node_labels(h, &unique, batch_size)?;
-    let props_of = gather_path_node_props(h, &unique, batch_size)?;
-    check_path_hydration_cancel()?;
-    let mut children = vec![expand_path_node_labels(h, flat, &labels_of)];
-    children.extend(expand_path_node_props(h, flat, &props_of)?);
-    Ok(children)
-}
-
-/// Stable-first unique UUIDs from a flattened path-node sequence (#706).
-fn unique_path_uuids(flat: &[[u8; 16]]) -> Vec<[u8; 16]> {
-    use std::collections::HashSet;
-    let mut seen = HashSet::with_capacity(flat.len());
-    let mut unique = Vec::with_capacity(flat.len());
-    for u in flat {
-        if seen.insert(*u) {
-            unique.push(*u);
-        }
-    }
-    unique
-}
-
-/// Cooperative cancel / resource-exhaustion gate for path hydration (#706).
-fn check_path_hydration_cancel() -> datafusion::error::Result<()> {
-    if path_hydration_stats::is_cancelled() {
-        return Err(datafusion::error::DataFusionError::ResourcesExhausted(
-            "cypher_path_nodes: hydration cancelled".into(),
-        ));
-    }
-    if path_hydration_stats::resource_exhausted() {
-        return Err(datafusion::error::DataFusionError::ResourcesExhausted(
-            "cypher_path_nodes: hydration resource limit exceeded".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// A `FixedSizeBinary(16)` column by name, for the hydration readers.
-fn hydration_fsb16(
-    b: &datafusion::arrow::array::RecordBatch,
-    name: &str,
-) -> datafusion::error::Result<datafusion::arrow::array::FixedSizeBinaryArray> {
-    use datafusion::arrow::array::FixedSizeBinaryArray;
-    b.column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<FixedSizeBinaryArray>().cloned())
-        .filter(|a| a.value_length() == 16)
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "cypher_path_nodes: no FixedSizeBinary(16) {name} column"
-            ))
-        })
-}
-
-/// Gather authoritative `type_ids` for the requested UUID set only (#705 / #706).
-fn gather_path_node_labels(
-    h: &PathNodeHydration,
-    unique: &[[u8; 16]],
-    batch_size: usize,
-) -> datafusion::error::Result<
-    std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
-> {
-    use datafusion::arrow::array::{Array, ListArray, UInt32Array};
-    use datafusion::error::DataFusionError;
-    use std::collections::{HashMap, HashSet};
-
-    let exec_err = |m: String| DataFusionError::Execution(m);
-    if unique.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
-    let mut label_ids_of: HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>> =
-        HashMap::with_capacity(unique.len());
-
-    graphforge_storage::visit_nodes_batched(
-        h.dir.as_deref().ok_or_else(|| {
-            DataFusionError::Plan("GF_READ_RESOURCE_MISSING: path hydration".into())
-        })?,
-        batch_size,
-        |b| {
-            check_path_hydration_cancel()?;
-            path_hydration_stats::record_node_batch(b.num_rows() as u64);
-            if remaining.is_empty() {
-                return Ok(false);
-            }
-            let uuids = hydration_fsb16(b, "node_uuid")?;
-            let type_ids = b
-                .column_by_name("type_ids")
-                .and_then(|c| c.as_any().downcast_ref::<ListArray>())
-                .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
-            for r in 0..b.num_rows() {
-                if uuids.is_null(r) || type_ids.is_null(r) {
-                    continue;
-                }
-                let mut u = [0u8; 16];
-                u.copy_from_slice(uuids.value(r));
-                if !remaining.remove(&u) {
-                    continue;
-                }
-                let values = type_ids.value(r);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| {
-                        exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
-                    })?;
-                let mut ids = Vec::with_capacity(values.len());
-                for i in 0..values.len() {
-                    if !values.is_null(i) {
-                        ids.push(
-                            graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
-                                |error| {
-                                    exec_err(format!(
-                                        "cypher_path_nodes: invalid membership identity: {error}"
-                                    ))
-                                },
-                            )?,
-                        );
-                    }
-                }
-                label_ids_of.insert(u, ids);
-                path_hydration_stats::record_node_gathered(1);
-                path_hydration_stats::record_peak_gathered(label_ids_of.len() as u64);
-                if remaining.is_empty() {
-                    break;
-                }
-            }
-            Ok(!remaining.is_empty())
-        },
-    )?;
-    path_hydration_stats::record_resolved(label_ids_of.len() as u64);
-    Ok(label_ids_of)
-}
-
-/// Expand gathered label ids to a `List<Utf8>` child aligned with `flat` (#705).
-fn expand_path_node_labels(
-    h: &PathNodeHydration,
-    flat: &[[u8; 16]],
-    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
-) -> datafusion::arrow::array::ArrayRef {
-    use datafusion::arrow::array::{ListBuilder, StringBuilder};
-
-    let mut labels_b = ListBuilder::new(StringBuilder::new());
-    for u in flat {
-        if let Some(ids) = label_ids_of.get(u) {
-            for id in ids {
-                if let Ok(i) = h
-                    .labels_by_type
-                    .binary_search_by_key(&id.encode(), |(tid, _)| tid.encode())
-                {
-                    labels_b.values().append_value(&h.labels_by_type[i].1);
-                }
-            }
-            labels_b.append(true);
-        } else {
-            labels_b.values().append_null();
-            labels_b.append(true);
-        }
-    }
-    std::sync::Arc::new(labels_b.finish())
-}
-
-/// Location of one gathered property row inside a stem's kept batches.
-struct PropRowLoc {
-    stem: usize,
-    batch: usize,
-    row: u32,
-}
-
-/// Kept property batches per stem, plus UUID → row locations across stems
-/// (#706 / #807). Complementary fields for one UUID may live in more than one
-/// stem; expand coalesces them.
-type GatheredPathProps = (
-    Vec<Vec<datafusion::arrow::array::RecordBatch>>,
-    std::collections::HashMap<[u8; 16], Vec<PropRowLoc>>,
-);
-
-/// Gather property rows for the requested UUID set only — batchwise, no
-/// complete-stem `concat_batches` (#706). Each stem is scanned independently
-/// so a UUID found in an earlier stem is still sought in later stems (#807).
-fn gather_path_node_props(
-    h: &PathNodeHydration,
-    unique: &[[u8; 16]],
-    batch_size: usize,
-) -> datafusion::error::Result<GatheredPathProps> {
-    use datafusion::arrow::array::UInt32Array;
-    use datafusion::error::DataFusionError;
-    use std::collections::{HashMap, HashSet};
-
-    let exec_err = |m: String| DataFusionError::Execution(m);
-    let mut uuid_to_loc: HashMap<[u8; 16], Vec<PropRowLoc>> = HashMap::with_capacity(unique.len());
-    let mut kept_by_stem: Vec<Vec<datafusion::arrow::array::RecordBatch>> =
-        Vec::with_capacity(h.prop_stems.len());
-
-    if unique.is_empty() {
-        return Ok((kept_by_stem, uuid_to_loc));
-    }
-
-    for (si, stem) in h.prop_stems.iter().enumerate() {
-        check_path_hydration_cancel()?;
-        path_hydration_stats::record_stem_opened();
-        let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
-        let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
-        graphforge_storage::visit_properties_batched(
-            h.dir.as_deref().ok_or_else(|| {
-                DataFusionError::Plan("GF_READ_RESOURCE_MISSING: path hydration".into())
-            })?,
-            stem,
-            batch_size,
-            |b| {
-                check_path_hydration_cancel()?;
-                path_hydration_stats::record_property_batch(b.num_rows() as u64);
-                if remaining.is_empty() {
-                    return Ok(false);
-                }
-                let key = hydration_fsb16(b, "node_uuid")?;
-                let mut take_rows: Vec<u32> = Vec::new();
-                let mut take_uuids: Vec<[u8; 16]> = Vec::new();
-                for r in 0..key.len() {
-                    if key.is_null(r) {
-                        continue;
-                    }
-                    let mut u = [0u8; 16];
-                    u.copy_from_slice(key.value(r));
-                    if !remaining.contains(&u) {
-                        continue;
-                    }
-                    take_rows.push(
-                        u32::try_from(r)
-                            .map_err(|_| exec_err(format!("property row {r} exceeds u32")))?,
-                    );
-                    take_uuids.push(u);
-                }
-                if take_rows.is_empty() {
-                    return Ok(true);
-                }
-                let indices = UInt32Array::from(take_rows);
-                let filtered = take_record_batch_rows(b, &indices)?;
-                let batch_idx = kept.len();
-                for (local_row, u) in take_uuids.into_iter().enumerate() {
-                    if remaining.remove(&u) {
-                        let row = u32::try_from(local_row).map_err(|_| {
-                            exec_err(format!("gathered property row {local_row} exceeds u32"))
-                        })?;
-                        uuid_to_loc.entry(u).or_default().push(PropRowLoc {
-                            stem: si,
-                            batch: batch_idx,
-                            row,
-                        });
-                        path_hydration_stats::record_property_gathered(1);
-                    }
-                }
-                path_hydration_stats::record_peak_gathered(uuid_to_loc.len() as u64);
-                kept.push(filtered);
-                Ok(!remaining.is_empty())
-            },
-        )?;
-        kept_by_stem.push(kept);
-    }
-    Ok((kept_by_stem, uuid_to_loc))
-}
-
-/// `take` every column of `batch` at `indices` into a new batch (#706 gather).
-fn take_record_batch_rows(
-    batch: &datafusion::arrow::array::RecordBatch,
-    indices: &datafusion::arrow::array::UInt32Array,
-) -> datafusion::error::Result<datafusion::arrow::array::RecordBatch> {
-    use datafusion::arrow::compute::take;
-    use datafusion::error::DataFusionError;
-
-    let cols: datafusion::error::Result<Vec<_>, _> = batch
-        .columns()
-        .iter()
-        .map(|c| {
-            take(c.as_ref(), indices, None).map_err(|e| DataFusionError::Execution(e.to_string()))
-        })
-        .collect();
-    datafusion::arrow::array::RecordBatch::try_new(batch.schema(), cols?)
-        .map_err(|e| DataFusionError::Execution(e.to_string()))
-}
-
-/// Expand gathered property rows into one nullable union child per field (#1024).
-///
-/// Each UUID may contribute a row from more than one stem (#807); `zip` keeps
-/// the last non-null value in sorted-stem order.
-fn expand_path_node_props(
-    h: &PathNodeHydration,
-    flat: &[[u8; 16]],
-    gathered: &GatheredPathProps,
-) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
-    use datafusion::arrow::array::{ArrayRef, UInt32Array, new_null_array};
-    use datafusion::arrow::compute::kernels::zip::zip;
-    use datafusion::arrow::compute::{is_not_null, take};
-    use datafusion::error::DataFusionError;
-
-    let exec_err = |m: String| DataFusionError::Execution(m);
-    let (kept_by_stem, uuid_to_loc) = gathered;
-    let mut children = Vec::with_capacity(h.fields.len().saturating_sub(2));
-    for field in h.fields.iter().skip(2) {
-        let mut child: ArrayRef = new_null_array(field.data_type(), flat.len());
-        for (si, batches) in kept_by_stem.iter().enumerate() {
-            for (bi, b) in batches.iter().enumerate() {
-                let Some(col) = b.column_by_name(field.name()) else {
-                    continue;
-                };
-                let indices = UInt32Array::from(
-                    flat.iter()
-                        .map(|u| {
-                            uuid_to_loc.get(u).and_then(|locs| {
-                                locs.iter()
-                                    .find(|loc| loc.stem == si && loc.batch == bi)
-                                    .map(|loc| loc.row)
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                let taken = take(col, &indices, None).map_err(|e| exec_err(e.to_string()))?;
-                let mask = is_not_null(&taken).map_err(|e| exec_err(e.to_string()))?;
-                child = zip(&mask, &taken, &child).map_err(|e| exec_err(e.to_string()))?;
-            }
-        }
-        children.push(child);
-    }
-    Ok(children)
-}
-
-/// Process-global structural counters for path-node hydration (#706).
-///
-/// Aggregate-only: never records UUIDs, property values, or paths. Tests
-/// [`reset`](path_hydration_stats::reset) immediately before a measured
-/// invoke and keep that section single-threaded.
-mod path_hydration_stats {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-    static UNIQUE_REQUESTED: AtomicU64 = AtomicU64::new(0);
-    static UNIQUE_RESOLVED_LABELS: AtomicU64 = AtomicU64::new(0);
-    static NODE_BATCHES_READ: AtomicU64 = AtomicU64::new(0);
-    static NODE_ROWS_EXAMINED: AtomicU64 = AtomicU64::new(0);
-    static NODE_ROWS_GATHERED: AtomicU64 = AtomicU64::new(0);
-    static PROPERTY_STEMS_OPENED: AtomicU64 = AtomicU64::new(0);
-    static PROPERTY_BATCHES_READ: AtomicU64 = AtomicU64::new(0);
-    static PROPERTY_ROWS_EXAMINED: AtomicU64 = AtomicU64::new(0);
-    static PROPERTY_ROWS_GATHERED: AtomicU64 = AtomicU64::new(0);
-    static PEAK_GATHERED_ENTRIES: AtomicU64 = AtomicU64::new(0);
-    static CANCELLED: AtomicBool = AtomicBool::new(false);
-    static MAX_EXAMINE_ROWS: AtomicU64 = AtomicU64::new(0);
-
-    /// Point-in-time copy of path-hydration counters.
-    #[cfg(test)]
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-    pub(super) struct Snapshot {
-        pub unique_uuids_requested: u64,
-        pub unique_uuids_resolved_labels: u64,
-        pub node_batches_read: u64,
-        pub node_rows_examined: u64,
-        pub node_rows_gathered: u64,
-        pub property_stems_opened: u64,
-        pub property_batches_read: u64,
-        pub property_rows_examined: u64,
-        pub property_rows_gathered: u64,
-        pub peak_gathered_entries: u64,
-    }
-
-    #[cfg(test)]
-    pub(super) fn reset() {
-        for c in [
-            &UNIQUE_REQUESTED,
-            &UNIQUE_RESOLVED_LABELS,
-            &NODE_BATCHES_READ,
-            &NODE_ROWS_EXAMINED,
-            &NODE_ROWS_GATHERED,
-            &PROPERTY_STEMS_OPENED,
-            &PROPERTY_BATCHES_READ,
-            &PROPERTY_ROWS_EXAMINED,
-            &PROPERTY_ROWS_GATHERED,
-            &PEAK_GATHERED_ENTRIES,
-            &MAX_EXAMINE_ROWS,
-        ] {
-            c.store(0, Ordering::Relaxed);
-        }
-        CANCELLED.store(false, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(super) fn snapshot() -> Snapshot {
-        Snapshot {
-            unique_uuids_requested: UNIQUE_REQUESTED.load(Ordering::Relaxed),
-            unique_uuids_resolved_labels: UNIQUE_RESOLVED_LABELS.load(Ordering::Relaxed),
-            node_batches_read: NODE_BATCHES_READ.load(Ordering::Relaxed),
-            node_rows_examined: NODE_ROWS_EXAMINED.load(Ordering::Relaxed),
-            node_rows_gathered: NODE_ROWS_GATHERED.load(Ordering::Relaxed),
-            property_stems_opened: PROPERTY_STEMS_OPENED.load(Ordering::Relaxed),
-            property_batches_read: PROPERTY_BATCHES_READ.load(Ordering::Relaxed),
-            property_rows_examined: PROPERTY_ROWS_EXAMINED.load(Ordering::Relaxed),
-            property_rows_gathered: PROPERTY_ROWS_GATHERED.load(Ordering::Relaxed),
-            peak_gathered_entries: PEAK_GATHERED_ENTRIES.load(Ordering::Relaxed),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_cancelled(v: bool) {
-        CANCELLED.store(v, Ordering::SeqCst);
-    }
-
-    pub(super) fn is_cancelled() -> bool {
-        CANCELLED.load(Ordering::Relaxed)
-    }
-
-    /// Soft examine budget for tests (`0` = unlimited).
-    #[cfg(test)]
-    pub(super) fn set_max_examine_rows(n: u64) {
-        MAX_EXAMINE_ROWS.store(n, Ordering::Relaxed);
-    }
-
-    pub(super) fn resource_exhausted() -> bool {
-        let max = MAX_EXAMINE_ROWS.load(Ordering::Relaxed);
-        max > 0
-            && NODE_ROWS_EXAMINED
-                .load(Ordering::Relaxed)
-                .saturating_add(PROPERTY_ROWS_EXAMINED.load(Ordering::Relaxed))
-                > max
-    }
-
-    pub(super) fn record_request(n: u64) {
-        UNIQUE_REQUESTED.fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_resolved(n: u64) {
-        UNIQUE_RESOLVED_LABELS.store(n, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_node_batch(rows: u64) {
-        NODE_BATCHES_READ.fetch_add(1, Ordering::Relaxed);
-        NODE_ROWS_EXAMINED.fetch_add(rows, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_node_gathered(n: u64) {
-        NODE_ROWS_GATHERED.fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_stem_opened() {
-        PROPERTY_STEMS_OPENED.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_property_batch(rows: u64) {
-        PROPERTY_BATCHES_READ.fetch_add(1, Ordering::Relaxed);
-        PROPERTY_ROWS_EXAMINED.fetch_add(rows, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_property_gathered(n: u64) {
-        PROPERTY_ROWS_GATHERED.fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_peak_gathered(n: u64) {
-        PEAK_GATHERED_ENTRIES.fetch_max(n, Ordering::Relaxed);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -12708,27 +12215,6 @@ mod tests {
     static VOLATILE_ROWS: AtomicUsize = AtomicUsize::new(0);
     /// Path-hydration structural counters are process-global (#706); serialize
     /// tests that arm cancel/resource hooks or assert snapshots.
-    static PATH_HYDRATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct PathHydrationTestGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl PathHydrationTestGuard {
-        fn arm() -> Self {
-            let lock = PATH_HYDRATION_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            path_hydration_stats::reset();
-            Self { _lock: lock }
-        }
-    }
-
-    impl Drop for PathHydrationTestGuard {
-        fn drop(&mut self) {
-            path_hydration_stats::reset();
-        }
-    }
 
     fn invoke_test_udf<U: ScalarUDFImpl>(
         udf: &U,
@@ -13860,7 +13346,6 @@ mod tests {
         // With hydration: node_uuid, labels, then the baked property union
         // (#1024) — the shape `render_node_struct` and `x.<prop>` need.
         let hydrated = CypherPathNodes::with_hydration(PathNodeHydration {
-            dir: Some(std::path::PathBuf::from("/nonexistent")),
             labels_by_type: vec![(
                 graphforge_value::EntityTypeId::decode(0).unwrap(),
                 "A".to_owned(),
@@ -15426,683 +14911,6 @@ mod tests {
         assert_eq!(
             out.data_type(),
             &CypherPathNodes::new().return_type(&[]).unwrap()
-        );
-    }
-
-    /// Hydrated `cypher_path_nodes` invoke over a real topology directory (#705).
-    fn invoke_hydrated_path_nodes(
-        hydrate: PathNodeHydration,
-        seed: datafusion::arrow::array::ArrayRef,
-        rels: datafusion::arrow::array::ArrayRef,
-    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
-        invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8_192)
-    }
-
-    fn invoke_hydrated_path_nodes_with_batch_size(
-        hydrate: PathNodeHydration,
-        seed: datafusion::arrow::array::ArrayRef,
-        rels: datafusion::arrow::array::ArrayRef,
-        batch_size: usize,
-    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
-        use std::sync::Arc;
-
-        use datafusion::arrow::datatypes::Field;
-        use datafusion::config::ConfigOptions;
-
-        let udf = CypherPathNodes::with_hydration(hydrate);
-        let n = seed.len();
-        let mut config = ConfigOptions::default();
-        config.execution.batch_size = batch_size.max(1);
-        let args = ScalarFunctionArgs {
-            args: vec![
-                ColumnarValue::Array(Arc::clone(&seed)),
-                ColumnarValue::Array(Arc::clone(&rels)),
-            ],
-            arg_fields: vec![
-                Arc::new(Field::new("seed", seed.data_type().clone(), true)),
-                Arc::new(Field::new("rels", rels.data_type().clone(), true)),
-            ],
-            number_rows: n,
-            return_field: Arc::new(Field::new("nodes", udf.return_type(&[])?, true)),
-            config_options: Arc::new(config),
-        };
-        udf.invoke_with_args(args).map(|v| match v {
-            ColumnarValue::Array(a) => a,
-            ColumnarValue::Scalar(s) => s.to_array_of_size(n).unwrap(),
-        })
-    }
-
-    fn path_node_label_lists(
-        out: &datafusion::arrow::array::ArrayRef,
-        row: usize,
-    ) -> Option<Vec<Vec<Option<String>>>> {
-        use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
-        let list = out.as_any().downcast_ref::<ListArray>().unwrap();
-        if list.is_null(row) {
-            return None;
-        }
-        let items = list.value(row);
-        let items = items.as_any().downcast_ref::<StructArray>().unwrap();
-        let labels = items
-            .column_by_name("labels")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        Some(
-            (0..labels.len())
-                .map(|i| {
-                    let values = labels.value(i);
-                    let strings = values.as_any().downcast_ref::<StringArray>().unwrap();
-                    (0..strings.len())
-                        .map(|j| (!strings.is_null(j)).then(|| strings.value(j).to_owned()))
-                        .collect()
-                })
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn hydrated_path_nodes_preserve_full_type_ids_labels() {
-        // #705: multi-label nodes keep every catalog-resolved label from
-        // authoritative `type_ids` (not the legacy primary `type_id` alone).
-        let _guard = PathHydrationTestGuard::arm();
-        use datafusion::arrow::array::FixedSizeBinaryArray;
-        use datafusion::arrow::datatypes::Field;
-        use graphforge_core::OntologyMode;
-        use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_storage::GraphWriter;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
-        let multi = new_v7();
-        let single = new_v7();
-        let unknown_only = new_v7();
-        w.create_node_with_labels(
-            multi,
-            &[
-                graphforge_value::EntityTypeId::decode(1).unwrap(),
-                graphforge_value::EntityTypeId::decode(3).unwrap(),
-            ],
-        )
-        .unwrap();
-        w.create_node_with_labels(
-            single,
-            &[graphforge_value::EntityTypeId::decode(2).unwrap()],
-        )
-        .unwrap();
-        // type_ids present but absent from the baked catalog → empty label list.
-        w.create_node_with_labels(
-            unknown_only,
-            &[graphforge_value::EntityTypeId::decode(99).unwrap()],
-        )
-        .unwrap();
-        w.flush().unwrap();
-
-        let multi_bytes = to_bytes(&multi);
-        let single_bytes = to_bytes(&single);
-        let unknown_bytes = to_bytes(&unknown_only);
-        let missing_bytes = [0xABu8; 16];
-
-        let hydrate = PathNodeHydration {
-            dir: Some(dir.path().to_path_buf()),
-            labels_by_type: vec![
-                (
-                    graphforge_value::EntityTypeId::decode(1).unwrap(),
-                    "Person".to_owned(),
-                ),
-                (
-                    graphforge_value::EntityTypeId::decode(2).unwrap(),
-                    "Company".to_owned(),
-                ),
-                (
-                    graphforge_value::EntityTypeId::decode(3).unwrap(),
-                    "Employee".to_owned(),
-                ),
-            ],
-            prop_stems: vec![],
-            fields: vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-            ]
-            .into(),
-        };
-
-        // Zero-hop walk over four seeds: multi-label, single-label, missing
-        // catalog id, and uuid absent from topology.
-        let seed = std::sync::Arc::new(
-            FixedSizeBinaryArray::try_from_iter(
-                [multi_bytes, single_bytes, unknown_bytes, missing_bytes]
-                    .iter()
-                    .copied(),
-            )
-            .unwrap(),
-        ) as datafusion::arrow::array::ArrayRef;
-        let rels = edge_list(&[Some(&[]), Some(&[]), Some(&[]), Some(&[])]);
-        let out = invoke_hydrated_path_nodes(hydrate, seed, rels).unwrap();
-        let labels = path_node_label_lists(&out, 0).unwrap();
-        assert_eq!(
-            labels[0],
-            vec![Some("Person".into()), Some("Employee".into())],
-            "multi-label node keeps full type_ids set in catalog order"
-        );
-        // Remaining seeds are separate rows (one zero-hop path each).
-        let labels1 = path_node_label_lists(&out, 1).unwrap();
-        assert_eq!(labels1[0], vec![Some("Company".into())]);
-        let labels2 = path_node_label_lists(&out, 2).unwrap();
-        assert_eq!(
-            labels2[0],
-            Vec::<Option<String>>::new(),
-            "unknown catalog ids skipped"
-        );
-        let labels3 = path_node_label_lists(&out, 3).unwrap();
-        assert_eq!(
-            labels3[0],
-            vec![None],
-            "missing topology row keeps a single-null labels element"
-        );
-
-        // Repeated node on a self-loop walk must repeat the full label set.
-        let seed_loop = std::sync::Arc::new(
-            FixedSizeBinaryArray::try_from_iter([multi_bytes].iter().copied()).unwrap(),
-        ) as datafusion::arrow::array::ArrayRef;
-        // Build a one-edge list with real uuids (not the byte-tag helper).
-        use datafusion::arrow::array::{FixedSizeBinaryBuilder, ListBuilder, StructBuilder};
-        let fields: datafusion::arrow::datatypes::Fields = vec![
-            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
-            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
-        ]
-        .into();
-        let mut b = ListBuilder::new(StructBuilder::new(
-            fields,
-            vec![
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-            ],
-        ));
-        b.values()
-            .field_builder::<FixedSizeBinaryBuilder>(0)
-            .unwrap()
-            .append_value(multi_bytes)
-            .unwrap();
-        b.values()
-            .field_builder::<FixedSizeBinaryBuilder>(1)
-            .unwrap()
-            .append_value(multi_bytes)
-            .unwrap();
-        b.values().append(true);
-        b.append(true);
-        let loop_rels = std::sync::Arc::new(b.finish()) as datafusion::arrow::array::ArrayRef;
-
-        let hydrate2 = PathNodeHydration {
-            dir: Some(dir.path().to_path_buf()),
-            labels_by_type: vec![
-                (
-                    graphforge_value::EntityTypeId::decode(1).unwrap(),
-                    "Person".to_owned(),
-                ),
-                (
-                    graphforge_value::EntityTypeId::decode(2).unwrap(),
-                    "Company".to_owned(),
-                ),
-                (
-                    graphforge_value::EntityTypeId::decode(3).unwrap(),
-                    "Employee".to_owned(),
-                ),
-            ],
-            prop_stems: vec![],
-            fields: vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-            ]
-            .into(),
-        };
-        let looped = invoke_hydrated_path_nodes(hydrate2, seed_loop, loop_rels).unwrap();
-        let loop_labels = path_node_label_lists(&looped, 0).unwrap();
-        assert_eq!(loop_labels.len(), 2);
-        assert_eq!(loop_labels[0], loop_labels[1]);
-        assert_eq!(
-            loop_labels[0],
-            vec![Some("Person".into()), Some("Employee".into())]
-        );
-    }
-
-    fn path_node_prop_strings(
-        out: &datafusion::arrow::array::ArrayRef,
-        row: usize,
-        field: &str,
-    ) -> Option<Vec<Option<String>>> {
-        use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
-        let list = out.as_any().downcast_ref::<ListArray>().unwrap();
-        if list.is_null(row) {
-            return None;
-        }
-        let items = list.value(row);
-        let items = items.as_any().downcast_ref::<StructArray>().unwrap();
-        let col = items
-            .column_by_name(field)
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        Some(
-            (0..col.len())
-                .map(|i| (!col.is_null(i)).then(|| col.value(i).to_owned()))
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn hydrated_path_nodes_sparse_selection_bounds_gather_work() {
-        // #706: a small path in a large property table gathers only requested
-        // UUIDs, stops reading once they are found, and never materializes the
-        // full stem via concat.
-        let _guard = PathHydrationTestGuard::arm();
-        use std::collections::HashMap;
-
-        use datafusion::arrow::array::FixedSizeBinaryArray;
-        use datafusion::arrow::datatypes::Field;
-        use graphforge_core::OntologyMode;
-        use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_ir::IrLiteral;
-        use graphforge_storage::GraphWriter;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
-        let keep_a = new_v7();
-        let keep_b = new_v7();
-        w.create_node_with_labels(
-            keep_a,
-            &[graphforge_value::EntityTypeId::decode(1).unwrap()],
-        )
-        .unwrap();
-        w.create_node_with_labels(
-            keep_b,
-            &[graphforge_value::EntityTypeId::decode(1).unwrap()],
-        )
-        .unwrap();
-        w.set_properties(
-            &keep_a,
-            None,
-            HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
-        )
-        .unwrap();
-        w.set_properties(
-            &keep_b,
-            None,
-            HashMap::from([("name".into(), IrLiteral::Str("Bob".into()))]),
-        )
-        .unwrap();
-        // Many irrelevant property rows after the selected pair.
-        for i in 0..200 {
-            let u = new_v7();
-            w.create_node_with_labels(u, &[graphforge_value::EntityTypeId::decode(1).unwrap()])
-                .unwrap();
-            w.set_properties(
-                &u,
-                None,
-                HashMap::from([("name".into(), IrLiteral::Str(format!("filler-{i}")))]),
-            )
-            .unwrap();
-        }
-        w.flush().unwrap();
-
-        let a = to_bytes(&keep_a);
-        let b = to_bytes(&keep_b);
-        let hydrate = PathNodeHydration {
-            dir: Some(dir.path().to_path_buf()),
-            labels_by_type: vec![(
-                graphforge_value::EntityTypeId::decode(1).unwrap(),
-                "Person".to_owned(),
-            )],
-            prop_stems: vec!["_untyped".to_owned()],
-            fields: vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-                Field::new("name", DataType::Utf8, true),
-            ]
-            .into(),
-        };
-        // Repeated UUID in the walk: hydrate once, emit twice publicly.
-        let seed =
-            std::sync::Arc::new(FixedSizeBinaryArray::try_from_iter([a].iter().copied()).unwrap())
-                as datafusion::arrow::array::ArrayRef;
-        use datafusion::arrow::array::{FixedSizeBinaryBuilder, ListBuilder, StructBuilder};
-        let edge_fields: datafusion::arrow::datatypes::Fields = vec![
-            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
-            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
-        ]
-        .into();
-        let mut edge_b = ListBuilder::new(StructBuilder::new(
-            edge_fields,
-            vec![
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-            ],
-        ));
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(0)
-            .unwrap()
-            .append_value(a)
-            .unwrap();
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(1)
-            .unwrap()
-            .append_value(b)
-            .unwrap();
-        edge_b.values().append(true);
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(0)
-            .unwrap()
-            .append_value(b)
-            .unwrap();
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(1)
-            .unwrap()
-            .append_value(a)
-            .unwrap();
-        edge_b.values().append(true);
-        edge_b.append(true);
-        let rels = std::sync::Arc::new(edge_b.finish()) as datafusion::arrow::array::ArrayRef;
-
-        path_hydration_stats::reset();
-        let out = invoke_hydrated_path_nodes_with_batch_size(
-            hydrate.clone(),
-            seed.clone(),
-            rels.clone(),
-            8,
-        )
-        .unwrap();
-        let snap = path_hydration_stats::snapshot();
-        assert_eq!(snap.unique_uuids_requested, 2);
-        assert_eq!(snap.node_rows_gathered, 2);
-        assert_eq!(snap.property_rows_gathered, 2);
-        assert!(
-            snap.property_rows_examined < 50,
-            "early-exit must avoid examining all filler rows: examined {}",
-            snap.property_rows_examined
-        );
-        assert!(
-            snap.node_rows_examined < 50,
-            "early-exit must avoid examining all filler node rows: examined {}",
-            snap.node_rows_examined
-        );
-        assert!(
-            snap.peak_gathered_entries <= 2,
-            "gather map peak must stay within unique requested UUIDs"
-        );
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "name").unwrap(),
-            vec![Some("Ada".into()), Some("Bob".into()), Some("Ada".into())]
-        );
-        let labels = path_node_label_lists(&out, 0).unwrap();
-        assert_eq!(labels.len(), 3);
-        assert_eq!(labels[0], vec![Some("Person".into())]);
-        assert_eq!(labels[2], labels[0]);
-
-        // Batch-size / reopen parity: same public values under a larger batch.
-        path_hydration_stats::reset();
-        let out_large =
-            invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8_192).unwrap();
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "name"),
-            path_node_prop_strings(&out_large, 0, "name")
-        );
-        assert_eq!(
-            path_node_label_lists(&out, 0),
-            path_node_label_lists(&out_large, 0)
-        );
-    }
-
-    #[test]
-    fn hydrated_path_nodes_coalesce_properties_across_stems() {
-        // #807: complementary properties in two stems must both hydrate.
-        // `Company` sorts before `Person`, so first-stem-only gather would keep
-        // `title` and leave later-stem `name` null.
-        let _guard = PathHydrationTestGuard::arm();
-        use std::collections::HashMap;
-
-        use datafusion::arrow::array::{
-            FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, StructBuilder,
-        };
-        use datafusion::arrow::datatypes::Field;
-        use graphforge_core::OntologyMode;
-        use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_ir::IrLiteral;
-        use graphforge_storage::GraphWriter;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let keep = new_v7();
-        {
-            let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 0).unwrap();
-            w.create_node_with_labels(
-                keep,
-                &[
-                    graphforge_value::EntityTypeId::decode(1).unwrap(),
-                    graphforge_value::EntityTypeId::decode(2).unwrap(),
-                ],
-            )
-            .unwrap();
-            w.set_properties(
-                &keep,
-                Some("Company"),
-                HashMap::from([("title".into(), IrLiteral::Str("CEO".into()))]),
-            )
-            .unwrap();
-            for i in 0..200 {
-                let filler = new_v7();
-                w.create_node_with_labels(
-                    filler,
-                    &[graphforge_value::EntityTypeId::decode(2).unwrap()],
-                )
-                .unwrap();
-                w.set_properties(
-                    &filler,
-                    Some("Company"),
-                    HashMap::from([("title".into(), IrLiteral::Str(format!("filler-title-{i}")))]),
-                )
-                .unwrap();
-            }
-            w.set_properties(
-                &keep,
-                Some("Person"),
-                HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
-            )
-            .unwrap();
-            for i in 0..200 {
-                let filler = new_v7();
-                w.create_node_with_labels(
-                    filler,
-                    &[graphforge_value::EntityTypeId::decode(1).unwrap()],
-                )
-                .unwrap();
-                w.set_properties(
-                    &filler,
-                    Some("Person"),
-                    HashMap::from([("name".into(), IrLiteral::Str(format!("filler-name-{i}")))]),
-                )
-                .unwrap();
-            }
-            w.flush().unwrap();
-        }
-
-        let bytes = to_bytes(&keep);
-        let hydrate = PathNodeHydration {
-            dir: Some(dir.path().to_path_buf()),
-            labels_by_type: vec![
-                (
-                    graphforge_value::EntityTypeId::decode(1).unwrap(),
-                    "Person".to_owned(),
-                ),
-                (
-                    graphforge_value::EntityTypeId::decode(2).unwrap(),
-                    "Company".to_owned(),
-                ),
-            ],
-            prop_stems: vec!["Company".to_owned(), "Person".to_owned()],
-            fields: vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-                Field::new("name", DataType::Utf8, true),
-                Field::new("title", DataType::Utf8, true),
-            ]
-            .into(),
-        };
-        let seed = std::sync::Arc::new(
-            FixedSizeBinaryArray::try_from_iter([bytes].iter().copied()).unwrap(),
-        ) as datafusion::arrow::array::ArrayRef;
-        let edge_fields: datafusion::arrow::datatypes::Fields = vec![
-            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
-            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
-        ]
-        .into();
-        let mut edge_b = ListBuilder::new(StructBuilder::new(
-            edge_fields,
-            vec![
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-                Box::new(FixedSizeBinaryBuilder::new(16)),
-            ],
-        ));
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(0)
-            .unwrap()
-            .append_value(bytes)
-            .unwrap();
-        edge_b
-            .values()
-            .field_builder::<FixedSizeBinaryBuilder>(1)
-            .unwrap()
-            .append_value(bytes)
-            .unwrap();
-        edge_b.values().append(true);
-        edge_b.append(true);
-        let rels = std::sync::Arc::new(edge_b.finish()) as datafusion::arrow::array::ArrayRef;
-
-        path_hydration_stats::reset();
-        let out = invoke_hydrated_path_nodes_with_batch_size(
-            hydrate.clone(),
-            seed.clone(),
-            rels.clone(),
-            8,
-        )
-        .unwrap();
-        let snap = path_hydration_stats::snapshot();
-        assert_eq!(snap.unique_uuids_requested, 1);
-        assert_eq!(snap.property_stems_opened, 2);
-        assert_eq!(snap.property_rows_gathered, 2);
-        assert!(
-            snap.peak_gathered_entries <= 1,
-            "gather map peak must stay within unique requested UUIDs, got {}",
-            snap.peak_gathered_entries
-        );
-        assert!(
-            snap.property_rows_examined < 50,
-            "per-stem early-exit must avoid examining filler rows: examined {}",
-            snap.property_rows_examined
-        );
-        let names = path_node_prop_strings(&out, 0, "name").unwrap();
-        let titles = path_node_prop_strings(&out, 0, "title").unwrap();
-        assert_eq!(names, vec![Some("Ada".into()), Some("Ada".into())]);
-        assert_eq!(titles, vec![Some("CEO".into()), Some("CEO".into())]);
-
-        path_hydration_stats::reset();
-        let out_large = invoke_hydrated_path_nodes_with_batch_size(
-            hydrate.clone(),
-            seed.clone(),
-            rels.clone(),
-            8_192,
-        )
-        .unwrap();
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "name"),
-            path_node_prop_strings(&out_large, 0, "name")
-        );
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "title"),
-            path_node_prop_strings(&out_large, 0, "title")
-        );
-
-        drop(GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 0).unwrap());
-        path_hydration_stats::reset();
-        let out_reopen =
-            invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8).unwrap();
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "name"),
-            path_node_prop_strings(&out_reopen, 0, "name")
-        );
-        assert_eq!(
-            path_node_prop_strings(&out, 0, "title"),
-            path_node_prop_strings(&out_reopen, 0, "title")
-        );
-    }
-
-    #[test]
-    fn hydrated_path_nodes_cancel_and_resource_limit_are_structured() {
-        let _guard = PathHydrationTestGuard::arm();
-        use datafusion::arrow::array::FixedSizeBinaryArray;
-        use datafusion::arrow::datatypes::Field;
-        use graphforge_core::OntologyMode;
-        use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_storage::GraphWriter;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
-        let u = new_v7();
-        w.create_node_with_labels(u, &[graphforge_value::EntityTypeId::decode(1).unwrap()])
-            .unwrap();
-        for _ in 0..32 {
-            w.create_node_with_labels(
-                new_v7(),
-                &[graphforge_value::EntityTypeId::decode(1).unwrap()],
-            )
-            .unwrap();
-        }
-        w.flush().unwrap();
-        let bytes = to_bytes(&u);
-        let hydrate = PathNodeHydration {
-            dir: Some(dir.path().to_path_buf()),
-            labels_by_type: vec![(
-                graphforge_value::EntityTypeId::decode(1).unwrap(),
-                "Person".to_owned(),
-            )],
-            prop_stems: vec![],
-            fields: vec![
-                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
-                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
-            ]
-            .into(),
-        };
-        let seed = std::sync::Arc::new(
-            FixedSizeBinaryArray::try_from_iter([bytes].iter().copied()).unwrap(),
-        ) as datafusion::arrow::array::ArrayRef;
-        let rels = edge_list(&[Some(&[])]);
-
-        path_hydration_stats::set_cancelled(true);
-        let err = invoke_hydrated_path_nodes_with_batch_size(
-            hydrate.clone(),
-            seed.clone(),
-            rels.clone(),
-            4,
-        )
-        .expect_err("cancelled hydration must fail closed");
-        assert!(
-            err.to_string().contains("cancelled"),
-            "expected structured cancel, got {err}"
-        );
-        path_hydration_stats::set_cancelled(false);
-
-        path_hydration_stats::reset();
-        path_hydration_stats::set_max_examine_rows(1);
-        let err = invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 4)
-            .expect_err("resource limit must fail closed");
-        assert!(
-            err.to_string().contains("resource limit"),
-            "expected structured resource error, got {err}"
         );
     }
 
