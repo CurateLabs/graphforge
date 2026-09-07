@@ -1530,6 +1530,8 @@ pub(crate) struct ConstructionIndexEncoding {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct V4OrdinalPublicationMetrics {
+    pub(crate) read_bytes: u64,
+    pub(crate) read_operations: u64,
     pub(crate) write_bytes: u64,
     pub(crate) write_operations: u64,
     pub(crate) fsync_operations: u64,
@@ -1541,6 +1543,11 @@ pub(crate) fn publish_v4_construction_artifacts(
     bundle: V4ConstructionArtifactBundle,
     generation: u64,
     topology_delta_sha256: &str,
+    parent: Option<(
+        &crate::ResolvedProjectGeneration,
+        &crate::V4OrdinalIdentityManifest,
+    )>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<
     (
         Vec<ConstructionIndexOutput>,
@@ -1550,18 +1557,41 @@ pub(crate) fn publish_v4_construction_artifacts(
     GfError,
 > {
     let V4ConstructionArtifactBundle {
-        manifest,
-        metrics,
+        mut manifest,
+        mut metrics,
         mut publications,
     } = bundle;
-    let published = publish_v4_construction_artifacts_inner(
-        encoded,
-        &manifest,
-        &metrics,
-        &mut publications,
-        generation,
-        topology_delta_sha256,
-    );
+    let mut local_names = v4_manifest_artifact_names(&manifest);
+    let published = (|| {
+        let (read_bytes, read_operations) = match parent {
+            Some((selected, prior)) => merge_construction_v4_delta(
+                encoded,
+                selected,
+                prior,
+                &mut manifest,
+                &mut metrics,
+                &mut publications,
+                &mut local_names,
+                cancelled,
+            )?,
+            None => (0, 0),
+        };
+        if cancelled() {
+            return Err(storage_err("construction ordinal publication cancelled"));
+        }
+        let (outputs, mut publication, metrics) = publish_v4_construction_artifacts_inner(
+            encoded,
+            &manifest,
+            &metrics,
+            &mut publications,
+            generation,
+            topology_delta_sha256,
+            &local_names,
+        )?;
+        publication.read_bytes = read_bytes;
+        publication.read_operations = read_operations;
+        Ok((outputs, publication, metrics))
+    })();
     match published {
         Ok(published) => {
             commit_v4_publications(publications, V4AuthorityTransactionProof)?;
@@ -1572,6 +1602,171 @@ pub(crate) fn publish_v4_construction_artifacts(
             combine_v4_cleanup(Err(primary), cleanup, "v4 authority transaction cleanup")
         }
     }
+}
+
+#[cfg(test)]
+type ConstructionOrdinalHook = Box<dyn FnMut(&str, u64)>;
+#[cfg(test)]
+thread_local! {
+    static CONSTRUCTION_ORDINAL_HOOK: std::cell::RefCell<Option<ConstructionOrdinalHook>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_construction_ordinal_hook(hook: Option<ConstructionOrdinalHook>) {
+    CONSTRUCTION_ORDINAL_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+fn construction_ordinal_event(_phase: &str, _generation: u64) {
+    #[cfg(test)]
+    CONSTRUCTION_ORDINAL_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(_phase, _generation);
+        }
+    });
+}
+
+/// Combine a streamed construction delta with selected parent descriptors. Only
+/// binary-carry inputs are opened; an ordinary append never rereads the base.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn merge_construction_v4_delta(
+    encoded: &graphforge_filesystem::StableDirectory,
+    selected: &crate::ResolvedProjectGeneration,
+    prior: &crate::V4OrdinalIdentityManifest,
+    delta: &mut crate::V4OrdinalIdentityManifest,
+    metrics: &mut V4OrdinalBuildMetrics,
+    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    local_names: &mut BTreeSet<String>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(u64, u64), GfError> {
+    if prior.topology_generation.checked_add(1) != Some(delta.topology_generation) {
+        return Err(storage_err(
+            "construction ordinal parent generation changed",
+        ));
+    }
+    let prior_end = match prior.ordinal_ranges.last() {
+        Some(range) => range
+            .first_node_id
+            .checked_add(range.count - 1)
+            .ok_or_else(|| storage_err("ordinal parent range overflows"))?,
+        None => 0,
+    };
+    if delta
+        .ordinal_ranges
+        .first()
+        .is_some_and(|range| range.first_node_id <= prior_end)
+    {
+        return Err(storage_err(
+            "construction ordinal delta reuses retained node IDs",
+        ));
+    }
+    let index = encoded
+        .open_child_directory(std::ffi::OsStr::new("graph"))
+        .and_then(|graph| graph.open_child_directory(std::ffi::OsStr::new("topology")))
+        .and_then(|topology| topology.open_child_directory(std::ffi::OsStr::new("uuid-membership")))
+        .map_err(storage_err)?;
+    let mut created = local_names
+        .iter()
+        .map(|name| (name.clone(), index.path().join(name)))
+        .collect::<HashMap<_, _>>();
+    let mut combined = prior.clone();
+    combined.topology_generation = delta.topology_generation;
+    combined
+        .forward_identities
+        .extend(delta.forward_identities.clone());
+    combined.ordinal_ranges.extend(delta.ordinal_ranges.clone());
+    combined.tombstones.extend(delta.tombstones.clone());
+    let mut intervals = v4_forward_intervals(&combined.forward_identities)?;
+    let mut first_consumed = None;
+    while intervals.len() >= 3 {
+        let right = intervals[intervals.len() - 1];
+        let left = intervals[intervals.len() - 2];
+        if right.1 - right.0 != left.1 - left.0 {
+            break;
+        }
+        first_consumed = Some(left.0);
+        intervals.pop();
+        intervals.pop();
+        intervals.push((left.0, right.1, left.2));
+    }
+    let lease = crate::graph_object_store::begin_graph_object_read(selected.container_root())?;
+    let mut objects = Vec::new();
+    let mut pinned = crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs {
+        manifest: prior.clone(),
+        artifacts: Vec::new(),
+    };
+    let mut read_bytes = 0_u64;
+    let mut read_calls = 0_u64;
+    for descriptor in prior
+        .forward_identities
+        .iter()
+        .chain(prior.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(prior.tombstones.iter().map(|run| &run.artifact))
+        .filter(|artifact| first_consumed.is_some_and(|first| artifact.generation >= first))
+    {
+        construction_ordinal_event("pin", descriptor.generation);
+        let (object, io, cache) =
+            lease.open_for_construction(&descriptor.sha256, descriptor.bytes, cancelled)?;
+        read_bytes = read_bytes
+            .checked_add(io.read_bytes)
+            .ok_or_else(|| storage_err("ordinal authentication bytes overflow"))?;
+        read_calls = read_calls
+            .checked_add(io.read_calls)
+            .ok_or_else(|| storage_err("ordinal authentication calls overflow"))?;
+        merge_cache_release_evidence(&mut metrics.cache_release, cache);
+        pinned
+            .artifacts
+            .push(crate::ordinal_identity_v4::PinnedV4OrdinalArtifact {
+                descriptor: descriptor.clone(),
+                file: object.try_clone_file().map_err(storage_err)?,
+            });
+        objects.push(object);
+    }
+    construction_ordinal_event("compaction", combined.topology_generation);
+    let mut compaction = compact_v4_binary_carry_with_cancellation(
+        &pinned,
+        &index,
+        index.path(),
+        &mut combined,
+        &mut created,
+        cancelled,
+    )?;
+    metrics.artifact_bytes = metrics
+        .artifact_bytes
+        .checked_add(compaction.write_bytes)
+        .ok_or_else(|| storage_err("ordinal writes overflow"))?;
+    metrics.write_blocks = metrics
+        .write_blocks
+        .checked_add(compaction.write_blocks)
+        .ok_or_else(|| storage_err("ordinal writes overflow"))?;
+    metrics.fsync_operations = metrics
+        .fsync_operations
+        .checked_add(compaction.fsync_operations)
+        .ok_or_else(|| storage_err("ordinal fsyncs overflow"))?;
+    merge_cache_release_evidence(&mut metrics.cache_release, compaction.cache_release);
+    metrics.peak_buffer_bytes = metrics.peak_buffer_bytes.max(4 * V4_ORDINAL_BLOCK_BYTES);
+    publications.append(&mut compaction.publications);
+    let retained = v4_manifest_artifact_names(&combined);
+    let mut current = Vec::new();
+    for (name, mut publication) in publications.drain(..) {
+        if retained.contains(&name) {
+            current.push((name, publication));
+        } else {
+            cleanup_v4_publication(&mut publication)?;
+        }
+    }
+    *publications = current;
+    *local_names = created
+        .into_keys()
+        .filter(|name| retained.contains(name))
+        .collect();
+    admit_v4_construction_manifest(&combined)?;
+    *delta = combined;
+    Ok((
+        read_bytes
+            .checked_add(compaction.read_bytes)
+            .ok_or_else(|| storage_err("ordinal read bytes overflow"))?,
+        read_calls
+            .checked_add(compaction.read_calls)
+            .ok_or_else(|| storage_err("ordinal read calls overflow"))?,
+    ))
 }
 
 fn cleanup_v4_publications(
@@ -1596,6 +1791,7 @@ fn publish_v4_construction_artifacts_inner(
     publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
     generation: u64,
     topology_delta_sha256: &str,
+    local_names: &BTreeSet<String>,
 ) -> Result<
     (
         Vec<ConstructionIndexOutput>,
@@ -1627,6 +1823,7 @@ fn publish_v4_construction_artifacts_inner(
         .iter()
         .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
         .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        .filter(|artifact| local_names.contains(&artifact.name))
         .map(|artifact| ConstructionIndexOutput {
             name: artifact.name.clone(),
             bytes: artifact.bytes,
@@ -1668,6 +1865,8 @@ fn publish_v4_construction_artifacts_inner(
     v4_authority_failure("directory_sync")?;
     work.fsync_operations = work.fsync_operations.saturating_add(4);
     let publication_metrics = V4OrdinalPublicationMetrics {
+        read_bytes: 0,
+        read_operations: 0,
         write_bytes: work.write_bytes,
         write_operations: work.write_operations,
         fsync_operations: work.fsync_operations,
@@ -7599,9 +7798,34 @@ fn compact_v4_binary_carry(
     manifest: &mut crate::V4OrdinalIdentityManifest,
     created: &mut HashMap<String, PathBuf>,
 ) -> Result<V4CompactionWork, GfError> {
+    compact_v4_binary_carry_with_cancellation(
+        pinned,
+        artifacts,
+        artifacts_path,
+        manifest,
+        created,
+        &mut || false,
+    )
+}
+
+fn compact_v4_binary_carry_with_cancellation(
+    pinned: &crate::ordinal_identity_v4::V4OrdinalPinnedUpdateInputs,
+    artifacts: &graphforge_filesystem::StableDirectory,
+    artifacts_path: &Path,
+    manifest: &mut crate::V4OrdinalIdentityManifest,
+    created: &mut HashMap<String, PathBuf>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<V4CompactionWork, GfError> {
     let prior_manifest = manifest.clone();
     let prior_created = created.clone();
-    match compact_v4_binary_carry_inner(pinned, artifacts, artifacts_path, manifest, created) {
+    match compact_v4_binary_carry_inner(
+        pinned,
+        artifacts,
+        artifacts_path,
+        manifest,
+        created,
+        cancelled,
+    ) {
         Ok(work) => Ok(work),
         Err(error) => {
             *manifest = prior_manifest;
@@ -7617,9 +7841,13 @@ fn compact_v4_binary_carry_inner(
     artifacts_path: &Path,
     manifest: &mut crate::V4OrdinalIdentityManifest,
     created: &mut HashMap<String, PathBuf>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<V4CompactionWork, GfError> {
     let mut work = V4CompactionWork::default();
     loop {
+        if cancelled() {
+            return Err(storage_err("construction ordinal compaction cancelled"));
+        }
         let intervals = v4_forward_intervals(&manifest.forward_identities)?;
         if intervals.len() < 3 {
             break;
@@ -7637,6 +7865,7 @@ fn compact_v4_binary_carry_inner(
             artifacts,
             right.1,
             &mut work,
+            cancelled,
         )?;
         created.insert(
             merged_forward.artifact.name.clone(),
@@ -7661,6 +7890,7 @@ fn compact_v4_binary_carry_inner(
             left.0,
             right.1,
             &mut work,
+            cancelled,
         )?;
         compact_v4_tombstone_interval(
             pinned,
@@ -7671,6 +7901,7 @@ fn compact_v4_binary_carry_inner(
             left.0,
             right.1,
             &mut work,
+            cancelled,
         )?;
         work.compactions = work.compactions.saturating_add(1);
     }
@@ -7856,6 +8087,7 @@ fn take_v4_output_cleanup_failure() -> Result<(), GfError> {
 
 #[allow(clippy::unnecessary_wraps)]
 fn v4_compaction_post_write_failure(point: &str) -> Result<(), GfError> {
+    construction_ordinal_event(point, 0);
     #[cfg(test)]
     V4_COMPACTION_POST_WRITE_FAILURE.with(|failure| {
         if failure
@@ -7892,6 +8124,7 @@ fn merge_v4_forward_artifacts(
     index: &graphforge_filesystem::StableDirectory,
     generation: u64,
     work: &mut V4CompactionWork,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GuardedV4Artifact, GfError> {
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(3).map_err(storage_err)?;
@@ -7947,6 +8180,9 @@ fn merge_v4_forward_artifacts(
         ];
         let mut previous = None;
         loop {
+            if cancelled() {
+                return Err(storage_err("construction ordinal compaction cancelled"));
+            }
             let source = match (heads[0], heads[1]) {
                 (None, None) => break,
                 (Some(_), None) => 0,
@@ -8051,6 +8287,7 @@ fn compact_v4_ordinal_interval(
     first_generation: u64,
     last_generation: u64,
     work: &mut V4CompactionWork,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     let mut replacement = Vec::new();
     let mut cursor = 0;
@@ -8110,6 +8347,11 @@ fn compact_v4_ordinal_interval(
                     )
                     .and_then(|()| {
                         while let Some(uuid) = read_exact_record::<16>(&mut readers[0])? {
+                            if cancelled() {
+                                return Err(storage_err(
+                                    "construction ordinal compaction cancelled",
+                                ));
+                            }
                             writer.push(uuid)?;
                             v4_compaction_post_write_failure("ordinal")?;
                         }
@@ -8196,6 +8438,7 @@ fn compact_v4_tombstone_interval(
     first_generation: u64,
     last_generation: u64,
     work: &mut V4CompactionWork,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     let selected = manifest
         .tombstones
@@ -8240,6 +8483,9 @@ fn compact_v4_tombstone_interval(
         }
         let mut previous = None;
         while let Some(Reverse((id, source))) = heap.pop() {
+            if cancelled() {
+                return Err(storage_err("construction ordinal compaction cancelled"));
+            }
             if previous != Some(id) {
                 merged.push(id)?;
                 v4_compaction_post_write_failure("tombstone")?;
@@ -9907,6 +10153,7 @@ pub(crate) mod tests {
             &index,
             2,
             &mut work,
+            &mut || false,
         )
         .unwrap_err()
         .to_string();
@@ -9980,6 +10227,7 @@ pub(crate) mod tests {
             &index,
             2,
             &mut work,
+            &mut || false,
         )
         .unwrap_err()
         .to_string();
@@ -10007,6 +10255,7 @@ pub(crate) mod tests {
             &index,
             3,
             &mut release_work,
+            &mut || false,
         )
         .unwrap_err()
         .to_string();
@@ -10105,9 +10354,16 @@ pub(crate) mod tests {
         let reused = stage_v4_ordinal_bundle(mappings, 1, &index, &mut || false).unwrap();
         assert!(reused.publications.is_empty());
         inject_v4_authority_failure("after_artifacts");
-        let error = publish_v4_construction_artifacts(&encoded, reused, 1, &hex_sha256(b"delta"))
-            .unwrap_err()
-            .to_string();
+        let error = publish_v4_construction_artifacts(
+            &encoded,
+            reused,
+            1,
+            &hex_sha256(b"delta"),
+            None,
+            &mut || false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("injected v4 authority failure at after_artifacts"));
         for (name, identity, bytes) in &originals {
             let file = index.open_child_file(std::ffi::OsStr::new(name)).unwrap();
@@ -10123,6 +10379,31 @@ pub(crate) mod tests {
                 )
                 .unwrap(),
                 *bytes
+            );
+        }
+
+        let reused = stage_v4_ordinal_bundle(mappings, 1, &index, &mut || false).unwrap();
+        assert!(reused.publications.is_empty());
+        let (outputs, _, _) = publish_v4_construction_artifacts(
+            &encoded,
+            reused,
+            1,
+            &hex_sha256(b"delta"),
+            None,
+            &mut || false,
+        )
+        .unwrap();
+        for (name, identity, bytes) in &originals {
+            let output = outputs
+                .iter()
+                .find(|output| output.name == *name)
+                .expect("reused payload remains in the complete publication inventory");
+            assert_eq!(output.bytes, bytes.len() as u64);
+            assert_eq!(output.sha256, hex_sha256(bytes));
+            let file = index.open_child_file(std::ffi::OsStr::new(name)).unwrap();
+            assert_eq!(
+                graphforge_filesystem::file_identity(&file).unwrap(),
+                *identity
             );
         }
 
@@ -10214,6 +10495,7 @@ pub(crate) mod tests {
             1,
             2,
             &mut work,
+            &mut || false,
         )
         .unwrap_err()
         .to_string();
@@ -10281,6 +10563,7 @@ pub(crate) mod tests {
             1,
             2,
             &mut work,
+            &mut || false,
         )
         .unwrap_err()
         .to_string();
@@ -10706,7 +10989,15 @@ pub(crate) mod tests {
             .unwrap();
         let mappings = [(Uuid::from_u128(1), 1_u64), (Uuid::from_u128(2), 3_u64)];
         let bundle = stage_v4_ordinal_bundle(mappings, 1, &index, &mut || false).unwrap();
-        publish_v4_construction_artifacts(&encoded, bundle, 1, &hex_sha256(b"delta")).unwrap();
+        publish_v4_construction_artifacts(
+            &encoded,
+            bundle,
+            1,
+            &hex_sha256(b"delta"),
+            None,
+            &mut || false,
+        )
+        .unwrap();
 
         cleanup_private_construction_index(&encoded).unwrap();
         assert!(index.child_names().unwrap().is_empty());

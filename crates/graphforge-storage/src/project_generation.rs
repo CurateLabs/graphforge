@@ -188,6 +188,21 @@ impl ResolvedProjectGeneration {
         maximum: u64,
         targeted_state: Option<&mut crate::graph_manifest::GraphManifestTargetedState>,
     ) -> Result<Option<(crate::GraphFileEntry, Vec<u8>)>, GfError> {
+        self.authenticated_graph_file_bytes_counted(
+            relative_path,
+            maximum,
+            targeted_state,
+            &mut crate::GraphObjectIoTotals::default(),
+        )
+    }
+
+    pub(crate) fn authenticated_graph_file_bytes_counted(
+        &self,
+        relative_path: &str,
+        maximum: u64,
+        targeted_state: Option<&mut crate::graph_manifest::GraphManifestTargetedState>,
+        io: &mut crate::GraphObjectIoTotals,
+    ) -> Result<Option<(crate::GraphFileEntry, Vec<u8>)>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
             return Ok(None);
         };
@@ -229,10 +244,11 @@ impl ResolvedProjectGeneration {
                     limits,
                     state,
                     |digest| {
-                        crate::read_graph_object_by_digest(
+                        crate::graph_object_store::read_graph_object_counted(
                             self.container_root(),
                             digest,
                             4 * 1024 * 1024,
+                            io,
                         )
                     },
                 )?
@@ -249,13 +265,16 @@ impl ResolvedProjectGeneration {
                 let relative = path
                     .strip_prefix(&graph_root)
                     .map_err(|_| corrupt("selected graph control escaped graph root"))?;
-                read_stable_graph_control(&graph_root, relative, entry.byte_length, maximum)?
+                read_stable_graph_control(&graph_root, relative, entry.byte_length, maximum, io)?
             }
-            crate::GraphFilesParticipant::V2(_) => crate::read_graph_object_by_digest(
-                self.container_root(),
-                &entry.content_sha256,
-                maximum,
-            )?,
+            crate::GraphFilesParticipant::V2(_) => {
+                crate::graph_object_store::read_graph_object_counted(
+                    self.container_root(),
+                    &entry.content_sha256,
+                    maximum,
+                    io,
+                )?
+            }
         };
         crate::graph_manifest::verify_object_bytes(
             &entry.content_sha256,
@@ -1655,6 +1674,7 @@ fn read_stable_graph_control(
     relative: &Path,
     expected_length: u64,
     maximum: u64,
+    io: &mut crate::GraphObjectIoTotals,
 ) -> Result<Vec<u8>, GfError> {
     let mut directory = graphforge_filesystem::StableDirectory::open(graph_root)
         .map_err(|_| corrupt("selected graph root cannot be retained"))?;
@@ -1688,9 +1708,25 @@ fn read_stable_graph_control(
     let capacity = usize::try_from(expected_length)
         .map_err(|_| corrupt("selected graph control length exceeds address space"))?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.take(expected_length.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| corrupt("selected graph control cannot be read"))?;
+    let mut reader = file.take(expected_length.saturating_add(1));
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|_| corrupt("selected graph control cannot be read"))?;
+        if count == 0 {
+            break;
+        }
+        io.read_bytes = io
+            .read_bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| corrupt("control read bytes overflow"))?;
+        io.read_calls = io
+            .read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("control read calls overflow"))?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
     if bytes.len() as u64 != expected_length {
         return Err(corrupt("selected graph control changed while reading"));
     }
@@ -1824,7 +1860,19 @@ mod tests {
         let index = graph.join("topology/uuid-membership");
         fs::create_dir_all(&index).unwrap();
         fs::write(generation_root.join(LEASE_FILE), []).unwrap();
-        let manifest_bytes = format!("{{\"format_version\":4,\"topology_generation\":{generation},\"forward_identities\":[],\"ordinal_ranges\":[],\"tombstones\":[]}}").into_bytes();
+        let manifest_bytes = if include_v4 {
+            let directory = graphforge_filesystem::StableDirectory::open(&index).unwrap();
+            let (manifest, _) = crate::uuid_membership::stage_v4_ordinal_artifacts(
+                std::iter::empty::<(Uuid, u64)>(),
+                generation,
+                &directory,
+                || false,
+            )
+            .unwrap();
+            serde_json::to_vec(&manifest).unwrap()
+        } else {
+            Vec::new()
+        };
         let manifest_digest = sha256_hex(Sha256::digest(&manifest_bytes).into());
         if include_v4 {
             fs::write(index.join("ordinal-v4-manifest.json"), &manifest_bytes).unwrap();

@@ -819,6 +819,10 @@ impl GraphManifestState {
         self.root.as_ref()
     }
 
+    pub(crate) fn entry(&self, path: &str) -> Option<&crate::GraphFileEntry> {
+        self.entries.get(path)
+    }
+
     /// Current entries in canonical logical-path order.
     #[must_use]
     pub fn entries(&self) -> impl ExactSizeIterator<Item = &crate::GraphFileEntry> {
@@ -2846,6 +2850,104 @@ pub(crate) fn begin_graph_object_read(root: &Path) -> Result<GraphObjectReadLeas
 }
 
 impl GraphObjectReadLease {
+    /// Authenticate only a construction compaction input, retaining its CAS lease.
+    pub(crate) fn open_for_construction(
+        &self,
+        digest: &str,
+        expected_length: u64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        (
+            AuthenticatedGraphObject,
+            GraphObjectIoTotals,
+            graphforge_filesystem::FileCacheReleaseEvidence,
+        ),
+        GfError,
+    > {
+        let file = self.cas.open_digest(digest)?;
+        let metadata = file.metadata().map_err(|error| {
+            storage(
+                "inspect construction input",
+                &self.cas.diagnostic_root,
+                error,
+            )
+        })?;
+        if !metadata.is_file()
+            || metadata.len() != expected_length
+            || !metadata.permissions().readonly()
+        {
+            return Err(validation("construction object authority changed"));
+        }
+        let retained = file
+            .try_clone()
+            .map_err(|error| storage("pin construction input", &self.cas.diagnostic_root, error))?;
+        let mut reader =
+            graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(|error| {
+                storage("bound construction input", &self.cas.diagnostic_root, error)
+            })?;
+        let mut totals = GraphObjectIoTotals::default();
+        let mut digest_state = Sha256::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let verified = (|| {
+            loop {
+                if cancelled() {
+                    return Err(validation("construction ordinal authentication cancelled"));
+                }
+                let count = reader.read(&mut buffer).map_err(|error| {
+                    storage(
+                        "authenticate construction input",
+                        &self.cas.diagnostic_root,
+                        error,
+                    )
+                })?;
+                if count == 0 {
+                    break;
+                }
+                totals.read_bytes = totals
+                    .read_bytes
+                    .checked_add(count as u64)
+                    .ok_or_else(|| validation("construction read bytes overflow"))?;
+                totals.read_calls = totals
+                    .read_calls
+                    .checked_add(1)
+                    .ok_or_else(|| validation("construction read calls overflow"))?;
+                digest_state.update(&buffer[..count]);
+            }
+            if totals.read_bytes != expected_length
+                || hex_digest(digest_state.finalize().into()) != digest
+            {
+                return Err(validation(
+                    "construction object digest does not match its address",
+                ));
+            }
+            Ok(())
+        })();
+        let released = reader.finish().map_err(|error| {
+            storage(
+                "release construction input",
+                &self.cas.diagnostic_root,
+                error,
+            )
+        });
+        let cache = match (verified, released) {
+            (Ok(()), Ok(cache)) => cache,
+            (Err(primary), Ok(_)) => return Err(primary),
+            (Ok(()), Err(error)) => return Err(error),
+            (Err(primary), Err(cleanup)) => {
+                return Err(validation(format!("{primary}; {cleanup}")));
+            }
+        };
+        Ok((
+            AuthenticatedGraphObject {
+                file: retained,
+                authenticated_length: expected_length,
+                _cas: std::sync::Arc::clone(&self.cas),
+            },
+            totals,
+            cache,
+        ))
+    }
+
     pub(crate) fn open(
         &self,
         digest: &str,
@@ -2971,6 +3073,30 @@ fn open_graph_object_with_read_lease(
         authenticated_length: expected_length,
         _cas: std::sync::Arc::clone(&lease.cas),
     })
+}
+
+pub(crate) fn read_graph_object_counted(
+    root: &Path,
+    digest: &str,
+    maximum: u64,
+    totals: &mut GraphObjectIoTotals,
+) -> Result<Vec<u8>, GfError> {
+    let cas = ReadOnlyCasRoot::open(root)?;
+    let (bytes, io) = read_graph_object_by_digest_file_counted(
+        cas.open_digest(digest)?,
+        digest,
+        maximum,
+        &cas.diagnostic_root,
+    )?;
+    totals.read_bytes = totals
+        .read_bytes
+        .checked_add(io.bytes)
+        .ok_or_else(|| validation("object read byte count overflows"))?;
+    totals.read_calls = totals
+        .read_calls
+        .checked_add(io.calls)
+        .ok_or_else(|| validation("object read call count overflows"))?;
+    Ok(bytes)
 }
 
 fn read_graph_object_by_digest_from_read_only_cas(
