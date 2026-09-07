@@ -427,3 +427,178 @@ async fn statement_commit_bumps_topology_generation_only_for_topology() {
         3
     );
 }
+
+#[tokio::test]
+async fn mutation_plans_relocate_and_bind_only_selected_write_resources() {
+    use datafusion::logical_expr::LogicalPlan;
+    use std::hash::{Hash, Hasher};
+    for (query, expected_left, expected_right) in [
+        (
+            "CREATE (:Person {name:'new'})",
+            vec!["left", "new"],
+            vec!["new", "right"],
+        ),
+        (
+            "MATCH (n:Person) SET n.name = n.name + '-set'",
+            vec!["left-set"],
+            vec!["right-set"],
+        ),
+        ("MATCH (n:Person) REMOVE n.name", vec![], vec![]),
+        ("MATCH (n:Person) DELETE n", vec![], vec![]),
+    ] {
+        let left = TempDir::new().unwrap();
+        let right = TempDir::new().unwrap();
+        let rt = Arc::new(Mutex::new(RuntimeCatalog::new()));
+        seed(left.path(), &rt, &["CREATE (:Person {name:'left'})"]).await;
+        seed(right.path(), &rt, &["CREATE (:Person {name:'right'})"]).await;
+        let ir = bind(query, &rt);
+        let lower = |root: &Path| {
+            let catalog = GraphCatalog::open(root, None, &rt.lock().unwrap()).unwrap();
+            graphforge_rel::GraphPlanLowerer::new_for_writes(
+                Some(&catalog),
+                None,
+                root,
+                OntologyMode::Exploratory,
+            )
+            .unwrap()
+            .lower_plan(&ir)
+            .unwrap()
+        };
+        let plan = lower(left.path());
+        let relocated = lower(right.path());
+        assert_eq!(plan, relocated, "{query}");
+        let hash = |plan: &LogicalPlan| {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            plan.hash(&mut hash);
+            hash.finish()
+        };
+        assert_eq!(hash(&plan), hash(&relocated));
+        let explain = plan.display_indent().to_string();
+        assert_eq!(explain, relocated.display_indent().to_string());
+        assert!(!explain.contains(left.path().to_str().unwrap()));
+        assert!(!explain.contains(right.path().to_str().unwrap()));
+        let left_session = session(left.path(), &rt);
+        let right_session = session(right.path(), &rt);
+        let left_state = left_session.context().state();
+        let right_state = right_session.context().state();
+        let (left_physical, right_physical) = tokio::join!(
+            left_state.create_physical_plan(&plan),
+            right_state.create_physical_plan(&plan),
+        );
+        let left_stream = datafusion::physical_plan::execute_stream(
+            left_physical.unwrap(),
+            left_session.context().task_ctx(),
+        )
+        .unwrap();
+        let right_stream = datafusion::physical_plan::execute_stream(
+            right_physical.unwrap(),
+            right_session.context().task_ctx(),
+        )
+        .unwrap();
+        drop(left_session);
+        drop(right_session);
+        let left_result = datafusion::physical_plan::common::collect(left_stream)
+            .await
+            .unwrap();
+        assert_eq!(left_result.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        let names = |root: &Path| {
+            let mut names: Vec<_> = logical_property_rows(root, "_untyped")
+                .into_iter()
+                .filter_map(|row| match row.values.get("name") {
+                    Some(graphforge_ir::IrLiteral::Str(name)) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(right.path()),
+            ["right"],
+            "the other retained stream has not been polled"
+        );
+        let right_result = datafusion::physical_plan::common::collect(right_stream)
+            .await
+            .unwrap();
+        assert_eq!(right_result.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        assert_eq!(names(left.path()), expected_left, "{query}");
+        assert_eq!(names(right.path()), expected_right, "{query}");
+        assert_eq!(
+            plan, relocated,
+            "binding leaves logical descriptors untouched"
+        );
+    }
+}
+
+#[tokio::test]
+async fn statement_and_literal_writes_require_explicit_writable_context() {
+    let dir = TempDir::new().unwrap();
+    let rt = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    seed(dir.path(), &rt, &["CREATE (:Person {name:'original'})"]).await;
+    for query in [
+        "CREATE (:Person {name:'new'})",
+        "MATCH (n:Person) SET n.name = 'changed'",
+        "MATCH (n:Person) REMOVE n.name",
+        "MATCH (n:Person) DELETE n",
+        "MERGE (:Person {name:'original'})",
+    ] {
+        let plan = bind(query, &rt);
+        let readonly = session(dir.path(), &rt).restrict_to_reads();
+        let catalog = GraphCatalog::open(dir.path(), None, &rt.lock().unwrap()).unwrap();
+        let missing = ExecutionSession::new(catalog, None).unwrap();
+        for (session, code) in [
+            (readonly, "GF_WRITE_RESOURCE_READ_ONLY"),
+            (missing, "GF_WRITE_RESOURCE_MISSING"),
+        ] {
+            let error = session.execute_write_statement(&plan).await.unwrap_err();
+            assert!(error.to_string().contains(code), "{query}: {error}");
+            let error = session.execute_create(&plan).await.unwrap_err();
+            assert!(error.to_string().contains(code), "{query}: {error}");
+        }
+    }
+    let properties = logical_property_rows(dir.path(), "_untyped");
+    assert_eq!(properties.len(), 1);
+    assert_eq!(
+        properties[0].values.get("name"),
+        Some(&graphforge_ir::IrLiteral::Str("original".into()))
+    );
+}
+
+#[tokio::test]
+async fn mixed_create_set_merge_preserves_buffered_visibility_and_atomic_rollback() {
+    for fail in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let rt = Arc::new(Mutex::new(RuntimeCatalog::new()));
+        let query = if fail {
+            "CREATE (n:P {x:1}) SET n.x=2 MERGE (m:P {x:2}) DELETE m SET m.x=3"
+        } else {
+            "CREATE (n:P {x:1}) SET n.x=2 MERGE (m:P {x:2}) RETURN m"
+        };
+        let result = run(dir.path(), &rt, query).await;
+        if fail {
+            assert!(result.unwrap_err().to_string().contains("deleted"));
+            assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 0);
+            assert!(logical_property_rows(dir.path(), "_untyped").is_empty());
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result.stats.rows_produced, 1);
+            assert_eq!(result.side_effects.as_ref().unwrap().nodes_created, 1);
+            let receipt = result.mutation_receipt.unwrap();
+            assert_eq!(
+                receipt
+                    .effects
+                    .iter()
+                    .filter(|effect| effect.kind == MutationKind::CreateNode)
+                    .count(),
+                1
+            );
+            assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
+            let properties = logical_property_rows(dir.path(), "_untyped");
+            assert_eq!(properties.len(), 1);
+            assert_eq!(
+                properties[0].values.get("x"),
+                Some(&graphforge_ir::IrLiteral::Int(2))
+            );
+        }
+    }
+}

@@ -70,7 +70,22 @@ fn ref_input_batch(persons: &[(Uuid, u64)]) -> RecordBatch {
     RecordBatch::try_new(ref_input_schema(), vec![Arc::new(uuid_arr), Arc::new(ids)]).unwrap()
 }
 
-async fn run(node: GraphCreateNode, input_batch: RecordBatch) -> (u64, u64) {
+fn test_write_resource(dir: &Path) -> graphforge_exec::write_resource::BoundWriteResource {
+    let catalog =
+        graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+            .unwrap();
+    graphforge_exec::ExecutionSession::new_with_target(
+        catalog,
+        None,
+        dir.to_path_buf(),
+        OntologyMode::Exploratory,
+    )
+    .unwrap()
+    .write_resource()
+    .unwrap()
+}
+
+async fn run(dir: &Path, node: GraphCreateNode, input_batch: RecordBatch) -> (u64, u64) {
     let ctx = SessionContext::new();
     let input: Arc<dyn ExecutionPlan> = ctx
         .read_batch(input_batch)
@@ -78,7 +93,9 @@ async fn run(node: GraphCreateNode, input_batch: RecordBatch) -> (u64, u64) {
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = Arc::new(graphforge_exec::GraphCreateExec::new(&node, input));
+    let exec = Arc::new(
+        graphforge_exec::GraphCreateExec::new(&node, input, &test_write_resource(dir)).unwrap(),
+    );
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
     let b = &out[0];
     let nodes = b
@@ -135,11 +152,9 @@ async fn create_per_matched_row_references_and_mints() {
             properties: vec![],
             computed_properties: vec![],
         }],
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
     );
 
-    let (nodes, edges) = run(node, ref_input_batch(&persons)).await;
+    let (nodes, edges) = run(dir.path(), node, ref_input_batch(&persons)).await;
     // Per row: 1 mint (`b`) + 1 edge; the reference `a` is not counted.
     assert_eq!((nodes, edges), (3, 3), "one new b + one edge per matched a");
 
@@ -166,13 +181,11 @@ async fn create_over_empty_match_creates_nothing() {
             is_reference: false,
         }],
         vec![],
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
     );
 
     // Empty input batch (no matched rows).
     let empty = RecordBatch::new_empty(ref_input_schema());
-    let (nodes, edges) = run(node, empty).await;
+    let (nodes, edges) = run(dir.path(), node, empty).await;
     assert_eq!((nodes, edges), (0, 0), "empty match creates nothing");
 }
 
@@ -194,8 +207,6 @@ async fn standalone_create_over_unit_row_creates_once() {
             is_reference: false,
         }],
         vec![],
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
     );
 
     // A single unit row (no columns).
@@ -206,7 +217,7 @@ async fn standalone_create_over_unit_row_creates_once() {
         &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
     )
     .unwrap();
-    let (nodes, edges) = run(node, unit_batch).await;
+    let (nodes, edges) = run(dir.path(), node, unit_batch).await;
     assert_eq!((nodes, edges), (1, 0), "standalone CREATE mints once");
 }
 
@@ -227,8 +238,6 @@ async fn null_referenced_node_uuid_errors() {
             is_reference: true,
         }],
         vec![],
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
     );
 
     // One input row whose node_uuid is null (e.g. an unmatched OPTIONAL MATCH).
@@ -251,7 +260,10 @@ async fn null_referenced_node_uuid_errors() {
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = Arc::new(graphforge_exec::GraphCreateExec::new(&node, input));
+    let exec = Arc::new(
+        graphforge_exec::GraphCreateExec::new(&node, input, &test_write_resource(dir.path()))
+            .unwrap(),
+    );
     let err = collect(exec, ctx.task_ctx()).await;
     assert!(
         err.is_err(),
@@ -280,8 +292,6 @@ async fn create_accumulates_across_multiple_input_batches() {
             is_reference: false,
         }],
         vec![],
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
     );
 
     // Two batches: 2 rows + 1 row, same schema as ref_input_plan (var_0).
@@ -295,7 +305,10 @@ async fn create_accumulates_across_multiple_input_batches() {
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = Arc::new(graphforge_exec::GraphCreateExec::new(&node, input));
+    let exec = Arc::new(
+        graphforge_exec::GraphCreateExec::new(&node, input, &test_write_resource(dir.path()))
+            .unwrap(),
+    );
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
     let nodes = out[0]
         .column(0)
