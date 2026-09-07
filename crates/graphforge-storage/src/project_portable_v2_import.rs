@@ -1829,7 +1829,7 @@ mod tests {
         files
     }
 
-    fn assert_identity_package_rejected(package: &Path) {
+    fn assert_identity_package_rejected(package: &Path) -> PortableV2Error {
         let target = tempfile::tempdir().unwrap();
         let before = crate::open_or_initialize_project(target.path())
             .unwrap()
@@ -1854,6 +1854,7 @@ mod tests {
             before
         );
         assert_eq!(import_authority_bytes(target.path()), bytes);
+        error
     }
 
     fn replace_node_identity(tree: &Path, primary: bool, raw: u32) {
@@ -1963,6 +1964,23 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn missing_delta_sequence_preserves_pristine_target_authority() {
+        let (_owner, package) = identity_package(|tree| {
+            write_identity_delta(tree, 0);
+            fs::rename(
+                tree.join(crate::delta_run_relative_path(1)),
+                tree.join(crate::delta_run_relative_path(2)),
+            )
+            .unwrap();
+        });
+        let error = assert_identity_package_rejected(&package);
+        assert_eq!(
+            error.to_string(),
+            "portable-v2 InvalidStructure: graph delta sequence is invalid"
+        );
     }
 
     #[test]
