@@ -116,10 +116,7 @@ class SurfaceGateTests(unittest.TestCase):
         manifest["method_evidence_groups"]["checkpoint-view"]["test_refs"] = [
             {
                 "path": "crates/graphforge-api/tests/algorithm_public_surface.rs",
-                "symbol": (
-                    "persisted_public_rank_is_exact_after_repeat_and_reopen_"
-                    "and_unavailable_is_stable"
-                ),
+                "symbol": "descriptor_byte_and_embedding_dispatch_are_publicly_covered",
             }
         ]
         errors = self.validate(manifest)
