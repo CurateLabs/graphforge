@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "932d8d9c7edf3f4aac04695933b01600e47a637f5aa332ca86ed53cb9989515d",
+  "public_method_digest": "e5e74747638b43f353b601a59575d7013a952efaaee5e7de5e698ba68dd175cb",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -826,6 +826,7 @@
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
+        "GraphForge.explain_stage",
         "GraphForge.register_procedure",
         "GraphForge.runtime_catalog",
         "GraphForge.schema"
@@ -882,6 +883,14 @@
         {
           "path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
           "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"
+        },
+        {
+          "path": "crates/graphforge-api/src/explanation.rs",
+          "symbol": "selected_stages_match_full_explanation_and_real_query_results"
+        },
+        {
+          "path": "crates/graphforge-api/tests/bind_error_spans.rs",
+          "symbol": "explanation_stages_share_binder_codes_payloads_and_all_spans"
         }
       ]
     },

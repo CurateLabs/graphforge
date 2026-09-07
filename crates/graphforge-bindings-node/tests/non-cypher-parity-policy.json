@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 261,
-  "releaseSurfaceDigest": "84310d5de1f83e7080f71e7933470640be96cd1b32b0bc10b0584496380924b3",
+  "releaseSurfaceCount": 262,
+  "releaseSurfaceDigest": "63807d272b94a108adfa81956a92956bbd6ab3950ae3f73de1867367e89e1a34",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
