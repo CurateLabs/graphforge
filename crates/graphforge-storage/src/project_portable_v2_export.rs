@@ -2281,6 +2281,9 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     use super::*;
     use crate::open_or_initialize_project;
+    use arrow::array::StringArray;
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
 
     fn compact_graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
         let project = tempfile::tempdir().unwrap();
@@ -2330,7 +2333,19 @@ mod tests {
         let tree = tempfile::tempdir().unwrap();
         fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
         fs::create_dir(tree.path().join("properties")).unwrap();
-        fs::write(tree.path().join("properties/Person.parquet"), b"person").unwrap();
+        let properties = RecordBatch::try_from_iter(vec![(
+            "name",
+            std::sync::Arc::new(StringArray::from(vec!["person"])) as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            fs::File::create(tree.path().join("properties/Person.parquet")).unwrap(),
+            properties.schema(),
+            None,
+        )
+        .unwrap();
+        writer.write(&properties).unwrap();
+        writer.close().unwrap();
         let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
         let mut participants = crate::empty_workspace_participants().unwrap();
         participants.insert(0, inventory);

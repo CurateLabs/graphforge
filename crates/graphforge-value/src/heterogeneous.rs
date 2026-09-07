@@ -160,65 +160,156 @@ pub fn dynamic_fields(types: &[DataType]) -> Fields {
 /// # Errors
 /// Returns a schema error when a tagged struct does not match an existing layout.
 pub fn recognize(data_type: &DataType) -> Result<Option<Layout>, ValueError> {
+    Ok(recognize_layout(data_type)?.map(|layout| match layout {
+        RowLayout::Scalar => Layout::ScalarV1,
+        RowLayout::Constant { depth } => Layout::ConstantV1 { depth },
+        RowLayout::Dynamic { .. } => {
+            let DataType::Struct(fields) = data_type else {
+                unreachable!("recognized struct")
+            };
+            Layout::DynamicV1 {
+                payload_types: fields
+                    .iter()
+                    .skip(1)
+                    .map(|field| field.data_type().clone())
+                    .collect(),
+            }
+        }
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum RowLayout {
+    Scalar,
+    Constant { depth: usize },
+    Dynamic { width: usize },
+}
+
+fn field_header(field: &Field, name: &str, nullable: bool) -> bool {
+    field.name() == name && field.is_nullable() == nullable && field.metadata().is_empty()
+}
+
+fn field_matches(field: &Field, name: &str, data_type: &DataType, nullable: bool) -> bool {
+    field_header(field, name, nullable) && field.data_type() == data_type
+}
+
+fn names_match(fields: &Fields, names: &[&str]) -> bool {
+    fields.len() == names.len()
+        && fields
+            .iter()
+            .zip(names)
+            .all(|(field, name)| field.name() == name)
+}
+
+fn dynamic_name_matches(name: &str, index: usize) -> bool {
+    let Some(suffix) = name.strip_prefix(DYNAMIC_PREFIX) else {
+        return false;
+    };
+    // Canonical decimal spelling without allocating a formatted field name.
+    !suffix.is_empty()
+        && (suffix == "0" || !suffix.starts_with('0'))
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        && suffix.parse::<usize>() == Ok(index)
+}
+
+fn scalar_payloads_match(fields: &[Arc<Field>]) -> bool {
+    fields.len() == 5
+        && [
+            (TAG, DataType::Int8, false),
+            (INT, DataType::Int64, true),
+            (FLOAT, DataType::Float64, true),
+            (STR, DataType::Utf8, true),
+            (BOOL, DataType::Boolean, true),
+        ]
+        .iter()
+        .zip(fields)
+        .all(|((name, data_type, nullable), field)| {
+            field_matches(field, name, data_type, *nullable)
+        })
+}
+
+fn constant_depth(fields: &Fields) -> Result<usize, ValueError> {
+    if !matches!(fields.len(), 6 | 8)
+        || !field_matches(&fields[0], KEY, &DataType::Float64, true)
+        || !scalar_payloads_match(&fields[1..6])
+    {
+        return Err(ValueError::Schema);
+    }
+    if fields.len() == 6 {
+        return Ok(0);
+    }
+    if !field_header(&fields[6], LIST, true) || !field_header(&fields[7], MAP, true) {
+        return Err(ValueError::Schema);
+    }
+    let (DataType::List(list_item), DataType::List(map_item)) =
+        (fields[6].data_type(), fields[7].data_type())
+    else {
+        return Err(ValueError::Schema);
+    };
+    if !field_header(list_item, "item", true) || !field_header(map_item, "item", true) {
+        return Err(ValueError::Schema);
+    }
+    let (DataType::Struct(child), DataType::Struct(entries)) =
+        (list_item.data_type(), map_item.data_type())
+    else {
+        return Err(ValueError::Schema);
+    };
+    if entries.len() != 2
+        || !field_matches(&entries[0], MAP_KEY, &DataType::Utf8, false)
+        || !field_header(&entries[1], MAP_VALUE, true)
+        || entries[1].data_type() != list_item.data_type()
+    {
+        return Err(ValueError::Schema);
+    }
+    constant_depth(child)?
+        .checked_add(1)
+        .ok_or(ValueError::Bounds)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCHEMA_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn recognize_layout(data_type: &DataType) -> Result<Option<RowLayout>, ValueError> {
+    #[cfg(test)]
+    SCHEMA_VISITS.with(|visits| visits.set(visits.get() + 1));
     let DataType::Struct(fields) = data_type else {
         return Ok(None);
     };
-    // Only the existing tag marker identifies this contract. Payload-like
-    // names alone remain valid ordinary map/property names.
     let Some(tag) = fields.iter().find(|field| field.name() == TAG) else {
         return Ok(None);
     };
-    let names = fields
-        .iter()
-        .map(|field| field.name().as_str())
-        .collect::<Vec<_>>();
-    let scalar_names = [TAG, INT, FLOAT, STR, BOOL];
-    let constant_names = [KEY, TAG, INT, FLOAT, STR, BOOL];
-    let complete_names = names == scalar_names
-        || names == constant_names
-        || names == [KEY, TAG, INT, FLOAT, STR, BOOL, LIST, MAP]
-        || (names.first() == Some(&TAG)
-            && names.len() > 1
-            && names
-                .iter()
-                .skip(1)
-                .enumerate()
-                .all(|(index, name)| *name == payload_field(index)));
-    // Cypher maps and node properties may use the tag name as ordinary data.
-    // A full wire footprint still rejects tag-type drift rather than becoming
-    // an ordinary map merely because its tag column has the wrong type.
-    if names.len() == 1 || (tag.data_type() != &DataType::Int8 && !complete_names) {
+    let dynamic_names = fields.first().is_some_and(|field| field.name() == TAG)
+        && fields.len() > 1
+        && fields
+            .iter()
+            .skip(1)
+            .enumerate()
+            .all(|(index, field)| dynamic_name_matches(field.name(), index));
+    let complete_names = names_match(fields, &[TAG, INT, FLOAT, STR, BOOL])
+        || names_match(fields, &[KEY, TAG, INT, FLOAT, STR, BOOL])
+        || names_match(fields, &[KEY, TAG, INT, FLOAT, STR, BOOL, LIST, MAP])
+        || dynamic_names;
+    if fields.len() == 1 || (tag.data_type() != &DataType::Int8 && !complete_names) {
         return Ok(None);
     }
-    if *fields == scalar_fields() {
-        return Ok(Some(Layout::ScalarV1));
+    if scalar_payloads_match(fields) {
+        return Ok(Some(RowLayout::Scalar));
     }
     if fields.first().is_some_and(|field| field.name() == KEY) {
-        let depth = match fields.iter().find(|field| field.name() == LIST) {
-            None => 0,
-            Some(field) => {
-                let DataType::List(item) = field.data_type() else {
-                    return Err(ValueError::Schema);
-                };
-                let Some(Layout::ConstantV1 { depth }) = recognize(item.data_type())? else {
-                    return Err(ValueError::Schema);
-                };
-                depth.checked_add(1).ok_or(ValueError::Bounds)?
-            }
-        };
-        if *fields != constant_fields(depth) {
-            return Err(ValueError::Schema);
-        }
-        return Ok(Some(Layout::ConstantV1 { depth }));
+        return constant_depth(fields).map(|depth| Some(RowLayout::Constant { depth }));
     }
-    let types: Vec<_> = fields
-        .iter()
-        .skip(1)
-        .map(|field| field.data_type().clone())
-        .collect();
-    if i8::try_from(types.len()).is_ok() && *fields == dynamic_fields(&types) {
-        return Ok(Some(Layout::DynamicV1 {
-            payload_types: types,
+    if dynamic_names
+        && i8::try_from(fields.len() - 1).is_ok()
+        && field_matches(&fields[0], TAG, &DataType::Int8, false)
+        && fields
+            .iter()
+            .skip(1)
+            .all(|field| field.is_nullable() && field.metadata().is_empty())
+    {
+        return Ok(Some(RowLayout::Dynamic {
+            width: fields.len() - 1,
         }));
     }
     Err(ValueError::Schema)
@@ -251,23 +342,37 @@ fn payload_is_null(array: &dyn Array, row: usize) -> bool {
 /// # Errors
 /// Returns a typed schema, tag, payload, or bounds error for an invalid row.
 pub fn decode_row(array: &StructArray, row: usize) -> Result<Decoded<'_>, ValueError> {
+    let layout = recognize_layout(array.data_type())?.ok_or(ValueError::Schema)?;
+    Ok(match select_row(array, row, layout)? {
+        None => Decoded::Null,
+        Some((index, true)) => Decoded::Map(array.column(index)),
+        Some((index, false)) => Decoded::Payload(array.column(index)),
+    })
+}
+
+fn select_row(
+    array: &StructArray,
+    row: usize,
+    layout: RowLayout,
+) -> Result<Option<(usize, bool)>, ValueError> {
     if row >= array.len() {
         return Err(ValueError::Bounds);
     }
-    let layout = recognize(array.data_type())?.ok_or(ValueError::Schema)?;
     if array.is_null(row) {
-        return Ok(Decoded::Null);
+        return Ok(None);
     }
+    let tag_index = usize::from(matches!(layout, RowLayout::Constant { .. }));
     let tags = array
-        .column_by_name(TAG)
-        .and_then(|a| a.as_any().downcast_ref::<Int8Array>())
+        .column(tag_index)
+        .as_any()
+        .downcast_ref::<Int8Array>()
         .ok_or(ValueError::Schema)?;
     if tags.is_null(row) {
         return Err(ValueError::NullPayload);
     }
     let tag = tags.value(row);
     let (selected, map, first_payload) = match layout {
-        Layout::ScalarV1 => match tag {
+        RowLayout::Scalar => match tag {
             0..=3 => (
                 Some(usize::try_from(tag).map_err(|_| ValueError::Tag(tag))? + 1),
                 false,
@@ -276,7 +381,7 @@ pub fn decode_row(array: &StructArray, row: usize) -> Result<Decoded<'_>, ValueE
             4 => (None, false, 1),
             _ => return Err(ValueError::Tag(tag)),
         },
-        Layout::ConstantV1 { depth } => match tag {
+        RowLayout::Constant { depth } => match tag {
             0..=3 => (
                 Some(usize::try_from(tag).map_err(|_| ValueError::Tag(tag))? + 2),
                 false,
@@ -289,9 +394,9 @@ pub fn decode_row(array: &StructArray, row: usize) -> Result<Decoded<'_>, ValueE
             ),
             _ => return Err(ValueError::Tag(tag)),
         },
-        Layout::DynamicV1 { ref payload_types } => {
+        RowLayout::Dynamic { width } => {
             let index = usize::try_from(tag).map_err(|_| ValueError::Tag(tag))?;
-            if index >= payload_types.len() {
+            if index >= width {
                 return Err(ValueError::Tag(tag));
             }
             (Some(index + 1), false, 1)
@@ -303,28 +408,21 @@ pub fn decode_row(array: &StructArray, row: usize) -> Result<Decoded<'_>, ValueE
         }
     }
     let Some(index) = selected else {
-        return Ok(Decoded::Null);
+        return Ok(None);
     };
     let payload = array.column(index);
     if payload_is_null(payload.as_ref(), row) {
         return Err(ValueError::NullPayload);
     }
-    Ok(if map {
-        Decoded::Map(payload)
-    } else {
-        Decoded::Payload(payload)
-    })
+    Ok(Some((index, map)))
 }
 
 /// Check nested schemas and identify whether value validation is necessary.
 ///
 /// # Errors
-/// Returns a typed schema error for malformed reserved heterogeneous layouts.
-///
-/// # Errors
 /// Returns a schema error for a malformed heterogeneous type at any nesting depth.
 pub fn contains_heterogeneous(data_type: &DataType) -> Result<bool, ValueError> {
-    let own = recognize(data_type)?.is_some();
+    let own = recognize_layout(data_type)?.is_some();
     let mut nested = false;
     match data_type {
         DataType::Struct(fields) => {
@@ -347,60 +445,157 @@ pub fn contains_heterogeneous(data_type: &DataType) -> Result<bool, ValueError> 
 /// # Errors
 /// Returns a typed error for malformed visible values or nested schemas.
 pub fn validate_array(array: &dyn Array) -> Result<(), ValueError> {
-    use arrow::array::{FixedSizeListArray, LargeListArray, MapArray};
-    if !contains_heterogeneous(array.data_type())? {
-        return Ok(());
+    let validator = ArrayValidator::new(array)?;
+    validator.rows(0..array.len())
+}
+
+// A per-call view borrows existing child arrays and their offsets. Schema work
+// and validator allocation scale with the Arrow type, never with its row count.
+// No state survives this call and no previously validated data is trusted later.
+enum ArrayValidator<'a> {
+    Skip,
+    Struct {
+        array: &'a StructArray,
+        layout: Option<RowLayout>,
+        children: Vec<ArrayValidator<'a>>,
+    },
+    List {
+        array: &'a dyn Array,
+        offsets: ChildOffsets<'a>,
+        child: Box<ArrayValidator<'a>>,
+    },
+    Dictionary {
+        array: &'a dyn Array,
+        value_type: &'a DataType,
+    },
+}
+
+enum ChildOffsets<'a> {
+    Small(&'a [i32]),
+    Large(&'a [i64]),
+    Fixed(usize),
+}
+
+impl ChildOffsets<'_> {
+    fn range(&self, row: usize) -> Result<std::ops::Range<usize>, ValueError> {
+        match self {
+            Self::Small(offsets) => Ok(usize::try_from(offsets[row])
+                .map_err(|_| ValueError::Bounds)?
+                ..usize::try_from(offsets[row + 1]).map_err(|_| ValueError::Bounds)?),
+            Self::Large(offsets) => Ok(usize::try_from(offsets[row])
+                .map_err(|_| ValueError::Bounds)?
+                ..usize::try_from(offsets[row + 1]).map_err(|_| ValueError::Bounds)?),
+            Self::Fixed(width) => {
+                let start = row.checked_mul(*width).ok_or(ValueError::Bounds)?;
+                Ok(start..start.checked_add(*width).ok_or(ValueError::Bounds)?)
+            }
+        }
     }
-    if let DataType::Dictionary(_, value) = array.data_type() {
-        let decoded = arrow::compute::cast(array, value)
-            .map_err(|error| ValueError::Arrow(error.to_string()))?;
-        return validate_array(decoded.as_ref());
+}
+
+impl<'a> ArrayValidator<'a> {
+    fn new(array: &'a dyn Array) -> Result<Self, ValueError> {
+        use arrow::array::{FixedSizeListArray, LargeListArray, MapArray};
+        if !contains_heterogeneous(array.data_type())? {
+            return Ok(Self::Skip);
+        }
+        if let DataType::Dictionary(_, value_type) = array.data_type() {
+            return Ok(Self::Dictionary { array, value_type });
+        }
+        if let Some(values) = array.as_any().downcast_ref::<StructArray>() {
+            return Ok(Self::Struct {
+                array: values,
+                layout: recognize_layout(values.data_type())?,
+                children: values
+                    .columns()
+                    .iter()
+                    .map(|value| Self::new(value.as_ref()))
+                    .collect::<Result<_, _>>()?,
+            });
+        }
+        let (offsets, child): (ChildOffsets<'a>, &'a dyn Array) =
+            if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+                (
+                    ChildOffsets::Small(values.value_offsets()),
+                    values.values().as_ref(),
+                )
+            } else if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
+                (
+                    ChildOffsets::Large(values.value_offsets()),
+                    values.values().as_ref(),
+                )
+            } else if let Some(values) = array.as_any().downcast_ref::<FixedSizeListArray>() {
+                (
+                    ChildOffsets::Fixed(
+                        usize::try_from(values.value_length()).map_err(|_| ValueError::Bounds)?,
+                    ),
+                    values.values().as_ref(),
+                )
+            } else if let Some(values) = array.as_any().downcast_ref::<MapArray>() {
+                (
+                    ChildOffsets::Small(values.value_offsets()),
+                    values.entries(),
+                )
+            } else {
+                return Err(ValueError::Schema);
+            };
+        Ok(Self::List {
+            array,
+            offsets,
+            child: Box::new(Self::new(child)?),
+        })
     }
-    if let Some(values) = array.as_any().downcast_ref::<StructArray>() {
-        if recognize(values.data_type())?.is_some() {
-            for row in 0..values.len() {
-                match decode_row(values, row)? {
-                    Decoded::Null => {}
-                    Decoded::Payload(value) | Decoded::Map(value) => {
-                        validate_array(value.slice(row, 1).as_ref())?;
+
+    fn rows(&self, rows: std::ops::Range<usize>) -> Result<(), ValueError> {
+        if matches!(self, Self::Skip) {
+            return Ok(());
+        }
+        for row in rows {
+            self.row(row)?;
+        }
+        Ok(())
+    }
+
+    fn row(&self, row: usize) -> Result<(), ValueError> {
+        match self {
+            Self::Skip => {}
+            Self::Struct {
+                array,
+                layout,
+                children,
+            } => {
+                if array.is_null(row) {
+                    return Ok(());
+                }
+                if let Some(layout) = layout {
+                    if let Some((index, _)) = select_row(array, row, *layout)? {
+                        children[index].row(row)?;
+                    }
+                } else {
+                    for child in children {
+                        child.row(row)?;
                     }
                 }
             }
-        } else {
-            for row in 0..values.len() {
-                if !values.is_null(row) {
-                    for child in values.columns() {
-                        validate_array(child.slice(row, 1).as_ref())?;
-                    }
+            Self::List {
+                array,
+                offsets,
+                child,
+            } => {
+                if !array.is_null(row) {
+                    child.rows(offsets.range(row)?)?;
+                }
+            }
+            Self::Dictionary { array, value_type } => {
+                if !payload_is_null(*array, row) {
+                    let decoded = arrow::compute::cast(array.slice(row, 1).as_ref(), value_type)
+                        .map_err(|error| ValueError::Arrow(error.to_string()))?;
+                    validate_array(decoded.as_ref())?;
                 }
             }
         }
-    } else if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
-        for row in 0..values.len() {
-            if !values.is_null(row) {
-                validate_array(values.value(row).as_ref())?;
-            }
-        }
-    } else if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
-        for row in 0..values.len() {
-            if !values.is_null(row) {
-                validate_array(values.value(row).as_ref())?;
-            }
-        }
-    } else if let Some(values) = array.as_any().downcast_ref::<FixedSizeListArray>() {
-        for row in 0..values.len() {
-            if !values.is_null(row) {
-                validate_array(values.value(row).as_ref())?;
-            }
-        }
-    } else if let Some(values) = array.as_any().downcast_ref::<MapArray>() {
-        for row in 0..values.len() {
-            if !values.is_null(row) {
-                validate_array(&values.value(row))?;
-            }
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Encode the existing constant/nested layout from neutral values.
@@ -802,6 +997,34 @@ mod tests {
             matches!(decode_row(items, 4).unwrap(), Decoded::Payload(value) if value.data_type() == &DataType::Int64)
         );
         validate_array(&dynamic).unwrap();
+    }
+
+    #[test]
+    fn nested_batch_schema_work_is_independent_of_row_count() {
+        let value = Literal::List(vec![Literal::Map(vec![("key".into(), Literal::Int(7))])]);
+        let mut expected_visits = None;
+        for rows in [1, 16, 256, 4096] {
+            let array = encode_constant(&vec![value.clone(); rows], 2).unwrap();
+            SCHEMA_VISITS.with(|visits| visits.set(0));
+            validate_array(&array).unwrap();
+            let visits = SCHEMA_VISITS.with(std::cell::Cell::get);
+            assert!(visits > 0);
+            assert_eq!(
+                *expected_visits.get_or_insert(visits),
+                visits,
+                "schema admission must scale with the type, not {rows} visible rows"
+            );
+            let mut tags = vec![4_i8; rows];
+            tags[rows - 1] = 99;
+            let mut columns = array.columns().to_vec();
+            columns[1] = Arc::new(Int8Array::from(tags));
+            let malformed = StructArray::new(array.fields().clone(), columns, None);
+            assert_eq!(
+                validate_array(&malformed),
+                Err(ValueError::Tag(99)),
+                "every visible row remains checked after the bounded schema pass"
+            );
+        }
     }
 
     #[test]
