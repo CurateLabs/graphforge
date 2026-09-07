@@ -317,6 +317,24 @@ mod tests {
     }
 
     #[test]
+    fn existing_cypher_property_counter_semantics() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name:'seed'})").unwrap();
+        let repeated = graph
+            .execute("MATCH (n:Person) SET n.metric=1 SET n.metric=2")
+            .unwrap();
+        assert_eq!(repeated.side_effects.unwrap().properties_set, 1);
+        let same_value = graph.execute("MATCH (n:Person) SET n.metric=2").unwrap();
+        assert_eq!(same_value.side_effects.unwrap().properties_set, 1);
+        let created = graph
+            .execute("CREATE (n:NewPerson {metric:1}) SET n.metric=2")
+            .unwrap();
+        assert_eq!(created.side_effects.unwrap().properties_set, 1);
+        let empty = graph.execute("MATCH (n:Absent) SET n.metric=3").unwrap();
+        assert_eq!(empty.side_effects.unwrap().properties_set, 0);
+    }
+
+    #[test]
     fn rank_and_cluster_writes_persist_without_topology_changes() {
         let (dir, graph, uuid) = graph();
         let generation = graphforge_storage::read_topology_generation(&graph.dir).unwrap();

@@ -61,6 +61,7 @@ pub(crate) mod algorithm_embedding_graphsage;
 pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
+mod mutation;
 pub mod read_resource;
 pub mod write_resource;
 pub use algorithm_embedding_options::validate_embedding_options;
@@ -5552,7 +5553,7 @@ impl ExecutionSession {
             .map_err(GfError::from_execution_error)?;
         self.adjacency_provider.invalidate();
 
-        let c = wctx.counters;
+        let c = wctx.mutation.counters;
         let mutation_receipt = Some(wctx.mutation_receipt());
         let side_effects = Some(SideEffects {
             nodes_created: c.nodes_created,
@@ -5577,7 +5578,7 @@ impl ExecutionSession {
             });
         }
 
-        let batch = write_driver::statement_summary_batch(&wctx.counters)?;
+        let batch = write_driver::statement_summary_batch(&wctx.mutation.counters)?;
         Ok(ExecutionResult {
             schema: batch.schema(),
             batches: vec![batch],
