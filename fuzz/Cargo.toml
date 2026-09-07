@@ -20,6 +20,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+graphforge-ir = { version = "0.5.2", path = "../crates/graphforge-ir" }
 graphforge-cypher = { version = "0.5.0", path = "../crates/graphforge-cypher" }
 graphforge-ontology = { version = "0.5.0", path = "../crates/graphforge-ontology" }
 graphforge-api = { version = "0.5.0", path = "../crates/graphforge-api" }

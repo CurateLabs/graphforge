@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "932d8d9c7edf3f4aac04695933b01600e47a637f5aa332ca86ed53cb9989515d"
-EXPECTED_RELEASE_DIGEST = "84310d5de1f83e7080f71e7933470640be96cd1b32b0bc10b0584496380924b3"
+EXPECTED_RUST_DIGEST = "e5e74747638b43f353b601a59575d7013a952efaaee5e7de5e698ba68dd175cb"
+EXPECTED_RELEASE_DIGEST = "63807d272b94a108adfa81956a92956bbd6ab3950ae3f73de1867367e89e1a34"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -257,7 +257,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 261
+    assert len(release_methods) == 262
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -346,6 +346,9 @@ def _classification_report() -> dict[str, object]:
             "python_id": python_id if classification == "equivalent" else "",
             "reason": reason,
         }
+
+    assert classifications["GraphForge.explain_stage"]["classification"] == "not-exposed"
+    assert classifications["GraphForge.explain_stage"]["python_id"] == ""
 
     # A newly exposed Python product method must be deliberately projected or
     # explicitly listed as Python-only. This catches silent binding expansion.

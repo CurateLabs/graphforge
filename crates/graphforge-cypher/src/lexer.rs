@@ -131,6 +131,7 @@ pub struct Lexer<'input> {
 }
 
 impl<'input> Lexer<'input> {
+    #[must_use]
     pub fn new(input: &'input str) -> Self {
         Self { input, pos: 0 }
     }
@@ -152,12 +153,12 @@ impl<'input> Lexer<'input> {
     fn skip_whitespace_and_comments(&mut self) -> Result<(), ParseError> {
         loop {
             // whitespace
-            while self.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+            while self.peek().is_some_and(|c| c.is_ascii_whitespace()) {
                 self.advance();
             }
             // line comment
             if self.rest().starts_with("//") {
-                while self.peek().map_or(false, |c| c != '\n') {
+                while self.peek().is_some_and(|c| c != '\n') {
                     self.advance();
                 }
                 continue;
@@ -203,7 +204,7 @@ impl<'input> Lexer<'input> {
 
     // Consume whitespace + exactly `n` bytes from the current position.
     fn skip_ws_and_advance_n(&mut self, n: usize) {
-        while self.peek().map_or(false, |c| c.is_ascii_whitespace()) {
+        while self.peek().is_some_and(|c| c.is_ascii_whitespace()) {
             self.advance();
         }
         self.pos += n;
@@ -214,7 +215,10 @@ impl<'input> Lexer<'input> {
     fn maybe_compound(&mut self, tok: Tok) -> Tok {
         match tok {
             Tok::Not => {
-                if self.peek_keyword().map(|w| w.eq_ignore_ascii_case("IN")) == Some(true) {
+                if self
+                    .peek_keyword()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("IN"))
+                {
                     self.skip_ws_and_advance_n(2); // "IN"
                     return Tok::NotIn;
                 }
@@ -224,13 +228,15 @@ impl<'input> Lexer<'input> {
                 match self.peek_keyword() {
                     Some(w) if w.eq_ignore_ascii_case("NULL") => {
                         self.skip_ws_and_advance_n(4);
-                        return Tok::IsNull;
+                        Tok::IsNull
                     }
                     Some(w) if w.eq_ignore_ascii_case("NOT") => {
                         // Save position in case "NULL" does not follow
                         let saved = self.pos;
                         self.skip_ws_and_advance_n(3); // "NOT"
-                        if self.peek_keyword().map(|w| w.eq_ignore_ascii_case("NULL")) == Some(true)
+                        if self
+                            .peek_keyword()
+                            .is_some_and(|w| w.eq_ignore_ascii_case("NULL"))
                         {
                             self.skip_ws_and_advance_n(4); // "NULL"
                             return Tok::IsNotNull;
@@ -243,14 +249,20 @@ impl<'input> Lexer<'input> {
                 }
             }
             Tok::Starts => {
-                if self.peek_keyword().map(|w| w.eq_ignore_ascii_case("WITH")) == Some(true) {
+                if self
+                    .peek_keyword()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("WITH"))
+                {
                     self.skip_ws_and_advance_n(4);
                     return Tok::StartsWith;
                 }
                 tok
             }
             Tok::Ends => {
-                if self.peek_keyword().map(|w| w.eq_ignore_ascii_case("WITH")) == Some(true) {
+                if self
+                    .peek_keyword()
+                    .is_some_and(|w| w.eq_ignore_ascii_case("WITH"))
+                {
                     self.skip_ws_and_advance_n(4);
                     return Tok::EndsWith;
                 }
@@ -343,9 +355,9 @@ impl<'input> Lexer<'input> {
         // Hex / octal
         if first == '0' {
             match self.peek() {
-                Some('x') | Some('X') => {
+                Some('x' | 'X') => {
                     s.push(self.advance().unwrap());
-                    while self.peek().map_or(false, |c| c.is_ascii_hexdigit()) {
+                    while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
                         s.push(self.advance().unwrap());
                     }
                     return i128::from_str_radix(&s[2..], 16)
@@ -358,9 +370,9 @@ impl<'input> Lexer<'input> {
                             )
                         });
                 }
-                Some('o') | Some('O') => {
+                Some('o' | 'O') => {
                     s.push(self.advance().unwrap());
-                    while self.peek().map_or(false, |c| matches!(c, '0'..='7')) {
+                    while self.peek().is_some_and(|c| matches!(c, '0'..='7')) {
                         s.push(self.advance().unwrap());
                     }
                     return i128::from_str_radix(&s[2..], 8)
@@ -377,7 +389,7 @@ impl<'input> Lexer<'input> {
             }
         }
 
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             s.push(self.advance().unwrap());
         }
 
@@ -385,21 +397,21 @@ impl<'input> Lexer<'input> {
         if self.peek() == Some('.') {
             // look ahead one more: if next after '.' is a digit, it's a float
             let rest = &self.input[self.pos + 1..];
-            if rest.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 is_float = true;
                 s.push(self.advance().unwrap()); // '.'
-                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     s.push(self.advance().unwrap());
                 }
             }
         }
-        if self.peek().map_or(false, |c| c == 'e' || c == 'E') {
+        if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
             is_float = true;
             s.push(self.advance().unwrap());
-            if self.peek().map_or(false, |c| c == '+' || c == '-') {
+            if self.peek().is_some_and(|c| c == '+' || c == '-') {
                 s.push(self.advance().unwrap());
             }
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 s.push(self.advance().unwrap());
             }
         }
@@ -425,15 +437,15 @@ impl<'input> Lexer<'input> {
 
     fn read_leading_dot_float(&mut self, start: usize) -> Result<Tok, ParseError> {
         let mut s = String::from(".");
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             s.push(self.advance().unwrap());
         }
-        if self.peek().map_or(false, |c| c == 'e' || c == 'E') {
+        if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
             s.push(self.advance().unwrap());
-            if self.peek().map_or(false, |c| c == '+' || c == '-') {
+            if self.peek().is_some_and(|c| c == '+' || c == '-') {
                 s.push(self.advance().unwrap());
             }
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 s.push(self.advance().unwrap());
             }
         }
@@ -507,33 +519,38 @@ fn keyword(s: &str) -> Option<Tok> {
     }
 }
 
-pub type Spanned<T> = Result<(usize, T, usize), ParseError>;
-
-impl<'input> Iterator for Lexer<'input> {
-    type Item = Spanned<Tok>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Err(e) = self.skip_whitespace_and_comments() {
-            return Some(Err(e));
+impl Lexer<'_> {
+    fn read_parameter(&mut self, start: usize) -> Result<Tok, ParseError> {
+        // parameter: $name (identifier) or $0, $1, ... (decimal index)
+        let mut name = String::new();
+        while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            name.push(self.advance().unwrap());
         }
-        let start = self.pos;
-        let c = self.advance()?;
+        if name.is_empty() {
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidParameter,
+                Span::new(start, self.pos),
+                "empty parameter name after '$'",
+            ));
+        }
+        // Reject mixed names like $123abc — must be all-digits or a valid identifier
+        let all_digits = name.chars().all(|c| c.is_ascii_digit());
+        let valid_ident = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_');
+        if !all_digits && !valid_ident {
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidParameter,
+                Span::new(start, self.pos),
+                format!("parameter name must be an identifier or decimal integer, got '{name}'"),
+            ));
+        }
+        Ok(Tok::Param(name))
+    }
 
-        let tok = match c {
-            '(' => Tok::LParen,
-            ')' => Tok::RParen,
-            '[' => Tok::LBracket,
-            ']' => Tok::RBracket,
-            '{' => Tok::LBrace,
-            '}' => Tok::RBrace,
-            ',' => Tok::Comma,
-            ':' => Tok::Colon,
-            ';' => Tok::Semi,
-            '|' => Tok::Pipe,
-            '^' => Tok::Caret,
-            '%' => Tok::Percent,
-            '/' => Tok::Slash,
-            '*' => Tok::Star,
+    fn read_operator(&mut self, c: char, start: usize) -> Result<Tok, ParseError> {
+        let token = match c {
             '+' => {
                 if self.peek() == Some('=') {
                     self.advance();
@@ -546,11 +563,8 @@ impl<'input> Iterator for Lexer<'input> {
                 if self.peek() == Some('.') {
                     self.advance();
                     Tok::DotDot
-                } else if self.peek().map_or(false, |c| c.is_ascii_digit()) {
-                    match self.read_leading_dot_float(start) {
-                        Ok(t) => t,
-                        Err(e) => return Some(Err(e)),
-                    }
+                } else if self.peek().is_some_and(|c| c.is_ascii_digit()) {
+                    self.read_leading_dot_float(start)?
                 } else {
                     Tok::Dot
                 }
@@ -568,11 +582,11 @@ impl<'input> Iterator for Lexer<'input> {
                     self.advance();
                     Tok::Neq
                 } else {
-                    return Some(Err(ParseError::new(
+                    return Err(ParseError::new(
                         ParseErrorKind::UnexpectedChar,
                         Span::new(start, self.pos),
                         "unexpected '!'",
-                    )));
+                    ));
                 }
             }
             '<' => match self.peek() {
@@ -609,6 +623,43 @@ impl<'input> Iterator for Lexer<'input> {
                 }
                 _ => Tok::Minus,
             },
+            _ => unreachable!("operator dispatch accepts only operator characters"),
+        };
+        Ok(token)
+    }
+}
+
+pub type Spanned<T> = Result<(usize, T, usize), ParseError>;
+
+impl Iterator for Lexer<'_> {
+    type Item = Spanned<Tok>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Err(e) = self.skip_whitespace_and_comments() {
+            return Some(Err(e));
+        }
+        let start = self.pos;
+        let c = self.advance()?;
+
+        let tok = match c {
+            '(' => Tok::LParen,
+            ')' => Tok::RParen,
+            '[' => Tok::LBracket,
+            ']' => Tok::RBracket,
+            '{' => Tok::LBrace,
+            '}' => Tok::RBrace,
+            ',' => Tok::Comma,
+            ':' => Tok::Colon,
+            ';' => Tok::Semi,
+            '|' => Tok::Pipe,
+            '^' => Tok::Caret,
+            '%' => Tok::Percent,
+            '/' => Tok::Slash,
+            '*' => Tok::Star,
+            '+' | '.' | '=' | '!' | '<' | '>' | '-' => match self.read_operator(c, start) {
+                Ok(token) => token,
+                Err(error) => return Some(Err(error)),
+            },
             '\'' | '"' => match self.read_string(c) {
                 Ok(s) => Tok::StrLit(s),
                 Err(e) => return Some(Err(e)),
@@ -617,49 +668,17 @@ impl<'input> Iterator for Lexer<'input> {
                 Ok(s) => Tok::Ident(s),
                 Err(e) => return Some(Err(e)),
             },
-            '$' => {
-                // parameter: $name (identifier) or $0, $1, ... (decimal index)
-                let mut name = String::new();
-                while self
-                    .peek()
-                    .map_or(false, |c| c.is_alphanumeric() || c == '_')
-                {
-                    name.push(self.advance().unwrap());
-                }
-                if name.is_empty() {
-                    return Some(Err(ParseError::new(
-                        ParseErrorKind::InvalidParameter,
-                        Span::new(start, self.pos),
-                        "empty parameter name after '$'",
-                    )));
-                }
-                // Reject mixed names like $123abc — must be all-digits or a valid identifier
-                let all_digits = name.chars().all(|c| c.is_ascii_digit());
-                let valid_ident = name
-                    .chars()
-                    .next()
-                    .map_or(false, |c| c.is_alphabetic() || c == '_');
-                if !all_digits && !valid_ident {
-                    return Some(Err(ParseError::new(
-                        ParseErrorKind::InvalidParameter,
-                        Span::new(start, self.pos),
-                        format!(
-                            "parameter name must be an identifier or decimal integer, got '{name}'"
-                        ),
-                    )));
-                }
-                Tok::Param(name)
-            }
+            '$' => match self.read_parameter(start) {
+                Ok(token) => token,
+                Err(error) => return Some(Err(error)),
+            },
             c if c.is_ascii_digit() => match self.read_number(c) {
                 Ok(t) => t,
                 Err(e) => return Some(Err(e)),
             },
             c if c.is_alphabetic() || c == '_' => {
                 let mut word = String::from(c);
-                while self
-                    .peek()
-                    .map_or(false, |c| c.is_alphanumeric() || c == '_')
-                {
+                while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     word.push(self.advance().unwrap());
                 }
                 match keyword(&word) {

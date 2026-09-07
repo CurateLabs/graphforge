@@ -12,7 +12,7 @@ and every supplied span. The Rust enum's source shape changes in v0.6.0.
 | Parser, every kind and expected/found payload | Parse with original diagnostic | GF_PARSE | ParseError | ParseError | Original; Python tuple; Node prefix |
 | Binder, every diagnostic in order | Bind | GF_PARSE | ParseError | ParseError | All retained; first is public primary |
 | Existing typed-UUID binder validation | BindValidation | GF_VALIDATION | ValidationError | GF_VALIDATION | Original diagnostics retained; no new binding span |
-| Legacy cypher logical EXPLAIN binder rejection | BindPlan | GF_PLAN | PlanError if transported | PlanError if transported | Original diagnostics retained |
+| Facade selected-stage EXPLAIN binder rejection (#1007) | Bind | GF_PARSE | ParseError | ParseError | All retained; first is public primary |
 | Planning UnknownFunction/UnsupportedExpr/UnboundVar | Lowering | GF_PLAN | PlanError | PlanError | None supplied |
 | Planning InvalidType | Lowering | GF_VALIDATION | ValidationError | ValidationError | None supplied |
 | Runtime lowering error, or established execute coercion remap | LoweringExecution | GF_EXECUTION | ExecutionError | ExecutionError | None supplied |
@@ -29,9 +29,11 @@ provider attributes, validation exceptions, and other fault domains are unchange
 
 Parser message presentation is also preserved: execute uses the parser's detailed
 message, while EXPLAIN uses its Display. Both retain the complete parser record.
-Legacy cypher EXPLAIN methods that successfully return `bind_errors` JSON keep
-that behavior; #1007 owns entry-point changes and consumes the shared binder
-conversion rather than creating another policy.
+The parser-owned EXPLAIN methods are removed by #1007. Facade stage selection
+uses the same binder conversion as execution; it does not return successful
+`bind_errors` JSON or classify ordinary binder rejection as GF_PLAN. See the
+[parser API migration](parser-api-boundary.md). The legacy `BindPlan` error type
+remains representable for Rust callers; the parser no longer produces it.
 
 The existing foreign-DataFusion coercion/placeholder compatibility classifier
 continues to apply to Plan and typed UnsupportedExpr failures. It cannot override

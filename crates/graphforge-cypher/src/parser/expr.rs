@@ -15,7 +15,7 @@ use super::patterns::{parse_node_pattern, parse_pattern};
 // Binding powers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum InfixOp {
     Or,
     Xor,
@@ -78,7 +78,7 @@ fn peek_infix_op(ts: &TokenStream) -> Option<InfixOp> {
 }
 
 /// Returns `(left_bp, right_bp)`.
-fn infix_binding_power(op: &InfixOp) -> (u8, u8) {
+fn infix_binding_power(op: InfixOp) -> (u8, u8) {
     match op {
         InfixOp::Or => (10, 11),
         InfixOp::Xor => (20, 21),
@@ -103,9 +103,7 @@ fn infix_binding_power(op: &InfixOp) -> (u8, u8) {
         InfixOp::Add | InfixOp::Sub => (50, 51),
         InfixOp::Mul | InfixOp::Div | InfixOp::Mod => (60, 61),
         InfixOp::Pow => (70, 71),
-        InfixOp::Dot => (80, 81),
-        InfixOp::Subscript => (80, 81),
-        InfixOp::LabelPredicate => (80, 81),
+        InfixOp::Dot | InfixOp::Subscript | InfixOp::LabelPredicate => (80, 81),
     }
 }
 
@@ -115,9 +113,8 @@ fn infix_binding_power(op: &InfixOp) -> (u8, u8) {
 
 pub fn parse_expr(ts: &mut TokenStream, min_bp: u8) -> Result<Expr, ParseError> {
     let mut lhs = parse_prefix(ts)?;
-    loop {
-        let Some(op) = peek_infix_op(ts) else { break };
-        let (l_bp, r_bp) = infix_binding_power(&op);
+    while let Some(op) = peek_infix_op(ts) {
+        let (l_bp, r_bp) = infix_binding_power(op);
         if l_bp < min_bp {
             break;
         }
@@ -171,90 +168,13 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
         }
 
         // --- Identifier: variable, function call, or namespaced function call ---
-        Some(Tok::Ident(name)) => {
-            ts.advance();
-            if ts.eat_if(&Tok::LParen) {
-                parse_function_call_args(ts, vec![name], false, start)
-            } else if let Some(segments) = namespaced_call_segments(ts, &name) {
-                // `date.truncate(…)`, `datetime.fromepoch(…)`: a dotted name
-                // followed by `(` is a qualified function call (the whole path is
-                // the name). A dotted name NOT followed by `(` stays a property
-                // access, handled by the infix `.` operator below.
-                for _ in 1..segments.len() {
-                    ts.advance(); // `.`
-                    ts.advance(); // segment ident
-                }
-                ts.eat(&Tok::LParen)?;
-                parse_function_call_args(ts, segments, false, start)
-            } else {
-                Ok(Expr::Var(VarRef {
-                    name,
-                    span: ts.span_from(start),
-                }))
-            }
-        }
+        Some(Tok::Ident(name)) => parse_identifier(ts, name, start),
 
         // --- Quantifier predicates: all/any/none/single(var IN list WHERE pred) ---
-        Some(Tok::All | Tok::Any | Tok::None | Tok::Single) => {
-            let kind = match ts.peek().unwrap() {
-                Tok::All => QuantifierKind::All,
-                Tok::Any => QuantifierKind::Any,
-                Tok::None => QuantifierKind::None,
-                _ => QuantifierKind::Single,
-            };
-            let name = tok_keyword_name(ts.peek().unwrap());
-            ts.advance();
-            ts.eat(&Tok::LParen)?;
-            // The quantifier form is `var IN …`; otherwise fall back to a plain
-            // function call (preserves any non-quantifier use of the name).
-            if matches!(ts.peek(), Some(Tok::Ident(_))) && matches!(ts.peek_n(1), Some(Tok::In)) {
-                parse_quantifier(ts, kind, start)
-            } else {
-                parse_function_call_args(ts, vec![name], false, start)
-            }
-        }
+        Some(Tok::All | Tok::Any | Tok::None | Tok::Single) => parse_quantifier_or_call(ts, start),
 
         // --- Block-form existential subquery or exists(...) function ---
-        Some(Tok::Exists) => {
-            ts.advance();
-            if ts.eat_if(&Tok::LBrace) {
-                let body = if matches!(
-                    ts.peek(),
-                    Some(
-                        Tok::Match
-                            | Tok::Optional
-                            | Tok::With
-                            | Tok::Return
-                            | Tok::Unwind
-                            | Tok::Create
-                            | Tok::Merge
-                            | Tok::Set
-                            | Tok::Remove
-                            | Tok::Delete
-                            | Tok::Detach
-                            | Tok::Call
-                    )
-                ) {
-                    ExistentialSubqueryBody::Full(Box::new(super::clauses::parse_subquery(ts)?))
-                } else {
-                    let pattern = parse_pattern(ts)?;
-                    let filter = if ts.eat_if(&Tok::Where) {
-                        Some(Box::new(parse_expr(ts, 0)?))
-                    } else {
-                        None
-                    };
-                    ExistentialSubqueryBody::Simple { pattern, filter }
-                };
-                ts.eat(&Tok::RBrace)?;
-                Ok(Expr::ExistentialSubquery(ExistentialSubquery {
-                    body,
-                    span: ts.span_from(start),
-                }))
-            } else {
-                ts.eat(&Tok::LParen)?;
-                parse_function_call_args(ts, vec!["exists".into()], false, start)
-            }
-        }
+        Some(Tok::Exists) => parse_exists(ts, start),
 
         // --- Keyword-named functions ---
         Some(
@@ -289,23 +209,7 @@ fn parse_prefix(ts: &mut TokenStream) -> Result<Expr, ParseError> {
         }
 
         // --- Unary minus ---
-        Some(Tok::Minus) => {
-            ts.advance();
-            if let Some(Tok::IntLit(n)) = ts.peek().cloned() {
-                let (l, _, r) = ts.advance().unwrap();
-                let span = Span::new(start, r);
-                return Ok(Expr::Literal(Literal::Int(
-                    negate_i64_magnitude(n, Span::new(l, r), ts)?,
-                    span,
-                )));
-            }
-            let expr = parse_expr(ts, 75)?;
-            Ok(Expr::UnaryOp(UnaryOp {
-                op: UnaryOpKind::Neg,
-                expr: Box::new(expr),
-                span: ts.span_from(start),
-            }))
-        }
+        Some(Tok::Minus) => parse_negation(ts, start),
 
         // --- Parenthesized expression ---
         Some(Tok::LParen) => {
@@ -378,7 +282,7 @@ fn is_relationship_start(tok: Option<&Tok>) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result<Expr, ParseError> {
-    let start = lhs.span().start as usize;
+    let start = lhs.span().start;
 
     match op {
         // --- Binary logical / arithmetic / comparison ---
@@ -396,39 +300,13 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         | InfixOp::Mul
         | InfixOp::Div
         | InfixOp::Mod
-        | InfixOp::Pow => {
-            ts.advance(); // consume the operator token
-            let rhs = parse_expr(ts, r_bp)?;
-            let span = Span::new(start, rhs.span().end as usize);
-            let comparison_left = comparison_chain_tail(&lhs, &op);
-            let binary = Expr::BinaryOp(BinaryOp {
-                op: infix_op_to_binary_kind(&op),
-                left: Box::new(
-                    comparison_left
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|| lhs.clone()),
-                ),
-                right: Box::new(rhs),
-                span,
-            });
-            if comparison_left.is_some() {
-                Ok(Expr::BinaryOp(BinaryOp {
-                    op: BinaryOpKind::And,
-                    left: Box::new(lhs),
-                    right: Box::new(binary),
-                    span,
-                }))
-            } else {
-                Ok(binary)
-            }
-        }
+        | InfixOp::Pow => parse_binary(ts, lhs, op, r_bp, start),
 
         // --- Regex match ---
         InfixOp::RegexMatch => {
             ts.advance();
             let rhs = parse_expr(ts, r_bp)?;
-            let span = Span::new(start, rhs.span().end as usize);
+            let span = Span::new(start, rhs.span().end);
             Ok(Expr::RegexMatch {
                 expr: Box::new(lhs),
                 pattern: Box::new(rhs),
@@ -460,7 +338,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         InfixOp::In => {
             ts.advance();
             let rhs = parse_expr(ts, r_bp)?;
-            let span = Span::new(start, rhs.span().end as usize);
+            let span = Span::new(start, rhs.span().end);
             Ok(Expr::InList {
                 expr: Box::new(lhs),
                 list: Box::new(rhs),
@@ -471,7 +349,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         InfixOp::NotIn => {
             ts.advance();
             let rhs = parse_expr(ts, r_bp)?;
-            let span = Span::new(start, rhs.span().end as usize);
+            let span = Span::new(start, rhs.span().end);
             Ok(Expr::InList {
                 expr: Box::new(lhs),
                 list: Box::new(rhs),
@@ -490,7 +368,7 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
             };
             ts.advance();
             let rhs = parse_expr(ts, r_bp)?;
-            let span = Span::new(start, rhs.span().end as usize);
+            let span = Span::new(start, rhs.span().end);
             Ok(Expr::StringOp {
                 expr: Box::new(lhs),
                 op: string_op,
@@ -517,90 +395,228 @@ fn parse_infix(ts: &mut TokenStream, lhs: Expr, op: InfixOp, r_bp: u8) -> Result
         }
 
         // --- Label/type predicate expression ---
-        InfixOp::LabelPredicate => {
-            ts.advance();
-            let label = eat_ident(ts)?;
-            let span = Span::new(start, ts.current_pos());
-            match lhs {
-                Expr::Var(VarRef { name, .. }) => Ok(Expr::LabelPredicate(LabelPredicate {
-                    var: name,
-                    labels: vec![label],
-                    span,
-                })),
-                Expr::LabelPredicate(mut pred) => {
-                    pred.labels.push(label);
-                    pred.span = span;
-                    Ok(Expr::LabelPredicate(pred))
-                }
-                other => Err(ParseError::new(
-                    ParseErrorKind::UnexpectedToken {
-                        expected: vec!["variable before `:Label` predicate".into()],
-                        found: format!("{other:?}"),
-                    },
-                    span,
-                    "`:Label` predicates require a variable",
-                )),
-            }
-        }
+        InfixOp::LabelPredicate => parse_label_predicate(ts, lhs, start),
 
         // --- Subscript / slice ---
-        InfixOp::Subscript => {
-            ts.advance(); // consume `[`
-            // Slice: [lo..hi], [..hi], [lo..]
-            // Subscript: [expr]
-            // Distinguish: if the first non-trivial thing is `..` it's a slice
-            // with no lower bound.
-            if ts.eat_if(&Tok::DotDot) {
-                // [..hi]
-                let hi = parse_expr(ts, 0)?;
-                ts.eat(&Tok::RBracket)?;
-                let span = Span::new(start, ts.current_pos());
-                // Encode as BinaryOp Slice — use a special representation via
-                // a FunctionCall to internal `slice` until AST gets a Slice node.
-                // For now represent as Subscript via InList trick — actually the
-                // AST has no dedicated Slice node. We model `a[lo..hi]` as a
-                // FunctionCall to a synthetic `_slice` node. Users of the AST
-                // (the IR binder) will interpret it.
-                return Ok(Expr::FunctionCall(FunctionCall {
-                    name: vec!["_slice_from_start".into()],
-                    distinct: false,
-                    star: false,
-                    args: vec![lhs, hi],
-                    span,
-                }));
-            }
-            let idx = parse_expr(ts, 0)?;
-            if ts.eat_if(&Tok::DotDot) {
-                // [lo..hi] or [lo..]
-                let (name, args) = if ts.at(&Tok::RBracket) {
-                    ("_slice_to_end", vec![lhs, idx])
-                } else {
-                    ("_slice", vec![lhs, idx, parse_expr(ts, 0)?])
-                };
-                ts.eat(&Tok::RBracket)?;
-                let span = Span::new(start, ts.current_pos());
-                return Ok(Expr::FunctionCall(FunctionCall {
-                    name: vec![name.into()],
-                    distinct: false,
-                    star: false,
-                    args,
-                    span,
-                }));
-            }
-            ts.eat(&Tok::RBracket)?;
-            let span = Span::new(start, ts.current_pos());
-            Ok(Expr::FunctionCall(FunctionCall {
-                name: vec!["_subscript".into()],
-                distinct: false,
-                star: false,
-                args: vec![lhs, idx],
-                span,
-            }))
-        }
+        InfixOp::Subscript => parse_subscript(ts, lhs, start),
     }
 }
 
-fn comparison_chain_tail(lhs: &Expr, next: &InfixOp) -> Option<Expr> {
+fn parse_quantifier_or_call(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    let kind = match ts.peek().unwrap() {
+        Tok::All => QuantifierKind::All,
+        Tok::Any => QuantifierKind::Any,
+        Tok::None => QuantifierKind::None,
+        _ => QuantifierKind::Single,
+    };
+    let name = tok_keyword_name(ts.peek().unwrap());
+    ts.advance();
+    ts.eat(&Tok::LParen)?;
+    // The quantifier form is `var IN …`; otherwise fall back to a plain
+    // function call (preserves any non-quantifier use of the name).
+    if matches!(ts.peek(), Some(Tok::Ident(_))) && matches!(ts.peek_n(1), Some(Tok::In)) {
+        parse_quantifier(ts, kind, start)
+    } else {
+        parse_function_call_args(ts, vec![name], false, start)
+    }
+}
+
+fn parse_identifier(ts: &mut TokenStream, name: String, start: usize) -> Result<Expr, ParseError> {
+    ts.advance();
+    if ts.eat_if(&Tok::LParen) {
+        parse_function_call_args(ts, vec![name], false, start)
+    } else if let Some(segments) = namespaced_call_segments(ts, &name) {
+        // `date.truncate(…)`, `datetime.fromepoch(…)`: a dotted name
+        // followed by `(` is a qualified function call (the whole path is
+        // the name). A dotted name NOT followed by `(` stays a property
+        // access, handled by the infix `.` operator below.
+        for _ in 1..segments.len() {
+            ts.advance(); // `.`
+            ts.advance(); // segment ident
+        }
+        ts.eat(&Tok::LParen)?;
+        parse_function_call_args(ts, segments, false, start)
+    } else {
+        Ok(Expr::Var(VarRef {
+            name,
+            span: ts.span_from(start),
+        }))
+    }
+}
+
+fn parse_exists(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    ts.advance();
+    if ts.eat_if(&Tok::LBrace) {
+        let body = if matches!(
+            ts.peek(),
+            Some(
+                Tok::Match
+                    | Tok::Optional
+                    | Tok::With
+                    | Tok::Return
+                    | Tok::Unwind
+                    | Tok::Create
+                    | Tok::Merge
+                    | Tok::Set
+                    | Tok::Remove
+                    | Tok::Delete
+                    | Tok::Detach
+                    | Tok::Call
+            )
+        ) {
+            ExistentialSubqueryBody::Full(Box::new(super::clauses::parse_subquery(ts)?))
+        } else {
+            let pattern = parse_pattern(ts)?;
+            let filter = if ts.eat_if(&Tok::Where) {
+                Some(Box::new(parse_expr(ts, 0)?))
+            } else {
+                None
+            };
+            ExistentialSubqueryBody::Simple { pattern, filter }
+        };
+        ts.eat(&Tok::RBrace)?;
+        Ok(Expr::ExistentialSubquery(ExistentialSubquery {
+            body,
+            span: ts.span_from(start),
+        }))
+    } else {
+        ts.eat(&Tok::LParen)?;
+        parse_function_call_args(ts, vec!["exists".into()], false, start)
+    }
+}
+
+fn parse_negation(ts: &mut TokenStream, start: usize) -> Result<Expr, ParseError> {
+    ts.advance();
+    if let Some(Tok::IntLit(n)) = ts.peek().cloned() {
+        let (l, _, r) = ts.advance().unwrap();
+        let span = Span::new(start, r);
+        return Ok(Expr::Literal(Literal::Int(
+            negate_i64_magnitude(n, Span::new(l, r), ts)?,
+            span,
+        )));
+    }
+    let expr = parse_expr(ts, 75)?;
+    Ok(Expr::UnaryOp(UnaryOp {
+        op: UnaryOpKind::Neg,
+        expr: Box::new(expr),
+        span: ts.span_from(start),
+    }))
+}
+
+fn parse_binary(
+    ts: &mut TokenStream,
+    lhs: Expr,
+    op: InfixOp,
+    r_bp: u8,
+    start: usize,
+) -> Result<Expr, ParseError> {
+    ts.advance(); // consume the operator token
+    let rhs = parse_expr(ts, r_bp)?;
+    let span = Span::new(start, rhs.span().end);
+    let comparison_left = comparison_chain_tail(&lhs, op);
+    let binary = Expr::BinaryOp(BinaryOp {
+        op: infix_op_to_binary_kind(op),
+        left: Box::new(comparison_left.clone().unwrap_or_else(|| lhs.clone())),
+        right: Box::new(rhs),
+        span,
+    });
+    if comparison_left.is_some() {
+        Ok(Expr::BinaryOp(BinaryOp {
+            op: BinaryOpKind::And,
+            left: Box::new(lhs),
+            right: Box::new(binary),
+            span,
+        }))
+    } else {
+        Ok(binary)
+    }
+}
+
+fn parse_label_predicate(
+    ts: &mut TokenStream,
+    lhs: Expr,
+    start: usize,
+) -> Result<Expr, ParseError> {
+    ts.advance();
+    let label = eat_ident(ts)?;
+    let span = Span::new(start, ts.current_pos());
+    match lhs {
+        Expr::Var(VarRef { name, .. }) => Ok(Expr::LabelPredicate(LabelPredicate {
+            var: name,
+            labels: vec![label],
+            span,
+        })),
+        Expr::LabelPredicate(mut pred) => {
+            pred.labels.push(label);
+            pred.span = span;
+            Ok(Expr::LabelPredicate(pred))
+        }
+        other => Err(ParseError::new(
+            ParseErrorKind::UnexpectedToken {
+                expected: vec!["variable before `:Label` predicate".into()],
+                found: format!("{other:?}"),
+            },
+            span,
+            "`:Label` predicates require a variable",
+        )),
+    }
+}
+
+fn parse_subscript(ts: &mut TokenStream, lhs: Expr, start: usize) -> Result<Expr, ParseError> {
+    ts.advance(); // consume `[`
+    // Slice: [lo..hi], [..hi], [lo..]
+    // Subscript: [expr]
+    // Distinguish: if the first non-trivial thing is `..` it's a slice
+    // with no lower bound.
+    if ts.eat_if(&Tok::DotDot) {
+        // [..hi]
+        let hi = parse_expr(ts, 0)?;
+        ts.eat(&Tok::RBracket)?;
+        let span = Span::new(start, ts.current_pos());
+        // Encode as BinaryOp Slice — use a special representation via
+        // a FunctionCall to internal `slice` until AST gets a Slice node.
+        // For now represent as Subscript via InList trick — actually the
+        // AST has no dedicated Slice node. We model `a[lo..hi]` as a
+        // FunctionCall to a synthetic `_slice` node. Users of the AST
+        // (the IR binder) will interpret it.
+        return Ok(Expr::FunctionCall(FunctionCall {
+            name: vec!["_slice_from_start".into()],
+            distinct: false,
+            star: false,
+            args: vec![lhs, hi],
+            span,
+        }));
+    }
+    let idx = parse_expr(ts, 0)?;
+    if ts.eat_if(&Tok::DotDot) {
+        // [lo..hi] or [lo..]
+        let (name, args) = if ts.at(&Tok::RBracket) {
+            ("_slice_to_end", vec![lhs, idx])
+        } else {
+            ("_slice", vec![lhs, idx, parse_expr(ts, 0)?])
+        };
+        ts.eat(&Tok::RBracket)?;
+        let span = Span::new(start, ts.current_pos());
+        return Ok(Expr::FunctionCall(FunctionCall {
+            name: vec![name.into()],
+            distinct: false,
+            star: false,
+            args,
+            span,
+        }));
+    }
+    ts.eat(&Tok::RBracket)?;
+    let span = Span::new(start, ts.current_pos());
+    Ok(Expr::FunctionCall(FunctionCall {
+        name: vec!["_subscript".into()],
+        distinct: false,
+        star: false,
+        args: vec![lhs, idx],
+        span,
+    }))
+}
+
+fn comparison_chain_tail(lhs: &Expr, next: InfixOp) -> Option<Expr> {
     if !matches!(
         next,
         InfixOp::Eq | InfixOp::Neq | InfixOp::Lt | InfixOp::Lte | InfixOp::Gt | InfixOp::Gte
@@ -697,9 +713,8 @@ fn parse_list_or_comprehension(ts: &mut TokenStream, start: usize) -> Result<Exp
     // List comprehension: [var IN list_expr WHERE? filter | projection]
     // Disambiguate: Ident at pos 0 AND In at pos 1
     if matches!(ts.peek(), Some(Tok::Ident(_))) && matches!(ts.peek_n(1), Some(Tok::In)) {
-        let var = match ts.advance() {
-            Some((_, Tok::Ident(name), _)) => name,
-            _ => unreachable!(),
+        let Some((_, Tok::Ident(var), _)) = ts.advance() else {
+            unreachable!()
         };
         ts.eat(&Tok::In)?;
         let list = parse_expr(ts, 0)?;
@@ -778,9 +793,8 @@ fn parse_quantifier(
     kind: QuantifierKind,
     start: usize,
 ) -> Result<Expr, ParseError> {
-    let var = match ts.advance() {
-        Some((_, Tok::Ident(name), _)) => name,
-        _ => unreachable!("dispatch checked `Ident IN`"),
+    let Some((_, Tok::Ident(var), _)) = ts.advance() else {
+        unreachable!("dispatch checked `Ident IN`")
     };
     ts.eat(&Tok::In)?;
     let list = parse_expr(ts, 0)?;
@@ -905,7 +919,7 @@ fn eat_ident_with_span(ts: &mut TokenStream) -> Result<(String, Span), ParseErro
     }
 }
 
-fn infix_op_to_binary_kind(op: &InfixOp) -> BinaryOpKind {
+fn infix_op_to_binary_kind(op: InfixOp) -> BinaryOpKind {
     match op {
         InfixOp::Or => BinaryOpKind::Or,
         InfixOp::Xor => BinaryOpKind::Xor,
@@ -937,7 +951,7 @@ fn to_i64(n: i128, span: Span, ts: &TokenStream<'_>) -> Result<i64, ParseError> 
 }
 
 fn negate_i64_magnitude(n: i128, span: Span, ts: &TokenStream<'_>) -> Result<i64, ParseError> {
-    let min_magnitude = (i64::MAX as i128) + 1;
+    let min_magnitude = i128::from(i64::MAX) + 1;
     if n == min_magnitude {
         Ok(i64::MIN)
     } else {

@@ -1880,10 +1880,6 @@ version = "0.5.2"
 dependencies = [
  "graphforge-ast",
  "graphforge-core",
- "graphforge-ir",
- "graphforge-rel",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]

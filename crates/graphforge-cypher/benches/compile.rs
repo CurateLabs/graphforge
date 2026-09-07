@@ -10,7 +10,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use divan::Bencher;
 use graphforge_cypher::lexer::Lexer;
-use graphforge_cypher::{AstQuery, Binder, OntologyMode, RuntimeCatalog, parse};
+use graphforge_cypher::{AstQuery, parse};
+use graphforge_ir::{Binder, OntologyMode, RuntimeCatalog};
 
 fn main() {
     divan::main();

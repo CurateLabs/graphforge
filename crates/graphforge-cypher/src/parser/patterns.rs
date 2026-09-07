@@ -27,17 +27,11 @@ pub fn parse_pattern(ts: &mut TokenStream) -> Result<PathPattern, ParseError> {
     let first = parse_node_pattern(ts)?;
     let mut elements: Vec<PathElement> = vec![PathElement::Node(first)];
 
-    loop {
-        // Try to parse a relationship pattern
-        match ts.peek() {
-            Some(Tok::RelOpen) | Some(Tok::Minus) | Some(Tok::LeftArrow) => {
-                let rel = parse_rel_pattern(ts)?;
-                elements.push(PathElement::Rel(rel));
-                let node = parse_node_pattern(ts)?;
-                elements.push(PathElement::Node(node));
-            }
-            _ => break,
-        }
+    while let Some(Tok::RelOpen | Tok::Minus | Tok::LeftArrow) = ts.peek() {
+        let rel = parse_rel_pattern(ts)?;
+        elements.push(PathElement::Rel(rel));
+        let node = parse_node_pattern(ts)?;
+        elements.push(PathElement::Node(node));
     }
 
     Ok(PathPattern {
@@ -201,20 +195,17 @@ fn parse_rel_pattern(ts: &mut TokenStream) -> Result<RelPattern, ParseError> {
     }
 }
 
+type RelationshipDetail = (
+    Option<String>,
+    Vec<String>,
+    Option<u32>,
+    Option<u32>,
+    Option<Expr>,
+);
+
 /// Parse the interior of a bracketed relationship pattern:
 /// `[var :TYPE|OTHER *min..max {props}]` — everything between `[` and `]`.
-fn parse_rel_detail(
-    ts: &mut TokenStream,
-) -> Result<
-    (
-        Option<String>,
-        Vec<String>,
-        Option<u32>,
-        Option<u32>,
-        Option<Expr>,
-    ),
-    ParseError,
-> {
+fn parse_rel_detail(ts: &mut TokenStream) -> Result<RelationshipDetail, ParseError> {
     // Optional variable
     let var = match ts.peek() {
         Some(Tok::Ident(_)) => Some(eat_ident(ts)?),

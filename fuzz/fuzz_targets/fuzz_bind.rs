@@ -7,7 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use graphforge_cypher::{Binder, OntologyMode, RuntimeCatalog, parse};
+use graphforge_cypher::parse;
+use graphforge_ir::{Binder, OntologyMode, RuntimeCatalog};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

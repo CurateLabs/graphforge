@@ -61,6 +61,10 @@ test("the Node classification is total, frozen, and backed by non-skipped native
   const languageSpecific = new Set(
     Object.keys(policy.classification.languageSpecific),
   );
+  assert.ok(release.includes("GraphForge.explain_stage"));
+  assert.equal(equivalent.has("GraphForge.explain_stage"), false);
+  assert.equal(languageSpecific.has("GraphForge.explain_stage"), false);
+  assert.ok(policy.classification.notExposedDefaults.GraphForge);
   const receivers = {
     CheckpointView,
     GraphForge,
