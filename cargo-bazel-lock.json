@@ -1,5 +1,5 @@
 {
-  "checksum": "04e97f3fc63e6ba232f6ee2a5f5669b86d44d249022a6bf960c7bbed5fff87cc",
+  "checksum": "7a4bf6809a93be5676332ba45a2e8d4de029ae879e07c4198b5c9034771daebe",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13035,6 +13035,10 @@
               "id": "codspeed-divan-compat 5.0.1",
               "target": "codspeed_divan_compat",
               "alias": "divan"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
             }
           ],
           "selects": {}

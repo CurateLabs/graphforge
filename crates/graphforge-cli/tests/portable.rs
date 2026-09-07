@@ -320,3 +320,174 @@ fn portable_v2_export_verify_and_import_round_trip() {
     ));
     assert_eq!(verified_outside["package_digest"], package_digest);
 }
+
+#[test]
+fn portable_facade_and_same_binary_preserve_complete_receipts() {
+    use graphforge_api::{
+        GraphForge, PortableSelection, PortableV2ExportRequest, PortableV2Limits, PortableV2Mode,
+        PortableV2Output, PortableV2SelectionPreviewRequest, PortableV2SelectionProfile,
+        PortableV2SelectionRequest, PortableVerifyRequest,
+    };
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("source");
+    let graph = GraphForge::new(project.to_str()).unwrap();
+    graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+    drop(graph);
+    let checkpoint = gf(
+        &project,
+        &[
+            "checkpoint",
+            "create",
+            "pinned",
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000001015",
+        ],
+    );
+    assert!(
+        checkpoint.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checkpoint.stderr)
+    );
+    for (selector, selection) in [
+        (vec!["--current"], PortableSelection::Current),
+        (
+            vec!["--checkpoint", "pinned"],
+            PortableSelection::Checkpoint("pinned".into()),
+        ),
+    ] {
+        let mut args = vec!["--json", "portable", "preview"];
+        args.extend(selector.iter().copied());
+        args.extend(["--profile", "complete"]);
+        let cli_preview = json(&gf(&project, &args));
+        let graph = GraphForge::new(project.to_str()).unwrap();
+        let preview = graph
+            .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+                selection: selection.clone(),
+                request: PortableV2SelectionRequest {
+                    profile: PortableV2SelectionProfile::Complete,
+                    strict: false,
+                },
+                limits: PortableV2Limits::default(),
+            })
+            .unwrap();
+        assert_eq!(cli_preview, serde_json::to_value(&preview).unwrap());
+        assert_eq!(cli_preview["include_graph_tree"], true);
+        drop(graph);
+        for (format, representation) in [
+            ("bundle", PortableV2Output::Bundle),
+            ("expanded", PortableV2Output::Expanded),
+        ] {
+            let package = root.path().join("package");
+            let mut args = vec!["--json", "portable", "export"];
+            args.extend(selector.iter().copied());
+            args.extend([
+                "--format",
+                format,
+                "--profile",
+                "complete",
+                "--output",
+                package.to_str().unwrap(),
+            ]);
+            let cli_export = json(&gf(&project, &args));
+            for (mode_flag, mode) in [
+                ("full", PortableV2Mode::Full),
+                ("inspect", PortableV2Mode::StructureOnly),
+            ] {
+                let cli_verify = json(&gf(
+                    &project,
+                    &[
+                        "--json",
+                        "portable",
+                        "verify",
+                        "--mode",
+                        mode_flag,
+                        "--input",
+                        package.to_str().unwrap(),
+                    ],
+                ));
+                let report = graphforge_api::verify_portable_v2(
+                    &PortableVerifyRequest {
+                        input: package.clone(),
+                        mode,
+                        limits: PortableV2Limits::default(),
+                    },
+                    None,
+                )
+                .unwrap();
+                assert_eq!(cli_verify, serde_json::to_value(report).unwrap());
+            }
+            if package.is_dir() {
+                fs::remove_dir_all(&package).unwrap();
+            } else {
+                fs::remove_file(&package).unwrap();
+            }
+            let graph = GraphForge::new(project.to_str()).unwrap();
+            let request = PortableV2ExportRequest {
+                selection: selection.clone(),
+                output_path: package.clone(),
+                representation,
+                profile: PortableV2SelectionProfile::Complete,
+                subset: None,
+                limits: PortableV2Limits::default(),
+            };
+            let exported = graph.export_portable_v2(&request, None, |_| {}).unwrap();
+            assert_eq!(
+                cli_export,
+                serde_json::to_value(exported.receipt()).unwrap()
+            );
+            let denied = graph
+                .export_portable_v2(&request, None, |_| {})
+                .unwrap_err();
+            assert_eq!(denied.code, graphforge_api::PortableV2ErrorCode::Io);
+            drop(graph);
+            if package.is_dir() {
+                fs::remove_dir_all(&package).unwrap();
+            } else {
+                fs::remove_file(&package).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_verification_golden_matches_real_facade_and_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let package = root.join("tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+    let expected: Value = serde_json::from_slice(
+        &fs::read(root.join("tests/fixtures/portable-v2/facade-verification-receipts.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    for (key, flag, mode) in [
+        ("full", "full", graphforge_api::PortableV2Mode::Full),
+        (
+            "structure_only",
+            "inspect",
+            graphforge_api::PortableV2Mode::StructureOnly,
+        ),
+    ] {
+        let report = graphforge_api::verify_portable_v2(
+            &graphforge_api::PortableVerifyRequest {
+                input: package.clone(),
+                mode,
+                limits: graphforge_api::PortableV2Limits::default(),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(report).unwrap(), expected[key]);
+        let cli = gf_cwd(
+            &std::env::current_dir().unwrap(),
+            &[
+                "--json",
+                "portable",
+                "verify",
+                "--mode",
+                flag,
+                "--input",
+                package.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(json(&cli), expected[key]);
+    }
+}

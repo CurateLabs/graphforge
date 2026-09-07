@@ -296,6 +296,12 @@ async function runSemantics() {
       forge.previewDeleteOntologyBridge({ exact: updatedBridge.id }).safe,
       true,
     );
+    const bridgePortable = join(subject.root, "portable-with-bridge");
+    await forge.exportPortableV2({
+      outputPath: bridgePortable,
+      representation: "expanded",
+    });
+    await assertCompositionReceipt(forge, bridgePortable, true);
     await forge.deleteOntologyBridge({
       authority: authority(forge),
       selector: { exact: updatedBridge.id },
@@ -350,6 +356,7 @@ async function runSemantics() {
       outputPath: portable,
       representation: "expanded",
     });
+    await assertCompositionReceipt(forge, portable, false);
     injectUnsupportedFeature(portable);
     const unsupported = await portableFailure(() =>
       GraphForge.verifyPortableV2({
@@ -602,3 +609,99 @@ test("packaged clean install", async () => {
   assert.equal(observed.module_count, 0);
   assert.ok(observed.package_origin.endsWith("index.js"));
 });
+
+async function assertCompositionReceipt(forge, portable, requireBridge) {
+  const verifiedComposition = await GraphForge.verifyPortableV2({
+    input: portable,
+    mode: "full",
+  });
+  const portableManifest = JSON.parse(
+    readFileSync(join(portable, "data/graphforge-project.json"), "utf8"),
+  );
+  const control = portableManifest.components.find(
+    (component) =>
+      component.participant_id === "graphforge-ontology-composition",
+  );
+  const compositionControl = JSON.parse(
+    readFileSync(join(portable, control.files[0].path), "utf8"),
+  );
+  assert.deepEqual(verifiedComposition.ontologyComposition, compositionControl);
+  assert.ok(compositionControl.modules.length > 0);
+  const expectedEntries = [
+    ...compositionControl.modules.map((module) => ({
+      kind: "ontology",
+      identity: {
+        id: module.ontology_id,
+        version: module.version,
+        content_digest: module.content_digest,
+      },
+      participant: `ontology-module-${module.content_digest.replace("sha256:", "")}`,
+    })),
+    ...compositionControl.bridge_sets.map((bridge) => ({
+      kind: "schema",
+      identity: {
+        id: bridge.bridge_id,
+        version: bridge.version,
+        content_digest: bridge.content_digest,
+      },
+      participant: `ontology-bridge-${bridge.content_digest.replace("sha256:", "")}`,
+    })),
+  ]
+    .map(({ kind, identity, participant }) => {
+      const component = portableManifest.components.find(
+        (value) => value.kind === kind && value.participant_id === participant,
+      );
+      const file = component.files[0];
+      return {
+        kind,
+        identity,
+        path: file.path,
+        mediaType: file.media_type,
+        length: BigInt(file.length),
+        sha256: file.sha256,
+        requiredDependencies: component.required_dependencies,
+      };
+    })
+    .sort((left, right) =>
+      left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+    );
+  assert.deepEqual(
+    verifiedComposition.ontologyCompositionEntries,
+    expectedEntries,
+  );
+  const preview = forge.previewPortableV2Selection({ profile: "complete" });
+  const projected = expectedEntries
+    .map((entry) => {
+      const length = Number(entry.length);
+      assert.ok(Number.isSafeInteger(length));
+      assert.equal(BigInt(length), entry.length);
+      return {
+        kind: entry.kind,
+        identity: entry.identity,
+        participant_id: entry.path.split("/")[3],
+        reason: "required-ontology-composition",
+        estimated_bytes: length,
+      };
+    })
+    .sort((left, right) =>
+      left.participant_id < right.participant_id
+        ? -1
+        : left.participant_id > right.participant_id
+          ? 1
+          : 0,
+    );
+  assert.ok(projected.length > 0);
+  assert.deepEqual(preview.projected, projected);
+  assert.equal(typeof preview.includeGraphTree, "boolean");
+  for (const entry of verifiedComposition.ontologyCompositionEntries)
+    assert.equal(typeof entry.length, "bigint");
+
+  if (requireBridge) {
+    assert.ok(compositionControl.bridge_sets.length > 0);
+    assert.ok(
+      verifiedComposition.ontologyCompositionEntries.some(
+        (entry) => entry.kind === "schema",
+      ),
+    );
+  }
+}

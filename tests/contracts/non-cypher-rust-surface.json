@@ -1,9 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "e5e74747638b43f353b601a59575d7013a952efaaee5e7de5e698ba68dd175cb",
+  "public_method_digest": "2e9d24ea3fc8ae0300399f986a947c72a7b5df7cf77e592f54d24237c226c8b2",
   "method_policy": {
     "receiver_defaults": {
+      "PortableV2ImportResult": "release-tested",
+      "PortableV2ExportFacadeResult": "release-tested",
       "GraphForge": "release-tested",
       "GraphImportSession": "release-tested",
       "GraphConstructionSession": "release-tested",
@@ -994,12 +996,36 @@
       "ids": [
         "GraphForge.export_portable_v2",
         "GraphForge.preview_portable_v2_graph_subset",
-        "GraphForge.preview_portable_v2_selection"
+        "GraphForge.preview_portable_v2_selection",
+        "PortableV2ImportResult.transient_peak_allocated_bytes",
+        "PortableV2ExportFacadeResult.receipt",
+        "crate.verify_discovered_portable_v2",
+        "crate.repack_verified_expanded_portable_v2"
       ],
       "test_refs": [
         {
           "path": "crates/graphforge-api/src/portable.rs",
           "symbol": "public_v2_export_preview_and_verify_agree_on_package_digest"
+        },
+        {
+          "path": "crates/graphforge-api/src/portable.rs",
+          "symbol": "subset_preview_preserves_storage_json_and_export_fingerprint"
+        },
+        {
+          "path": "crates/graphforge-api/src/portable.rs",
+          "symbol": "verified_repack_preserves_package_and_refuses_occupied_destination"
+        },
+        {
+          "path": "crates/graphforge-api/src/portable.rs",
+          "symbol": "import_allocation_qualification_deduplicates_and_requires_durable_cleanup"
+        },
+        {
+          "path": "crates/graphforge-cli/tests/portable.rs",
+          "symbol": "portable_facade_and_same_binary_preserve_complete_receipts"
+        },
+        {
+          "path": "crates/graphforge-api/tests/discovery_portable_v2.rs",
+          "symbol": "valid_discovery_maps_to_the_storage_verified_package"
         }
       ]
     }

@@ -1,0 +1,32 @@
+{
+  "full": {
+    "contract": "graphforge-portable-verify/2",
+    "representation": "bundle",
+    "package_digest": "sha256:fbbf2d07c8b10790b2023cbfba6c6ca70ca58b8df68eceb9bdf3fafd8637e57e",
+    "package_class": "complete",
+    "component_count": 3,
+    "entry_count": 8,
+    "payload_bytes": 3624,
+    "integrity": "verified",
+    "compatibility": "supported",
+    "authenticity": "unsigned",
+    "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
+    "ontology_composition": null,
+    "ontology_composition_entries": []
+  },
+  "structure_only": {
+    "contract": "graphforge-portable-verify/2",
+    "representation": "bundle",
+    "package_digest": "sha256:fbbf2d07c8b10790b2023cbfba6c6ca70ca58b8df68eceb9bdf3fafd8637e57e",
+    "package_class": "complete",
+    "component_count": 3,
+    "entry_count": 8,
+    "payload_bytes": 3624,
+    "integrity": "not_checked",
+    "compatibility": "supported",
+    "authenticity": "unsigned",
+    "transport_digest": "sha256:f11322419e4c10c33365f07b28f24d6a348a105e61a152f6e5fcd6750daaea35",
+    "ontology_composition": null,
+    "ontology_composition_entries": []
+  }
+}

@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "1fe9ccbbed1ed043e498f61160e93a4e5f861342e8dc2fbd24e44318ff464bb2",
+  "sha256": "7f90abeea4449e9c8dea94444c5510126ee913a56b8038f52e416501fdd86d99",
   "entries": [
     {
       "name": "graphforge-api",
@@ -88,6 +88,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": "dev",
+          "target": null
+        },
+        {
+          "name": "graphforge-discovery",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
           "target": null
         },
         {
@@ -618,7 +627,7 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": null,
+          "kind": "dev",
           "target": null
         },
         {
@@ -746,6 +755,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "serde_json",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {
@@ -2120,15 +2138,6 @@
         },
         {
           "name": "graphforge-core",
-          "req": "^0.5.2",
-          "features": [],
-          "optional": false,
-          "uses_default_features": true,
-          "kind": null,
-          "target": null
-        },
-        {
-          "name": "graphforge-discovery",
           "req": "^0.5.2",
           "features": [],
           "optional": false,

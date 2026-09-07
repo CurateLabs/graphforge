@@ -1268,3 +1268,6 @@ mod tests {
 
 /// Neutral portable package contracts.
 pub mod portable;
+
+/// Identity-free public storage receipts.
+pub mod storage_receipt;

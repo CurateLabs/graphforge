@@ -279,6 +279,80 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
         expanded = root / "portable"
         exported = forge.export_portable_v2(output_path=str(expanded), representation="expanded")
         expanded_path = Path(exported["output"])
+        verified_composition = g.GraphForge.verify_portable_v2(str(expanded_path), mode="full")
+        portable_manifest = json.loads((expanded_path / "data/graphforge-project.json").read_text())
+        control = next(
+            c
+            for c in portable_manifest["components"]
+            if c["participant_id"] == "graphforge-ontology-composition"
+        )
+        composition_control = json.loads((expanded_path / control["files"][0]["path"]).read_text())
+        assert verified_composition["ontology_composition"] == composition_control
+        assert composition_control["modules"]
+        expected_entries = []
+        identities = [
+            (
+                "ontology",
+                "ontology-module-",
+                {
+                    "id": m["ontology_id"],
+                    "version": m["version"],
+                    "content_digest": m["content_digest"],
+                },
+            )
+            for m in composition_control["modules"]
+        ]
+        identities += [
+            (
+                "schema",
+                "ontology-bridge-",
+                {
+                    "id": b["bridge_id"],
+                    "version": b["version"],
+                    "content_digest": b["content_digest"],
+                },
+            )
+            for b in composition_control["bridge_sets"]
+        ]
+        for kind, prefix, identity in identities:
+            component = next(
+                c
+                for c in portable_manifest["components"]
+                if c["kind"] == kind
+                and c["participant_id"]
+                == prefix + identity["content_digest"].removeprefix("sha256:")
+            )
+            file = component["files"][0]
+            expected_entries.append(
+                {
+                    "kind": kind,
+                    "identity": identity,
+                    "path": file["path"],
+                    "media_type": file["media_type"],
+                    "length": file["length"],
+                    "sha256": file["sha256"],
+                    "required_dependencies": component["required_dependencies"],
+                }
+            )
+        assert verified_composition["ontology_composition_entries"] == sorted(
+            expected_entries, key=lambda entry: entry["path"]
+        )
+        selection_preview = forge.preview_portable_v2_selection(profile="complete")
+        expected_projected = [
+            {
+                "kind": e["kind"],
+                "identity": e["identity"],
+                "participant_id": e["path"].split("/")[3],
+                "reason": "required-ontology-composition",
+                "estimated_bytes": e["length"],
+            }
+            for e in expected_entries
+        ]
+        assert expected_projected
+        assert selection_preview["projected"] == sorted(
+            expected_projected, key=lambda entry: entry["participant_id"]
+        )
+        assert isinstance(selection_preview["include_graph_tree"], bool)
         inject_unsupported_feature(expanded_path)
         future_code, future_diagnostics = failure(
             lambda: g.GraphForge.verify_portable_v2(str(expanded_path), mode="structure_only")

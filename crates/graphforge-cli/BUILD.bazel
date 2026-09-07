@@ -29,7 +29,6 @@ _CLI_DEPS = [
     "@crates//:url",
     "//crates/graphforge-api:graphforge_api",
     "//crates/graphforge-discovery:graphforge_discovery",
-    "//crates/graphforge-storage:graphforge_storage",
 ]
 
 _CONTRACT_FIXTURES = [
@@ -87,7 +86,7 @@ gf_rust_test(
         "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
     },
     size = "medium",
-    deps = _CLI_DEPS,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
 )
 
 gf_rust_binary(
@@ -170,7 +169,7 @@ gf_rust_integration_test(
     name = "portable",
     srcs = ["tests/portable.rs"],
     crate = ":graphforge_cli",
-    data = _CLI_TEST_DATA,
+    data = _CLI_TEST_DATA + _HUB_FIXTURE + ["//tests/fixtures/portable-v2:facade-verification-receipts.json"],
     rustc_env = _CLI_BIN_ENV,
     size = "large",
     timeout = "long",

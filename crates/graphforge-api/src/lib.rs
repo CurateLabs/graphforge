@@ -125,7 +125,12 @@ pub use ontology_composition_lifecycle::{
     CompositionChangeRequest, CompositionDataDisposition, CompositionPortableCompatibility,
     CompositionPortableReceipt,
 };
+mod discovery_portable_v2;
 mod paging;
+pub use discovery_portable_v2::{
+    DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
+    DiscoveryPortableV2Request, verify_discovered_portable_v2,
+};
 mod portable;
 mod provenance;
 mod provider_embedding;
@@ -153,25 +158,33 @@ mod valid_time;
 mod workspace_ontology;
 mod write_modes;
 
-pub use graphforge_storage::{
+pub use graphforge_core::portable::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
-    PortableV2ExportReceipt, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
+    PortableV2ExportProgress, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
     PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2Output,
     PortableV2PackageClass, PortableV2ParticipantId, PortableV2PropertyProjection,
     PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
-    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
+    PortableV2SubsetClosure, PortableV2SubsetPreview as PortableV2SubsetPlan,
+    PortableV2SubsetRequest,
+};
+pub use graphforge_core::storage_receipt::{
+    ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
+};
+/// Finite portable export budgets.
+pub type PortableV2ExportLimits = PortableV2Limits;
+pub use graphforge_storage::{
     SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
-    PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportRequest,
-    PortableV2ImportRequest, PortableV2ImportResult, PortableV2OciPublishFacadeRequest,
-    PortableV2OciPullFacadeRequest, PortableV2SelectionPreviewRequest,
-    PortableV2SubsetPreviewRequest, PortableVerifyRequest, PortableVerifyResult,
-    publish_portable_v2_oci, publish_portable_v2_oci_with_registry, pull_portable_v2_oci,
-    pull_portable_v2_oci_with_registry, verify_portable_v2,
+    PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportReceiptView,
+    PortableV2ExportRequest, PortableV2ImportRequest, PortableV2ImportResult,
+    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest, PortableV2RepackRequest,
+    PortableV2RepackResult, PortableV2SelectionPreviewRequest, PortableV2SubsetPreviewRequest,
+    PortableVerifyRequest, PortableVerifyResult, publish_portable_v2_oci,
+    publish_portable_v2_oci_with_registry, pull_portable_v2_oci,
+    pull_portable_v2_oci_with_registry, repack_verified_expanded_portable_v2, verify_portable_v2,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
@@ -551,10 +564,8 @@ impl GraphForge {
     }
 
     /// Capture closed, identity-free storage evidence for ordinary consumers.
-    pub fn storage_attribution_receipt(
-        &self,
-    ) -> Result<graphforge_storage::StorageAttributionReceipt, GfError> {
-        graphforge_storage::StorageAttributionReceipt::from_snapshot(&self.storage_attribution()?)
+    pub fn storage_attribution_receipt(&self) -> Result<StorageAttributionReceipt, GfError> {
+        graphforge_storage::storage_attribution_receipt_from_snapshot(&self.storage_attribution()?)
     }
 
     pub(crate) fn stage_project_generation(

@@ -22,6 +22,7 @@ _API_COMPILE_DATA = [
 ]
 
 _API_DEPS = [
+    "//crates/graphforge-discovery:graphforge_discovery",
     "//crates/graphforge-portable-oci:graphforge_portable_oci",
     "@crates//:bytes",
     "//crates/graphforge-core:graphforge_core",
@@ -522,6 +523,7 @@ test_suite(
         ":clear",
         ":conductance",
         ":create_scaling",
+        ":discovery_portable_v2",
         ":e2e_baseline",
         ":existential_subquery",
         ":facade_methods",
@@ -626,5 +628,13 @@ gf_rust_integration_test(
     name = "graphforge_fly_filesystem_smoke_test",
     srcs = ["src/bin/graphforge-fly-filesystem-smoke.rs"],
     crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "discovery_portable_v2",
+    srcs = ["tests/discovery_portable_v2.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/fixtures/portable-v2:ontology-only.manifest.json"],
     deps = _API_DEPS,
 )

@@ -31,6 +31,7 @@ pub use storage_attribution::{
     StorageAttributionSnapshot, StorageIoPhase, artifact_category_authority_commitment,
     artifact_category_peak_authority_commitment, capture_project_storage_identity_union,
     capture_storage_attribution, classify_graph_artifact,
+    storage_attribution_receipt_from_snapshot,
 };
 
 pub mod generation;
@@ -232,12 +233,6 @@ pub use project_portable_v2::{
     PortableV2Mode, PortableV2OntologyComposition, PortableV2OntologyModule,
     PortableV2PackageClass, PortableV2Report, PortableV2Representation,
     materialize_verified_portable_v2, verify_portable_v2,
-};
-
-pub mod discovery_portable_v2;
-pub use discovery_portable_v2::{
-    DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
-    DiscoveryPortableV2Request, verify_discovered_portable_v2,
 };
 
 mod project_portable_v2_selection;

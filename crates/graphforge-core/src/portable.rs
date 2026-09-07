@@ -364,3 +364,305 @@ impl std::fmt::Debug for PortableV2OciSignatureMaterial {
             .finish()
     }
 }
+
+/// Stable semantic participant identity. Runtime catalog IDs and host paths are never selectors.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PortableV2ParticipantId {
+    /// Owning portable capability contract.
+    pub capability_id: String,
+    /// Stable record-family contract.
+    pub record_family_id: String,
+}
+
+/// Built-in deterministic selection profiles.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PortableV2SelectionProfile {
+    /// Every committed participant and graph-tree payload.
+    Complete,
+    /// Authored/adopted ontology plus required schema participants.
+    OntologyOnly,
+    /// Whole graph/data components. Row or subgraph selection belongs to #786.
+    DataComponents,
+    /// Derived and repository artifact participants.
+    Artifacts,
+    /// Closed-schema portable settings only.
+    Settings,
+    /// Explicit stable identities.
+    Custom(Vec<PortableV2ParticipantId>),
+    /// Exact projected ontology module or bridge identities. The immutable
+    /// preview exposes the complete emitted composition closure.
+    OntologyComposition(Vec<PortableV2ExactIdentity>),
+}
+
+/// Selection planning request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortableV2SelectionRequest {
+    /// Requested built-in or custom profile.
+    pub profile: PortableV2SelectionProfile,
+    /// Refuse any automatically required dependency instead of widening visibly.
+    pub strict: bool,
+}
+
+/// Stable reason for inclusion/exclusion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortableV2SelectionReason {
+    /// Directly requested by profile or exact identity.
+    Requested,
+    /// Required ontology/schema closure.
+    RequiredSchemaAuthority,
+    /// Required exact multi-ontology composition closure.
+    RequiredOntologyComposition,
+    /// Not part of the requested profile.
+    ProfileExcluded,
+}
+
+/// Content-free preview row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2SelectionEntry {
+    /// Stable semantic identity.
+    pub identity: PortableV2ParticipantId,
+    /// Canonical component kind.
+    pub kind: String,
+    /// Stable selection reason.
+    pub reason: PortableV2SelectionReason,
+    /// Exact committed payload bytes.
+    pub estimated_bytes: u64,
+    /// Manifest row count.
+    pub row_count: u64,
+}
+
+/// Exact ontology module or bridge emitted by composition projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2ProjectedSelectionEntry {
+    /// Projected component kind (`ontology` or `schema`).
+    pub kind: String,
+    /// Exact semantic identity addressable by callers.
+    pub identity: PortableV2ExactIdentity,
+    /// Stable component identity used by the portable manifest.
+    pub participant_id: String,
+    /// Whether this exact identity was directly requested or closure-added.
+    pub reason: PortableV2SelectionReason,
+    /// Exact canonical projected payload bytes.
+    pub estimated_bytes: u64,
+}
+
+/// Immutable deterministic preview consumed by both export representations.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2SelectionPlan {
+    /// Pinned source generation identity.
+    pub source_generation_uuid: String,
+    /// Pinned source generation manifest identity.
+    pub source_manifest_sha256: String,
+    /// Portable package class token.
+    pub package_class: String,
+    /// Included participants in canonical identity order.
+    pub included: Vec<PortableV2SelectionEntry>,
+    /// Excluded participants in canonical identity order.
+    pub excluded: Vec<PortableV2SelectionEntry>,
+    /// Exact projected ontology closure in canonical identity order.
+    pub projected: Vec<PortableV2ProjectedSelectionEntry>,
+    /// Explicit redaction reason codes; values are never retained.
+    pub redactions: Vec<String>,
+    /// Required portable capability contracts.
+    pub required_capabilities: Vec<String>,
+    /// Exact known participant bytes, excluding bounded control metadata.
+    pub estimated_payload_bytes: u64,
+    /// Stable digest over canonical content-free plan metadata.
+    pub selection_fingerprint: String,
+    include_graph_tree: bool,
+}
+
+impl PortableV2SelectionPlan {
+    /// Construct a passive preview; this does not authorize storage execution.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        source_generation_uuid: String,
+        source_manifest_sha256: String,
+        package_class: String,
+        included: Vec<PortableV2SelectionEntry>,
+        excluded: Vec<PortableV2SelectionEntry>,
+        projected: Vec<PortableV2ProjectedSelectionEntry>,
+        redactions: Vec<String>,
+        required_capabilities: Vec<String>,
+        estimated_payload_bytes: u64,
+        selection_fingerprint: String,
+        include_graph_tree: bool,
+    ) -> Self {
+        Self {
+            source_generation_uuid,
+            source_manifest_sha256,
+            package_class,
+            included,
+            excluded,
+            projected,
+            redactions,
+            required_capabilities,
+            estimated_payload_bytes,
+            selection_fingerprint,
+            include_graph_tree,
+        }
+    }
+    /// Whether the semantic selection includes the graph tree.
+    #[must_use]
+    pub fn includes_graph_tree(&self) -> bool {
+        self.include_graph_tree
+    }
+    /// Set the semantic graph-tree selection for a projected preview.
+    pub fn set_include_graph_tree(&mut self, include: bool) {
+        self.include_graph_tree = include;
+    }
+    /// Whether a semantic participant is included.
+    #[must_use]
+    pub fn includes(&self, capability: &str, family: &str) -> bool {
+        self.included.iter().any(|entry| {
+            entry.identity.capability_id == capability && entry.identity.record_family_id == family
+        })
+    }
+}
+
+/// Stable UUID selector for one pinned generation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PortableV2GraphSelector {
+    /// Ordered node UUIDs (hyphenated).
+    pub node_uuids: Vec<String>,
+    /// Ordered edge UUIDs (hyphenated).
+    pub edge_uuids: Vec<String>,
+}
+
+/// Portable-v2 on-wire closure tokens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortableV2SubsetClosure {
+    /// Selected nodes plus edges whose endpoints are both selected.
+    InducedEdges,
+    /// Selected edges plus both endpoint nodes.
+    Referential,
+}
+
+/// Property projection/redaction for subset packages.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PortableV2PropertyProjection {
+    /// Property field names excluded from payloads.
+    pub exclude: Vec<String>,
+}
+
+/// Subset planning request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PortableV2SubsetRequest {
+    /// Stable UUID selector.
+    pub selector: PortableV2GraphSelector,
+    /// Closure mode.
+    pub closure: PortableV2SubsetClosure,
+    /// Property projection.
+    pub projection: PortableV2PropertyProjection,
+}
+
+/// Content-free graph-subset receipt retained in the semantic manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2GraphSubsetMeta {
+    /// Canonical content-free selector digest token.
+    pub selector: String,
+    /// On-wire closure token.
+    pub closure: String,
+}
+
+/// Immutable subset preview consumed by planning and export.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2SubsetPreview {
+    /// Component selection consumed by the exporter.
+    pub selection: PortableV2SelectionPlan,
+    /// Graph-subset metadata emitted into the semantic manifest.
+    pub graph_subset: PortableV2GraphSubsetMeta,
+    /// Resolved node count after closure.
+    pub selected_node_count: u64,
+    /// Resolved edge count after closure.
+    pub selected_edge_count: u64,
+    /// Endpoint nodes added beyond the caller's explicit node set.
+    pub endpoint_node_count: u64,
+    /// Domain-separated projected graph fingerprint.
+    pub result_fingerprint: String,
+    /// Stable digest over the full subset preview.
+    pub subset_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Portable-v2 transport representation.
+pub enum PortableV2Output {
+    /// Closed BagIt-compatible directory.
+    Expanded,
+    /// Canonical uncompressed PAX/ustar stream.
+    Bundle,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Aggregate content-free progress observation.
+pub struct PortableV2ExportProgress {
+    /// Fully emitted entries.
+    pub entries_completed: usize,
+    /// Emitted source payload bytes.
+    pub bytes_completed: u64,
+    /// Planned entry count.
+    pub entries_total: usize,
+    /// Planned source payload bytes.
+    pub bytes_total: u64,
+}
+
+#[cfg(test)]
+mod preview_wire_tests {
+    use super::*;
+
+    #[test]
+    fn moved_preview_contract_keeps_private_serialized_graph_decision() {
+        let plan = PortableV2SelectionPlan::new(
+            "generation".into(),
+            "manifest".into(),
+            "graph-data-subset".into(),
+            vec![PortableV2SelectionEntry {
+                identity: PortableV2ParticipantId {
+                    capability_id: "graph@1".into(),
+                    record_family_id: "files@1".into(),
+                },
+                kind: "graph-data".into(),
+                reason: PortableV2SelectionReason::Requested,
+                estimated_bytes: 7,
+                row_count: 2,
+            }],
+            Vec::new(),
+            Vec::new(),
+            vec!["redacted".into()],
+            vec!["graph@1".into()],
+            7,
+            "selection".into(),
+            false,
+        );
+        let expected = serde_json::json!({
+            "source_generation_uuid":"generation", "source_manifest_sha256":"manifest",
+            "package_class":"graph-data-subset", "included":[{"identity":{"capability_id":"graph@1","record_family_id":"files@1"},
+                "kind":"graph-data","reason":"requested","estimated_bytes":7,"row_count":2}],
+            "excluded":[],"projected":[],"redactions":["redacted"],"required_capabilities":["graph@1"],
+            "estimated_payload_bytes":7,"selection_fingerprint":"selection","include_graph_tree":false
+        });
+        assert_eq!(serde_json::to_value(&plan).unwrap(), expected);
+        let subset = PortableV2SubsetPreview {
+            selection: plan,
+            graph_subset: PortableV2GraphSubsetMeta {
+                selector: "selector".into(),
+                closure: "referential".into(),
+            },
+            selected_node_count: 2,
+            selected_edge_count: 1,
+            endpoint_node_count: 1,
+            result_fingerprint: "result".into(),
+            subset_fingerprint: "subset".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(subset).unwrap(),
+            serde_json::json!({
+                "selection":expected,"graph_subset":{"selector":"selector","closure":"referential"},
+                "selected_node_count":2,"selected_edge_count":1,"endpoint_node_count":1,
+                "result_fingerprint":"result","subset_fingerprint":"subset"
+            })
+        );
+    }
+}

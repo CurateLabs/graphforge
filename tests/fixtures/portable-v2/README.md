@@ -35,3 +35,14 @@ result in the composition identity.
 It freezes the four package classes, both representations, cross-form receipts,
 semantic tamper and future-feature ordering, and the durable non-authoritative
 staging replay/conflict/cancellation/failure matrix.
+
+`facade-verification-receipts.json` pins the complete Rust-facade/CLI verification
+receipts for the immutable checked-in Hub bundle
+`tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb`. It was emitted
+by the same-build `gf --json portable verify --mode full` and `--mode inspect`
+commands; `structure_only` is the binding/API spelling of inspect mode. The CLI
+integration test independently compares both actual facade and CLI results to
+this golden. Native Python and Node tests compare every field, using an explicit
+Node naming/BigInt adapter with safe-integer roundtrip checks. Nonempty composition
+and projected preview entries are separately exercised against actual exported
+multi-ontology packages in the native lifecycle suites.

@@ -295,25 +295,8 @@ pub(crate) fn run_portable(
 }
 
 fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
-    serde_json::json!({
-        "contract": result.contract,
-        "source": result.source,
-        "checkpoint": result.checkpoint,
-        "generation_uuid": result.generation_uuid,
-        "package_digest": result.package_digest,
-        "transport_digest": result.transport_digest,
-        "entry_count": result.entry_count,
-        "payload_bytes": result.payload_bytes,
-        "representation": result.representation,
-        "selection_fingerprint": result.selection_fingerprint,
-        "allocation_logical_bytes": result.allocation_logical_bytes,
-        "allocation_allocated_bytes": result
-            .allocation_identity_allocated_bytes
-            .values()
-            .copied()
-            .sum::<u64>(),
-        "allocation_physical_objects": result.allocation_physical_objects,
-    })
+    serde_json::to_value(result.receipt())
+        .expect("portable receipt contains serializable scalar values")
 }
 
 /// Project-free portable operations that must not hold a live `GraphForge` lock.
@@ -469,26 +452,7 @@ pub(crate) fn run_portable_without_graph(
 fn import_transient_peak(
     result: &graphforge_api::PortableV2ImportResult,
 ) -> Result<u64, graphforge_api::GfError> {
-    if !result.materialized_cleanup_parent_sync_confirmed
-        || result.materialized_cleanup_removed_identity_allocated_bytes
-            != result.materialized_identity_allocated_bytes
-    {
-        return Err(graphforge_api::GfError::Validation(
-            "storage.portable_import_allocation_cleanup: portable import allocation cleanup did not reconcile"
-                .into(),
-        ));
-    }
-    let mut lifecycle = graphforge_storage::StorageAllocationLifecycle::default();
-    lifecycle.replace_owner(
-        "portable-import-materialized",
-        &result.materialized_identity_allocated_bytes,
-    )?;
-    lifecycle.replace_owner(
-        "portable-import-published",
-        &result.published_identity_allocated_bytes,
-    )?;
-    lifecycle.remove_owner("portable-import-materialized")?;
-    Ok(lifecycle.peak_allocated_bytes())
+    result.transient_peak_allocated_bytes()
 }
 
 #[derive(Clone, Copy, ValueEnum)]

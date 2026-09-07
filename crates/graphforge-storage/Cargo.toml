@@ -18,7 +18,6 @@ test-support = []
 [dependencies]
 graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-discovery = { version = "0.5.2", path = "../graphforge-discovery" }
 graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }

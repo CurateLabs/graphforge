@@ -177,6 +177,8 @@ fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_
         "packageClass": plan.package_class,
         "included": plan.included,
         "excluded": plan.excluded,
+        "projected": plan.projected,
+        "includeGraphTree": plan.includes_graph_tree(),
         "redactions": plan.redactions,
         "requiredCapabilities": plan.required_capabilities,
         "estimatedPayloadBytes": plan.estimated_payload_bytes,
@@ -271,6 +273,22 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
         compatibility: compatibility_token(report.compatibility),
         authenticity: authenticity_token(report.authenticity),
         transport_digest: report.transport_digest,
+        ontology_composition: serde_json::to_value(report.ontology_composition)
+            .expect("portable composition contains only serializable contract fields"),
+        ontology_composition_entries: report
+            .ontology_composition_entries
+            .into_iter()
+            .map(|entry| PortableCompositionEntryOutput {
+                kind: entry.kind,
+                identity: serde_json::to_value(entry.identity)
+                    .expect("portable identity contains only strings"),
+                path: entry.path,
+                media_type: entry.media_type,
+                length: BigInt::from(entry.length),
+                sha256: entry.sha256,
+                required_dependencies: entry.required_dependencies,
+            })
+            .collect(),
     }
 }
 
@@ -445,6 +463,10 @@ pub struct PortableVerifyOutput {
     pub compatibility: String,
     pub authenticity: String,
     pub transport_digest: Option<String>,
+    /// Exact authenticated composition, with canonical contract field names.
+    pub ontology_composition: serde_json::Value,
+    /// Authenticated entries; lengths preserve the binding's bigint contract.
+    pub ontology_composition_entries: Vec<PortableCompositionEntryOutput>,
 }
 
 #[napi(object)]
@@ -860,4 +882,15 @@ impl Task for SinkStreamTask {
             .map(sink_receipt_output)
             .map_err(|error| crate::to_napi_deferred_err(env, &error))
     }
+}
+
+#[napi(object)]
+pub struct PortableCompositionEntryOutput {
+    pub kind: String,
+    pub identity: serde_json::Value,
+    pub path: String,
+    pub media_type: String,
+    pub length: BigInt,
+    pub sha256: String,
+    pub required_dependencies: Vec<String>,
 }

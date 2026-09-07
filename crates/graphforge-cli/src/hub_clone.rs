@@ -8,15 +8,15 @@ use graphforge_api::telemetry::{
     WaitReason,
 };
 use graphforge_api::{
+    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
+    PortableV2ErrorCode, verify_discovered_portable_v2,
+};
+use graphforge_api::{
     GraphForge, OperationId, PortableV2ImportRequest, PortableV2Limits, PortableV2Mode,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryErrorCode, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor,
     RefSet, RepositoryIdentity,
-};
-use graphforge_storage::{
-    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
-    PortableV2ErrorCode, verify_discovered_portable_v2,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
