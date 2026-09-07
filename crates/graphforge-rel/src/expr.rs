@@ -138,12 +138,9 @@ pub struct ExprLowerer<'a> {
     /// a single struct column, not a table whose fields are top-level columns.
     /// Empty elsewhere; its length is the current nesting depth.
     elem_struct_cols: Vec<String>,
-    /// The project directory for read-side lowering, when one is attached
-    /// (#1024): lets `nodes(p)` bake a hydrating `cypher_path_nodes` whose
-    /// elements carry labels + the property union discovered from
-    /// `properties/*.parquet`. `None` in schema-only/explain lowering — the
-    /// UDF then keeps its `node_uuid`-only shape.
-    read_target: Option<std::path::PathBuf>,
+    /// Immutable dataset schemas used to describe hydrated `nodes(p)` values.
+    /// Schema-only explanation retains the original UUID-only shape.
+    read_target: Option<graphforge_ir::LoweringSnapshot>,
     /// Wall-clock instant captured ONCE per lowering (lazily, on first use) so all
     /// zero-arg current-time constructors — `date()`/`localtime()`/…/`datetime()`
     /// — in one query fold to the SAME value, making
@@ -262,10 +259,9 @@ impl<'a> ExprLowerer<'a> {
         self
     }
 
-    /// Attach the project directory for read-side lowering, so `nodes(p)` bakes
-    /// a hydrating `cypher_path_nodes` (labels + property union, #1024).
+    /// Attach immutable dataset schemas for the logical `nodes(p)` output.
     #[must_use]
-    pub fn with_read_target(mut self, dir: std::path::PathBuf) -> Self {
+    pub fn with_read_target(mut self, dir: graphforge_ir::LoweringSnapshot) -> Self {
         self.read_target = Some(dir);
         self
     }
@@ -3181,7 +3177,7 @@ impl<'a> ExprLowerer<'a> {
     fn path_node_hydration(&self) -> Option<PathNodeHydration> {
         use datafusion::arrow::datatypes::Field;
         let dir = self.read_target.as_ref()?;
-        let stems = graphforge_storage::list_property_stems(dir);
+        let stems = dir.node_property_stems.clone();
         let mut fields = vec![
             Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
             Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
@@ -3189,8 +3185,8 @@ impl<'a> ExprLowerer<'a> {
         let mut seen: std::collections::HashSet<String> =
             fields.iter().map(|f| f.name().clone()).collect();
         for stem in &stems {
-            let table = graphforge_storage::PropertyTable::open_discovered(dir, stem);
-            for f in table.schema_ref().fields() {
+            let table = &dir.node_properties[stem];
+            for f in table.fields() {
                 if f.name() == "node_uuid" || !seen.insert(f.name().clone()) {
                     continue;
                 }

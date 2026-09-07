@@ -77,7 +77,10 @@ pub(crate) fn required(
         .validate(contract)
         .map_err(|e| DataFusionError::Plan(format!("GF_WRITE_RESOURCE_INCOMPATIBLE: {e}")))?;
     let lowerer = graphforge_rel::GraphPlanLowerer::new(
-        Some(&binding.resource.catalog),
+        Some(
+            &graphforge_storage::lowering_snapshot(Some(&binding.resource.catalog), None)
+                .map_err(|e| DataFusionError::Plan(e.to_string()))?,
+        ),
         binding.resource.ontology.as_ref(),
     )
     .map_err(|e| DataFusionError::Plan(e.to_string()))?;

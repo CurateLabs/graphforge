@@ -1347,7 +1347,7 @@ impl CreateRecorder {
 
 /// Everything the phases borrow from the session.
 pub(crate) struct PhaseEnv<'a> {
-    pub lowerer: &'a GraphPlanLowerer<'a>,
+    pub lowerer: &'a GraphPlanLowerer,
     pub exprs: &'a ExprArena,
     pub dir: &'a Path,
     pub mode: OntologyMode,
@@ -4199,7 +4199,7 @@ mod tests {
     }
 
     fn phase_env<'a>(
-        lowerer: &'a GraphPlanLowerer<'a>,
+        lowerer: &'a GraphPlanLowerer,
         exprs: &'a ExprArena,
         dir: &'a Path,
         params: &'a HashMap<String, IrLiteral>,
@@ -4218,9 +4218,12 @@ mod tests {
     fn set_accumulates_nodes_and_edges_once_across_duplicate_and_null_rows() {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
-                    .unwrap();
+            let lowerer = GraphPlanLowerer::new_for_writes(
+                &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+                None,
+                OntologyMode::Exploratory,
+            )
+            .unwrap();
             let mut exprs = ExprArena::new();
             let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
             let params = HashMap::new();
@@ -4265,9 +4268,12 @@ mod tests {
     fn remove_accumulates_nodes_and_edges_and_ignores_null_optional_rows() {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
-                    .unwrap();
+            let lowerer = GraphPlanLowerer::new_for_writes(
+                &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+                None,
+                OntologyMode::Exploratory,
+            )
+            .unwrap();
             let exprs = ExprArena::new();
             let params = HashMap::new();
             let env = phase_env(&lowerer, &exprs, dir.path(), &params);
@@ -4311,9 +4317,12 @@ mod tests {
     #[test]
     fn set_and_remove_reject_malformed_identity_and_edge_routing_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
-                .unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            None,
+            OntologyMode::Exploratory,
+        )
+        .unwrap();
         let mut exprs = ExprArena::new();
         let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
         let params = HashMap::new();
@@ -4462,9 +4471,12 @@ mod tests {
         assert!(error.to_string().contains("known relation type"));
 
         let dir = tempfile::tempdir().unwrap();
-        let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
-                .unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            None,
+            OntologyMode::Exploratory,
+        )
+        .unwrap();
         let exprs = ExprArena::new();
         let params = HashMap::new();
         let env = phase_env(&lowerer, &exprs, dir.path(), &params);

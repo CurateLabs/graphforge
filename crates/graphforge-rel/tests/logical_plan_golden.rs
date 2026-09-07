@@ -110,10 +110,9 @@ fn render_lowered(query: &str) -> String {
     // `Expand` can bake its edge-read path; the directory is not rendered in
     // the explain output, so a throwaway temp dir keeps snapshots deterministic.
     let dir = tempfile::tempdir().expect("tempdir");
-    let lowered = graphforge_rel::GraphPlanLowerer::new_with_dir(
-        None,
+    let lowered = graphforge_rel::GraphPlanLowerer::new_for_reads(
+        &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
         Some(&handle),
-        dir.path(),
         OntologyMode::Advisory,
     )
     .expect("valid ontology identities")
@@ -160,10 +159,9 @@ fn render_property_read(query: &str) -> String {
     writer.flush().expect("flush");
 
     let catalog = GraphCatalog::open(dir.path(), None, &rc.lock().unwrap()).expect("catalog");
-    let lowered = graphforge_rel::GraphPlanLowerer::new_with_dir(
-        Some(&catalog),
+    let lowered = graphforge_rel::GraphPlanLowerer::new_for_reads(
+        &graphforge_storage::lowering_snapshot(Some(&catalog), Some(dir.path())).unwrap(),
         None,
-        dir.path(),
         OntologyMode::Exploratory,
     )
     .expect("valid ontology identities")

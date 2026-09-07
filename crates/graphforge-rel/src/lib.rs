@@ -68,7 +68,7 @@ pub fn explain_logical_with(
 }
 
 /// Like [`explain_logical_with`] but also threads a
-/// [`GraphCatalog`](graphforge_storage::GraphCatalog) so property accesses (e.g.
+/// [`GraphCatalog`](graphforge_ir::LoweringSnapshot) so property accesses (e.g.
 /// `n.name`) resolve to their column names via the catalog's `PropId → name`
 /// map instead of falling back to `prop_<id>` placeholders. Used by the engine
 /// facade's `explain`, which lowers against the instance's runtime catalog.
@@ -78,7 +78,7 @@ pub fn explain_logical_with(
 /// Returns [`GfError`] if the plan cannot be lowered.
 pub fn explain_logical_with_catalog(
     plan: &GraphPlan,
-    catalog: Option<&graphforge_storage::GraphCatalog>,
+    catalog: Option<&graphforge_ir::LoweringSnapshot>,
     ontology: Option<&OntologyHandle>,
 ) -> Result<String, GfError> {
     let lowered = GraphPlanLowerer::new(catalog, ontology)?.lower_plan(plan)?;
@@ -96,13 +96,11 @@ pub fn explain_logical_with_catalog(
 /// Returns [`GfError`] if the plan cannot be lowered.
 pub fn explain_logical_for_writes(
     plan: &GraphPlan,
-    catalog: Option<&graphforge_storage::GraphCatalog>,
+    snapshot: &graphforge_ir::LoweringSnapshot,
     ontology: Option<&OntologyHandle>,
-    dir: &std::path::Path,
     mode: graphforge_core::OntologyMode,
 ) -> Result<String, GfError> {
-    let lowered =
-        GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode)?.lower_plan(plan)?;
+    let lowered = GraphPlanLowerer::new_for_writes(snapshot, ontology, mode)?.lower_plan(plan)?;
     let ctx = datafusion::prelude::SessionContext::new();
     let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
     Ok(final_plan.display_indent_schema().to_string())

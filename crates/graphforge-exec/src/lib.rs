@@ -5308,9 +5308,8 @@ impl ExecutionSession {
         // catalog). Without it, edges are written with a `_UNKNOWN` relation
         // name and a later `MATCH ()-[:REL]->()` filter never matches.
         let lowerer = GraphPlanLowerer::new_for_writes(
-            Some(&self.catalog),
+            &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&resource.dir))?,
             self.ontology.as_ref(),
-            &resource.dir,
             resource.mode,
         )?;
         let logical = bind_query_params(lowerer.lower_plan(plan)?, params)?;
@@ -5461,9 +5460,8 @@ impl ExecutionSession {
             .map_err(GfError::from_plan_error)?;
         let split = write_driver::split_write_plan(&plan.ops)?;
         let lowerer = GraphPlanLowerer::new_for_writes(
-            Some(&self.catalog),
+            &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&resource.dir))?,
             self.ontology.as_ref(),
-            &resource.dir,
             resource.mode,
         )?;
 
@@ -5924,9 +5922,8 @@ impl ExecutionSession {
                 ));
             }
             let lowerer = GraphPlanLowerer::new_for_writes(
-                Some(&self.catalog),
+                &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&self.dir))?,
                 self.ontology.as_ref(),
-                &self.dir,
                 self.mode,
             )?;
             let logical = lowerer.lower_plan(plan)?;
@@ -5970,12 +5967,17 @@ impl ExecutionSession {
                         .into(),
                 ));
             }
-            GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())?
-        } else {
-            GraphPlanLowerer::new_with_dir(
-                Some(&self.catalog),
+            GraphPlanLowerer::new(
+                Some(&graphforge_storage::lowering_snapshot(
+                    Some(&self.catalog),
+                    None,
+                )?),
                 self.ontology.as_ref(),
-                &self.dir,
+            )?
+        } else {
+            GraphPlanLowerer::new_for_reads(
+                &graphforge_storage::lowering_snapshot(Some(&self.catalog), Some(&self.dir))?,
+                self.ontology.as_ref(),
                 self.mode,
             )?
         };
@@ -6012,7 +6014,7 @@ impl ExecutionSession {
 }
 
 fn lower_write_terminal_suffix(
-    lowerer: &GraphPlanLowerer<'_>,
+    lowerer: &GraphPlanLowerer,
     plan: &GraphPlan,
     start: Option<usize>,
     frontier: &write_driver::Frontier,
@@ -6037,7 +6039,7 @@ fn lower_write_terminal_suffix(
 #[allow(clippy::too_many_arguments)]
 async fn run_write_relational_segment(
     session: &SessionContext,
-    lowerer: &GraphPlanLowerer<'_>,
+    lowerer: &GraphPlanLowerer,
     plan: &GraphPlan,
     range: std::ops::Range<usize>,
     frontier: &mut write_driver::Frontier,
@@ -6799,9 +6801,12 @@ mod tests {
         let mut runtime = RuntimeCatalog::new();
         runtime.intern_label("DestinationMeaning").unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &runtime).unwrap();
-        let mut contract = GraphPlanLowerer::new(Some(&catalog), None)
-            .unwrap()
-            .read_contract();
+        let mut contract = GraphPlanLowerer::new(
+            Some(&graphforge_storage::lowering_snapshot(Some(&catalog), None).unwrap()),
+            None,
+        )
+        .unwrap()
+        .read_contract();
         assert_eq!(contract.labels.len(), 1);
         contract.labels[0].1 = "DifferentMeaning".into();
         let contract = Some(contract);

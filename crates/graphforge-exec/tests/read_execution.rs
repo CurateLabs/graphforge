@@ -248,6 +248,7 @@ async fn logical_read_resources_relocate_and_bind_independently() {
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS name",
         "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN b.name AS name",
         "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN nodes(p)[1].name AS name",
+        "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN [n IN nodes(p) | n.name][1] AS name",
     ] {
         let ir = bind(query, rc.clone());
         let left_catalog = GraphCatalog::open(left.path(), None, &rc.lock().unwrap()).unwrap();
@@ -256,15 +257,21 @@ async fn logical_read_resources_relocate_and_bind_independently() {
         let right_session = session_with(right.path(), &rc.lock().unwrap());
 
         let lower = |catalog: &GraphCatalog, root: &std::path::Path| {
-            graphforge_rel::GraphPlanLowerer::new_with_dir(
-                Some(catalog),
+            let snapshot =
+                graphforge_storage::lowering_snapshot(Some(catalog), Some(root)).unwrap();
+            // Compilation must use the immutable snapshot even when its source
+            // has disappeared. Restore it only for independent execution binding.
+            let unavailable = root.with_extension("unavailable");
+            std::fs::rename(root, &unavailable).unwrap();
+            let lowered = graphforge_rel::GraphPlanLowerer::new_for_reads(
+                &snapshot,
                 None,
-                root,
                 OntologyMode::Exploratory,
             )
             .unwrap()
-            .lower_plan(&ir)
-            .unwrap()
+            .lower_plan(&ir);
+            std::fs::rename(&unavailable, root).unwrap();
+            lowered.unwrap()
         };
         let plan = lower(&left_catalog, left.path());
         let relocated = lower(&right_catalog, right.path());

@@ -489,3 +489,6 @@ impl StorageProvider for ParquetProvider {
         Err(GfError::NotImplemented("scan_nodes"))
     }
 }
+
+mod lowering_snapshot;
+pub use lowering_snapshot::lowering_snapshot;
