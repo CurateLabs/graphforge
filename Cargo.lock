@@ -2171,6 +2171,7 @@ dependencies = [
  "graphforge-knowledge",
  "graphforge-observability",
  "graphforge-ontology",
+ "graphforge-portable-oci",
  "graphforge-provenance",
  "graphforge-rel",
  "graphforge-search",
@@ -2398,6 +2399,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphforge-portable-oci"
+version = "0.5.2"
+dependencies = [
+ "graphforge-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "graphforge-provenance"
 version = "0.5.2"
 dependencies = [
@@ -2480,7 +2493,6 @@ dependencies = [
  "thrift",
  "tokio",
  "unicode-normalization",
- "ureq",
  "uuid",
  "wait-timeout",
 ]

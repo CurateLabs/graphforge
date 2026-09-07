@@ -77,7 +77,7 @@ pub struct PortableV2ImportResult {
 }
 
 /// Publish a verified local portable-v2 package to an OCI registry.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PortableV2OciPublishFacadeRequest {
     /// Verified local package path (bundle).
     pub package_path: PathBuf,
@@ -90,9 +90,9 @@ pub struct PortableV2OciPublishFacadeRequest {
     /// Verifier limits.
     pub limits: graphforge_storage::PortableV2Limits,
     /// Authenticity policy applied after transport.
-    pub authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy,
+    pub authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy,
     /// Optional signature material attached as an OCI referrer.
-    pub signature: Option<graphforge_storage::PortableV2OciSignatureMaterial>,
+    pub signature: Option<graphforge_core::portable::PortableV2OciSignatureMaterial>,
     /// Use plain HTTP (local disposable registries only).
     pub insecure_http: bool,
     /// Caller-owned credential; never logged or persisted.
@@ -100,7 +100,7 @@ pub struct PortableV2OciPublishFacadeRequest {
 }
 
 /// Pull a digest-pinned portable-v2 package from an OCI registry.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PortableV2OciPullFacadeRequest {
     /// Registry host without scheme or credentials.
     pub registry: String,
@@ -115,7 +115,7 @@ pub struct PortableV2OciPullFacadeRequest {
     /// Verifier limits.
     pub limits: graphforge_storage::PortableV2Limits,
     /// Authenticity policy.
-    pub authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy,
+    pub authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy,
     /// Use plain HTTP (local disposable registries only).
     pub insecure_http: bool,
     /// Caller-owned credential; never logged or persisted.
@@ -262,15 +262,16 @@ pub fn verify_portable_v2(
 pub fn publish_portable_v2_oci(
     request: &PortableV2OciPublishFacadeRequest,
     cancelled: Option<&AtomicBool>,
-) -> Result<graphforge_storage::PortableV2OciReference, graphforge_storage::PortableV2Error> {
-    let client = graphforge_storage::HttpOciRegistry::new(
+) -> Result<graphforge_core::portable::PortableV2OciReference, graphforge_storage::PortableV2Error>
+{
+    let client = graphforge_portable_oci::HttpOciRegistry::new(
         &request.registry,
         request.credential.as_deref(),
         request.insecure_http,
     )?;
-    graphforge_storage::publish_portable_v2_oci(
+    crate::portable_oci::publish_portable_v2_oci(
         &client,
-        &graphforge_storage::PortableV2OciPublishRequest {
+        &crate::portable_oci::PortableV2OciPublishRequest {
             package_path: &request.package_path,
             registry: &request.registry,
             repository: &request.repository,
@@ -288,15 +289,16 @@ pub fn publish_portable_v2_oci(
 pub fn pull_portable_v2_oci(
     request: &PortableV2OciPullFacadeRequest,
     cancelled: Option<&AtomicBool>,
-) -> Result<graphforge_storage::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error> {
-    let client = graphforge_storage::HttpOciRegistry::new(
+) -> Result<graphforge_core::portable::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error>
+{
+    let client = graphforge_portable_oci::HttpOciRegistry::new(
         &request.registry,
         request.credential.as_deref(),
         request.insecure_http,
     )?;
-    graphforge_storage::pull_portable_v2_oci(
+    crate::portable_oci::pull_portable_v2_oci(
         &client,
-        &graphforge_storage::PortableV2OciPullRequest {
+        &crate::portable_oci::PortableV2OciPullRequest {
             registry: &request.registry,
             repository: &request.repository,
             reference: &request.reference,
@@ -312,20 +314,22 @@ pub fn pull_portable_v2_oci(
 
 /// Publish/pull against an injected registry backend (local conformance / tests).
 pub fn publish_portable_v2_oci_with_registry(
-    registry: &dyn graphforge_storage::PortableV2OciRegistry,
-    request: &graphforge_storage::PortableV2OciPublishRequest<'_>,
+    registry: &dyn graphforge_portable_oci::PortableV2OciRegistry,
+    request: &crate::portable_oci::PortableV2OciPublishRequest<'_>,
     cancelled: Option<&AtomicBool>,
-) -> Result<graphforge_storage::PortableV2OciReference, graphforge_storage::PortableV2Error> {
-    graphforge_storage::publish_portable_v2_oci(registry, request, cancelled)
+) -> Result<graphforge_core::portable::PortableV2OciReference, graphforge_storage::PortableV2Error>
+{
+    crate::portable_oci::publish_portable_v2_oci(registry, request, cancelled)
 }
 
 /// Pull against an injected registry backend (local conformance / tests).
 pub fn pull_portable_v2_oci_with_registry(
-    registry: &dyn graphforge_storage::PortableV2OciRegistry,
-    request: &graphforge_storage::PortableV2OciPullRequest<'_>,
+    registry: &dyn graphforge_portable_oci::PortableV2OciRegistry,
+    request: &crate::portable_oci::PortableV2OciPullRequest<'_>,
     cancelled: Option<&AtomicBool>,
-) -> Result<graphforge_storage::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error> {
-    graphforge_storage::pull_portable_v2_oci(registry, request, cancelled)
+) -> Result<graphforge_core::portable::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error>
+{
+    crate::portable_oci::pull_portable_v2_oci(registry, request, cancelled)
 }
 
 impl GraphForge {
@@ -1448,16 +1452,16 @@ mod tests {
         )
         .unwrap();
 
-        let registry = graphforge_storage::MemoryOciRegistry::default();
+        let registry = graphforge_portable_oci::MemoryOciRegistry::default();
         let published = publish_portable_v2_oci_with_registry(
             &registry,
-            &graphforge_storage::PortableV2OciPublishRequest {
+            &crate::portable_oci::PortableV2OciPublishRequest {
                 package_path: &bundle,
                 registry: "memory.local",
                 repository: "tests/facade",
                 tag: Some("latest"),
                 limits,
-                authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy::default(),
+                authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy::default(),
                 signature: None,
                 credential: None,
             },
@@ -1467,14 +1471,14 @@ mod tests {
         let destination = root.path().join("pulled.gfpb");
         let pulled = pull_portable_v2_oci_with_registry(
             &registry,
-            &graphforge_storage::PortableV2OciPullRequest {
+            &crate::portable_oci::PortableV2OciPullRequest {
                 registry: "memory.local",
                 repository: "tests/facade",
                 reference: &published.oci_manifest_digest,
                 expected_oci_digest: None,
                 destination: &destination,
                 limits,
-                authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy::default(),
+                authenticity: graphforge_core::portable::PortableV2OciAuthenticityPolicy::default(),
                 credential: None,
             },
             None,
@@ -1483,7 +1487,39 @@ mod tests {
         assert_eq!(pulled.report.package_digest, published.package_digest);
         assert_eq!(
             pulled.signature_state,
-            graphforge_storage::PortableV2OciSignatureState::Absent
+            graphforge_core::portable::PortableV2OciSignatureState::Absent
         );
+    }
+}
+
+impl std::fmt::Debug for PortableV2OciPublishFacadeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortableV2OciPublishFacadeRequest")
+            .field("package_path", &self.package_path)
+            .field("registry", &self.registry)
+            .field("repository", &self.repository)
+            .field("tag", &self.tag)
+            .field("limits", &self.limits)
+            .field("authenticity", &self.authenticity)
+            .field("signature", &self.signature)
+            .field("insecure_http", &self.insecure_http)
+            .field("credential", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PortableV2OciPullFacadeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortableV2OciPullFacadeRequest")
+            .field("registry", &self.registry)
+            .field("repository", &self.repository)
+            .field("reference", &self.reference)
+            .field("expected_oci_digest", &self.expected_oci_digest)
+            .field("destination", &self.destination)
+            .field("limits", &self.limits)
+            .field("authenticity", &self.authenticity)
+            .field("insecure_http", &self.insecure_http)
+            .field("credential", &"[REDACTED]")
+            .finish()
     }
 }

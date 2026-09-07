@@ -155,9 +155,7 @@ pub use graphforge_storage::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
-    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2OciAuthenticityPolicy,
-    PortableV2OciPhase, PortableV2OciProgress, PortableV2OciPullReceipt, PortableV2OciReference,
-    PortableV2OciSignatureMaterial, PortableV2OciSignatureState, PortableV2Output,
+    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2Output,
     PortableV2PackageClass, PortableV2ParticipantId, PortableV2PropertyProjection,
     PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
@@ -20744,3 +20742,13 @@ mod tests {
         assert!(!encoded.contains(project.path().to_string_lossy().as_ref()));
     }
 }
+
+mod portable_oci;
+
+pub use graphforge_core::portable::{
+    PortableV2OciAuthenticityPolicy, PortableV2OciPhase, PortableV2OciProgress,
+    PortableV2OciPullReceipt, PortableV2OciReference, PortableV2OciSignatureMaterial,
+    PortableV2OciSignatureState,
+};
+pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableV2OciRegistry};
+pub use portable_oci::{PortableV2OciPublishRequest, PortableV2OciPullRequest};

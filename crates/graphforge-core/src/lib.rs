@@ -1265,3 +1265,6 @@ mod tests {
         }
     }
 }
+
+/// Neutral portable package contracts.
+pub mod portable;

@@ -14,8 +14,10 @@ SPEC.loader.exec_module(publish_dry_run)
 
 def test_cargo_order_contains_complete_public_surface() -> None:
     order, _source = publish_dry_run.cargo_publish_order()
-    assert len(order) == 19
+    assert len(order) == 20
     assert order[0] == "graphforge-core"
+    assert order.index("graphforge-core") < order.index("graphforge-portable-oci")
+    assert order.index("graphforge-portable-oci") < order.index("graphforge-api")
     assert order.index("graphforge-core") < order.index("graphforge-value")
     assert order.index("graphforge-value") < order.index("graphforge-ir")
     assert order[-1] == "graphforge-cli"

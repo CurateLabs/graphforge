@@ -75,6 +75,8 @@ assert "graphforge-cli" in names
 assert "graphforge-discovery" in names
 assert "graphforge-value" in names
 # Relative order samples
+assert names.index("graphforge-core") < names.index("graphforge-portable-oci")
+assert names.index("graphforge-portable-oci") < names.index("graphforge-api")
 assert names.index("graphforge-core") < names.index("graphforge-value")
 for consumer in ("graphforge-ontology", "graphforge-ir", "graphforge-storage"):
     assert names.index("graphforge-value") < names.index(consumer)
@@ -85,12 +87,12 @@ assert names.index("graphforge-observability") < names.index("graphforge-api")
 
 checked = run("check")
 assert checked.returncode == 0, checked.stderr
-assert "19 crates" in checked.stdout
+assert "20 crates" in checked.stdout
 
 dry = run("dry-run-commands")
 assert dry.returncode == 0, dry.stderr
 commands = [line for line in dry.stdout.splitlines() if line]
-assert len(commands) == 19, commands
+assert len(commands) == 20, commands
 assert any(command.startswith("cargo publish -p graphforge-value ") for command in commands)
 assert any(command.startswith("cargo publish -p graphforge-observability ") for command in commands)
 assert commands[0].startswith("cargo publish -p graphforge-core ")

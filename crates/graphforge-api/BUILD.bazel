@@ -22,6 +22,7 @@ _API_COMPILE_DATA = [
 ]
 
 _API_DEPS = [
+    "//crates/graphforge-portable-oci:graphforge_portable_oci",
     "@crates//:bytes",
     "//crates/graphforge-core:graphforge_core",
         "//crates/graphforge-value:graphforge_value",
