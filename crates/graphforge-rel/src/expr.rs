@@ -138,12 +138,9 @@ pub struct ExprLowerer<'a> {
     /// a single struct column, not a table whose fields are top-level columns.
     /// Empty elsewhere; its length is the current nesting depth.
     elem_struct_cols: Vec<String>,
-    /// The project directory for read-side lowering, when one is attached
-    /// (#1024): lets `nodes(p)` bake a hydrating `cypher_path_nodes` whose
-    /// elements carry labels + the property union discovered from
-    /// `properties/*.parquet`. `None` in schema-only/explain lowering — the
-    /// UDF then keeps its `node_uuid`-only shape.
-    read_target: Option<std::path::PathBuf>,
+    /// Immutable dataset schemas used to describe hydrated `nodes(p)` values.
+    /// Schema-only explanation retains the original UUID-only shape.
+    read_target: Option<graphforge_ir::LoweringSnapshot>,
     /// Wall-clock instant captured ONCE per lowering (lazily, on first use) so all
     /// zero-arg current-time constructors — `date()`/`localtime()`/…/`datetime()`
     /// — in one query fold to the SAME value, making
@@ -262,10 +259,9 @@ impl<'a> ExprLowerer<'a> {
         self
     }
 
-    /// Attach the project directory for read-side lowering, so `nodes(p)` bakes
-    /// a hydrating `cypher_path_nodes` (labels + property union, #1024).
+    /// Attach immutable dataset schemas for the logical `nodes(p)` output.
     #[must_use]
-    pub fn with_read_target(mut self, dir: std::path::PathBuf) -> Self {
+    pub fn with_read_target(mut self, dir: graphforge_ir::LoweringSnapshot) -> Self {
         self.read_target = Some(dir);
         self
     }
@@ -601,8 +597,15 @@ impl<'a> ExprLowerer<'a> {
                         CYPHER_REVERSE.call(vec![arg.clone()])
                     });
                 }
-                resolve_builtin(name, lowered, || self.path_node_hydration())
-                    .ok_or_else(|| LoweringError::UnknownFunction(name.clone()))
+                resolve_builtin(name, lowered, {
+                    let hydration = if name.eq_ignore_ascii_case("_path_nodes") {
+                        self.path_node_hydration()?
+                    } else {
+                        None
+                    };
+                    || hydration
+                })
+                .ok_or_else(|| LoweringError::UnknownFunction(name.clone()))
             }
 
             IrExpr::Parameter(name) => Ok(DfExpr::Placeholder(Placeholder {
@@ -1411,8 +1414,15 @@ impl<'a> ExprLowerer<'a> {
             .iter()
             .map(|&a| self.lower(a))
             .collect::<Result<_, _>>()?;
-        resolve_builtin(name, lowered, || self.path_node_hydration())
-            .ok_or_else(|| LoweringError::UnknownFunction(name.to_string()))
+        resolve_builtin(name, lowered, {
+            let hydration = if name.eq_ignore_ascii_case("_path_nodes") {
+                self.path_node_hydration()?
+            } else {
+                None
+            };
+            || hydration
+        })
+        .ok_or_else(|| LoweringError::UnknownFunction(name.to_string()))
     }
 
     /// Resolve a `date(<arg>)` argument to constant i64 epoch-days when the
@@ -3178,10 +3188,12 @@ impl<'a> ExprLowerer<'a> {
     /// occurrence of a name wins, forced nullable — a node without the column
     /// is NULL). `None` without a read target (schema-only lowering), keeping
     /// the UDF's original `node_uuid`-only shape.
-    fn path_node_hydration(&self) -> Option<PathNodeHydration> {
+    fn path_node_hydration(&self) -> Result<Option<PathNodeHydration>, LoweringError> {
         use datafusion::arrow::datatypes::Field;
-        let dir = self.read_target.as_ref()?;
-        let stems = graphforge_storage::list_property_stems(dir);
+        let Some(dir) = self.read_target.as_ref() else {
+            return Ok(None);
+        };
+        let stems = dir.node_property_stems.clone();
         let mut fields = vec![
             Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
             Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
@@ -3189,8 +3201,12 @@ impl<'a> ExprLowerer<'a> {
         let mut seen: std::collections::HashSet<String> =
             fields.iter().map(|f| f.name().clone()).collect();
         for stem in &stems {
-            let table = graphforge_storage::PropertyTable::open_discovered(dir, stem);
-            for f in table.schema_ref().fields() {
+            let table = dir.node_properties.get(stem).ok_or_else(|| {
+                LoweringError::UnsupportedExpr(format!(
+                    "lowering snapshot missing node property schema for stem {stem}"
+                ))
+            })?;
+            for f in table.fields() {
                 if f.name() == "node_uuid" || !seen.insert(f.name().clone()) {
                     continue;
                 }
@@ -3207,12 +3223,12 @@ impl<'a> ExprLowerer<'a> {
                 .cmp(&right.encode())
                 .then_with(|| left_name.cmp(right_name))
         });
-        Some(PathNodeHydration {
+        Ok(Some(PathNodeHydration {
             dir: None,
             labels_by_type,
             prop_stems: stems,
             fields: fields.into(),
-        })
+        }))
     }
 }
 
@@ -15206,6 +15222,32 @@ mod tests {
             s.contains("var_0.node_uuid"),
             "seed is the uuid column: {s}"
         );
+    }
+
+    #[test]
+    fn path_nodes_rejects_snapshot_missing_discovered_schema() {
+        for name in ["_path_nodes", "_PATH_NODES"] {
+            let mut arena = ExprArena::new();
+            let mut vm = VarMap::new();
+            vm.insert(VarId(0), "var_0");
+            vm.insert(VarId(1), "var_1.rels");
+            let start = arena.push(IrExpr::VarRef(VarId(0)));
+            let rels = arena.push(IrExpr::VarRef(VarId(1)));
+            let id = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![start, rels],
+            });
+            let snapshot = graphforge_ir::LoweringSnapshot {
+                node_property_stems: vec!["missing".into()],
+                ..Default::default()
+            };
+            let error = make_lowerer(&arena, &vm)
+                .with_read_target(snapshot)
+                .lower(id)
+                .unwrap_err();
+            assert!(matches!(error, LoweringError::UnsupportedExpr(ref message)
+            if message == "lowering snapshot missing node property schema for stem missing"));
+        }
     }
 
     /// A 16-byte uuid stand-in: byte `b` repeated.

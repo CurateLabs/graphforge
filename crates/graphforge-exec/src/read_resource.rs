@@ -22,10 +22,15 @@ impl GraphReadContext {
         contract: Option<&graphforge_plan::GraphReadContract>,
     ) -> Result<()> {
         if let Some(contract) = contract {
-            let actual =
-                graphforge_rel::GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())
-                    .map_err(|e| DataFusionError::Plan(e.to_string()))?
-                    .read_contract();
+            let actual = graphforge_rel::GraphPlanLowerer::new(
+                Some(
+                    &graphforge_storage::lowering_snapshot(Some(&self.catalog), None)
+                        .map_err(|e| DataFusionError::Plan(e.to_string()))?,
+                ),
+                self.ontology.as_ref(),
+            )
+            .map_err(|e| DataFusionError::Plan(e.to_string()))?
+            .read_contract();
             if *contract != actual {
                 return Err(DataFusionError::Plan(
                     "GF_READ_RESOURCE_INCOMPATIBLE: logical identities".into(),
@@ -109,8 +114,14 @@ pub(crate) fn bind(
     let contract = resource
         .as_ref()
         .map(|r| {
-            graphforge_rel::GraphPlanLowerer::new(Some(&r.catalog), r.ontology.as_ref())
-                .map(|l| l.read_contract())
+            graphforge_rel::GraphPlanLowerer::new(
+                Some(&graphforge_storage::lowering_snapshot(
+                    Some(&r.catalog),
+                    None,
+                )?),
+                r.ontology.as_ref(),
+            )
+            .map(|l| l.read_contract())
         })
         .transpose()
         .map_err(|e| DataFusionError::Plan(e.to_string()))?;

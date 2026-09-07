@@ -3315,15 +3315,14 @@ impl GraphForge {
             let explained = if needs_writes {
                 graphforge_rel::explain_logical_for_writes(
                     &plan,
-                    Some(&catalog),
+                    &catalog.lowering_snapshot(Some(&self.dir))?,
                     self.ontology.as_ref(),
-                    &self.dir,
                     self.ontology_mode,
                 )
             } else {
                 graphforge_rel::explain_logical_with_catalog(
                     &plan,
-                    Some(&catalog),
+                    Some(&catalog.lowering_snapshot(None)?),
                     self.ontology.as_ref(),
                 )
             };

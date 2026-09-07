@@ -3192,6 +3192,18 @@ impl GraphCatalog {
             )
     }
 
+    /// Retain one inventory while collecting a compilation's schema facts.
+    pub(crate) fn lowering_property_inventory(
+        &self,
+    ) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
+        self.schema
+            .authority
+            .read()
+            .expect("property inventory lock poisoned")
+            .property_inventory
+            .clone()
+    }
+
     /// Canonical routes in this catalog's authenticated inventory.
     #[must_use]
     pub fn property_routes(&self, kind: crate::PropertyRouteKind) -> Vec<String> {

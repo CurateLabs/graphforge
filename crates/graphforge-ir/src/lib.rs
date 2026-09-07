@@ -521,3 +521,6 @@ mod tests {
         assert!(p.nodes.is_empty() && p.edges.is_empty());
     }
 }
+
+pub mod lowering_snapshot;
+pub use lowering_snapshot::LoweringSnapshot;

@@ -455,9 +455,8 @@ async fn mutation_plans_relocate_and_bind_only_selected_write_resources() {
         let lower = |root: &Path| {
             let catalog = GraphCatalog::open(root, None, &rt.lock().unwrap()).unwrap();
             graphforge_rel::GraphPlanLowerer::new_for_writes(
-                Some(&catalog),
+                &graphforge_storage::lowering_snapshot(Some(&catalog), Some(root)).unwrap(),
                 None,
-                root,
                 OntologyMode::Exploratory,
             )
             .unwrap()
