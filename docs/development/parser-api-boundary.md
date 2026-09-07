@@ -45,8 +45,7 @@ same fallible result as execution. Parser display text remains unchanged.
 `BoundAst` remains deferred because binding produces GraphIR directly. Selecting
 `PhysicalPlan` reuses the renderer already used by the full facade explanation;
 it no longer refers to the old parser's unimplemented physical-stage stub. No
-new compiler stage, persisted format, binding fallback, or query behavior is
-introduced.
+new compiler stage, persisted format, or binding fallback is introduced.
 
 ## Verification
 
