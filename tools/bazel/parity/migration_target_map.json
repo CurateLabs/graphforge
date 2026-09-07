@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 122,
+  "cargo_target_count": 123,
   "targets": [
     {
       "package": "graphforge-api",
@@ -1222,6 +1222,16 @@
       "bazel_label": "//crates/graphforge-value:graphforge_value",
       "exception_id": null,
       "notes": "#1011; unit tests `//crates/graphforge-value:graphforge_value_test`"
+    },
+    {
+      "package": "graphforge-portable-oci",
+      "target": "graphforge_portable_oci",
+      "class": "lib",
+      "source": "crates/graphforge-portable-oci/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-portable-oci:graphforge_portable_oci",
+      "exception_id": null,
+      "notes": "#1021; unit tests `//crates/graphforge-portable-oci:graphforge_portable_oci_test`"
     }
   ],
   "exceptions": [

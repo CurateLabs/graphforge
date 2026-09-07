@@ -2155,7 +2155,7 @@ fn reject_destination(p: &Path) -> Result<(), ExportError> {
     Ok(())
 }
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]
-fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     rustix::fs::renameat_with(
         rustix::fs::CWD,
         stage,
@@ -2166,7 +2166,7 @@ fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     Ok(())
 }
 #[cfg(windows)]
-fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     // Windows rename is non-replacing. The destination was also checked before
     // staging; any intervening creation makes this operation fail closed.
     fs::rename(stage, destination)
@@ -2177,7 +2177,7 @@ fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     target_os = "redox",
     windows
 )))]
-fn publish_no_replace(_: &Path, _: &Path) -> std::io::Result<()> {
+pub(crate) fn publish_no_replace(_: &Path, _: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "atomic no-replace publication is unsupported on this platform",

@@ -1,0 +1,6 @@
+"""Portable OCI protocol and transport targets."""
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+exports_files(["Cargo.toml"])
+package(default_visibility = ["//visibility:public"])
+gf_rust_library(name = "graphforge_portable_oci")
+gf_rust_test(name = "graphforge_portable_oci_test", crate = ":graphforge_portable_oci")

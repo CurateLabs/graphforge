@@ -1,5 +1,5 @@
 {
-  "checksum": "a3bfb96f87e7b527bdd568053012b8c6339eaab8c486b53ce519735ff5e61279",
+  "checksum": "04e97f3fc63e6ba232f6ee2a5f5669b86d44d249022a6bf960c7bbed5fff87cc",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13680,6 +13680,64 @@
       ],
       "license_file": "../../LICENSE"
     },
+    "graphforge-portable-oci 0.5.2": {
+      "name": "graphforge-portable-oci",
+      "version": "0.5.2",
+      "package_url": "https://github.com/CurateLabs/graphforge",
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "graphforge_portable_oci",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "graphforge_portable_oci",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "serde 1.0.229",
+              "target": "serde"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
+              "id": "sha2 0.11.0",
+              "target": "sha2"
+            },
+            {
+              "id": "ureq 3.4.0",
+              "target": "ureq"
+            },
+            {
+              "id": "url 2.5.8",
+              "target": "url"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.5.2"
+      },
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "license_file": "../../LICENSE"
+    },
     "graphforge-provenance 0.5.2": {
       "name": "graphforge-provenance",
       "version": "0.5.2",
@@ -13989,10 +14047,6 @@
             {
               "id": "unicode-normalization 0.1.25",
               "target": "unicode_normalization"
-            },
-            {
-              "id": "ureq 3.4.0",
-              "target": "ureq"
             },
             {
               "id": "uuid 1.26.0",
@@ -34372,6 +34426,7 @@
     "graphforge-observability 0.5.2": "crates/graphforge-observability",
     "graphforge-ontology 0.5.2": "crates/graphforge-ontology",
     "graphforge-plan 0.5.2": "crates/graphforge-plan",
+    "graphforge-portable-oci 0.5.2": "crates/graphforge-portable-oci",
     "graphforge-provenance 0.5.2": "crates/graphforge-provenance",
     "graphforge-rel 0.5.2": "crates/graphforge-rel",
     "graphforge-search 0.5.2": "crates/graphforge-search",

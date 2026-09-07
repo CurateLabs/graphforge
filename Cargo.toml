@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/graphforge-core",
+  "crates/graphforge-portable-oci",
   "crates/graphforge-value",
   "crates/graphforge-ast",
   "crates/graphforge-cypher",
