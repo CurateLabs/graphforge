@@ -1211,7 +1211,7 @@ impl GraphForge {
         });
         let binding_catalog = transaction.as_ref().map_or_else(
             || Arc::clone(&self.runtime_catalog),
-            |transaction| transaction.catalog(),
+            graphforge_exec::mutation::MutationTransaction::catalog,
         );
         validate_typed_parameter_binding(
             &ast,
@@ -1332,6 +1332,7 @@ impl GraphForge {
     }
 
     #[allow(clippy::too_many_lines)] // one visibility lock spans execution and publication
+    #[allow(clippy::too_many_arguments)] // keep publication, binding and pre-admitted write context explicit
     fn run_plan_with_publish_and_bindings(
         &self,
         plan: &GraphPlan,
@@ -1389,7 +1390,7 @@ impl GraphForge {
         };
         let working_catalog = transaction.as_ref().map_or_else(
             || Arc::clone(&self.runtime_catalog),
-            |transaction| transaction.catalog(),
+            graphforge_exec::mutation::MutationTransaction::catalog,
         );
         let mut lifecycle = if is_write {
             Some(mutation_transaction::FacadeMutationLifecycle::new(

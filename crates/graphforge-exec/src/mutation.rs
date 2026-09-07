@@ -86,7 +86,6 @@ impl MutationState {
     /// Commit a statement's staged files with the existing topology index and
     /// adjacency-delta participant. Property-only commits do not open a writer.
     pub(crate) fn commit_topology(
-        &mut self,
         staged: graphforge_storage::RewriteBatch,
         writer: &mut graphforge_storage::GraphWriter,
         dir: &std::path::Path,
@@ -148,11 +147,13 @@ pub struct MutationTransaction {
     )>,
     validate_catalog: bool,
     prepared: bool,
-    topology: Option<(
-        graphforge_storage::GraphWriter,
-        HashSet<[u8; 16]>,
-        HashSet<[u8; 16]>,
-    )>,
+    topology: Option<PreparedTopology>,
+}
+
+struct PreparedTopology {
+    writer: graphforge_storage::GraphWriter,
+    deleted_nodes: HashSet<[u8; 16]>,
+    deleted_edges: HashSet<[u8; 16]>,
 }
 
 impl MutationTransaction {
@@ -237,6 +238,7 @@ impl MutationTransaction {
     ///
     /// # Errors
     /// Returns an error if the authenticated property rewrite cannot be staged.
+    #[allow(clippy::implicit_hasher)] // matches the storage SET accumulator contract
     pub fn stage_node_properties(
         &mut self,
         resource: &crate::write_resource::BoundWriteResource,
@@ -310,11 +312,11 @@ impl MutationTransaction {
         self.staged = crate::write_driver::stage_statement(&mut context, resource.directory())?;
         self.prepared = true;
         self.state = context.mutation;
-        self.topology = Some((
-            context.writer,
-            context.pending_node_deletes,
-            context.pending_edge_deletes,
-        ));
+        self.topology = Some(PreparedTopology {
+            writer: context.writer,
+            deleted_nodes: context.pending_node_deletes,
+            deleted_edges: context.pending_edge_deletes,
+        });
         Ok(())
     }
 
@@ -349,10 +351,13 @@ impl MutationTransaction {
         self.admit(resource)?;
         let staged = std::mem::replace(&mut self.staged, graphforge_storage::RewriteBatch::new());
         match &mut self.topology {
-            Some((writer, nodes, edges)) => {
-                self.state
-                    .commit_topology(staged, writer, resource.directory(), nodes, edges)
-            }
+            Some(topology) => MutationState::commit_topology(
+                staged,
+                &mut topology.writer,
+                resource.directory(),
+                &topology.deleted_nodes,
+                &topology.deleted_edges,
+            ),
             None => staged.commit_at(resource.directory()),
         }
     }

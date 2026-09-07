@@ -5011,6 +5011,7 @@ pub struct NodePropertySetCounts {
 
 /// Stage authenticated node properties and report existing-value replacements.
 /// Uses the same before-map required by the rewrite, without another read pass.
+#[allow(clippy::implicit_hasher)] // same execution accumulator contract as the SET wrappers above
 pub fn stage_set_node_properties_authenticated_with_counts(
     staged: &mut RewriteBatch,
     dir: &Path,

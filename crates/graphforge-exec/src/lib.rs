@@ -709,10 +709,11 @@ impl ExecutionPlan for GraphCreateExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        use futures::StreamExt;
+
         self.mutation_health
             .check()
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        use futures::StreamExt;
 
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -1507,10 +1508,11 @@ impl ExecutionPlan for GraphDeleteExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        use futures::StreamExt;
+
         self.mutation_health
             .check()
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        use futures::StreamExt;
 
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -2082,10 +2084,11 @@ impl ExecutionPlan for GraphSetExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        use futures::StreamExt;
+
         self.mutation_health
             .check()
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        use futures::StreamExt;
 
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -2235,10 +2238,11 @@ impl ExecutionPlan for GraphRemoveExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        use futures::StreamExt;
+
         self.mutation_health
             .check()
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        use futures::StreamExt;
 
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
