@@ -131,12 +131,159 @@ fn loaded_view_is_identical_to_scan_build_exploratory_including_wildcard() {
     }
 }
 
+fn write_mixed_relations(dir: &Path) -> Uuid {
+    let mut writer = GraphWriter::open_at(dir, OntologyMode::Exploratory, TS).unwrap();
+    let (a, b) = (new_v7(), new_v7());
+    writer.create_node(a, PERSON).unwrap();
+    writer.create_node(b, PERSON).unwrap();
+    let victim = new_v7();
+    writer.create_edge(victim, "KNOWS", &a, &b).unwrap();
+    writer.create_edge(new_v7(), "KNOWS", &b, &a).unwrap();
+    writer.create_edge(new_v7(), "OWNS", &a, &b).unwrap();
+    writer.flush().unwrap();
+    victim
+}
+
+fn assert_mixed_cardinality(dir: &Path, knows: u64) {
+    let persistent = persistent(dir, OntologyMode::Exploratory);
+    let scanned = scan(dir, OntologyMode::Exploratory);
+    for (relation, expected) in [
+        ("KNOWS", knows),
+        ("OWNS", 1),
+        ("MISSING", 0),
+        ("*", knows + 1),
+    ] {
+        for direction in [Direction::Out, Direction::In, Direction::Undirected] {
+            let expected = if direction == Direction::Undirected {
+                expected * 2
+            } else {
+                expected
+            };
+            assert_eq!(
+                persistent.edge_cardinality(relation, direction).unwrap(),
+                expected,
+                "persistent {relation} {direction:?}"
+            );
+            assert_eq!(
+                scanned.edge_cardinality(relation, direction).unwrap(),
+                expected,
+                "scan {relation} {direction:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_exploratory_cardinality_preserves_filter_without_index() {
+    let dir = TempDir::new().unwrap();
+    write_mixed_relations(dir.path());
+    assert_mixed_cardinality(dir.path(), 2);
+    assert!(!graphforge_storage::adjacency::adjacency_dir(dir.path()).exists());
+}
+
+#[test]
+fn mixed_exploratory_cardinality_preserves_filter_with_stale_index() {
+    let dir = TempDir::new().unwrap();
+    let victim = write_mixed_relations(dir.path());
+    build_adjacency_index(dir.path(), TS).unwrap();
+    let victims = std::collections::HashSet::from([*victim.as_bytes()]);
+    graphforge_storage::delete_edges(dir.path(), &victims).unwrap();
+    let provider = persistent(dir.path(), OntologyMode::Exploratory);
+    assert_eq!(
+        provider.status("KNOWS", Direction::Out),
+        AdjacencyStatus::Miss
+    );
+    assert_mixed_cardinality(dir.path(), 1);
+    assert_eq!(
+        persistent(dir.path(), OntologyMode::Exploratory).status("KNOWS", Direction::Out),
+        AdjacencyStatus::Miss,
+        "counting must neither rebuild nor serve stale manifest cardinality"
+    );
+}
+
+fn write_advisory_mixed_storage(dir: &Path) -> Uuid {
+    let legacy_victim = write_mixed_relations(dir);
+    let mut writer = GraphWriter::open_at(dir, OntologyMode::Advisory, TS).unwrap();
+    let (a, b) = (new_v7(), new_v7());
+    writer.create_node(a, PERSON).unwrap();
+    writer.create_node(b, PERSON).unwrap();
+    writer.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
+    writer.create_edge(new_v7(), "KNOWS", &b, &a).unwrap();
+    writer.create_edge(new_v7(), "OWNS", &a, &b).unwrap();
+    writer.flush().unwrap();
+    legacy_victim
+}
+
+fn assert_advisory_mixed_cardinality(dir: &Path, knows: u64) {
+    let persistent = persistent(dir, OntologyMode::Advisory);
+    let scanned = scan(dir, OntologyMode::Advisory);
+    for (relation, expected) in [
+        ("KNOWS", knows),
+        ("OWNS", 2),
+        ("MISSING", 0),
+        ("*", knows + 2),
+    ] {
+        for direction in [Direction::Out, Direction::In, Direction::Undirected] {
+            let expected = if direction == Direction::Undirected {
+                expected * 2
+            } else {
+                expected
+            };
+            assert_eq!(
+                scanned
+                    .adjacency(relation, direction)
+                    .unwrap()
+                    .edge_entry_count()
+                    .unwrap(),
+                expected,
+                "traversal must include typed and legacy {relation} {direction:?}"
+            );
+            assert_eq!(
+                persistent.edge_cardinality(relation, direction).unwrap(),
+                expected,
+                "persistent {relation} {direction:?}"
+            );
+            assert_eq!(
+                scanned.edge_cardinality(relation, direction).unwrap(),
+                expected,
+                "scan {relation} {direction:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn advisory_mixed_storage_cardinality_preserves_filter_without_index() {
+    let dir = TempDir::new().unwrap();
+    write_advisory_mixed_storage(dir.path());
+    assert_advisory_mixed_cardinality(dir.path(), 4);
+    assert!(!graphforge_storage::adjacency::adjacency_dir(dir.path()).exists());
+}
+
+#[test]
+fn advisory_mixed_storage_cardinality_preserves_filter_with_stale_index() {
+    let dir = TempDir::new().unwrap();
+    let victim = write_advisory_mixed_storage(dir.path());
+    build_adjacency_index(dir.path(), TS).unwrap();
+    let victims = std::collections::HashSet::from([*victim.as_bytes()]);
+    graphforge_storage::delete_edges(dir.path(), &victims).unwrap();
+    assert_eq!(
+        persistent(dir.path(), OntologyMode::Advisory).status("KNOWS", Direction::Out),
+        AdjacencyStatus::Miss
+    );
+    assert_advisory_mixed_cardinality(dir.path(), 3);
+    assert_eq!(
+        persistent(dir.path(), OntologyMode::Advisory).status("KNOWS", Direction::Out),
+        AdjacencyStatus::Miss
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Acceptance 2: missing or stale index falls back with identical results
 // ---------------------------------------------------------------------------
 
 #[test]
-fn absent_capability_dir_is_building_and_scan_builds() {
+fn absent_capability_dir_rebuilds_on_first_access() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
 
@@ -151,10 +298,15 @@ fn absent_capability_dir_is_building_and_scan_builds() {
             .adjacency("KNOWS", Direction::Out)
             .unwrap()
     );
+    assert_eq!(
+        persistent(dir.path(), OntologyMode::Strict).status("KNOWS", Direction::Out),
+        AdjacencyStatus::Hit,
+        "first access must publish the streamed CSR so later queries stay off scan-build"
+    );
 }
 
 #[test]
-fn absent_index_scan_build_is_cached_across_stream_batches() {
+fn absent_index_rebuild_is_cached_across_stream_batches() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     let provider = persistent(dir.path(), OntologyMode::Strict);
@@ -163,13 +315,13 @@ fn absent_index_scan_build_is_cached_across_stream_batches() {
     let second = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
         Arc::ptr_eq(&first, &second),
-        "scan-build must be reused instead of rescanning per input batch"
+        "the published CSR view must be reused instead of rebuilding per input batch"
     );
     provider.revalidate();
     let next_query = provider.adjacency("KNOWS", Direction::Out).unwrap();
     assert!(
-        !Arc::ptr_eq(&first, &next_query),
-        "an absent-index cache must not survive the next query"
+        Arc::ptr_eq(&first, &next_query),
+        "a just-published fresh CSR must survive revalidate at the same generation"
     );
 }
 
@@ -513,6 +665,48 @@ mod session_wiring {
         assert_eq!(rows(&on_stale), rows(&before), "stale fallback identical");
     }
 
+    #[tokio::test]
+    async fn lazy_corrupt_shards_are_repaired_by_fixed_and_variable_traversal() {
+        for query in [
+            "MATCH (a:P {name: 'a'})-[:KNOWS]->(b:P) RETURN 1 AS one",
+            "MATCH (a:P {name: 'a'})-[:KNOWS*1..3]->(b:P) RETURN 1 AS one",
+        ] {
+            let dir = TempDir::new().unwrap();
+            let rc = seeded_chain(dir.path()).await;
+            build_adjacency_index(dir.path(), TS).unwrap();
+            let plan = bind(query, &rc);
+            let expected = session(dir.path(), &rc).execute_plan(&plan).await.unwrap();
+            let mut stack = vec![graphforge_storage::adjacency::adjacency_dir(dir.path())];
+            let mut corrupted = 0;
+            while let Some(path) = stack.pop() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().and_then(|ext| ext.to_str()) == Some("csr") {
+                        std::fs::write(path, b"corrupt payload").unwrap();
+                        corrupted += 1;
+                    }
+                }
+            }
+            assert!(corrupted > 0);
+            let result = session(dir.path(), &rc).execute_plan(&plan).await.unwrap();
+            assert_eq!(
+                result.stats.rows_produced, expected.stats.rows_produced,
+                "{query}"
+            );
+            assert!(result.stats.rows_produced > 0);
+            // Recovery must also repair the reusable provider artifact.
+            let repaired = persistent(dir.path(), OntologyMode::Exploratory);
+            assert_eq!(
+                repaired.adjacency("KNOWS", Direction::Out).unwrap(),
+                scan(dir.path(), OntologyMode::Exploratory)
+                    .adjacency("KNOWS", Direction::Out)
+                    .unwrap()
+            );
+        }
+    }
+
     /// CodeRabbit regression (#824): one long-lived session that reads
     /// (caching a loaded view), writes (bumping the generation), and reads
     /// again must observe the post-write adjacency — successful writes
@@ -598,27 +792,34 @@ async fn zero_hop_traversal_on_hit_never_opens_edge_files() {
 // ---------------------------------------------------------------------------
 
 /// A warm shared provider serves repeat queries from its view cache: after
-/// the first load, even deleting every index file does not affect the second
-/// query (nothing is re-read).
+/// the first row read, even deleting every index file does not affect a repeat
+/// read of that authenticated shard.
 #[test]
 fn shared_provider_serves_second_query_from_cache() {
     let dir = TempDir::new().unwrap();
-    write_diamond(dir.path());
+    let [src, ..] = write_diamond(dir.path());
     build_adjacency_index(dir.path(), TS).unwrap();
 
     let provider = persistent(dir.path(), OntologyMode::Strict);
     let first = provider.adjacency("KNOWS", Direction::Out).unwrap();
 
+    let expected = first.neighbors(src).unwrap().to_vec();
+    assert_eq!(expected.len(), 3);
+
     // Remove the whole index AND the edge files; cache must still serve.
     std::fs::remove_dir_all(dir.path().join("indexes")).unwrap();
     std::fs::remove_dir_all(dir.path().join("topology").join("edges")).unwrap();
     let second = provider.adjacency("KNOWS", Direction::Out).unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(second.neighbors(src).unwrap().to_vec(), expected);
     assert_eq!(first, second);
 
     // revalidate() with an unchanged generation keeps the cache too (the
     // session-construction call must not defeat the amortization).
     provider.revalidate();
     let third = provider.adjacency("KNOWS", Direction::Out).unwrap();
+    assert!(Arc::ptr_eq(&first, &third));
+    assert_eq!(third.neighbors(src).unwrap().to_vec(), expected);
     assert_eq!(first, third);
 }
 
@@ -753,4 +954,31 @@ fn revalidate_picks_up_externally_built_index() {
         provider.status("KNOWS", Direction::Out),
         AdjacencyStatus::Hit
     );
+}
+
+#[test]
+fn cardinality_rejects_same_generation_wrong_manifest_counts() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path());
+    let mut rows = build_adjacency_index(dir.path(), TS).unwrap();
+    let generation = graphforge_storage::read_topology_generation(dir.path()).unwrap();
+    for row in &mut rows {
+        assert_eq!(row.topology_generation, generation);
+        row.edge_count += 100;
+    }
+    graphforge_storage::adjacency::write_manifest(dir.path(), &rows).unwrap();
+    let provider = persistent(dir.path(), OntologyMode::Strict);
+    for relation in ["KNOWS", "*"] {
+        for (direction, expected) in [
+            (Direction::Out, 6),
+            (Direction::In, 6),
+            (Direction::Undirected, 12),
+        ] {
+            assert_eq!(
+                provider.edge_cardinality(relation, direction).unwrap(),
+                expected,
+                "wrong manifest count must not override topology: {relation} {direction:?}"
+            );
+        }
+    }
 }

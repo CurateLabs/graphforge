@@ -152,24 +152,16 @@ impl ShardedCsrIndex {
             if !is_normal_path_component(&shard.file) {
                 return Err(GfError::Storage("invalid CSR shard file name".into()));
             }
-            // Authenticate and structurally validate every bounded shard at
-            // open. Runtime row reads then cannot discover latent corruption
-            // through the infallible traversal interface.
+            // Presence only. Checksum and structural authentication stay on the
+            // first row touch so opening a multi-shard index cannot charge O(E)
+            // process RSS (#1094).
             let shard_path = root.join(&shard.file);
-            let shard_bytes = std::fs::read(&shard_path).map_err(|error| {
+            let metadata = std::fs::metadata(&shard_path).map_err(|error| {
                 GfError::Storage(format!("missing CSR shard {}: {error}", shard.file))
             })?;
-            if sha256_hex(&shard_bytes) != shard.sha256 {
+            if !metadata.is_file() {
                 return Err(GfError::Storage(format!(
-                    "CSR shard checksum mismatch: {}",
-                    shard.file
-                )));
-            }
-            let decoded = read_csr_bytes(&shard_bytes, &shard_path)?;
-            if decoded.node_count() != shard.node_count || decoded.edge_count() != shard.edge_count
-            {
-                return Err(GfError::Storage(format!(
-                    "CSR shard count mismatch: {}",
+                    "missing CSR shard {}",
                     shard.file
                 )));
             }
@@ -2592,6 +2584,28 @@ mod tests {
                 .to_string()
                 .contains("missing CSR shard")
         );
+    }
+
+    #[test]
+    fn opening_sharded_csr_does_not_read_or_decode_shard_payloads() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let published = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(
+            (published.node_count(), published.edge_count()),
+            (expected.node_count(), expected.edge_count())
+        );
+        for record in &published.manifest.shards {
+            std::fs::write(published.root.join(&record.file), b"corrupt-payload").unwrap();
+        }
+        let reader = ShardedCsrIndex::open(&path).expect("open must not decode shard payloads");
+        assert_eq!(
+            (reader.node_count(), reader.edge_count()),
+            (expected.node_count(), expected.edge_count())
+        );
+        assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
     }
 
     #[test]

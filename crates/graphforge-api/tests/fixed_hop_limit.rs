@@ -1119,6 +1119,14 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
     );
     assert_eq!(recount_demand.operator_rss.len(), 1);
     assert_eq!(recount_demand.operator_rss[0].operator, "edge_count");
+    if cfg!(target_os = "linux") {
+        let rss = &recount_demand.operator_rss[0];
+        const RECOUNT_RSS_SLACK: u64 = 32 * 1024 * 1024;
+        assert!(
+            rss.peak_bytes <= rss.before_bytes.saturating_add(RECOUNT_RSS_SLACK),
+            "recount peak RSS must stay off the O(E) decode path at nodes={nodes}: {rss:?}"
+        );
+    }
     println!(
         "recount nodes={nodes} rss={:?}",
         recount_demand.operator_rss

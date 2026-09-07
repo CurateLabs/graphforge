@@ -202,6 +202,113 @@ pub fn read_edges(
     Ok(batches)
 }
 
+/// Count topology edge rows without materializing adjacency or the full graph.
+///
+/// Used by unconstrained `count(r)` so a missing CSR index cannot charge O(E)
+/// RSS (#1094). `"*"` unions every edge file; a Strict name counts its stem.
+/// Advisory named counts include the typed stem and matching legacy exploratory
+/// rows. Shared-file filtering streams only the relation-name column in bounded
+/// batches.
+///
+/// # Errors
+/// Returns [`crate::GfError::Storage`] on an invalid typed stem or footer read
+/// failure, or a malformed relation-name column.
+pub fn count_edge_rows(
+    dir: &Path,
+    rel_name: &str,
+    mode: OntologyMode,
+) -> Result<u64, crate::GfError> {
+    let relation = match mode {
+        OntologyMode::Exploratory => Some("_exploratory"),
+        OntologyMode::Advisory | OntologyMode::Strict if rel_name == "*" => None,
+        OntologyMode::Advisory | OntologyMode::Strict => {
+            let mut comps = Path::new(rel_name).components();
+            let single_normal = matches!(comps.next(), Some(std::path::Component::Normal(_)))
+                && comps.next().is_none();
+            if !single_normal {
+                return Err(crate::GfError::Storage(format!(
+                    "invalid relation name {rel_name:?}: must be a plain file stem"
+                )));
+            }
+            (mode == OntologyMode::Strict).then_some(rel_name)
+        }
+    };
+    let mut total = 0_u64;
+    for (stem, path) in crate::mutator::edge_parquet_files(dir, relation)? {
+        if mode == OntologyMode::Advisory
+            && rel_name != "*"
+            && stem != rel_name
+            && stem != "_exploratory"
+        {
+            continue;
+        }
+        let file = File::open(&path).map_err(|error| {
+            crate::GfError::Storage(format!("open edge footer {}: {error}", path.display()))
+        })?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
+            crate::GfError::Storage(format!("read edge footer {}: {error}", path.display()))
+        })?;
+        if stem == "_exploratory" && rel_name != "*" {
+            let relation_column = builder
+                .schema()
+                .index_of("rel_type_name")
+                .map_err(|error| {
+                    crate::GfError::Storage(format!(
+                        "edge relation column {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            let projection =
+                parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), [relation_column]);
+            let reader = builder
+                .with_projection(projection)
+                .with_batch_size(8_192)
+                .build()
+                .map_err(|error| {
+                    crate::GfError::Storage(format!(
+                        "read edge relations {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            for batch in reader {
+                let batch = batch.map_err(|error| {
+                    crate::GfError::Storage(format!(
+                        "decode edge relations {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let names = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                    .ok_or_else(|| {
+                        crate::GfError::Storage(format!(
+                            "edge rel_type_name is not Utf8: {}",
+                            path.display()
+                        ))
+                    })?;
+                let matching =
+                    u64::try_from(names.iter().filter(|name| *name == Some(rel_name)).count())
+                        .map_err(|_| crate::GfError::Storage("edge count exceeds u64".into()))?;
+                total = total
+                    .checked_add(matching)
+                    .ok_or_else(|| crate::GfError::Storage("edge count exceeds u64".into()))?;
+            }
+            continue;
+        }
+        let rows = u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
+            crate::GfError::Storage(format!(
+                "edge footer row count overflows u64: {}",
+                path.display()
+            ))
+        })?;
+        total = total
+            .checked_add(rows)
+            .ok_or_else(|| crate::GfError::Storage("edge count exceeds u64".into()))?;
+    }
+    Ok(total)
+}
+
 /// Like [`read_edges`] but returns only rows whose `edge_id` is in
 /// `edge_ids` — the traversal's lazy edge-record read (#830): on an adjacency
 /// Hit, only the traversed edges' records are needed, not the whole file.

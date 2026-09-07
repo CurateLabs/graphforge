@@ -239,8 +239,7 @@ impl Adjacency {
     /// depends on this ordering.
     ///
     /// Unknown, isolated, or deleted ids yield an empty row — never a panic.
-    #[must_use]
-    pub fn neighbors(&self, node_id: u64) -> NeighborRow<'_> {
+    pub fn neighbors(&self, node_id: u64) -> Result<NeighborRow<'_>, GfError> {
         self.inner.neighbors(node_id)
     }
 
@@ -301,7 +300,7 @@ impl Adjacency {
                 "bounded ordered traversal requires a directed adjacency view".into(),
             )),
             _ => Ok(self
-                .neighbors(node_id)
+                .neighbors(node_id)?
                 .iter()
                 .skip(skip)
                 .take(limit)
@@ -320,8 +319,11 @@ impl Adjacency {
     /// included only when the callback needs them — callers that skip empty
     /// rows should check [`NeighborRow::is_empty`]). Map backings yield only
     /// keys present in the map.
-    pub(crate) fn for_each_row(&self, mut visit: impl FnMut(u64, NeighborRow<'_>)) {
-        self.inner.for_each_row(&mut visit);
+    pub(crate) fn for_each_row(
+        &self,
+        mut visit: impl FnMut(u64, NeighborRow<'_>),
+    ) -> Result<(), GfError> {
+        self.inner.for_each_row(&mut visit)
     }
 }
 
@@ -388,20 +390,17 @@ impl AdjacencyInner {
         }
     }
 
-    fn neighbors(&self, node_id: u64) -> NeighborRow<'_> {
-        match self {
+    fn neighbors(&self, node_id: u64) -> Result<NeighborRow<'_>, GfError> {
+        Ok(match self {
             Self::Empty => NeighborRow::pairs(&[]),
             Self::Map(map) => NeighborRow::pairs(map.get(&node_id).map_or(&[], Vec::as_slice)),
             Self::Csr(csr) => NeighborRow::csr(csr.row(node_id)),
-            Self::Sharded(csr) => NeighborRow::owned(
-                csr.row(node_id)
-                    .expect("authenticated immutable CSR shard changed after open"),
-            ),
+            Self::Sharded(csr) => NeighborRow::owned(csr.row(node_id)?),
             Self::ShardedOverlay { base, replaced, .. } => {
-                NeighborRow::owned(replaced.get(&node_id).cloned().unwrap_or_else(|| {
-                    base.row(node_id)
-                        .expect("authenticated immutable CSR shard changed after open")
-                }))
+                NeighborRow::owned(match replaced.get(&node_id) {
+                    Some(row) => row.clone(),
+                    None => base.row(node_id)?,
+                })
             }
             Self::Overlay(overlay) => match overlay.row(node_id) {
                 graphforge_storage::adjacency_delta::OverlayRow::Base(row) => NeighborRow::csr(row),
@@ -410,9 +409,9 @@ impl AdjacencyInner {
                 }
             },
             Self::Undirected { out, inbound } => {
-                merge_undirected_row(&out.neighbors(node_id), &inbound.neighbors(node_id))
+                merge_undirected_row(&out.neighbors(node_id)?, &inbound.neighbors(node_id)?)
             }
-        }
+        })
     }
 
     fn backing(&self) -> AdjacencyBacking {
@@ -465,7 +464,7 @@ impl AdjacencyInner {
         }
     }
 
-    fn for_each_row(&self, visit: &mut dyn FnMut(u64, NeighborRow<'_>)) {
+    fn for_each_row(&self, visit: &mut dyn FnMut(u64, NeighborRow<'_>)) -> Result<(), GfError> {
         match self {
             Self::Empty => {}
             Self::Map(map) => {
@@ -480,46 +479,51 @@ impl AdjacencyInner {
             }
             Self::Sharded(csr) => {
                 for node_id in 0..csr.node_count() {
-                    visit(node_id, self.neighbors(node_id));
+                    visit(node_id, self.neighbors(node_id)?);
                 }
             }
             Self::Overlay(overlay) => {
                 for node_id in 0..overlay.node_extent {
-                    visit(node_id, self.neighbors(node_id));
+                    visit(node_id, self.neighbors(node_id)?);
                 }
             }
             Self::ShardedOverlay { node_extent, .. } => {
                 for node_id in 0..*node_extent {
-                    visit(node_id, self.neighbors(node_id));
+                    visit(node_id, self.neighbors(node_id)?);
                 }
             }
             Self::Undirected { out, inbound } => {
                 let extent = out.node_extent().max(inbound.node_extent());
                 for node_id in 0..extent {
-                    visit(node_id, self.neighbors(node_id));
+                    visit(node_id, self.neighbors(node_id)?);
                 }
             }
         }
+        Ok(())
     }
 }
 
 impl PartialEq for Adjacency {
     fn eq(&self, other: &Self) -> bool {
-        fn collect(view: &Adjacency) -> Vec<(u64, Vec<(u64, u64)>)> {
+        type Rows = Vec<(u64, Vec<(u64, u64)>)>;
+        fn collect(view: &Adjacency) -> Result<Rows, GfError> {
             let mut rows = Vec::new();
             view.for_each_row(|node_id, row| {
                 if !row.is_empty() {
                     rows.push((node_id, row.to_vec()));
                 }
-            });
+            })?;
             rows.sort_unstable_by_key(|(node_id, _)| *node_id);
-            rows
+            Ok(rows)
         }
-        collect(self) == collect(other)
+        match (collect(self), collect(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
     }
 }
 
-impl Eq for Adjacency {}
+// Corrupt views are not equal, including to themselves; do not implement Eq.
 
 /// Merge out and in rows with ascending `edge_id` and **out before in on ties**.
 fn merge_undirected_row<'a>(out: &NeighborRow<'a>, inbound: &NeighborRow<'a>) -> NeighborRow<'a> {
@@ -566,8 +570,106 @@ pub trait AdjacencyProvider: Send + Sync {
         direction: Direction,
     ) -> Result<Arc<Adjacency>, GfError>;
 
+    /// Repair a failed index row read. Other providers preserve the original error.
+    fn repair_adjacency(
+        &self,
+        _rel_type_name: &str,
+        _direction: Direction,
+        error: GfError,
+    ) -> Result<Arc<Adjacency>, GfError> {
+        Err(error)
+    }
+
     /// How [`adjacency`](Self::adjacency) for the same key would be served.
     fn status(&self, rel_type_name: &str, direction: Direction) -> AdjacencyStatus;
+
+    /// Cardinality of adjacency entries without opening shard payloads.
+    ///
+    /// The default loads the view. Persistent indexes should read the stamped
+    /// manifest count so unconstrained `count(r)` cannot charge O(E) RSS.
+    fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
+        self.adjacency(rel_type_name, direction)?.edge_entry_count()
+    }
+}
+
+/// Query-local row access: only a failed index read can trigger one repair.
+/// The replacement view is retained so later rows do not reopen the bad artifact.
+pub(crate) struct AdjacencyReader<'a> {
+    provider: &'a dyn AdjacencyProvider,
+    relation: &'a str,
+    direction: Direction,
+    view: Arc<Adjacency>,
+    repair_attempted: bool,
+}
+
+impl<'a> AdjacencyReader<'a> {
+    pub(crate) fn new(
+        provider: &'a dyn AdjacencyProvider,
+        relation: &'a str,
+        direction: Direction,
+    ) -> Result<Self, GfError> {
+        Ok(Self {
+            provider,
+            relation,
+            direction,
+            view: provider.adjacency(relation, direction)?,
+            repair_attempted: false,
+        })
+    }
+
+    pub(crate) fn node_extent(&self) -> u64 {
+        self.view.node_extent()
+    }
+
+    fn read<T>(&mut self, read: impl Fn(&Adjacency) -> Result<T, GfError>) -> Result<T, GfError> {
+        match read(&self.view) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if self.repair_attempted {
+                    return Err(error);
+                }
+                self.repair_attempted = true;
+                // These closures only perform adjacency row reads. No query
+                // work or emitted output is retried, and repair failure propagates.
+                self.view = self
+                    .provider
+                    .repair_adjacency(self.relation, self.direction, error)?;
+                read(&self.view)
+            }
+        }
+    }
+
+    /// Consume a successfully authenticated row once, preserving borrowed
+    /// map/legacy rows and moving no full-row allocation across this boundary.
+    pub(crate) fn with_neighbors<T>(
+        &mut self,
+        node: u64,
+        visit: impl FnOnce(NeighborRow<'_>) -> T,
+    ) -> Result<T, GfError> {
+        let error = match self.view.neighbors(node) {
+            Ok(row) => return Ok(visit(row)),
+            Err(error) => error,
+        };
+        if self.repair_attempted {
+            return Err(error);
+        }
+        self.repair_attempted = true;
+        self.view = self
+            .provider
+            .repair_adjacency(self.relation, self.direction, error)?;
+        Ok(visit(self.view.neighbors(node)?))
+    }
+    pub(crate) fn degree(&mut self, node: u64) -> Result<u64, GfError> {
+        self.read(|view| view.degree(node))
+    }
+    pub(crate) fn neighbor_chunk(
+        &mut self,
+        node: u64,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Vec<(u64, u64)>, GfError> {
+        self.read(|view| view.neighbor_chunk(node, skip, limit))
+    }
 }
 
 /// Scan-build provider: `graphforge_storage::read_edges` + in-memory build on every
@@ -610,6 +712,25 @@ impl AdjacencyProvider for ScanBuildAdjacencyProvider {
     fn status(&self, _rel_type_name: &str, _direction: Direction) -> AdjacencyStatus {
         AdjacencyStatus::Building
     }
+
+    fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
+        footer_edge_cardinality(&self.dir, rel_type_name, self.mode, direction)
+    }
+}
+
+/// Directed `count(r)` is the stored edge-row count. Undirected views expose
+/// each stored edge on both the out and in sides.
+fn footer_edge_cardinality(
+    dir: &std::path::Path,
+    rel_type_name: &str,
+    mode: OntologyMode,
+    direction: Direction,
+) -> Result<u64, GfError> {
+    let rows = graphforge_storage::count_edge_rows(dir, rel_type_name, mode)?;
+    Ok(match direction {
+        Direction::Out | Direction::In => rows,
+        Direction::Undirected => rows.saturating_mul(2),
+    })
 }
 
 /// Build `node_id -> [(edge_id, neighbour_node_id)]` honouring direction and,
@@ -950,9 +1071,11 @@ impl PersistentAdjacencyProvider {
     /// status/adjacency snapshot agreement — is untouched.
     ///
     /// Drops the memoized state and view cache when: the prior read was
-    /// `Unreadable` (always retry — rare and cheap), the index was `Absent`
-    /// (scan-built views are query-scoped), or the observed generation no
-    /// longer matches the counter.
+    /// `Unreadable` (always retry — rare and cheap), the index was still
+    /// `Absent` (no capability dir yet), or the observed generation no
+    /// longer matches the counter. A first-access rebuild promotes Absent
+    /// to Ready, so the published CSR survives revalidate at the same
+    /// generation (#1094).
     pub fn revalidate(&self) {
         let mut state = self.state.lock().expect("adjacency state lock");
         let drop_state = match state.as_ref() {
@@ -1038,6 +1161,29 @@ fn sharded_overlay_rows(
 }
 
 impl AdjacencyProvider for PersistentAdjacencyProvider {
+    fn repair_adjacency(
+        &self,
+        rel_type_name: &str,
+        direction: Direction,
+        error: GfError,
+    ) -> Result<Arc<Adjacency>, GfError> {
+        if !matches!(error, GfError::Storage(_)) {
+            return Err(error);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| {
+                i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+            });
+        // Unlike initial index admission, failed lazy reads must not hide a
+        // failed rebuild behind scan-build. Perform one rebuild and one load.
+        let rows = build_adjacency_index(&self.dir, now)?;
+        let stem = Self::stem_for(rel_type_name);
+        let view = self.load(&stem, direction, &rows, &[])?;
+        self.invalidate();
+        Ok(self.cache_view(&stem, direction, view))
+    }
+
     fn adjacency(
         &self,
         rel_type_name: &str,
@@ -1053,7 +1199,14 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             return Ok(Arc::clone(view));
         }
         match self.state() {
-            IndexState::Absent | IndexState::Unreadable => {
+            IndexState::Absent => {
+                // Host-scale projects never create `indexes/adjacency/` during
+                // ingest. Scan-building that first request charges O(E) RSS and
+                // fails the S18→S19 plateau gate (#1094). Publish the streamed
+                // CSR once, then serve it; rebuild failure still scan-builds.
+                self.rebuild_and_serve(rel_type_name, &stem, direction)
+            }
+            IndexState::Unreadable => {
                 // A streaming ExpandExec may request the same view once per
                 // input batch. Scan-build exactly once per session/query and
                 // cache it just like a CSR view; writes/revalidation clear the
@@ -1118,6 +1271,57 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             }
         }
     }
+
+    fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
+        let stem = Self::stem_for(rel_type_name);
+        match self.state() {
+            IndexState::Ready {
+                fresh: true,
+                rows,
+                deltas,
+                ..
+            } if deltas.is_empty() && Self::rows_cover(&rows, &stem, direction) => {
+                // Preserve load()'s torn-manifest guard without decoding any
+                // shard payload. A legacy or disagreeing index counts the
+                // authoritative topology instead.
+                let relevant = rows.iter().filter(|row| {
+                    row.relation_type == stem
+                        && match direction {
+                            Direction::Out => row.direction == csr::Direction::Out,
+                            Direction::In => row.direction == csr::Direction::In,
+                            Direction::Undirected => true,
+                        }
+                });
+                for row in relevant {
+                    let path = csr::csr_path(&self.dir, &stem, row.direction);
+                    if !ShardedCsrIndex::open(&path).is_ok_and(|index| {
+                        index.node_count() == row.node_count && index.edge_count() == row.edge_count
+                    }) {
+                        return footer_edge_cardinality(
+                            &self.dir,
+                            rel_type_name,
+                            self.scan.mode,
+                            direction,
+                        );
+                    }
+                }
+                let total = |wanted: csr::Direction| {
+                    rows.iter()
+                        .filter(|row| row.relation_type == stem && row.direction == wanted)
+                        .map(|row| row.edge_count)
+                        .sum::<u64>()
+                };
+                Ok(match direction {
+                    Direction::Out => total(csr::Direction::Out),
+                    Direction::In => total(csr::Direction::In),
+                    Direction::Undirected => {
+                        total(csr::Direction::Out).saturating_add(total(csr::Direction::In))
+                    }
+                })
+            }
+            _ => footer_edge_cardinality(&self.dir, rel_type_name, self.scan.mode, direction),
+        }
+    }
 }
 
 /// Undirected CSR pair without materializing a merged hash map (#340).
@@ -1175,16 +1379,16 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let out = provider.adjacency("KNOWS", Direction::Out).unwrap();
         // a has three outgoing entries: a→b, a→c, then the parallel a→b.
-        assert_eq!(out.neighbors(a).len(), 3);
+        assert_eq!(out.neighbors(a).unwrap().len(), 3);
         // The self-loop is one Out entry under d...
-        assert_eq!(out.neighbors(d).to_vec(), vec![(6, d)]);
+        assert_eq!(out.neighbors(d).unwrap().to_vec(), vec![(6, d)]);
         // ...and two Undirected entries under d (src-keyed + dst-keyed), after
         // the two incoming diamond edges b→d, c→d.
         let undirected = provider.adjacency("KNOWS", Direction::Undirected).unwrap();
-        assert_eq!(undirected.neighbors(d).len(), 4);
+        assert_eq!(undirected.neighbors(d).unwrap().len(), 4);
         let in_view = provider.adjacency("KNOWS", Direction::In).unwrap();
         // b's incoming: a→b and the parallel a→b.
-        assert_eq!(in_view.neighbors(b).to_vec(), vec![(1, a), (5, a)]);
+        assert_eq!(in_view.neighbors(b).unwrap().to_vec(), vec![(1, a), (5, a)]);
     }
 
     /// `KNOWS` and `OWNS` rows share `_exploratory.parquet`; the rel filter
@@ -1206,7 +1410,7 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert_eq!(
-            view.neighbors(ids[0]).to_vec(),
+            view.neighbors(ids[0]).unwrap().to_vec(),
             vec![(1, ids[1])],
             "OWNS row excluded"
         );
@@ -1229,7 +1433,7 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("*", Direction::Out).unwrap();
         assert_eq!(
-            view.neighbors(ids[0]).to_vec(),
+            view.neighbors(ids[0]).unwrap().to_vec(),
             vec![(1, ids[1]), (2, ids[2])],
             "wildcard skips the rel filter"
         );
@@ -1258,7 +1462,7 @@ mod tests {
         let view = provider.adjacency("*", Direction::Out).unwrap();
         // Both relations' edges appear (KNOWS a→b, OWNS a→c), unioned across the
         // two per-relation files — no longer the pre-#823 empty view.
-        let mut got = view.neighbors(ids[0]).to_vec();
+        let mut got = view.neighbors(ids[0]).unwrap().to_vec();
         got.sort_unstable();
         assert_eq!(
             got,
@@ -1295,9 +1499,12 @@ mod tests {
         let provider =
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
-        assert!(view.neighbors(ids[1]).is_empty(), "deleted id yields empty");
+        assert!(
+            view.neighbors(ids[1]).unwrap().is_empty(),
+            "deleted id yields empty"
+        );
         assert_eq!(
-            view.neighbors(ids[2]).to_vec(),
+            view.neighbors(ids[2]).unwrap().to_vec(),
             vec![(3, ids[3])],
             "survivor intact"
         );
@@ -1310,7 +1517,7 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert!(view.is_empty());
-        assert!(view.neighbors(1).is_empty());
+        assert!(view.neighbors(1).unwrap().is_empty());
     }
 
     /// Neighbor order is edge-file row order — BFS emission order depends on
@@ -1335,7 +1542,7 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert_eq!(
-            view.neighbors(hub_id).to_vec(),
+            view.neighbors(hub_id).unwrap().to_vec(),
             vec![(1, spoke_ids[0]), (2, spoke_ids[1]), (3, spoke_ids[2])],
             "entries in edge-file row order"
         );
@@ -1387,7 +1594,7 @@ mod tests {
             neighbor_ids: vec![2],
         };
         let view = merge_undirected(out, inbound);
-        assert_eq!(view.neighbors(0).to_vec(), vec![(7, 1), (7, 2)]);
+        assert_eq!(view.neighbors(0).unwrap().to_vec(), vec![(7, 1), (7, 2)]);
         assert_eq!(view.base_csr_entries_expanded(), 0);
     }
 
@@ -1406,5 +1613,201 @@ mod tests {
         assert_eq!(AdjacencyStatus::Building.as_str(), "building");
         assert_eq!(AdjacencyStatus::Hit.as_str(), "hit");
         assert_eq!(AdjacencyStatus::Miss.as_str(), "miss");
+    }
+
+    fn overwrite_sharded_csr_payloads(project: &Path) -> usize {
+        let mut overwritten = 0;
+        let mut stack = vec![csr::adjacency_dir(project)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("csr") {
+                    continue;
+                }
+                std::fs::write(&path, b"corrupt-payload").unwrap();
+                overwritten += 1;
+            }
+        }
+        overwritten
+    }
+
+    #[test]
+    fn persistent_edge_cardinality_uses_parquet_footers_when_index_is_absent() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        assert!(
+            !csr::adjacency_dir(dir.path()).exists(),
+            "diamond fixture must start without an adjacency index"
+        );
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        assert_eq!(
+            provider.edge_cardinality("KNOWS", Direction::Out).unwrap(),
+            6
+        );
+        assert_eq!(provider.edge_cardinality("*", Direction::Out).unwrap(), 6);
+        assert!(
+            !csr::adjacency_dir(dir.path()).exists(),
+            "count(r) must not publish or decode an adjacency index"
+        );
+    }
+
+    #[test]
+    fn persistent_edge_cardinality_does_not_read_or_decode_shard_payloads() {
+        let dir = TempDir::new().unwrap();
+        let [src, ..] = write_diamond(dir.path());
+        let rows = build_adjacency_index(dir.path(), TS).unwrap();
+        let expected = rows
+            .iter()
+            .filter(|row| row.relation_type == "KNOWS" && row.direction == csr::Direction::Out)
+            .map(|row| row.edge_count)
+            .sum::<u64>();
+        assert!(expected > 0, "diamond fixture must stamp a KNOWS out count");
+        assert!(
+            overwrite_sharded_csr_payloads(dir.path()) > 0,
+            "fixture must publish sharded CSR payloads"
+        );
+
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        assert_eq!(
+            provider.edge_cardinality("KNOWS", Direction::Out).unwrap(),
+            expected
+        );
+        assert_eq!(
+            provider.edge_cardinality("*", Direction::Out).unwrap(),
+            expected
+        );
+
+        let path = csr::csr_path(dir.path(), "KNOWS", csr::Direction::Out);
+        let reader = ShardedCsrIndex::open(&path).expect("open must not decode shard payloads");
+        assert_eq!(reader.edge_count(), expected);
+        assert!(
+            reader
+                .row(src)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum"),
+            "row() authenticates the payload after open"
+        );
+
+        let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        assert_eq!(view.edge_entry_count().unwrap(), expected);
+        assert!(
+            view.degree(src)
+                .unwrap_err()
+                .to_string()
+                .contains("checksum"),
+            "first row touch fails checksum; cardinality must not require it"
+        );
+    }
+    #[test]
+    fn lazy_index_reads_repair_corrupt_shards() {
+        for operation in 0..4 {
+            let dir = TempDir::new().unwrap();
+            let [src, ..] = write_diamond(dir.path());
+            build_adjacency_index(dir.path(), TS).unwrap();
+            assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
+            let provider =
+                PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+            let corrupt = provider.adjacency("KNOWS", Direction::Out).unwrap();
+            assert!(corrupt.neighbors(src).is_err());
+            assert_ne!(
+                corrupt.as_ref(),
+                corrupt.as_ref(),
+                "corrupt views are never valid equality evidence"
+            );
+            let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
+            match operation {
+                0 => assert_eq!(reader.with_neighbors(src, |row| row.len()).unwrap(), 3),
+                1 => assert_eq!(reader.degree(src).unwrap(), 3),
+                2 => assert_eq!(reader.neighbor_chunk(src, 1, 1).unwrap().len(), 1),
+                _ => {
+                    let graph = crate::algorithm_graph::export_adjacency(
+                        &provider,
+                        dir.path(),
+                        OntologyMode::Strict,
+                        crate::algorithm_graph::AdjacencySelection {
+                            label: None,
+                            via: "KNOWS",
+                            direction: Direction::Out,
+                            weight: None,
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(graph.neighbors(src).len(), 3);
+                }
+            }
+            let repaired = provider.adjacency("KNOWS", Direction::Out).unwrap();
+            assert_eq!(repaired.neighbors(src).unwrap().len(), 3);
+            if operation < 3 {
+                assert!(Arc::ptr_eq(&reader.view, &repaired));
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_index_read_propagates_failed_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let [src, ..] = write_diamond(dir.path());
+        build_adjacency_index(dir.path(), TS).unwrap();
+        assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
+        // Topology corruption makes the actual rebuild fail; it cannot be
+        // hidden as a successful empty row or a successful scan fallback.
+        std::fs::write(
+            dir.path().join("topology/edges/KNOWS.parquet"),
+            b"corrupt topology",
+        )
+        .unwrap();
+        let error = reader.with_neighbors(src, |row| row.len()).unwrap_err();
+        assert!(
+            !error.to_string().contains("CSR shard checksum"),
+            "must report the rebuild failure: {error}"
+        );
+        assert!(
+            reader.view.neighbors(src).is_err(),
+            "failed repair must not replace the view with fabricated data"
+        );
+    }
+    #[test]
+    fn row_callback_borrows_high_degree_map_without_copying() {
+        let dir = TempDir::new().unwrap();
+        let provider =
+            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let entries: Vec<_> = (0..65_536).map(|id| (id, id + 1)).collect();
+        let original = entries.as_ptr();
+        let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
+        reader.view = Arc::new(Adjacency {
+            inner: AdjacencyInner::Map(HashMap::from([(1, entries)])),
+        });
+        let mut visits = 0;
+        for _ in 0..2 {
+            let first = reader
+                .with_neighbors(1, |row| {
+                    visits += 1;
+                    let NeighborRowKind::Pairs(entries) = row.kind else {
+                        panic!("healthy map rows must remain borrowed");
+                    };
+                    assert_eq!(
+                        entries.as_ptr(),
+                        original,
+                        "a small LIMIT must not clone the entire degree-sized row"
+                    );
+                    entries[0]
+                })
+                .unwrap();
+            assert_eq!(first, (0, 1));
+        }
+        assert_eq!(visits, 2, "each successful row is consumed exactly once");
     }
 }

@@ -407,7 +407,7 @@ pub use property_overlay::{
 pub mod catalog;
 pub use catalog::{
     AdmittedSourceFile, EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable,
-    TypedEdgeTable, UnionEdgeTable, list_edge_property_stems, list_property_stems,
+    TypedEdgeTable, UnionEdgeTable, count_edge_rows, list_edge_property_stems, list_property_stems,
     node_property_files, node_property_source_files, node_property_source_fragments,
     node_topology_present, read_edge_properties, read_edge_properties_projected, read_edges,
     read_edges_filtered, read_edges_filtered_observed, read_edges_filtered_projected_observed,

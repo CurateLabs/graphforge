@@ -682,7 +682,8 @@ pub(crate) fn export_adjacency(
     mode: OntologyMode,
     selection: AdjacencySelection<'_>,
 ) -> Result<AdjacencyGraph, GfError> {
-    let adjacency = provider.adjacency(selection.via, selection.direction)?;
+    let mut adjacency =
+        crate::adjacency::AdjacencyReader::new(provider, selection.via, selection.direction)?;
     let (node_ids, node_uuid_by_id) = selected_nodes(dir, selection.label)?;
     let selected: HashSet<u64> = node_ids.iter().copied().collect();
 
@@ -691,12 +692,14 @@ pub(crate) fn export_adjacency(
     let mut raw = Vec::new();
     let mut edge_ids = HashSet::new();
     for &node_id in &node_ids {
-        for (edge_id, neighbor_id) in adjacency.neighbors(node_id).iter() {
-            if selected.contains(&neighbor_id) {
-                raw.push((node_id, edge_id, neighbor_id));
-                edge_ids.insert(edge_id);
+        adjacency.with_neighbors(node_id, |neighbors| {
+            for (edge_id, neighbor_id) in neighbors.iter() {
+                if selected.contains(&neighbor_id) {
+                    raw.push((node_id, edge_id, neighbor_id));
+                    edge_ids.insert(edge_id);
+                }
             }
-        }
+        })?;
     }
     raw.sort_unstable();
 

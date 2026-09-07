@@ -248,10 +248,12 @@ impl ExecutionPlan for OrderedOneHopExec {
             )));
         }
         // Inbound view: destinations ordered by node id, multiplicity = in-degree.
-        let inbound = self
-            .provider
-            .adjacency(&self.rel_type_name, Direction::In)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let mut inbound = crate::adjacency::AdjacencyReader::new(
+            self.provider.as_ref(),
+            &self.rel_type_name,
+            Direction::In,
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let node_extent = inbound.node_extent();
 
         let mut remaining = self.fetch;

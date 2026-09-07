@@ -262,10 +262,12 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
                 "OrderedTwoHopPathCountExec only has partition 0, got {partition}"
             )));
         }
-        let inbound = self
-            .provider
-            .adjacency(&self.rel_type_name, Direction::In)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let mut inbound = crate::adjacency::AdjacencyReader::new(
+            self.provider.as_ref(),
+            &self.rel_type_name,
+            Direction::In,
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let node_extent = inbound.node_extent();
 
         let mut remaining = self.fetch;
@@ -278,7 +280,7 @@ impl ExecutionPlan for OrderedTwoHopPathCountExec {
             }
             demand::record_adjacency_row(self.capture_epoch, 1);
             let (path_count, examined) = count_two_hop_paths_to(
-                &inbound,
+                &mut inbound,
                 destination,
                 self.require_edge_disjoint,
                 remaining,
@@ -327,7 +329,7 @@ fn usize_from_u64(value: u64) -> usize {
 }
 
 fn count_two_hop_paths_to(
-    inbound: &crate::Adjacency,
+    inbound: &mut crate::adjacency::AdjacencyReader<'_>,
     destination: u64,
     require_edge_disjoint: bool,
     remaining: usize,

@@ -2539,14 +2539,15 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     let src_ids = u64_column(&input, cfg.src_col_idx)?;
 
     // --- Obtain the directed adjacency the traversal needs (#762). ---
-    let adjacency = cfg.provider.adjacency(&cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency =
+        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
 
     // --- BFS per source row, with per-path edge deduplication. ---
     // Run the traversal BEFORE any edge-file read: the BFS needs only the
     // adjacency view, and knowing the traversed edge ids lets the
     // relationship-list read below fetch exactly those rows (#830) instead of
     // scanning the whole file.
-    let emissions = bfs_emit(cfg, &adjacency, src_ids);
+    let emissions = bfs_emit(cfg, &mut adjacency, src_ids)?;
     // No matched paths → empty output under the planned schema. Avoid assembling
     // take-columns from empty input/node batches: under DataFusion 54 an empty
     // seed can still produce wide intermediate schemas that disagree with
@@ -2637,9 +2638,9 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
 /// edge list); extension stops once `max_hops` is reached.
 fn bfs_emit(
     cfg: &ExpandConfig,
-    adjacency: &Adjacency,
+    adjacency: &mut adjacency::AdjacencyReader<'_>,
     src_ids: &arrow::array::UInt64Array,
-) -> Vec<(usize, u64, Vec<u64>)> {
+) -> Result<Vec<(usize, u64, Vec<u64>)>, GfError> {
     use std::collections::{HashSet, VecDeque};
 
     let mut emissions: Vec<(usize, u64, Vec<u64>)> = Vec::new();
@@ -2663,24 +2664,26 @@ fn bfs_emit(
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {
             continue;
         }
-        for (edge_id, next) in adjacency.neighbors(p.node).iter() {
-            if p.visited_edges.contains(&edge_id) {
-                continue; // relationship isomorphism: no edge twice per path
+        adjacency.with_neighbors(p.node, |neighbors| {
+            for (edge_id, next) in neighbors.iter() {
+                if p.visited_edges.contains(&edge_id) {
+                    continue; // relationship isomorphism: no edge twice per path
+                }
+                let mut visited = p.visited_edges.clone();
+                visited.insert(edge_id);
+                let mut edge_path = p.edge_path.clone();
+                edge_path.push(edge_id);
+                queue.push_back(PathState {
+                    node: next,
+                    visited_edges: visited,
+                    edge_path,
+                    hops: p.hops + 1,
+                    input_row: p.input_row,
+                });
             }
-            let mut visited = p.visited_edges.clone();
-            visited.insert(edge_id);
-            let mut edge_path = p.edge_path.clone();
-            edge_path.push(edge_id);
-            queue.push_back(PathState {
-                node: next,
-                visited_edges: visited,
-                edge_path,
-                hops: p.hops + 1,
-                input_row: p.input_row,
-            });
-        }
+        })?;
     }
-    emissions
+    Ok(emissions)
 }
 
 /// The public identity of one edge, for the edge-list column (#709). UUIDs +
@@ -3697,7 +3700,8 @@ fn expand_single_hop_chunk(
 
     // The adjacency view: directional for Out/In, merged for Undirected
     // (dedup per input row happens in the emit pass below).
-    let adjacency = cfg.provider.adjacency(&cfg.rel_type_name, cfg.direction)?;
+    let mut adjacency =
+        adjacency::AdjacencyReader::new(cfg.provider.as_ref(), &cfg.rel_type_name, cfg.direction)?;
 
     // Pass 1: walk the frontier collecting (input row, edge_id, neighbor)
     // triples and the distinct traversed edge ids, so the edge read below
@@ -3714,26 +3718,27 @@ fn expand_single_hop_chunk(
             position.seen_edges.clear();
             continue;
         };
-        let neighbors = adjacency.neighbors(src);
-        while position.neighbor_offset < neighbors.len() && triples.len() < max_output {
-            let (edge_id, neighbor) = neighbors
-                .get(position.neighbor_offset)
-                .expect("neighbor_offset < len");
-            position.neighbor_offset += 1;
-            if matches!(cfg.direction, Direction::Undirected)
-                && !position.seen_edges.insert(edge_id)
-            {
-                continue;
+        adjacency.with_neighbors(src, |neighbors| {
+            while position.neighbor_offset < neighbors.len() && triples.len() < max_output {
+                let (edge_id, neighbor) = neighbors
+                    .get(position.neighbor_offset)
+                    .expect("neighbor_offset < len");
+                position.neighbor_offset += 1;
+                if matches!(cfg.direction, Direction::Undirected)
+                    && !position.seen_edges.insert(edge_id)
+                {
+                    continue;
+                }
+                triples.push((row, edge_id, neighbor));
+                traversed.insert(edge_id);
+                reached.insert(neighbor);
             }
-            triples.push((row, edge_id, neighbor));
-            traversed.insert(edge_id);
-            reached.insert(neighbor);
-        }
-        if position.neighbor_offset >= neighbors.len() {
-            position.row += 1;
-            position.neighbor_offset = 0;
-            position.seen_edges.clear();
-        }
+            if position.neighbor_offset >= neighbors.len() {
+                position.row += 1;
+                position.neighbor_offset = 0;
+                position.seen_edges.clear();
+            }
+        })?;
     }
     if triples.is_empty() {
         return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
