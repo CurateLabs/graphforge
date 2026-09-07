@@ -166,9 +166,9 @@ mod tests {
 
     use super::*;
     use arrow::array::{
-        ArrayRef, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+        Array, ArrayRef, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
     };
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::Schema;
     use graphforge_core::TypeId;
     use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
     use std::sync::Arc;

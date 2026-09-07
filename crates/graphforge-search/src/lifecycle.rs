@@ -38,7 +38,7 @@ pub struct TextIndexRequest<'a> {
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
-    pub label_id: u32,
+    pub label_id: graphforge_value::EntityTypeSelection,
     /// Explicit non-empty property selectors persisted in canonical order.
     pub properties: &'a [String],
 }
@@ -49,7 +49,7 @@ pub struct LazyTextRequest<'a> {
     /// Normalized graph label persisted in the discovered artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for Parquet membership projection.
-    pub label_id: u32,
+    pub label_id: graphforge_value::EntityTypeSelection,
 }
 
 /// One verified, immutable text publication.
@@ -969,7 +969,7 @@ where
 fn generation_checked_snapshot(
     project_dir: &Path,
     expected: &SearchSourceSnapshot,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     properties: &[String],
     limits: TextSearchLimits,
 ) -> Result<SearchSourceSnapshot, SearchArtifactError> {
@@ -1060,7 +1060,7 @@ mod tests {
     use std::collections::HashMap;
 
     use graphforge_core::uuid::{Uuid, to_bytes};
-    use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
+    use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_storage::generation::bump_search_generation;
     use graphforge_storage::{
         GraphWriter, SearchPublicationMode, current_search_artifact, set_node_properties,
@@ -1085,7 +1085,9 @@ mod tests {
     fn request(properties: &[String]) -> TextIndexRequest<'_> {
         TextIndexRequest {
             label: LABEL,
-            label_id: LABEL_ID,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            ),
             properties,
         }
     }
@@ -1093,7 +1095,9 @@ mod tests {
     fn lazy_request() -> LazyTextRequest<'static> {
         LazyTextRequest {
             label: LABEL,
-            label_id: LABEL_ID,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            ),
         }
     }
 
@@ -1111,7 +1115,12 @@ mod tests {
 
     fn write_person(project_dir: &Path, value: &str) {
         let mut writer = GraphWriter::open_at(project_dir, OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(LABEL_ID)).unwrap();
+        writer
+            .create_node(
+                uuid(1),
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            )
+            .unwrap();
         writer
             .set_properties(
                 &uuid(1),
@@ -1381,7 +1390,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_person(dir.path(), "Alice");
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
-        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second
+            .create_node(
+                uuid(2),
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            )
+            .unwrap();
         second.flush().unwrap();
         let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
         assert_eq!(paths.len(), 2);
@@ -1389,7 +1403,9 @@ mod tests {
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
         let selected_before = project_text_source(
             dir.path(),
-            LABEL_ID,
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            ),
             Some(&properties()),
             TextSearchLimits::default(),
             || Ok(()),
@@ -1411,7 +1427,9 @@ mod tests {
             generation_checked_snapshot(
                 dir.path(),
                 &selected_before,
-                LABEL_ID,
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap()
+                ),
                 &properties(),
                 TextSearchLimits::default(),
             )
@@ -1424,7 +1442,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_person(dir.path(), "Alice");
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
-        second.create_node(uuid(2), TypeId(LABEL_ID)).unwrap();
+        second
+            .create_node(
+                uuid(2),
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            )
+            .unwrap();
         second
             .set_properties(
                 &uuid(2),

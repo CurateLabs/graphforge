@@ -9,8 +9,8 @@ use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, StringArray};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
 
+use graphforge_core::OntologyMode;
 use graphforge_core::uuid::new_v7;
-use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
 use graphforge_storage::{
     EdgePropertyTable, GraphCatalog, GraphWriter, PropertyOverlayLimits, PropertyRouteKind,
@@ -41,9 +41,12 @@ async fn strict_mode_round_trip_nodes_and_edges() {
     let a = new_v7();
     let b = new_v7();
     let c = new_v7();
-    w.create_node(a, TypeId(0)).unwrap();
-    w.create_node(b, TypeId(0)).unwrap();
-    w.create_node(c, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(c, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
 
     // 2 KNOWS edges: a->b, b->c. Surrogate edge_ids should be 1 then 2.
     assert_eq!(w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap(), 1);
@@ -83,8 +86,10 @@ async fn exploratory_mode_routes_to_catch_all_files() {
     // Node with an unknown label + untyped properties.
     let src = new_v7();
     let dst = new_v7();
-    w.create_node(src, TypeId(0)).unwrap();
-    w.create_node(dst, TypeId(0)).unwrap();
+    w.create_node(src, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(dst, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &src,
         None,
@@ -154,7 +159,8 @@ async fn localdatetime_property_round_trips_through_storage() {
     let (days, nanos) = (5_393_i64, 45_074_645_876_123_i64); // 1984-10-11T12:31:14.645876123
 
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(node, TypeId(0)).unwrap();
+    w.create_node(node, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &node,
         None,
@@ -195,7 +201,8 @@ async fn datetime_and_time_properties_round_trip_through_storage() {
     let (days, nanos, offset) = (5_393_i64, 45_074_645_876_123_i64, -3_600_i32);
 
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(node, TypeId(0)).unwrap();
+    w.create_node(node, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &node,
         None,
@@ -251,7 +258,8 @@ async fn list_of_temporals_property_round_trips_through_storage() {
     let (d0, d1) = (5_393_i64, 5_394_i64);
 
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(node, TypeId(0)).unwrap();
+    w.create_node(node, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &node,
         None,
@@ -346,9 +354,21 @@ async fn append_round_trip_continues_surrogates() {
     // Session 1: 3 nodes (ids 1,2,3) + 2 KNOWS edges (ids 1,2).
     let (a, b, c) = (new_v7(), new_v7(), new_v7());
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    assert_eq!(w.create_node(a, TypeId(0)).unwrap(), 1);
-    assert_eq!(w.create_node(b, TypeId(0)).unwrap(), 2);
-    assert_eq!(w.create_node(c, TypeId(0)).unwrap(), 3);
+    assert_eq!(
+        w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        w.create_node(c, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap(),
+        3
+    );
     assert_eq!(w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap(), 1);
     assert_eq!(w.create_edge(new_v7(), "KNOWS", &b, &c).unwrap(), 2);
     w.flush().unwrap();
@@ -357,11 +377,16 @@ async fn append_round_trip_continues_surrogates() {
     let (d, e) = (new_v7(), new_v7());
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     assert_eq!(
-        w2.create_node(d, TypeId(0)).unwrap(),
+        w2.create_node(d, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap(),
         4,
         "node ids continue"
     );
-    assert_eq!(w2.create_node(e, TypeId(0)).unwrap(), 5);
+    assert_eq!(
+        w2.create_node(e, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap(),
+        5
+    );
     assert_eq!(
         w2.create_edge(new_v7(), "KNOWS", &d, &e).unwrap(),
         3,
@@ -401,7 +426,8 @@ async fn append_property_merge_adds_new_column() {
     let dir = TempDir::new().unwrap();
     let a = new_v7();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &a,
         None,
@@ -412,7 +438,8 @@ async fn append_property_merge_adds_new_column() {
 
     let b = new_v7();
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w2.create_node(b, TypeId(0)).unwrap();
+    w2.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w2.set_properties(
         &b,
         None,
@@ -444,7 +471,8 @@ async fn append_property_merge_preserves_heterogeneous_scalar_types() {
     let dir = TempDir::new().unwrap();
     let a = new_v7();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &a,
         None,
@@ -455,7 +483,8 @@ async fn append_property_merge_preserves_heterogeneous_scalar_types() {
 
     let b = new_v7();
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w2.create_node(b, TypeId(0)).unwrap();
+    w2.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w2.set_properties(
         &b,
         None,
@@ -477,7 +506,8 @@ async fn append_property_merge_null_first_across_flushes() {
     let dir = TempDir::new().unwrap();
     let a = new_v7();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.set_properties(
         &a,
         None,
@@ -488,7 +518,8 @@ async fn append_property_merge_null_first_across_flushes() {
 
     let b = new_v7();
     let mut w2 = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-    w2.create_node(b, TypeId(0)).unwrap();
+    w2.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w2.set_properties(
         &b,
         None,
@@ -508,8 +539,10 @@ async fn append_edge_stems_are_isolated() {
     let dir = TempDir::new().unwrap();
     let (a, b) = (new_v7(), new_v7());
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
-    w.create_node(b, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
     w.flush().unwrap();
 
@@ -550,8 +583,10 @@ fn write_knows_edge_with_props(
 ) -> uuid::Uuid {
     let (a, b) = (new_v7(), new_v7());
     let mut w = GraphWriter::open_at(dir, mode, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
-    w.create_node(b, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     let edge = new_v7();
     w.create_edge(edge, "KNOWS", &a, &b).unwrap();
     w.set_edge_properties(&edge, Some("KNOWS"), props).unwrap();
@@ -686,8 +721,10 @@ async fn edge_property_stems_are_isolated() {
     // Add a LIKES edge with its own property.
     let (a, b) = (new_v7(), new_v7());
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    w.create_node(a, TypeId(0)).unwrap();
-    w.create_node(b, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     let edge = new_v7();
     w.create_edge(edge, "LIKES", &a, &b).unwrap();
     w.set_edge_properties(
@@ -716,8 +753,12 @@ async fn edge_property_table_sql_and_direct_reads_merge_cross_fragment_mutations
     let (updated, retained, deleted) = (new_v7(), new_v7(), new_v7());
 
     let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    writer.create_node(src, TypeId(0)).unwrap();
-    writer.create_node(dst, TypeId(0)).unwrap();
+    writer
+        .create_node(src, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    writer
+        .create_node(dst, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     for (edge, properties) in [
         (
             updated,
@@ -896,8 +937,10 @@ fn flush_bumps_topology_generation_once_per_topology_flush() {
 
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     let (a, b) = (new_v7(), new_v7());
-    w.create_node(a, TypeId(0)).unwrap();
-    w.create_node(b, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
+    w.create_node(b, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
     w.flush().unwrap();
     assert_eq!(
@@ -906,7 +949,8 @@ fn flush_bumps_topology_generation_once_per_topology_flush() {
         "one bump per committed batch, however many topology files it staged"
     );
 
-    w.create_node(new_v7(), TypeId(0)).unwrap();
+    w.create_node(new_v7(), graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.flush().unwrap();
     assert_eq!(read_topology_generation(dir.path()).unwrap(), 2);
 }
@@ -916,7 +960,8 @@ fn property_only_flush_does_not_bump_topology_generation() {
     let dir = TempDir::new().unwrap();
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     let a = new_v7();
-    w.create_node(a, TypeId(0)).unwrap();
+    w.create_node(a, graphforge_value::EntityTypeId::decode(0).unwrap())
+        .unwrap();
     w.flush().unwrap();
     assert_eq!(read_topology_generation(dir.path()).unwrap(), 1);
 

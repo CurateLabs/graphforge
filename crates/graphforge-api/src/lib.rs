@@ -34,7 +34,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef;
-use graphforge_core::{GraphIdentity, TypeId};
+use graphforge_core::GraphIdentity;
+#[cfg(test)]
+use graphforge_core::TypeId;
 pub use graphforge_io::{
     ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
 };

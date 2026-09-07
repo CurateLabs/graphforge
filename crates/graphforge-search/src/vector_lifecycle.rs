@@ -42,7 +42,7 @@ pub struct VectorIndexRequest<'a> {
     /// Normalized graph label persisted in the artifact key.
     pub label: &'a str,
     /// Local catalog identity used only for topology membership projection.
-    pub label_id: u32,
+    pub label_id: graphforge_value::EntityTypeSelection,
     /// Normalized caller-defined vector space persisted in the artifact key.
     pub space: &'a str,
 }
@@ -169,7 +169,7 @@ where
 /// topology or an exhausted membership projection.
 pub fn project_label_members<C>(
     project_dir: &Path,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
     checkpoint: C,
 ) -> Result<BTreeSet<[u8; 16]>, SearchArtifactError>
@@ -188,7 +188,7 @@ pub(crate) struct LabelMemberProjection {
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 pub(crate) fn project_label_members_snapshot<C>(
     project_dir: &Path,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     limits: VectorLifecycleLimits,
     mut checkpoint: C,
 ) -> Result<LabelMemberProjection, SearchArtifactError>
@@ -276,7 +276,14 @@ where
                     if values.null_count() != 0 {
                         return Err(source("topology type_ids contains null labels"));
                     }
-                    if values.values().contains(&label_id) {
+                    let mut selected =
+                        matches!(label_id, graphforge_value::EntityTypeSelection::All);
+                    for encoded in values.values() {
+                        let id = graphforge_value::EntityTypeId::decode(*encoded)
+                            .map_err(|error| source(error.to_string()))?;
+                        selected |= label_id == graphforge_value::EntityTypeSelection::Known(id);
+                    }
+                    if selected {
                         eligible.insert(node_uuid);
                         if eligible.len() > limits.vector.eligible_nodes {
                             return Err(exhausted("eligible_nodes", limits.vector.eligible_nodes));
@@ -405,7 +412,7 @@ mod tests {
     use std::collections::HashSet;
 
     use graphforge_core::uuid::Uuid;
-    use graphforge_ir::{OntologyMode, TypeId};
+    use graphforge_ir::OntologyMode;
     use graphforge_storage::{
         GraphWriter, SearchPublicationOutcome, delete_nodes, generation::bump_search_generation,
     };
@@ -427,7 +434,9 @@ mod tests {
     fn request() -> VectorIndexRequest<'static> {
         VectorIndexRequest {
             label: "Person",
-            label_id: 9,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
             space: "semantic",
         }
     }
@@ -455,7 +464,11 @@ mod tests {
             writer
                 .create_node_with_labels(
                     uuid(*value),
-                    &labels.iter().copied().map(TypeId).collect::<Vec<_>>(),
+                    &labels
+                        .iter()
+                        .copied()
+                        .map(|id| graphforge_value::EntityTypeId::decode(id).unwrap())
+                        .collect::<Vec<_>>(),
                 )
                 .unwrap();
         }
@@ -492,7 +505,14 @@ mod tests {
         corrupt_node_surrogate_to_null(dir.path());
         std::fs::remove_dir_all(dir.path().join("topology/uuid-membership")).unwrap();
         assert!(matches!(
-            project_label_members(dir.path(), 9, VectorLifecycleLimits::default(), || Ok(())),
+            project_label_members(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
+                VectorLifecycleLimits::default(),
+                || Ok(())
+            ),
             Err(SearchArtifactError::SourceSnapshot { .. })
         ));
     }
@@ -503,7 +523,12 @@ mod tests {
         for ordinal in 1_u8..=2 {
             let mut writer =
                 GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
-            writer.create_node(uuid(ordinal), TypeId(9)).unwrap();
+            writer
+                .create_node(
+                    uuid(ordinal),
+                    graphforge_value::EntityTypeId::decode(9).unwrap(),
+                )
+                .unwrap();
             writer.flush().unwrap();
         }
         let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();

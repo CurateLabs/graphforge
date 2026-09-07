@@ -53,9 +53,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{
-    ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray, Float64Array, Float64Builder,
-    Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
-    TimestampMicrosecondBuilder, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, FixedSizeBinaryArray, Float64Array,
+    Float64Builder, Int64Builder, RecordBatch, StringArray, StringBuilder,
+    TimestampMicrosecondArray, TimestampMicrosecondBuilder, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -63,7 +63,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_core::{
     GfError, OntologyMode, ProjectErrorCode, SpatialCoordinates, SpatialCrs, SpatialGeometryType,
-    SpatialType, SpatialValue, TypeId,
+    SpatialType, SpatialValue,
 };
 use graphforge_ir::IrLiteral;
 
@@ -352,9 +352,21 @@ pub(crate) fn write_replay_overlay_streaming(
                 .hyphenated()
                 .to_string();
             match overlay.nodes.get(&uuid) {
-                Some(Some(replacement)) => writer
-                    .write(&replay_node_batch(&[replacement])?)
-                    .map_err(pq_err)?,
+                Some(Some(replacement)) => {
+                    let mut replacement = replacement.clone();
+                    let primary = batch
+                        .column_by_name("type_id")
+                        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+                        .ok_or_else(|| pq_err("canonical type_id column is incompatible"))?;
+                    if primary.is_null(row) {
+                        return Err(pq_err("canonical primary type is null"));
+                    }
+                    replacement.primary_type =
+                        PrimaryEntityTypeId::decode(primary.value(row)).map_err(pq_err)?;
+                    writer
+                        .write(&replay_node_batch(&[&replacement])?)
+                        .map_err(pq_err)?;
+                }
                 Some(None) => {}
                 None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
             }
@@ -446,8 +458,9 @@ fn scan_replay_node_authority(
                 .values()
                 .filter_map(Option::as_ref)
                 .map(|row| {
-                    REPLAY_NODE_FIXED_ROW_BYTES
-                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                    REPLAY_NODE_FIXED_ROW_BYTES.saturating_add(
+                        row.type_ids.len().saturating_mul(size_of::<EntityTypeId>()),
+                    )
                 })
                 .max()
                 .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
@@ -486,7 +499,26 @@ fn scan_replay_node_authority(
             .column_by_name("type_ids")
             .and_then(|column| column.as_any().downcast_ref::<arrow::array::ListArray>())
             .ok_or_else(|| pq_err("canonical type_ids column is incompatible"))?;
+        let primary_types = batch
+            .column_by_name("type_id")
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| pq_err("canonical type_id column is incompatible"))?;
         for row in 0..batch.num_rows() {
+            if primary_types.is_null(row) || type_ids.is_null(row) {
+                return Err(pq_err("canonical node identity contains null"));
+            }
+            PrimaryEntityTypeId::decode(primary_types.value(row)).map_err(pq_err)?;
+            let memberships = type_ids.value(row);
+            let memberships = memberships
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| pq_err("canonical membership type is incompatible"))?;
+            if memberships.null_count() != 0 {
+                return Err(pq_err("canonical node membership contains null"));
+            }
+            for encoded in memberships.values() {
+                EntityTypeId::decode(*encoded).map_err(pq_err)?;
+            }
             let type_count = usize::try_from(type_ids.value_length(row))
                 .map_err(|_| replay_resource_limit("topology node type_ids row width"))?;
             maximum_row_bytes = maximum_row_bytes.max(
@@ -549,8 +581,9 @@ fn scan_replay_node_authority(
                 .values()
                 .filter_map(Option::as_ref)
                 .map(|row| {
-                    REPLAY_NODE_FIXED_ROW_BYTES
-                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                    REPLAY_NODE_FIXED_ROW_BYTES.saturating_add(
+                        row.type_ids.len().saturating_mul(size_of::<EntityTypeId>()),
+                    )
                 })
                 .max()
                 .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
@@ -582,7 +615,7 @@ fn replay_node_batch(
     let nullable_label_sets =
         arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
             rows.iter()
-                .map(|row| Some(row.type_ids.iter().copied().map(Some))),
+                .map(|row| Some(row.type_ids.iter().map(|id| Some(id.encode())))),
         );
     let label_sets = arrow::array::ListArray::new(
         Arc::new(Field::new("item", DataType::UInt32, false)),
@@ -599,7 +632,7 @@ fn replay_node_batch(
             )),
             Arc::new(UInt32Array::from(
                 rows.iter()
-                    .map(|row| row.type_ids.first().copied().unwrap_or(u32::MAX))
+                    .map(|row| row.primary_type.encode())
                     .collect::<Vec<_>>(),
             )),
             Arc::new(label_sets),
@@ -1594,14 +1627,24 @@ pub(crate) fn write_reconstructed_graph(
     let primary_types = UInt32Array::from(
         nodes
             .iter()
-            .map(|(_, labels)| labels.first().copied().unwrap_or(u32::MAX))
-            .collect::<Vec<_>>(),
+            .map(|(uuid, _)| {
+                state
+                    .node_primary_types
+                    .get(*uuid)
+                    .map(|primary| primary.encode())
+                    .ok_or_else(|| {
+                        pq_err(format!(
+                            "reconstructed node {uuid} is missing its primary route"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     );
     let nullable_label_sets =
         arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
             nodes
                 .iter()
-                .map(|(_, labels)| Some(labels.iter().copied().map(Some))),
+                .map(|(_, labels)| Some(labels.iter().map(|id| Some(id.encode())))),
         );
     let label_sets = arrow::array::ListArray::new(
         Arc::new(Field::new("item", DataType::UInt32, false)),
@@ -2073,7 +2116,7 @@ impl GraphWriter {
         let node_bytes = self.nodes.iter().fold(0usize, |sum, row| {
             sum.saturating_add(NODE_ROW_CHARGE)
                 .saturating_add(size_of::<(Uuid, u64)>())
-                .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                .saturating_add(row.type_ids.len().saturating_mul(size_of::<EntityTypeId>()))
         });
         let edge_bytes = self.edges.iter().fold(0usize, |sum, (route, rows)| {
             sum.saturating_add(ROUTE_ENTRY_CHARGE)
@@ -2137,7 +2180,7 @@ impl GraphWriter {
             .iter()
             .fold(0usize, |sum, row| {
                 sum.saturating_add(NODE_SCRATCH_CHARGE)
-                    .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                    .saturating_add(row.type_ids.len().saturating_mul(size_of::<EntityTypeId>()))
             })
             .saturating_add(self.edges.values().flatten().fold(0usize, |sum, row| {
                 sum.saturating_add(EDGE_SCRATCH_CHARGE)
@@ -2212,7 +2255,7 @@ impl GraphWriter {
                 "duplicate node UUID in graph writer topology window".into(),
             ));
         }
-        let labels = type_ids.len().saturating_mul(size_of::<u32>());
+        let labels = type_ids.len().saturating_mul(size_of::<EntityTypeId>());
         self.admit_topology(
             1,
             NODE_ROW_CHARGE
@@ -5960,7 +6003,7 @@ fn stage_property_fragment(
         1,
         Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
     );
-    let rows = cols.first().map_or(0, |column| column.len());
+    let rows = cols.first().map_or(0, arrow::array::Array::len);
     cols.insert(1, Arc::new(BooleanArray::from(vec![tombstone; rows])));
     let logical_schema = Arc::clone(schema);
     let schema = Arc::new(Schema::new_with_metadata(
@@ -6326,8 +6369,14 @@ mod tests {
     fn create_node_persists_complete_label_set_and_primary_label() {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        w.create_node_with_labels(new_v7(), &[TypeId(4), TypeId(9)])
-            .unwrap();
+        w.create_node_with_labels(
+            new_v7(),
+            &[
+                EntityTypeId::decode(4).unwrap(),
+                EntityTypeId::decode(9).unwrap(),
+            ],
+        )
+        .unwrap();
         w.flush().unwrap();
 
         let nodes = crate::catalog::read_nodes(dir.path()).unwrap();
@@ -6354,9 +6403,21 @@ mod tests {
     fn surrogate_ids_are_monotonic_from_one() {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 1);
-        assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 2);
-        assert_eq!(w.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+        assert_eq!(
+            w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
@@ -6364,7 +6425,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let node = new_v7();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        first.create_node(node, TypeId(0)).unwrap();
+        first
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         first
             .set_properties(
                 &node,
@@ -6419,8 +6482,18 @@ mod tests {
         let first_node = new_v7();
         let second_node = new_v7();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        assert_eq!(first.create_node(first_node, TypeId(0)).unwrap(), 1);
-        assert_eq!(first.create_node(second_node, TypeId(0)).unwrap(), 2);
+        assert_eq!(
+            first
+                .create_node(first_node, EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            first
+                .create_node(second_node, EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            2
+        );
         assert_eq!(
             first
                 .create_edge(new_v7(), "KNOWS", &first_node, &second_node)
@@ -6433,7 +6506,12 @@ mod tests {
         let _measurement = crate::io_stats::test_measurement_guard();
         crate::io_stats::reset();
         let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        assert_eq!(reopened.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+        assert_eq!(
+            reopened
+                .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            3
+        );
         reopened.register_existing_node(first_node, 1).unwrap();
         reopened.register_existing_node(second_node, 2).unwrap();
         assert_eq!(
@@ -6477,8 +6555,10 @@ mod tests {
         let left = new_v7();
         let right = new_v7();
         let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        seed.create_node(left, TypeId(0)).unwrap();
-        seed.create_node(right, TypeId(0)).unwrap();
+        seed.create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        seed.create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         seed.flush().unwrap();
         crate::rebuild_uuid_membership_indexes(
             dir.path(),
@@ -6513,12 +6593,17 @@ mod tests {
         let left = new_v7();
         let right = new_v7();
         let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        seed.create_node(left, TypeId(0)).unwrap();
-        seed.create_node(right, TypeId(0)).unwrap();
+        seed.create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        seed.create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         seed.flush().unwrap();
 
         let mut additions = HashMap::new();
-        additions.insert(to_bytes(&left), HashSet::from([7]));
+        additions.insert(
+            to_bytes(&left),
+            HashSet::from([EntityTypeId::decode(7).unwrap()]),
+        );
         let mut add_labels =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
         let mut staged = RewriteBatch::new();
@@ -6526,7 +6611,7 @@ mod tests {
             &mut staged,
             dir.path(),
             &additions,
-            &HashMap::<[u8; 16], HashSet<u32>>::new(),
+            &HashMap::<[u8; 16], HashSet<EntityTypeId>>::new(),
         )
         .unwrap();
         assert_eq!(
@@ -6553,14 +6638,17 @@ mod tests {
         );
 
         let mut removals = HashMap::new();
-        removals.insert(to_bytes(&left), HashSet::from([7]));
+        removals.insert(
+            to_bytes(&left),
+            HashSet::from([EntityTypeId::decode(7).unwrap()]),
+        );
         let mut remove_labels =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 3).unwrap();
         let mut staged = RewriteBatch::new();
         crate::stage_mutate_node_labels(
             &mut staged,
             dir.path(),
-            &HashMap::<[u8; 16], HashSet<u32>>::new(),
+            &HashMap::<[u8; 16], HashSet<EntityTypeId>>::new(),
             &removals,
         )
         .unwrap();
@@ -6594,8 +6682,12 @@ mod tests {
         let left = new_v7();
         let right = new_v7();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        first.create_node(left, TypeId(0)).unwrap();
-        first.create_node(right, TypeId(0)).unwrap();
+        first
+            .create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        first
+            .create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         first.create_edge(new_v7(), "KNOWS", &left, &right).unwrap();
         first.flush().unwrap();
 
@@ -6632,11 +6724,15 @@ mod tests {
     fn node_appends_create_immutable_shards_without_prior_row_replay() {
         let dir = TempDir::new().unwrap();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        first.create_node(new_v7(), TypeId(0)).unwrap();
+        first
+            .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+            .unwrap();
         first.flush().unwrap();
 
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        second.create_node(new_v7(), TypeId(0)).unwrap();
+        second
+            .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+            .unwrap();
         second.flush().unwrap();
 
         let fragments = crate::mutator::node_parquet_files(dir.path()).unwrap();
@@ -6650,18 +6746,27 @@ mod tests {
             .sum::<usize>();
         assert_eq!(rows, 2);
         let mut third = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        assert_eq!(third.create_node(new_v7(), TypeId(0)).unwrap(), 3);
+        assert_eq!(
+            third
+                .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .unwrap(),
+            3
+        );
     }
 
     #[test]
     fn node_append_rejects_an_existing_surrogate_range_shard() {
         let dir = TempDir::new().unwrap();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        first.create_node(new_v7(), TypeId(0)).unwrap();
+        first
+            .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+            .unwrap();
         first.flush().unwrap();
 
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
-        second.create_node(new_v7(), TypeId(0)).unwrap();
+        second
+            .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+            .unwrap();
         let collision = dir
             .path()
             .join("topology/nodes/00000000000000000002-00000000000000000002.parquet");
@@ -6678,7 +6783,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let first_uuid = new_v7();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        first.create_node(first_uuid, TypeId(0)).unwrap();
+        first
+            .create_node(first_uuid, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         first
             .set_properties(
                 &first_uuid,
@@ -6691,7 +6798,9 @@ mod tests {
         let second_uuid = new_v7();
         let mut second =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
-        second.create_node(second_uuid, TypeId(0)).unwrap();
+        second
+            .create_node(second_uuid, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         second
             .set_properties(
                 &second_uuid,
@@ -6748,7 +6857,9 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
             for _ in 0..rows {
-                writer.create_node(new_v7(), TypeId(0)).unwrap();
+                writer
+                    .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                    .unwrap();
             }
             writer.flush().unwrap();
             writer.topology_write_work()
@@ -6777,7 +6888,11 @@ mod tests {
                 max_flush_scratch_bytes: usize::MAX,
             });
 
-        assert!(writer.create_node(new_v7(), TypeId(0)).is_err());
+        assert!(
+            writer
+                .create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+                .is_err()
+        );
         assert_eq!(writer.next_node_id, 1);
         assert!(writer.nodes.is_empty());
         assert!(writer.uuid_to_node_id.is_empty());
@@ -6792,21 +6907,35 @@ mod tests {
         let right = new_v7();
         let collision = new_v7();
         let mut edge_first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        edge_first.create_node(left, TypeId(0)).unwrap();
-        edge_first.create_node(right, TypeId(0)).unwrap();
+        edge_first
+            .create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        edge_first
+            .create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         edge_first
             .create_edge(collision, "KNOWS", &left, &right)
             .unwrap();
         let next_node = edge_first.next_node_id;
-        assert!(edge_first.create_node(collision, TypeId(0)).is_err());
+        assert!(
+            edge_first
+                .create_node(collision, EntityTypeId::decode(0).unwrap())
+                .is_err()
+        );
         assert_eq!(edge_first.next_node_id, next_node);
         assert_eq!(edge_first.nodes.len(), 2);
 
         let dir = TempDir::new().unwrap();
         let mut node_first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        node_first.create_node(left, TypeId(0)).unwrap();
-        node_first.create_node(right, TypeId(0)).unwrap();
-        node_first.create_node(collision, TypeId(0)).unwrap();
+        node_first
+            .create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        node_first
+            .create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        node_first
+            .create_node(collision, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         let next_edge = node_first.next_edge_id;
         assert!(
             node_first
@@ -6822,7 +6951,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let first = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        writer.create_node(first, TypeId(0)).unwrap();
+        writer
+            .create_node(first, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         assert!(
             crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
@@ -6834,7 +6965,9 @@ mod tests {
 
         let second = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
-        writer.create_node(second, TypeId(0)).unwrap();
+        writer
+            .create_node(second, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         assert!(
             crate::uuid_membership_index_is_fresh(dir.path()).unwrap(),
@@ -6879,8 +7012,12 @@ mod tests {
         for _ in 0..8 {
             let left = new_v7();
             let right = new_v7();
-            writer.create_node(left, TypeId(0)).unwrap();
-            writer.create_node(right, TypeId(0)).unwrap();
+            writer
+                .create_node(left, EntityTypeId::decode(0).unwrap())
+                .unwrap();
+            writer
+                .create_node(right, EntityTypeId::decode(0).unwrap())
+                .unwrap();
             writer
                 .create_edge(new_v7(), "KNOWS", &left, &right)
                 .unwrap();
@@ -6905,8 +7042,12 @@ mod tests {
         let right = new_v7();
         let edge = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        writer.create_node(left, TypeId(0)).unwrap();
-        writer.create_node(right, TypeId(0)).unwrap();
+        writer
+            .create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
         assert_eq!(writer.cancel_edges(&HashSet::from([to_bytes(&edge)])), 1);
         writer.refresh_topology_charge();
@@ -6935,7 +7076,9 @@ mod tests {
                 max_buffered_topology_bytes: 2_048,
                 max_flush_scratch_bytes: 2_048,
             });
-        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         let before = writer.charged_topology_bytes;
         assert!(
             writer
@@ -7057,8 +7200,12 @@ mod tests {
                 let left = Uuid::from_u128(10_000 + u128::from(batch) * 3);
                 let right = Uuid::from_u128(10_001 + u128::from(batch) * 3);
                 let edge = Uuid::from_u128(10_002 + u128::from(batch) * 3);
-                writer.create_node(left, TypeId(0)).unwrap();
-                writer.create_node(right, TypeId(0)).unwrap();
+                writer
+                    .create_node(left, EntityTypeId::decode(0).unwrap())
+                    .unwrap();
+                writer
+                    .create_node(right, EntityTypeId::decode(0).unwrap())
+                    .unwrap();
                 writer
                     .set_properties(
                         &left,
@@ -7252,7 +7399,12 @@ mod tests {
         parquet.close().unwrap();
 
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        assert_eq!(writer.create_node(new_v7(), TypeId(9)).unwrap(), 2);
+        assert_eq!(
+            writer
+                .create_node(new_v7(), EntityTypeId::decode(9).unwrap())
+                .unwrap(),
+            2
+        );
         writer.flush().unwrap();
 
         let nodes = crate::catalog::read_nodes(dir.path()).unwrap();
@@ -7273,7 +7425,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         // `b` was never created.
         let b = new_v7();
         let e = w.create_edge(new_v7(), "KNOWS", &a, &b);
@@ -7297,7 +7449,10 @@ mod tests {
         w.register_existing_node(a, 42).unwrap();
         // A freshly-minted `b` (next surrogate is 1 — register did not advance it).
         let b = new_v7();
-        assert_eq!(w.create_node(b, TypeId(0)).unwrap(), 1);
+        assert_eq!(
+            w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap(),
+            1
+        );
         // The edge resolves both endpoints; its src_id is the registered 42.
         let edge_id = w
             .create_edge(new_v7(), "KNOWS", &a, &b)
@@ -7313,7 +7468,8 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         w.register_existing_node(new_v7(), 7).unwrap();
         let created = new_v7();
-        w.create_node(created, TypeId(0)).unwrap();
+        w.create_node(created, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         w.flush().unwrap();
         // Exactly one node on disk (the created one), not two.
         let nodes = crate::catalog::read_nodes(dir.path()).unwrap();
@@ -7343,9 +7499,9 @@ mod tests {
         let a = new_v7();
         let b = new_v7();
         let c = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
-        w.create_node(c, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(c, EntityTypeId::decode(0).unwrap()).unwrap();
         // First row: `score` is Null. Later rows: consistently Int.
         w.set_properties(
             &a,
@@ -7412,8 +7568,8 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
         let b = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -7456,7 +7612,9 @@ mod tests {
         let mut expected = HashMap::new();
         for value in cases {
             let node = new_v7();
-            writer.create_node(node, TypeId(0)).unwrap();
+            writer
+                .create_node(node, EntityTypeId::decode(0).unwrap())
+                .unwrap();
             writer
                 .set_properties(
                     &node,
@@ -7520,7 +7678,7 @@ mod tests {
         fs::remove_file(dir.path().join("properties/_untyped.parquet")).unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -7557,7 +7715,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         w.flush().unwrap(); // no properties written → no _untyped file
 
         let ab = to_bytes(&a);
@@ -7576,7 +7734,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(1)).unwrap();
+        w.create_node(a, EntityTypeId::decode(1).unwrap()).unwrap();
         w.set_properties(
             &a,
             Some("Person"),
@@ -7608,7 +7766,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -7638,7 +7796,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -7666,8 +7824,8 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         let a = new_v7();
         let b = new_v7();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
         let e = new_v7();
         w.create_edge(e, "KNOWS", &a, &b).unwrap();
         w.set_edge_properties(
@@ -7712,7 +7870,8 @@ mod tests {
     fn set_node_properties_empty_map_writes_nothing() {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(new_v7(), TypeId(0)).unwrap();
+        w.create_node(new_v7(), EntityTypeId::decode(0).unwrap())
+            .unwrap();
         w.flush().unwrap();
 
         let search_generation = crate::generation::read_search_generation(dir.path()).unwrap();
@@ -7739,8 +7898,8 @@ mod tests {
         let (a, e) = (new_v7(), new_v7());
         let b = new_v7();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
         w.create_edge(e, "KNOWS", &a, &b).unwrap();
         w.set_properties(
             &a,
@@ -7799,7 +7958,9 @@ mod tests {
         let node = new_v7();
         let uuid = to_bytes(&node);
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &node,
@@ -7851,7 +8012,9 @@ mod tests {
         let resurrected = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         for node in [removed, resurrected] {
-            writer.create_node(node, TypeId(0)).unwrap();
+            writer
+                .create_node(node, EntityTypeId::decode(0).unwrap())
+                .unwrap();
             writer
                 .set_properties(
                     &node,
@@ -7906,7 +8069,9 @@ mod tests {
         let node = new_v7();
         let node_bytes = to_bytes(&node);
         let mut writer = GraphWriter::open_at(graph.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &node,
@@ -8045,8 +8210,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (updated, untouched) = (new_v7(), new_v7());
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(updated, TypeId(0)).unwrap();
-        writer.create_node(untouched, TypeId(0)).unwrap();
+        writer
+            .create_node(updated, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_node(untouched, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.flush().unwrap();
 
         let legacy_rows = vec![
@@ -8203,8 +8372,14 @@ mod tests {
         assert_eq!(empty.num_rows(), 0);
 
         let node = new_v7();
-        w.create_node_with_labels(node, &[TypeId(3), TypeId(7)])
-            .unwrap();
+        w.create_node_with_labels(
+            node,
+            &[
+                EntityTypeId::decode(3).unwrap(),
+                EntityTypeId::decode(7).unwrap(),
+            ],
+        )
+        .unwrap();
         for _ in 0..2 {
             let batch = w.pending_nodes_batch().unwrap();
             assert_eq!(batch.schema(), TOPOLOGY_NODES_SCHEMA.clone());
@@ -8228,8 +8403,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (a, b) = (new_v7(), new_v7());
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -8263,8 +8438,8 @@ mod tests {
         let (a, b) = (new_v7(), new_v7());
         let (e1, e2) = (new_v7(), new_v7());
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
         w.create_edge(e1, "KNOWS", &a, &b).unwrap();
         w.create_edge(e2, "KNOWS", &b, &a).unwrap();
         w.set_edge_properties(
@@ -8298,9 +8473,9 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let e_ab = new_v7();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
-        w.create_node(c, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(b, EntityTypeId::decode(0).unwrap()).unwrap();
+        w.create_node(c, EntityTypeId::decode(0).unwrap()).unwrap();
         w.create_edge(e_ab, "KNOWS", &a, &b).unwrap();
 
         // Incident from either endpoint; c has none.
@@ -8320,9 +8495,17 @@ mod tests {
             (to_bytes(&alice), to_bytes(&bob), to_bytes(&edge));
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         writer
-            .create_node_with_labels(alice, &[TypeId(3), TypeId(7)])
+            .create_node_with_labels(
+                alice,
+                &[
+                    EntityTypeId::decode(3).unwrap(),
+                    EntityTypeId::decode(7).unwrap(),
+                ],
+            )
             .unwrap();
-        writer.create_node(bob, TypeId(3)).unwrap();
+        writer
+            .create_node(bob, EntityTypeId::decode(3).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &alice,
@@ -8336,29 +8519,75 @@ mod tests {
 
         assert_eq!(
             writer.pending_node_labels(&HashSet::from([alice_bytes, bob_bytes])),
-            HashSet::from([3, 7])
+            HashSet::from([
+                EntityTypeId::decode(3).unwrap(),
+                EntityTypeId::decode(7).unwrap()
+            ])
         );
         let matched = writer
-            .find_pending_node(&[3, 7], &[("name".into(), IrLiteral::Str("Alice".into()))])
+            .find_pending_node(
+                &[
+                    EntityTypeId::decode(3).unwrap(),
+                    EntityTypeId::decode(7).unwrap(),
+                ],
+                &[("name".into(), IrLiteral::Str("Alice".into()))],
+            )
             .unwrap();
         assert_eq!(matched.0, alice_bytes);
-        assert_eq!(matched.2, 3);
-        assert_eq!(matched.3, vec![3, 7]);
+        assert_eq!(matched.2.encode(), 3);
+        assert_eq!(
+            matched.3.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+            vec![3, 7]
+        );
         assert_eq!(matched.4["age"], IrLiteral::Int(42));
-        assert!(writer.find_pending_node(&[9], &[]).is_none());
         assert!(
             writer
-                .find_pending_node(&[3], &[("name".into(), IrLiteral::Str("Bob".into()))])
+                .find_pending_node(&[EntityTypeId::decode(9).unwrap()], &[])
+                .is_none()
+        );
+        assert!(
+            writer
+                .find_pending_node(
+                    &[EntityTypeId::decode(3).unwrap()],
+                    &[("name".into(), IrLiteral::Str("Bob".into()))]
+                )
                 .is_none()
         );
 
-        assert_eq!(writer.add_pending_node_labels(&alice_bytes, &[7, 9]), 1);
-        assert_eq!(writer.add_pending_node_labels(&[0xff; 16], &[1]), 0);
-        assert_eq!(writer.remove_pending_node_labels(&alice_bytes, &[7, 99]), 1);
-        assert_eq!(writer.remove_pending_node_labels(&[0xff; 16], &[1]), 0);
+        assert_eq!(
+            writer.add_pending_node_labels(
+                &alice_bytes,
+                &[
+                    EntityTypeId::decode(7).unwrap(),
+                    EntityTypeId::decode(9).unwrap()
+                ]
+            ),
+            1
+        );
+        assert_eq!(
+            writer.add_pending_node_labels(&[0xff; 16], &[EntityTypeId::decode(1).unwrap()]),
+            0
+        );
+        assert_eq!(
+            writer.remove_pending_node_labels(
+                &alice_bytes,
+                &[
+                    EntityTypeId::decode(7).unwrap(),
+                    EntityTypeId::decode(99).unwrap()
+                ]
+            ),
+            1
+        );
+        assert_eq!(
+            writer.remove_pending_node_labels(&[0xff; 16], &[EntityTypeId::decode(1).unwrap()]),
+            0
+        );
         assert_eq!(
             writer.pending_node_labels(&HashSet::from([alice_bytes])),
-            HashSet::from([3, 9])
+            HashSet::from([
+                EntityTypeId::decode(3).unwrap(),
+                EntityTypeId::decode(9).unwrap()
+            ])
         );
 
         writer.create_edge(edge, "KNOWS", &alice, &bob).unwrap();
@@ -8400,7 +8629,12 @@ mod tests {
 
         writer.flush().unwrap();
         let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
-        assert_eq!(reopened.create_node(new_v7(), TypeId(3)).unwrap(), 3);
+        assert_eq!(
+            reopened
+                .create_node(new_v7(), EntityTypeId::decode(3).unwrap())
+                .unwrap(),
+            3
+        );
         assert_eq!(
             read_node_props(dir.path(), "Person")[&alice_bytes]["name"],
             IrLiteral::Str("Alice".into())
@@ -8416,7 +8650,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let a = new_v7();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::decode(0).unwrap()).unwrap();
         w.set_properties(
             &a,
             None,
@@ -8458,8 +8692,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (a, b) = (new_v7(), new_v7());
         let mut seed = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        seed.create_node(a, TypeId(0)).unwrap();
-        seed.create_node(b, TypeId(0)).unwrap();
+        seed.create_node(a, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        seed.create_node(b, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         seed.set_properties(
             &a,
             None,
@@ -8479,7 +8715,7 @@ mod tests {
 
         let d = new_v7();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(d, TypeId(0)).unwrap();
+        w.create_node(d, EntityTypeId::decode(0).unwrap()).unwrap();
         w.flush_into(&mut staged).unwrap();
 
         // nodes.parquet staged exactly once (net content), still last-ish in
@@ -8514,7 +8750,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let node = new_v7();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(node, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         crate::uuid_membership::fail_next_snapshot_refresh_for_test();
 
         let error = writer.flush().unwrap_err();
@@ -8614,8 +8852,12 @@ mod tests {
             ("null".into(), IrLiteral::Null),
         ]);
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(node, TypeId(0)).unwrap();
-        writer.create_node(propertyless, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_node(propertyless, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.set_properties(&node, None, values.clone()).unwrap();
         writer
             .set_properties(
@@ -8734,8 +8976,12 @@ mod tests {
         ]);
 
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        writer.create_node(node, TypeId(0)).unwrap();
-        writer.create_node(other, TypeId(0)).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_node(other, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         writer.create_edge(edge, "ROUTE", &node, &other).unwrap();
         writer.set_properties(&node, None, values.clone()).unwrap();
         writer

@@ -4,7 +4,8 @@
 //! never enumerates or copies project-generation participants, provenance,
 //! knowledge, epistemic, valid-time, search, or derived-index directories.
 
-use std::collections::{BTreeMap, BTreeSet};
+use graphforge_value::{EntityTypeId, PrimaryEntityTypeId, RuntimeEntityId};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -434,7 +435,7 @@ fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
     reason = "catalog dependency closure remains one auditable selection pass"
 )]
 fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usize>, GfError> {
-    let mut type_ids = BTreeSet::new();
+    let mut type_ids = HashSet::new();
     for nodes in crate::mutator::node_parquet_files(target).map_err(storage)? {
         for batch in read_parquet(&nodes)? {
             if let Some(column) = batch.column_by_name("type_id") {
@@ -443,8 +444,14 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| validation("node type_id is not UInt32"))?;
                 for row in 0..values.len() {
-                    if !values.is_null(row) {
-                        type_ids.insert(values.value(row));
+                    if values.is_null(row) {
+                        return Err(validation("node type_id contains null"));
+                    }
+                    if let Some(id) = PrimaryEntityTypeId::decode(values.value(row))
+                        .map_err(|e| validation(e.to_string()))?
+                        .label()
+                    {
+                        type_ids.insert(id);
                     }
                 }
             }
@@ -455,14 +462,22 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
                     .ok_or_else(|| validation("node type_ids is not List"))?;
                 for row in 0..lists.len() {
                     if lists.is_null(row) {
-                        continue;
+                        return Err(validation("node type_ids contains null list"));
                     }
                     let values = lists.value(row);
                     let values = values
                         .as_any()
                         .downcast_ref::<UInt32Array>()
                         .ok_or_else(|| validation("node type_ids values are not UInt32"))?;
-                    type_ids.extend(values.values().iter().copied());
+                    for index in 0..values.len() {
+                        if values.is_null(index) {
+                            return Err(validation("node type_ids contains null"));
+                        }
+                        type_ids.insert(
+                            EntityTypeId::decode(values.value(index))
+                                .map_err(|e| validation(e.to_string()))?,
+                        );
+                    }
                 }
             }
         }
@@ -524,13 +539,9 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut active_owners = BTreeSet::new();
     for row in 0..catalog.num_rows() {
         if kinds.value(row) == "entity_type"
-            && type_ids.iter().any(|stored| {
-                *stored == ids.value(row)
-                    || graphforge_ir::runtime_type_id_from_entity_plan_id(graphforge_core::TypeId(
-                        *stored,
-                    ))
-                    .is_some_and(|runtime| runtime.0 == ids.value(row))
-            })
+            && type_ids.contains(&EntityTypeId::runtime(
+                RuntimeEntityId::new(ids.value(row)).map_err(|e| validation(e.to_string()))?,
+            ))
         {
             active_owners.insert(names.value(row).to_owned());
         }
@@ -540,13 +551,9 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut selected = BTreeSet::new();
     for row in 0..catalog.num_rows() {
         let keep = match kinds.value(row) {
-            "entity_type" => type_ids.iter().any(|stored| {
-                *stored == ids.value(row)
-                    || graphforge_ir::runtime_type_id_from_entity_plan_id(graphforge_core::TypeId(
-                        *stored,
-                    ))
-                    .is_some_and(|runtime| runtime.0 == ids.value(row))
-            }),
+            "entity_type" => type_ids.contains(&EntityTypeId::runtime(
+                RuntimeEntityId::new(ids.value(row)).map_err(|e| validation(e.to_string()))?,
+            )),
             "relation_type" => relation_names.contains(names.value(row)),
             "property" => {
                 property_names.contains(names.value(row))
@@ -697,7 +704,7 @@ fn fingerprint_graph_paths(root: &Path, paths: Vec<PathBuf>) -> Result<[u8; 32],
 fn fingerprint_graph_paths_with_runtime_names(
     root: &Path,
     paths: Vec<PathBuf>,
-    runtime_entity_names: Option<&BTreeMap<u32, String>>,
+    runtime_entity_names: Option<&HashMap<RuntimeEntityId, String>>,
 ) -> Result<[u8; 32], GfError> {
     let mut logical_tables = BTreeMap::<String, Vec<PathBuf>>::new();
     for path in paths {
@@ -769,7 +776,7 @@ fn fingerprint_graph_paths_with_runtime_names(
 fn logical_fingerprint_batch(
     relative: &str,
     batch: &RecordBatch,
-    runtime_entity_names: Option<&BTreeMap<u32, String>>,
+    runtime_entity_names: Option<&HashMap<RuntimeEntityId, String>>,
 ) -> Result<RecordBatch, GfError> {
     let source_schema = batch.schema();
     let mut names: Vec<&str> = if relative == "topology/nodes.parquet" {
@@ -817,10 +824,10 @@ fn logical_fingerprint_batch(
     RecordBatch::try_new(schema, columns).map_err(storage)
 }
 
-fn portable_runtime_entity_names(root: &Path) -> Result<BTreeMap<u32, String>, GfError> {
+fn portable_runtime_entity_names(root: &Path) -> Result<HashMap<RuntimeEntityId, String>, GfError> {
     let path = root.join("topology/runtime_catalog.parquet");
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(HashMap::new());
     }
     let batches = read_parquet(&path)?;
     let schema = batches
@@ -828,34 +835,22 @@ fn portable_runtime_entity_names(root: &Path) -> Result<BTreeMap<u32, String>, G
         .map(RecordBatch::schema)
         .ok_or_else(|| validation("runtime catalog has no schema"))?;
     let batch = concat_batches(&schema, &batches).map_err(storage)?;
-    // Parsing through RuntimeCatalog applies the catalog's complete structural
-    // and uniqueness validation before IDs are used as portable authority.
-    let canonical = graphforge_ir::RuntimeCatalog::from_record_batch(&batch)?.to_record_batch();
-    let kinds = string_column(&canonical, "entry_kind")?;
-    let names = string_column(&canonical, "name")?;
-    let ids = canonical
-        .column_by_name("runtime_id")
-        .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-        .ok_or_else(|| validation("runtime catalog runtime_id is not UInt32"))?;
-    let mut result = BTreeMap::new();
-    for row in 0..canonical.num_rows() {
-        if kinds.value(row) == "entity_type"
-            && result
-                .insert(ids.value(row), names.value(row).to_owned())
-                .is_some()
-        {
-            return Err(validation("runtime catalog has a duplicate entity type ID"));
-        }
-    }
-    Ok(result)
+    let catalog = graphforge_ir::RuntimeCatalog::from_record_batch(&batch)?;
+    Ok(catalog
+        .entity_type_names_with_ids()
+        .map(|(id, name)| (id, name.to_owned()))
+        .collect())
 }
 
-fn portable_type_name(id: u32, runtime: &BTreeMap<u32, String>) -> Result<String, GfError> {
+fn portable_type_name(
+    id: u32,
+    runtime: &HashMap<RuntimeEntityId, String>,
+) -> Result<String, GfError> {
     let id = graphforge_value::EntityTypeId::decode(id)
         .map_err(|error| validation(format!("invalid node type: {error}")))?;
     if let Some(local) = id.tagged().runtime_entity_id() {
         return runtime
-            .get(&local.get())
+            .get(&local)
             .map(|name| format!("runtime-entity:{name}"))
             .ok_or_else(|| validation("node runtime type ID has no catalog name"));
     }
@@ -867,7 +862,7 @@ fn portable_type_name(id: u32, runtime: &BTreeMap<u32, String>) -> Result<String
 fn portable_node_type_column(
     name: &str,
     column: &ArrayRef,
-    runtime: &BTreeMap<u32, String>,
+    runtime: &HashMap<RuntimeEntityId, String>,
 ) -> Result<(Arc<Field>, ArrayRef), GfError> {
     if name == "type_id" {
         let values = column
@@ -1525,6 +1520,24 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
+    #[test]
+    fn projected_semantic_id_does_not_select_equal_runtime_local_id() {
+        let target = TempDir::new().unwrap();
+        let mut catalog = RuntimeCatalog::new();
+        let runtime = catalog.intern_label("UnrelatedRuntime").unwrap();
+        assert_eq!(runtime.get(), 0);
+        let mut writer = GraphWriter::open_at(target.path(), OntologyMode::Strict, TS).unwrap();
+        writer
+            .create_node(uuid(90), EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+        assert!(
+            selected_catalog_rows(target.path(), &catalog.to_record_batch())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn fixture() -> (TempDir, [Uuid; 3], [Uuid; 2]) {
         let source = TempDir::new().unwrap();
         let nodes = [uuid(3), uuid(1), uuid(2)];
@@ -1532,10 +1545,20 @@ mod tests {
         let mut writer =
             GraphWriter::open_at(source.path(), OntologyMode::Exploratory, TS).unwrap();
         writer
-            .create_node_with_labels(nodes[0], &[TypeId(7), TypeId(9)])
+            .create_node_with_labels(
+                nodes[0],
+                &[
+                    EntityTypeId::ontology(TypeId(7)).unwrap(),
+                    EntityTypeId::ontology(TypeId(9)).unwrap(),
+                ],
+            )
             .unwrap();
-        writer.create_node(nodes[1], TypeId(8)).unwrap();
-        writer.create_node(nodes[2], TypeId(10)).unwrap();
+        writer
+            .create_node(nodes[1], EntityTypeId::ontology(TypeId(8)).unwrap())
+            .unwrap();
+        writer
+            .create_node(nodes[2], EntityTypeId::ontology(TypeId(10)).unwrap())
+            .unwrap();
         for (index, node) in nodes.iter().enumerate() {
             writer
                 .set_properties(
@@ -1723,7 +1746,9 @@ mod tests {
         let appended = uuid(4);
         let mut writer =
             GraphWriter::open_at(source.path(), OntologyMode::Exploratory, TS + 1).unwrap();
-        writer.create_node(appended, TypeId(10)).unwrap();
+        writer
+            .create_node(appended, EntityTypeId::ontology(TypeId(10)).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         let target = TempDir::new().unwrap();
         let mut selected = nodes
@@ -1894,9 +1919,15 @@ mod tests {
         catalog.intern_property("noise", Some("Company")).unwrap();
 
         let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
-        writer.create_node(alice, TypeId(person.0)).unwrap();
-        writer.create_node(bob, TypeId(person.0)).unwrap();
-        writer.create_node(excluded, TypeId(company.0)).unwrap();
+        writer
+            .create_node(alice, EntityTypeId::runtime(person))
+            .unwrap();
+        writer
+            .create_node(bob, EntityTypeId::runtime(person))
+            .unwrap();
+        writer
+            .create_node(excluded, EntityTypeId::runtime(company))
+            .unwrap();
         writer.create_edge(knows, "KNOWS", &alice, &bob).unwrap();
         writer
             .create_edge(ignores, "IGNORES", &alice, &excluded)
@@ -2638,7 +2669,7 @@ mod tests {
             catalog.intern_label(prefix).unwrap();
         }
         let runtime_id = catalog.intern_label(label).unwrap();
-        let storage_id = graphforge_ir::runtime_entity_type_id(runtime_id);
+        let storage_id = graphforge_value::EntityTypeId::runtime(runtime_id);
         let mut writer = GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
         writer.create_node(uuid(91), storage_id).unwrap();
         writer.flush().unwrap();
@@ -2682,7 +2713,10 @@ mod tests {
         let node = uuid(93);
         let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
         writer
-            .create_node(node, graphforge_core::TypeId(1))
+            .create_node(
+                node,
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -2715,7 +2749,7 @@ mod tests {
             let root = TempDir::new().unwrap();
             let mut catalog = RuntimeCatalog::new();
             let storage_id =
-                graphforge_ir::runtime_entity_type_id(catalog.intern_label("Person").unwrap());
+                graphforge_value::EntityTypeId::runtime(catalog.intern_label("Person").unwrap());
             let mut writer =
                 GraphWriter::open_at(root.path(), OntologyMode::Exploratory, TS).unwrap();
             writer.create_node(uuid(91), storage_id).unwrap();
@@ -2771,7 +2805,9 @@ mod tests {
         writer
             .create_node(
                 uuid(92),
-                graphforge_ir::runtime_entity_type_id(graphforge_ir::RuntimeTypeId(41)),
+                graphforge_value::EntityTypeId::runtime(
+                    graphforge_value::RuntimeEntityId::new(41).unwrap(),
+                ),
             )
             .unwrap();
         writer.flush().unwrap();

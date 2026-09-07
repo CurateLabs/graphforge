@@ -1251,7 +1251,7 @@ fn append_created_node_output_cols(
 
     let empty_uuids: &[[u8; 16]] = &[];
     let empty_node_ids: &[u64] = &[];
-    let empty_type_ids: &[u32] = &[];
+    let empty_type_ids: &[graphforge_value::PrimaryEntityTypeId] = &[];
     let (uuids, node_ids, type_ids) = match recorder.node_identities(spec.var) {
         Some(identities) => identities,
         None if rows == 0 => (empty_uuids, empty_node_ids, empty_type_ids),
@@ -1277,7 +1277,9 @@ fn append_created_node_output_cols(
     }
     out_cols.push(Arc::new(uuid_b.finish()));
     out_cols.push(Arc::new(UInt64Array::from(node_ids.to_vec())));
-    out_cols.push(Arc::new(UInt32Array::from(type_ids.to_vec())));
+    out_cols.push(Arc::new(UInt32Array::from(
+        type_ids.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+    )));
     out_cols.push(write_driver::repeated_label_sets(&spec.label_ids, rows));
 
     for (_, lit) in &spec.properties {
@@ -1650,7 +1652,7 @@ impl WriteCol {
         batch: &RecordBatch,
         row: usize,
         mode: OntologyMode,
-        type_id_to_entity_name: &HashMap<u32, String>,
+        type_id_to_entity_name: &HashMap<graphforge_value::EntityTypeId, String>,
     ) -> Result<String, GfError> {
         if self.is_edge {
             let idx = self.rel_name_idx.ok_or_else(|| {
@@ -1678,9 +1680,14 @@ impl WriteCol {
             .as_any()
             .downcast_ref::<arrow::array::UInt32Array>()
             .ok_or_else(|| GfError::Execution("type_id is not a UInt32 column".into()))?;
-        let type_id = arr.value(row);
-        Ok(type_id_to_entity_name
-            .get(&type_id)
+        if arr.is_null(row) {
+            return Err(GfError::Execution("node primary identity is null".into()));
+        }
+        let primary = graphforge_value::PrimaryEntityTypeId::decode(arr.value(row))
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        Ok(primary
+            .label()
+            .and_then(|id| type_id_to_entity_name.get(&id))
             .cloned()
             .unwrap_or_else(|| UNTYPED_STEM.to_owned()))
     }
@@ -1867,7 +1874,7 @@ fn accumulate_set_batch(
     targets: &[(WriteCol, DfExpr)],
     phys_values: &[Arc<dyn datafusion::physical_expr::PhysicalExpr>],
     mode: OntologyMode,
-    type_map: &HashMap<u32, String>,
+    type_map: &HashMap<graphforge_value::EntityTypeId, String>,
     acc: &mut SetAccumulator,
 ) -> Result<(), GfError> {
     let n = batch.num_rows();
@@ -1901,7 +1908,7 @@ fn accumulate_remove_batch(
     batch: &RecordBatch,
     targets: &[WriteCol],
     mode: OntologyMode,
-    type_map: &HashMap<u32, String>,
+    type_map: &HashMap<graphforge_value::EntityTypeId, String>,
     acc: &mut RemoveAccumulator,
 ) -> Result<(), GfError> {
     for col in targets {
@@ -1933,7 +1940,7 @@ pub struct GraphSetExec {
     input: Arc<dyn ExecutionPlan>,
     /// Per target: resolved columns + the value expression to evaluate per row.
     targets: Vec<(WriteCol, DfExpr)>,
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
     /// Logical input schema (with `var_<n>` qualifiers) — used to build the
@@ -2077,7 +2084,7 @@ impl ExecutionPlan for GraphSetExec {
 pub struct GraphRemoveExec {
     input: Arc<dyn ExecutionPlan>,
     targets: Vec<WriteCol>,
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
     schema: SchemaRef,
@@ -5222,7 +5229,7 @@ impl ExecutionSession {
             self.ontology.as_ref(),
             &self.dir,
             self.mode,
-        );
+        )?;
         let logical = bind_query_params(lowerer.lower_plan(plan)?, params)?;
 
         let physical = self
@@ -5377,7 +5384,7 @@ impl ExecutionSession {
             self.ontology.as_ref(),
             &self.dir,
             self.mode,
-        );
+        )?;
 
         // Run the read prefix once, keeping the variable registrations the
         // write phases resolve against.
@@ -5840,7 +5847,7 @@ impl ExecutionSession {
                 self.ontology.as_ref(),
                 &self.dir,
                 self.mode,
-            );
+            )?;
             let logical = lowerer.lower_plan(plan)?;
             let physical = self
                 .ctx
@@ -5882,14 +5889,14 @@ impl ExecutionSession {
                         .into(),
                 ));
             }
-            GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())
+            GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())?
         } else {
             GraphPlanLowerer::new_with_dir(
                 Some(&self.catalog),
                 self.ontology.as_ref(),
                 &self.dir,
                 self.mode,
-            )
+            )?
         };
         #[cfg(feature = "differential-testing")]
         let lowerer = if self.relational_fixed_hop_reference {

@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use graphforge_core::{OntologyMode, TypeId};
+use graphforge_core::OntologyMode;
 use graphforge_storage::{
     CheckpointCreateRequest, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionRequest,
@@ -17,6 +17,7 @@ use graphforge_storage::{
     publish_graph_delta, reconstruct_graph_state, resolve_project_generation,
     stage_project_generation_with_graph_tree,
 };
+use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
 fn sample_ops() -> Vec<GraphDeltaOp> {
@@ -30,7 +31,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
                 node_id: 2,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 1,
                 updated_at_micros: 1,
             },
@@ -41,7 +42,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
                 node_id: 3,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 2,
                 updated_at_micros: 2,
             },
@@ -75,7 +76,7 @@ fn publish_base(container: &std::path::Path) -> Uuid {
     writer
         .create_node(
             Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
-            TypeId(1),
+            EntityTypeId::decode(1).unwrap(),
         )
         .unwrap();
     writer.flush().unwrap();

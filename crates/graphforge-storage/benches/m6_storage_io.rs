@@ -4,7 +4,7 @@
 //! closure. Every sample owns a private temporary project root.
 
 use divan::Bencher;
-use graphforge_core::{OntologyMode, TypeId};
+use graphforge_core::OntologyMode;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaCompactionLimits,
     GraphDeltaCompactionRequest, GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind,
@@ -30,7 +30,12 @@ fn prepared_publication() -> (
     open_or_initialize_project(root.path()).unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Strict, 1).unwrap();
-    writer.create_node(Uuid::from_u128(1), TypeId(1)).unwrap();
+    writer
+        .create_node(
+            Uuid::from_u128(1),
+            graphforge_value::EntityTypeId::decode(1).unwrap(),
+        )
+        .unwrap();
     writer.flush().unwrap();
     let (_, files) = capture_graph_files(workspace.path()).unwrap();
     let mut participants = empty_workspace_participants().unwrap();
@@ -80,7 +85,7 @@ fn publish_delta(root: &std::path::Path) {
                 payload: GraphDeltaPayload::UpsertNodeV2 {
                     node_uuid: Uuid::from_u128(2).to_string(),
                     node_id: 2,
-                    type_ids: vec![1],
+                    type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                     created_at_micros: 2,
                     updated_at_micros: 2,
                 },

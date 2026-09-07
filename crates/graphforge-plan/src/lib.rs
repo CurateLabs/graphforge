@@ -1564,7 +1564,7 @@ pub struct GraphSetNode {
     pub targets: Vec<SetTarget>,
     /// Maps a node `type_id` to its property-file entity stem, for per-row node
     /// stem resolution (an empty map / missing id falls back to `_untyped`).
-    pub type_id_to_entity_name: HashMap<u32, String>,
+    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     /// Target project directory.
     pub dir: PathBuf,
     /// Ontology mode (drives node property-file routing).
@@ -1588,7 +1588,7 @@ impl GraphSetNode {
     pub fn new(
         input: Arc<LogicalPlan>,
         targets: Vec<SetTarget>,
-        type_id_to_entity_name: HashMap<u32, String>,
+        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Self {
@@ -1698,7 +1698,7 @@ pub struct GraphRemoveNode {
     pub targets: Vec<RemoveTarget>,
     /// Maps a node `type_id` to its property-file entity stem (see
     /// [`GraphSetNode::type_id_to_entity_name`]).
-    pub type_id_to_entity_name: HashMap<u32, String>,
+    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     /// Target project directory.
     pub dir: PathBuf,
     /// Ontology mode (drives node property-file routing).
@@ -1722,7 +1722,7 @@ impl GraphRemoveNode {
     pub fn new(
         input: Arc<LogicalPlan>,
         targets: Vec<RemoveTarget>,
-        type_id_to_entity_name: HashMap<u32, String>,
+        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Self {

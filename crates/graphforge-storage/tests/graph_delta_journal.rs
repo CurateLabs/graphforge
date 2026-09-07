@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
-use graphforge_core::{OntologyMode, TypeId};
+use graphforge_core::OntologyMode;
 use graphforge_ir::IrLiteral;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaJournalLimits, GraphDeltaOp,
@@ -17,6 +17,7 @@ use graphforge_storage::{
     reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
     visit_authenticated_property_snapshots,
 };
+use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
 fn authenticated_property_rows(
@@ -97,7 +98,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
                 node_id: 3,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 1_700_000_000_000_001,
                 updated_at_micros: 1_700_000_000_000_001,
             },
@@ -108,7 +109,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
                 node_id: 4,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 1_700_000_000_000_002,
                 updated_at_micros: 1_700_000_000_000_002,
             },
@@ -156,11 +157,17 @@ fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize
         1_700_000_000_000_000,
     )
     .unwrap();
-    writer.create_node(first, TypeId(1)).unwrap();
-    writer.create_node(second, TypeId(1)).unwrap();
+    writer
+        .create_node(first, EntityTypeId::decode(1).unwrap())
+        .unwrap();
+    writer
+        .create_node(second, EntityTypeId::decode(1).unwrap())
+        .unwrap();
     writer.create_edge(edge, "KNOWS", &first, &second).unwrap();
     for _ in 0..extra_nodes {
-        writer.create_node(Uuid::now_v7(), TypeId(1)).unwrap();
+        writer
+            .create_node(Uuid::now_v7(), EntityTypeId::decode(1).unwrap())
+            .unwrap();
     }
     writer
         .set_properties(

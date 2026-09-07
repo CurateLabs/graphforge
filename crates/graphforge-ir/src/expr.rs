@@ -6,7 +6,7 @@
 //!
 //! Unlike the AST expression types in `graphforge-ast`, these types:
 //! - carry **no source spans** (semantic-only)
-//! - use resolved IDs ([`VarId`], [`PropId`]) instead of raw name strings
+//! - use resolved IDs ([`VarId`], [`PropertyId`]) instead of raw name strings
 //! - collapse AST-level sugar (`IsNull`, `InList`, `StringOp`, `RegexMatch`)
 //!   into `UnaryOp` / `BinaryOp` variants handled uniformly by the executor
 
@@ -535,14 +535,14 @@ pub enum IrExpr {
 /// # Example
 ///
 /// ```
-/// use graphforge_ir::{ExprArena, IrExpr, IrLiteral, VarId, PropId};
+/// use graphforge_ir::{ExprArena, IrExpr, IrLiteral, VarId, PropId, PropertyId};
 /// use graphforge_ir::expr::BinaryOpKind;
 ///
 /// let mut arena = ExprArena::new();
 ///
 /// // Build: name = "Alice"
 /// let var = arena.push(IrExpr::VarRef(VarId(0)));
-/// let prop = arena.push(IrExpr::PropertyAccess { base: var, prop: PropId(1) });
+/// let prop = arena.push(IrExpr::PropertyAccess { base: var, prop: PropertyId::ontology(PropId(1)).unwrap() });
 /// let lit = arena.push(IrExpr::Literal(IrLiteral::Str("Alice".into())));
 /// let eq  = arena.push(IrExpr::BinaryOp { op: BinaryOpKind::Eq, left: prop, right: lit });
 ///
@@ -623,7 +623,7 @@ mod tests {
         // a.name (PropId 1)
         let a_name = arena.push(IrExpr::PropertyAccess {
             base: a,
-            prop: PropId(1),
+            prop: PropertyId::ontology(PropId(1)).unwrap(),
         });
 
         // "Alice"
@@ -639,7 +639,7 @@ mod tests {
         // a.age (PropId 2)
         let a_age = arena.push(IrExpr::PropertyAccess {
             base: a,
-            prop: PropId(2),
+            prop: PropertyId::ontology(PropId(2)).unwrap(),
         });
 
         // 30
@@ -725,7 +725,7 @@ mod tests {
 
         let prop = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: PropId(3),
+            prop: PropertyId::ontology(PropId(3)).unwrap(),
         });
 
         let binop = arena.push(IrExpr::BinaryOp {

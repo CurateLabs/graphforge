@@ -27,7 +27,7 @@ pub enum SearchIndexRequest<'a> {
         /// Normalized graph label persisted in the artifact key.
         label: &'a str,
         /// Local catalog identity used only for graph membership projection.
-        label_id: u32,
+        label_id: graphforge_value::EntityTypeSelection,
         /// Explicit properties, or `None` for stable default discovery.
         properties: Option<&'a [String]>,
         /// Force atomic replacement even when an exact fresh artifact exists.
@@ -38,7 +38,7 @@ pub enum SearchIndexRequest<'a> {
         /// Normalized graph label persisted in the artifact key.
         label: &'a str,
         /// Local catalog identity used only for graph membership projection.
-        label_id: u32,
+        label_id: graphforge_value::EntityTypeSelection,
         /// Stable graph UUID resolved by the caller.
         node_uuid: [u8; 16],
         /// Finite, non-zero fixed-dimension vector.
@@ -142,7 +142,7 @@ mod tests {
     use std::collections::HashMap;
 
     use graphforge_core::uuid::Uuid;
-    use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
+    use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_storage::{
         GraphWriter, SearchPublicationOutcome, generation::bump_search_generation,
     };
@@ -163,7 +163,13 @@ mod tests {
     fn write_text_graph(dir: &TempDir) {
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         writer
-            .create_node_with_labels(uuid(1), &[TypeId(1), TypeId(9)])
+            .create_node_with_labels(
+                uuid(1),
+                &[
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    graphforge_value::EntityTypeId::decode(9).unwrap(),
+                ],
+            )
             .unwrap();
         writer
             .set_properties(
@@ -185,7 +191,9 @@ mod tests {
     fn text_request<'a>(properties: Option<&'a [String]>, rebuild: bool) -> SearchIndexRequest<'a> {
         SearchIndexRequest::Text {
             label: "Person",
-            label_id: 9,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
             properties,
             rebuild,
         }
@@ -194,7 +202,9 @@ mod tests {
     fn vector_request(vector: &[f32], updated_at_micros: i64) -> SearchIndexRequest<'_> {
         SearchIndexRequest::Vector {
             label: "Person",
-            label_id: 9,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
             node_uuid: uuid_bytes(1),
             vector,
             space: "semantic",
@@ -302,7 +312,9 @@ mod tests {
     fn vector_dispatch_preserves_insert_idempotence_and_replacement() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(9)).unwrap();
+        writer
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         let first = prepare_search_index(
             dir.path(),

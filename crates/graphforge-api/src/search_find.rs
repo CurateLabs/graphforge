@@ -94,7 +94,7 @@ impl GraphForge {
     fn retrieve_find_hits(
         &self,
         label: &str,
-        label_id: u32,
+        label_id: graphforge_value::EntityTypeSelection,
         query: Option<&str>,
         vector_query: Option<&VectorQuery>,
         space: Option<&str>,
@@ -159,7 +159,7 @@ impl GraphForge {
     fn retrieve_vector_hits(
         &self,
         label: &str,
-        label_id: u32,
+        label_id: graphforge_value::EntityTypeSelection,
         vector_query: &VectorQuery,
         space: Option<&str>,
         force_stale: bool,
@@ -416,6 +416,78 @@ mod tests {
             })
             .unwrap();
         assert_eq!(mismatched.num_rows(), 0);
+    }
+
+    #[test]
+    fn missing_label_keeps_validation_and_never_selects_existing_nodes() {
+        let graph = GraphForge::new(None).unwrap();
+        node(&graph, "matching title");
+        assert_eq!(
+            graph.find_label_id("Absent").unwrap(),
+            graphforge_value::EntityTypeSelection::Missing
+        );
+        assert!(matches!(
+            graph.find_label_id("Paper").unwrap(),
+            graphforge_value::EntityTypeSelection::Known(_)
+        ));
+        let empty = graph
+            .find(FindOptions {
+                label: Some("Absent".into()),
+                query: Some("matching".into()),
+                limit: 10,
+                ..FindOptions::default()
+            })
+            .unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        assert_eq!(
+            empty
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["node_uuid", "score", "matched_on"]
+        );
+        for invalid in [
+            FindOptions::default(),
+            FindOptions {
+                query: Some("".into()),
+                ..FindOptions::default()
+            },
+            FindOptions {
+                query: Some("matching".into()),
+                limit: 0,
+                ..FindOptions::default()
+            },
+            FindOptions {
+                vector: Some(vec![1.0, 0.0]),
+                ..FindOptions::default()
+            },
+            FindOptions {
+                query: Some("matching".into()),
+                space: Some("semantic".into()),
+                ..FindOptions::default()
+            },
+            FindOptions {
+                query: Some("matching".into()),
+                force_stale: true,
+                ..FindOptions::default()
+            },
+        ] {
+            let known = graph
+                .find(FindOptions {
+                    label: Some("Paper".into()),
+                    ..invalid.clone()
+                })
+                .unwrap_err();
+            let missing = graph
+                .find(FindOptions {
+                    label: Some("Absent".into()),
+                    ..invalid
+                })
+                .unwrap_err();
+            assert_eq!(missing.code(), known.code());
+        }
     }
 
     #[test]

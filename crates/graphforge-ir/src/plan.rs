@@ -84,7 +84,7 @@ pub enum GraphOp {
     /// MATCH pattern specifies a concrete relation type.  The relational
     /// lowering layer maps `rel_ty → relation_name` via the ontology (or the
     /// `RuntimeCatalog` in exploratory mode) to determine the Parquet file
-    /// path.  In exploratory mode, if `rel_ty` is a `RuntimeTypeId`, the
+    /// path.  In exploratory mode, if `rel_ty` carries a runtime relation identity, the
     /// storage layer routes the scan to `topology/edges/_exploratory.parquet`.
     TypedEdgeScan {
         /// The variable that receives each scanned edge.
@@ -554,10 +554,14 @@ impl GraphPlanBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AggFunc, BinaryOpKind, ExprArena, IrExpr, IrLiteral, PropId};
+    use crate::{AggFunc, BinaryOpKind, ExprArena, IrExpr, IrLiteral, PropId, PropertyId};
 
-    fn make_type_id(n: u32) -> TypeId {
-        TypeId(n)
+    fn make_type_id(n: u32) -> EntityTypeId {
+        EntityTypeId::ontology(crate::TypeId(n)).unwrap()
+    }
+
+    fn make_relation_id(n: u32) -> RelationTypeId {
+        RelationTypeId::ontology(crate::TypeId(n)).unwrap()
     }
 
     // NodeScan → TypedEdgeScan → Filter → Project
@@ -589,7 +593,7 @@ mod tests {
                 },
                 GraphOp::TypedEdgeScan {
                     var: var_e,
-                    rel_ty: make_type_id(10),
+                    rel_ty: make_relation_id(10),
                 },
                 GraphOp::Filter { predicate: pred },
                 GraphOp::Project {
@@ -619,7 +623,7 @@ mod tests {
         let ref_b = exprs.push(IrExpr::VarRef(var_b));
         let prop = exprs.push(IrExpr::PropertyAccess {
             base: ref_b,
-            prop: PropId(5),
+            prop: PropertyId::ontology(PropId(5)).unwrap(),
         });
         let lit = exprs.push(IrExpr::Literal(IrLiteral::Str("Bob".into())));
         let pred = exprs.push(IrExpr::BinaryOp {
@@ -672,7 +676,7 @@ mod tests {
     fn typed_edge_scan_roundtrip() {
         let op = GraphOp::TypedEdgeScan {
             var: VarId(3),
-            rel_ty: make_type_id(42),
+            rel_ty: make_relation_id(42),
         };
         let json = serde_json::to_string(&op).unwrap();
         let back: GraphOp = serde_json::from_str(&json).unwrap();
@@ -769,11 +773,11 @@ mod tests {
             GraphOp::NodeScan { var: v0, ty: None },
             GraphOp::EdgeScan {
                 var: v0,
-                ty: Some(make_type_id(1)),
+                ty: Some(make_relation_id(1)),
             },
             GraphOp::TypedEdgeScan {
                 var: v0,
-                rel_ty: make_type_id(2),
+                rel_ty: make_relation_id(2),
             },
             GraphOp::Expand {
                 src: v0,
@@ -874,7 +878,7 @@ mod tests {
             GraphOp::Set {
                 items: vec![SetPropItem {
                     target: v0,
-                    prop: PropId(7),
+                    prop: PropertyId::ontology(PropId(7)).unwrap(),
                     prop_name: "age".into(),
                     value: e0,
                 }],
@@ -884,7 +888,7 @@ mod tests {
             GraphOp::Remove {
                 items: vec![RemovePropItem {
                     target: v0,
-                    prop: PropId(7),
+                    prop: PropertyId::ontology(PropId(7)).unwrap(),
                     prop_name: "age".into(),
                 }],
                 label_items: vec![],

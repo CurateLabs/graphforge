@@ -23,7 +23,9 @@
 //! consume the same canonical shard union; they are outside the query-provider
 //! scan path.
 
-use graphforge_value::{PropertyId, RuntimeEntityId, RuntimeRelationId};
+use graphforge_value::{
+    EntityTypeId, PropertyId, RelationTypeId, RuntimeEntityId, RuntimeRelationId,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -135,7 +137,7 @@ pub(crate) fn normalize_topology_nodes(
                         .as_any()
                         .downcast_ref::<UInt32Array>()
                         .ok_or_else(|| invalid("type_ids values are not UInt32".into()))?;
-                    for raw in values.iter() {
+                    for raw in values {
                         let raw =
                             raw.ok_or_else(|| invalid(format!("null membership at row {row}")))?;
                         EntityTypeId::decode(raw)
@@ -2877,17 +2879,17 @@ pub struct GraphCatalog {
     /// the runtime catalog. Lets the lowering layer resolve a `TypedEdgeScan`'s
     /// relation name in exploratory mode (where the ontology map is empty).
     rel_names: HashMap<RuntimeRelationId, String>,
-    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    /// Reverse map checked runtime identity → entity-type (node label) name, from the
     /// runtime catalog. The lowerer tags these keys with
-    /// [`graphforge_ir::runtime_entity_type_id`] before merging them with
+    /// [`EntityTypeId::runtime`] before merging them with
     /// ontology TypeIds (#702 / #889).
     label_names: HashMap<RuntimeEntityId, String>,
-    semantic_rel_routes: HashMap<u32, String>,
-    semantic_label_routes: HashMap<u32, String>,
-    semantic_label_names: HashMap<u32, String>,
+    semantic_rel_routes: HashMap<RelationTypeId, String>,
+    semantic_label_routes: HashMap<EntityTypeId, String>,
+    semantic_label_names: HashMap<EntityTypeId, String>,
     semantic_composition_fingerprint: Option<String>,
-    semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>>,
-    semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>>,
+    semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
+    semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
 }
 
 impl fmt::Debug for GraphCatalog {
@@ -3076,22 +3078,25 @@ impl GraphCatalog {
         let mut semantic_rel_routes = HashMap::new();
         let mut semantic_label_routes = HashMap::new();
         let mut semantic_label_names = HashMap::new();
-        let mut semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>> = HashMap::new();
-        let mut semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>> =
+        let mut semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
+            HashMap::new();
+        let mut semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
             HashMap::new();
         if let Some(bindings) = semantic {
             for binding in &bindings.bindings {
                 match binding.route_kind {
                     crate::SemanticRouteKind::Entity => {
-                        semantic_label_routes.insert(binding.storage_id, binding.route.clone());
-                        semantic_label_names.insert(binding.storage_id, binding.symbol.display());
+                        let id = EntityTypeId::decode(binding.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+                        semantic_label_routes.insert(id, binding.route.clone());
+                        semantic_label_names.insert(id, binding.symbol.display());
                     }
                     crate::SemanticRouteKind::Relation => {
-                        semantic_rel_routes.insert(binding.storage_id, binding.route.clone());
-                        semantic_edge_tables.insert(
-                            binding.storage_id,
-                            Arc::new(TypedEdgeTable::open(dir, &binding.route)),
-                        );
+                        let id = RelationTypeId::decode(binding.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+                        semantic_rel_routes.insert(id, binding.route.clone());
+                        semantic_edge_tables
+                            .insert(id, Arc::new(TypedEdgeTable::open(dir, &binding.route)));
                     }
                     crate::SemanticRouteKind::NodeProperty
                     | crate::SemanticRouteKind::EdgeProperty => {
@@ -3102,7 +3107,7 @@ impl GraphCatalog {
                             .map_or(binding.symbol.local_id.as_str(), |(_, name)| name);
                         prop_names.insert(
                             PropertyId::ontology(graphforge_core::PropId(binding.storage_id))
-                                .map_err(|error| GfError::Validation(error.to_string()))?,
+                                .map_err(|error| DataFusionError::Plan(error.to_string()))?,
                             name.to_owned(),
                         );
                     }
@@ -3118,7 +3123,8 @@ impl GraphCatalog {
                         && binding.owner.as_ref() == Some(&relation.symbol)
                 }) {
                     semantic_edge_property_tables.insert(
-                        relation.storage_id,
+                        RelationTypeId::decode(relation.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?,
                         Arc::new(inventory.as_ref().map_or_else(
                             || EdgePropertyTable::open_discovered(dir, &relation.route),
                             |inventory| {
@@ -3261,7 +3267,7 @@ impl GraphCatalog {
         &self.prop_names
     }
 
-    /// Reverse map `RuntimeTypeId.0` → relation-type name from the runtime
+    /// Reverse map checked runtime identity → relation-type name from the runtime
     /// catalog. The relational lowerer tags these keys before merging them with
     /// ontology TypeIds so the two zero-based ID spaces cannot collide.
     #[must_use]
@@ -3269,7 +3275,7 @@ impl GraphCatalog {
         &self.rel_names
     }
 
-    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    /// Reverse map checked runtime identity → entity-type (node label) name, from the
     /// runtime catalog. The relational lowerer tags these keys before merging
     /// them with ontology TypeIds so the two zero-based ID spaces cannot collide
     /// (#702).
@@ -3280,19 +3286,19 @@ impl GraphCatalog {
 
     /// Generation-pinned semantic relation ID to opaque physical route.
     #[must_use]
-    pub fn semantic_rel_routes(&self) -> &HashMap<u32, String> {
+    pub fn semantic_rel_routes(&self) -> &HashMap<RelationTypeId, String> {
         &self.semantic_rel_routes
     }
 
     /// Generation-pinned semantic entity ID to opaque property route.
     #[must_use]
-    pub fn semantic_label_routes(&self) -> &HashMap<u32, String> {
+    pub fn semantic_label_routes(&self) -> &HashMap<EntityTypeId, String> {
         &self.semantic_label_routes
     }
 
     /// Generation-pinned semantic entity ID to exact qualified display name.
     #[must_use]
-    pub fn semantic_label_names(&self) -> &HashMap<u32, String> {
+    pub fn semantic_label_names(&self) -> &HashMap<EntityTypeId, String> {
         &self.semantic_label_names
     }
 
@@ -3304,13 +3310,16 @@ impl GraphCatalog {
 
     /// Registered authenticated provider for one semantic relation ID.
     #[must_use]
-    pub fn semantic_edge_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+    pub fn semantic_edge_table(&self, id: RelationTypeId) -> Option<Arc<dyn TableProvider>> {
         self.semantic_edge_tables.get(&id).cloned()
     }
 
     /// Registered authenticated property provider for one semantic relation ID.
     #[must_use]
-    pub fn semantic_edge_property_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+    pub fn semantic_edge_property_table(
+        &self,
+        id: RelationTypeId,
+    ) -> Option<Arc<dyn TableProvider>> {
         self.semantic_edge_property_tables.get(&id).cloned()
     }
 }
@@ -3344,13 +3353,13 @@ fn build_rel_names(runtime_catalog: &RuntimeCatalog) -> HashMap<RuntimeRelationI
         .collect()
 }
 
-/// Build the `RuntimeTypeId.0 → label-name` map from the runtime catalog.
+/// Build the checked runtime entity → label-name map from the runtime catalog.
 ///
 /// As with [`build_rel_names`], only the runtime-catalog side is needed: the
 /// binder resolves labels ontology-first, so ontology-sourced label `TypeId`s
 /// are already covered by the lowerer's ontology map; this fills the exploratory
 /// / advisory-miss case. Consumers must tag keys with
-/// [`graphforge_ir::runtime_entity_type_id`] before comparing them to stored
+/// [`EntityTypeId::runtime`] before comparing them to stored
 /// plan/storage TypeIds (#702 / #889).
 fn build_label_names(runtime_catalog: &RuntimeCatalog) -> HashMap<RuntimeEntityId, String> {
     runtime_catalog

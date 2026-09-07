@@ -847,7 +847,7 @@ impl ConstructionSemanticAuthority {
     pub(crate) fn context(&self) -> Result<CompositionBindingContext, GfError> {
         let compiled = self.composition.compile()?;
         self.bindings.validate_against(&compiled)?;
-        Ok(CompositionBindingContext::new(
+        CompositionBindingContext::new(
             Arc::new(compiled),
             self.composition.bridges.clone(),
             CompositionBindingLimits::default(),
@@ -857,7 +857,7 @@ impl ConstructionSemanticAuthority {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        )?)
+        )
     }
 }
 
@@ -6753,7 +6753,7 @@ fn build_runtime_catalog(
                                     budgets,
                                     evidence,
                                 )?;
-                                catalog.intern_label_at(owner_name, now_micros);
+                                catalog.intern_label_at(owner_name, now_micros)?;
                             }
                             ConstructionChunkKind::Edge => {
                                 admit_catalog_identifier(
@@ -6764,7 +6764,7 @@ fn build_runtime_catalog(
                                     budgets,
                                     evidence,
                                 )?;
-                                catalog.intern_relation_type_at(owner_name, now_micros);
+                                catalog.intern_relation_type_at(owner_name, now_micros)?;
                             }
                         }
                         for (offset, field) in
@@ -6789,7 +6789,7 @@ fn build_runtime_catalog(
                                     field.name(),
                                     Some(owner_name),
                                     now_micros,
-                                );
+                                )?;
                             }
                         }
                     }

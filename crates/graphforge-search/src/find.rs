@@ -18,7 +18,7 @@ pub struct FindSearchRequest<'a> {
     /// Normalized graph label.
     pub label: &'a str,
     /// Local catalog identity used only for graph membership projection.
-    pub label_id: u32,
+    pub label_id: graphforge_value::EntityTypeSelection,
     /// Optional non-empty plain-text query.
     pub query: Option<&'a str>,
     /// Optional finite, non-zero vector query.
@@ -290,7 +290,7 @@ mod tests {
     use std::collections::HashMap;
 
     use graphforge_core::uuid::Uuid;
-    use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
+    use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_storage::GraphWriter;
     use tempfile::TempDir;
 
@@ -314,7 +314,9 @@ mod tests {
     ) -> FindSearchRequest<'a> {
         FindSearchRequest {
             label: LABEL,
-            label_id: LABEL_ID,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            ),
             query,
             vector,
             space,
@@ -325,7 +327,12 @@ mod tests {
     fn write_people(dir: &TempDir) {
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         for value in [2_u8, 1] {
-            writer.create_node(uuid(value), TypeId(LABEL_ID)).unwrap();
+            writer
+                .create_node(
+                    uuid(value),
+                    graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+                )
+                .unwrap();
             writer
                 .set_properties(
                     &uuid(value),
@@ -340,7 +347,9 @@ mod tests {
                 dir.path(),
                 VectorIndexRequest {
                     label: LABEL,
-                    label_id: LABEL_ID,
+                    label_id: graphforge_value::EntityTypeSelection::Known(
+                        graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+                    ),
                     space: "semantic",
                 },
                 *uuid(value).as_bytes(),
@@ -457,7 +466,9 @@ mod tests {
         );
         let empty_label = FindSearchRequest {
             label: "Empty",
-            label_id: 44,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(44).unwrap(),
+            ),
             query: Some("shared"),
             vector: None,
             space: None,

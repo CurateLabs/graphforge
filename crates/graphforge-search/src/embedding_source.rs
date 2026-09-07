@@ -164,8 +164,8 @@ fn exhausted(resource: &'static str, limit: u64) -> SearchArtifactError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+    use graphforge_core::OntologyMode;
     use graphforge_core::uuid::{new_v7, to_bytes};
-    use graphforge_core::{OntologyMode, TypeId};
     use graphforge_ir::IrLiteral;
     use graphforge_storage::{
         EmbeddingBatchRow, EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityInput,
@@ -356,8 +356,18 @@ mod tests {
         let node_b = new_v7();
         let mut writer =
             GraphWriter::open_at(project.path(), OntologyMode::Exploratory, 10).unwrap();
-        assert_eq!(writer.create_node(node_a, TypeId(1)).unwrap(), 1);
-        assert_eq!(writer.create_node(node_b, TypeId(1)).unwrap(), 2);
+        assert_eq!(
+            writer
+                .create_node(node_a, graphforge_value::EntityTypeId::decode(1).unwrap())
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            writer
+                .create_node(node_b, graphforge_value::EntityTypeId::decode(1).unwrap())
+                .unwrap(),
+            2
+        );
         writer.flush().unwrap();
 
         let first = capture(project.path(), &[part("labels", b"a,b")], &[], 2);
@@ -407,7 +417,9 @@ mod tests {
         let node_bytes = to_bytes(&node);
         let mut writer =
             GraphWriter::open_at(project.path(), OntologyMode::Exploratory, 10).unwrap();
-        writer.create_node(node, TypeId(1)).unwrap();
+        writer
+            .create_node(node, graphforge_value::EntityTypeId::decode(1).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         let recorded = capture(
             project.path(),

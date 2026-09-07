@@ -15,6 +15,7 @@ use arrow::array::{
 };
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ir::IrLiteral;
+use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -155,16 +156,22 @@ pub enum GraphDeltaPayload {
         /// Node UUID (hyphenated lowercase).
         node_uuid: String,
         /// Complete label type id set.
-        type_ids: Vec<u32>,
+        type_ids: Vec<EntityTypeId>,
     },
     /// Lossless node upsert used by the typed GFDR contract.
+    ///
+    /// Existing nodes retain the canonical base's immutable primary route.
+    /// For a new node, the first upsert supplies its initial creation labels;
+    /// emit that upsert before subsequent membership changes in the same run.
+    /// V2 deliberately has no independent primary field, so collapsing those
+    /// operations into final memberships would lose the creation route.
     UpsertNodeV2 {
         /// Node UUID.
         node_uuid: String,
         /// Stable runtime surrogate identity.
         node_id: u64,
         /// Complete label type id set.
-        type_ids: Vec<u32>,
+        type_ids: Vec<EntityTypeId>,
         /// Creation timestamp in UTC microseconds.
         created_at_micros: i64,
         /// Last-update timestamp in UTC microseconds.
@@ -380,7 +387,10 @@ pub struct GraphDeltaRun {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconstructedGraphState {
     /// Surviving nodes: uuid -> sorted type ids.
-    pub nodes: BTreeMap<String, Vec<u32>>,
+    pub nodes: BTreeMap<String, Vec<EntityTypeId>>,
+    /// Immutable primary property route, independent of current memberships.
+    #[serde(default)]
+    pub node_primary_types: BTreeMap<String, PrimaryEntityTypeId>,
     /// Stable node surrogate identities loaded from canonical Parquet.
     pub node_ids: BTreeMap<String, u64>,
     /// Canonical node creation/update timestamps in UTC microseconds.
@@ -407,7 +417,8 @@ pub struct ReconstructedGraphState {
 pub(crate) struct ReplayNodeRow {
     pub(crate) node_uuid: String,
     pub(crate) node_id: u64,
-    pub(crate) type_ids: Vec<u32>,
+    pub(crate) primary_type: PrimaryEntityTypeId,
+    pub(crate) type_ids: Vec<EntityTypeId>,
     pub(crate) created_at_micros: i64,
     pub(crate) updated_at_micros: i64,
 }
@@ -443,9 +454,9 @@ impl ReplayOverlay {
             sum.saturating_add(192)
                 .saturating_add(uuid.len())
                 .saturating_add(row.as_ref().map_or(0, |row| {
-                    row.node_uuid
-                        .len()
-                        .saturating_add(row.type_ids.len().saturating_mul(size_of::<u32>()))
+                    row.node_uuid.len().saturating_add(
+                        row.type_ids.len().saturating_mul(size_of::<EntityTypeId>()),
+                    )
                 }))
         });
         let edges = self.edges.iter().fold(0_usize, |sum, (uuid, row)| {
@@ -484,7 +495,7 @@ impl ReconstructedGraphState {
             hasher.update(uuid.as_bytes());
             hasher.update(b"|");
             for type_id in types {
-                hasher.update(type_id.to_le_bytes());
+                hasher.update(type_id.encode().to_le_bytes());
             }
             hasher.update(b"\n");
             if let Some(node_id) = self.node_ids.get(uuid) {
@@ -553,6 +564,7 @@ impl ReconstructedGraphState {
             .len()
             .saturating_mul(32)
             .saturating_add(self.node_timestamps.len().saturating_mul(40))
+            .saturating_add(self.node_primary_types.len().saturating_mul(40))
             .saturating_add(self.edge_ids.len().saturating_mul(48))
             .saturating_add(self.edge_created_at.len().saturating_mul(32));
         let nprops = self.node_properties.len().saturating_mul(96);
@@ -1000,11 +1012,20 @@ fn build_replay_overlay(
                     created_at_micros,
                     updated_at_micros,
                 } => {
+                    // V2 carries memberships only. Retain initial creation authority;
+                    // the streaming writer overrides this with canonical authority
+                    // when the UUID already exists in the base.
+                    let primary_type = overlay
+                        .nodes
+                        .get(node_uuid)
+                        .and_then(Option::as_ref)
+                        .map_or_else(|| initial_primary(type_ids), |row| row.primary_type);
                     overlay.nodes.insert(
                         node_uuid.clone(),
                         Some(ReplayNodeRow {
                             node_uuid: node_uuid.clone(),
                             node_id: *node_id,
+                            primary_type,
                             type_ids: type_ids.clone(),
                             created_at_micros: *created_at_micros,
                             updated_at_micros: *updated_at_micros,
@@ -1515,6 +1536,7 @@ pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphSta
         let uuids = required_array::<FixedSizeBinaryArray>(&batch, "node_uuid")?;
         let ids = required_array::<UInt64Array>(&batch, "node_id")?;
         let type_ids = required_array::<ListArray>(&batch, "type_ids")?;
+        let primary_types = required_array::<UInt32Array>(&batch, "type_id")?;
         let created = required_array::<TimestampMicrosecondArray>(&batch, "created_at")?;
         let updated = required_array::<TimestampMicrosecondArray>(&batch, "updated_at")?;
         for row in 0..batch.num_rows() {
@@ -1524,7 +1546,18 @@ pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphSta
                 .as_any()
                 .downcast_ref::<UInt32Array>()
                 .ok_or_else(|| corrupt("canonical node type_ids item type mismatch"))?;
-            let labels = (0..labels.len()).map(|index| labels.value(index)).collect();
+            if type_ids.is_null(row) || primary_types.is_null(row) || labels.null_count() != 0 {
+                return Err(corrupt("canonical node identity contains null"));
+            }
+            let labels = (0..labels.len())
+                .map(|index| {
+                    EntityTypeId::decode(labels.value(index))
+                        .map_err(|error| corrupt(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let primary = PrimaryEntityTypeId::decode(primary_types.value(row))
+                .map_err(|error| corrupt(error.to_string()))?;
+            state.node_primary_types.insert(uuid.clone(), primary);
             state.nodes.insert(uuid.clone(), labels);
             state.node_ids.insert(uuid.clone(), ids.value(row));
             state
@@ -1612,6 +1645,13 @@ fn encode_typed_value(value: &IrLiteral) -> Result<String, GfError> {
         .map_err(|error| corrupt(format!("canonical property value encode failed: {error}")))
 }
 
+fn initial_primary(labels: &[EntityTypeId]) -> PrimaryEntityTypeId {
+    labels
+        .first()
+        .copied()
+        .map_or_else(PrimaryEntityTypeId::absent, PrimaryEntityTypeId::known)
+}
+
 #[allow(clippy::too_many_lines)] // Exhaustive operation handling keeps replay ordering explicit.
 fn apply_one(
     state: &mut ReconstructedGraphState,
@@ -1631,8 +1671,12 @@ fn apply_one(
             node_uuid,
             type_ids,
         } => {
+            state
+                .node_primary_types
+                .entry(node_uuid.clone())
+                .or_insert_with(|| initial_primary(type_ids));
             let mut sorted = type_ids.clone();
-            sorted.sort_unstable();
+            sorted.sort_unstable_by_key(|id| id.encode());
             state.nodes.insert(node_uuid.clone(), sorted);
         }
         GraphDeltaPayload::UpsertNodeV2 {
@@ -1642,8 +1686,12 @@ fn apply_one(
             created_at_micros,
             updated_at_micros,
         } => {
+            state
+                .node_primary_types
+                .entry(node_uuid.clone())
+                .or_insert_with(|| initial_primary(type_ids));
             let mut sorted = type_ids.clone();
-            sorted.sort_unstable();
+            sorted.sort_unstable_by_key(|id| id.encode());
             state.nodes.insert(node_uuid.clone(), sorted);
             state.node_ids.insert(node_uuid.clone(), *node_id);
             state
@@ -1652,6 +1700,7 @@ fn apply_one(
         }
         GraphDeltaPayload::DeleteNode { node_uuid } => {
             state.nodes.remove(node_uuid);
+            state.node_primary_types.remove(node_uuid);
             state.node_ids.remove(node_uuid);
             state.node_timestamps.remove(node_uuid);
             state
@@ -1968,7 +2017,13 @@ mod crash_oracle_tests {
         let workspace = tempfile::tempdir().unwrap();
         let node_uuid = Uuid::now_v7().hyphenated().to_string();
         let mut state = ReconstructedGraphState::default();
-        state.nodes.insert(node_uuid.clone(), vec![1]);
+        state
+            .nodes
+            .insert(node_uuid.clone(), vec![EntityTypeId::decode(1).unwrap()]);
+        state.node_primary_types.insert(
+            node_uuid.clone(),
+            PrimaryEntityTypeId::known(EntityTypeId::decode(1).unwrap()),
+        );
         state.node_ids.insert(node_uuid.clone(), 1);
         state.node_timestamps.insert(node_uuid, (1, 1));
         crate::writer::write_reconstructed_graph(workspace.path(), &state).unwrap();
@@ -2014,7 +2069,7 @@ mod crash_oracle_tests {
                 payload: GraphDeltaPayload::UpsertNodeV2 {
                     node_uuid: Uuid::now_v7().hyphenated().to_string(),
                     node_id: 1,
-                    type_ids: vec![1],
+                    type_ids: vec![EntityTypeId::decode(1).unwrap()],
                     created_at_micros: 1,
                     updated_at_micros: 1,
                 },
@@ -2112,5 +2167,107 @@ mod crash_oracle_tests {
                 .generation_uuid(),
             concurrent_generation
         );
+    }
+}
+
+#[cfg(test)]
+mod checked_identity_tests {
+    use super::*;
+
+    fn node_record(uuid: &str, labels: Vec<EntityTypeId>) -> GraphDeltaRecord {
+        GraphDeltaRecord {
+            record_version: GRAPH_DELTA_RECORD_VERSION,
+            operation_uuid: Uuid::now_v7(),
+            op_sequence: 0,
+            kind: GraphDeltaOpKind::UpsertNode,
+            schema_id: SCHEMA_JSON_V1,
+            payload: GraphDeltaPayload::UpsertNodeV2 {
+                node_uuid: uuid.to_owned(),
+                node_id: 1,
+                type_ids: labels,
+                created_at_micros: 1,
+                updated_at_micros: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn v2_memberships_preserve_integer_bytes_and_reject_other_domains() {
+        let wire = br#"{"kind":"upsert_node_v2","node_uuid":"node","node_id":1,"type_ids":[0,1073741823,1073741824,2147483647],"created_at_micros":1,"updated_at_micros":2}"#;
+        assert_eq!(
+            GraphDeltaPayload::decode(wire).unwrap().encode().unwrap(),
+            wire
+        );
+        for invalid in [2147483648_u32, 3221225472, u32::MAX] {
+            let wire = format!(
+                r#"{{"kind":"upsert_node_v2","node_uuid":"node","node_id":1,"type_ids":[{invalid}],"created_at_micros":1,"updated_at_micros":2}}"#
+            );
+            assert!(GraphDeltaPayload::decode(wire.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn initial_absent_primary_survives_label_replay_and_canonical_compaction() {
+        let uuid = Uuid::now_v7().to_string();
+        let initial = node_record(&uuid, vec![]);
+        let update = node_record(&uuid, vec![EntityTypeId::decode(1073741825).unwrap()]);
+        let mut state = ReconstructedGraphState::default();
+        apply_one(&mut state, &initial).unwrap();
+        apply_one(&mut state, &update).unwrap();
+        assert_eq!(
+            state.node_primary_types[&uuid],
+            PrimaryEntityTypeId::absent()
+        );
+        let base = tempfile::tempdir().unwrap();
+        crate::writer::write_reconstructed_graph(base.path(), &state).unwrap();
+        let reopened = load_base_state(base.path()).unwrap();
+        assert_eq!(
+            reopened.node_primary_types[&uuid],
+            PrimaryEntityTypeId::absent()
+        );
+        assert_eq!(reopened.nodes[&uuid], state.nodes[&uuid]);
+
+        let run = GraphDeltaRun {
+            run_sequence: 1,
+            run_uuid: Uuid::now_v7(),
+            transaction_uuid: Uuid::now_v7(),
+            records: vec![initial, update.clone()],
+            bytes: vec![],
+        };
+        let (overlay, _) =
+            build_replay_overlay(&[run], GraphDeltaJournalLimits::default()).unwrap();
+        assert_eq!(
+            overlay.nodes[&uuid].as_ref().unwrap().primary_type,
+            PrimaryEntityTypeId::absent()
+        );
+
+        // A standalone update has no primary field. The canonical base remains
+        // authoritative even when the update's first membership is nonempty.
+        let run = GraphDeltaRun {
+            run_sequence: 1,
+            run_uuid: Uuid::now_v7(),
+            transaction_uuid: Uuid::now_v7(),
+            records: vec![update],
+            bytes: vec![],
+        };
+        let (overlay, _) =
+            build_replay_overlay(&[run], GraphDeltaJournalLimits::default()).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let (inventory, _) = capture_graph_files(base.path()).unwrap();
+        crate::graph_files::materialize_graph_tree(base.path(), &inventory, target.path()).unwrap();
+        crate::writer::write_replay_overlay_streaming(
+            base.path(),
+            &inventory,
+            target.path(),
+            &overlay,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap();
+        let compacted = load_base_state(target.path()).unwrap();
+        assert_eq!(
+            compacted.node_primary_types[&uuid],
+            PrimaryEntityTypeId::absent()
+        );
+        assert_eq!(compacted.nodes[&uuid], state.nodes[&uuid]);
     }
 }

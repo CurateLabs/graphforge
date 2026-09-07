@@ -617,3 +617,95 @@ impl RuntimeCatalogData {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog() -> RuntimeCatalogData {
+        let mut catalog = RuntimeCatalogData::new();
+        catalog.intern_label_at("Person", 1).unwrap();
+        catalog.intern_relation_type_at("Person", 2).unwrap();
+        catalog
+            .intern_property_at("name", Some("Person"), 3)
+            .unwrap();
+        catalog
+            .intern_property_at("name", Some("Company"), 4)
+            .unwrap();
+        catalog
+    }
+
+    #[test]
+    fn bounded_batches_preserve_catalog_bytes_and_namespace_overlap() {
+        let original = catalog().to_record_batch();
+        let batches: Vec<_> = (0..original.num_rows())
+            .map(|row| original.slice(row, 1))
+            .collect();
+        let restored = RuntimeCatalogData::from_record_batches(&batches).unwrap();
+        assert_eq!(restored.to_record_batch(), original);
+        let mut appended = RuntimeCatalogData::new();
+        for batch in &batches {
+            appended.extend_from_record_batch(batch).unwrap();
+        }
+        assert_eq!(appended.to_record_batch(), original);
+    }
+
+    #[test]
+    fn failed_batch_append_preserves_existing_catalog_authority() {
+        let mut existing = catalog();
+        let before = existing.to_record_batch();
+        let mut next = existing.clone();
+        next.intern_label_at("Company", 5).unwrap();
+        let valid = next.to_record_batch().slice(before.num_rows(), 1);
+        let mut columns = valid.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from(vec!["Person"]));
+        let duplicate_name = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+        assert!(existing.extend_from_record_batch(&duplicate_name).is_err());
+        assert_eq!(existing.to_record_batch(), before);
+        assert!(RuntimeCatalogData::from_record_batches([&before, &duplicate_name]).is_err());
+
+        let mut columns = valid.columns().to_vec();
+        columns[2] = Arc::new(UInt32Array::from(vec![0]));
+        let duplicate_id = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+        assert!(existing.extend_from_record_batch(&duplicate_id).is_err());
+        assert_eq!(existing.to_record_batch(), before);
+        assert!(RuntimeCatalogData::from_record_batches([&before, &duplicate_id]).is_err());
+
+        existing.extend_from_record_batch(&valid).unwrap();
+        assert_eq!(existing.to_record_batch(), next.to_record_batch());
+    }
+    #[test]
+    fn duplicate_ids_in_each_catalog_kind_fail_across_batch_boundaries() {
+        for kind in [
+            EntryKind::EntityType,
+            EntryKind::RelationType,
+            EntryKind::Property,
+        ] {
+            let mut existing = RuntimeCatalogData::new();
+            let intern = |catalog: &mut RuntimeCatalogData, name| match kind {
+                EntryKind::EntityType => catalog.intern_label_at(name, 1).map(|_| ()),
+                EntryKind::RelationType => catalog.intern_relation_type_at(name, 1).map(|_| ()),
+                EntryKind::Property => catalog.intern_property_at(name, None, 1).map(|_| ()),
+            };
+            intern(&mut existing, "first").unwrap();
+            let before = existing.to_record_batch();
+            let mut next = existing.clone();
+            intern(&mut next, "second").unwrap();
+            let good = next.to_record_batch().slice(1, 1);
+            let mut columns = good.columns().to_vec();
+            columns[2] = Arc::new(UInt32Array::from(vec![0]));
+            let duplicate = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+            assert!(
+                existing.extend_from_record_batch(&duplicate).is_err(),
+                "{kind:?}"
+            );
+            assert_eq!(existing.to_record_batch(), before, "{kind:?}");
+            assert!(
+                RuntimeCatalogData::from_record_batches([&before, &duplicate]).is_err(),
+                "{kind:?}"
+            );
+            existing.extend_from_record_batch(&good).unwrap();
+            assert_eq!(existing.to_record_batch(), next.to_record_batch());
+        }
+    }
+}

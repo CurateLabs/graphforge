@@ -819,9 +819,11 @@ mod crash_oracle_tests {
             1_700_000_000_000_000,
         )
         .unwrap();
-        first.create_node(left, graphforge_core::TypeId(0)).unwrap();
         first
-            .create_node(right, graphforge_core::TypeId(0))
+            .create_node(left, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        first
+            .create_node(right, graphforge_value::EntityTypeId::decode(0).unwrap())
             .unwrap();
         first
             .create_edge(Uuid::now_v7(), "KNOWS", &left, &right)
@@ -937,7 +939,7 @@ mod crash_oracle_tests {
                     payload: crate::GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: Uuid::now_v7().hyphenated().to_string(),
                         node_id: 1,
-                        type_ids: vec![1],
+                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                         created_at_micros: 1,
                         updated_at_micros: 1,
                     },

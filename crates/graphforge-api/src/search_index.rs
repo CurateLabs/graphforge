@@ -414,35 +414,50 @@ impl GraphForge {
         })
     }
 
-    pub(crate) fn search_label_id(&self, label: &str) -> Result<u32, GfError> {
+    pub(crate) fn search_label_id(
+        &self,
+        label: &str,
+    ) -> Result<graphforge_value::EntityTypeSelection, GfError> {
         validate_label(label)?;
-        self.resolve_search_label_id(label)
+        self.resolve_search_label_id(label)?
+            .map(graphforge_value::EntityTypeSelection::Known)
             .ok_or_else(|| validation(format!("unknown search label {label:?}")))
     }
 
-    /// Resolve a find label, soft-missing unknown labels like analyst verbs.
-    ///
-    /// Invalid label spelling still fails validation. An absent catalog entry
-    /// becomes [`u32::MAX`] so retrieval and Arrow shaping return a typed empty
-    /// table instead of `GF_VALIDATION`.
-    pub(crate) fn find_label_id(&self, label: &str) -> Result<u32, GfError> {
+    /// Resolve a find label without treating an unknown name as unrestricted.
+    /// Invalid spelling and invalid catalog identities remain errors.
+    pub(crate) fn find_label_id(
+        &self,
+        label: &str,
+    ) -> Result<graphforge_value::EntityTypeSelection, GfError> {
         validate_label(label)?;
-        Ok(self.resolve_search_label_id(label).unwrap_or(u32::MAX))
+        Ok(self.resolve_search_label_id(label)?.map_or(
+            graphforge_value::EntityTypeSelection::Missing,
+            graphforge_value::EntityTypeSelection::Known,
+        ))
     }
 
-    fn resolve_search_label_id(&self, label: &str) -> Option<u32> {
-        self.ontology
+    fn resolve_search_label_id(
+        &self,
+        label: &str,
+    ) -> Result<Option<graphforge_value::EntityTypeId>, GfError> {
+        if let Some(id) = self
+            .ontology
             .as_ref()
-            .and_then(|ontology| ontology.entity_type_id(label).map(|id| id.0))
-            .or_else(|| {
-                self.runtime_catalog
-                    .lock()
-                    .expect("runtime catalog poisoned")
-                    .entity_type_names_with_ids()
-                    .find_map(|(id, name)| {
-                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id).0)
-                    })
-            })
+            .and_then(|ontology| ontology.entity_type_id(label))
+        {
+            return graphforge_value::EntityTypeId::ontology(id)
+                .map(Some)
+                .map_err(|error| validation(error.to_string()));
+        }
+        Ok(self
+            .runtime_catalog
+            .lock()
+            .expect("runtime catalog poisoned")
+            .entity_type_names_with_ids()
+            .find_map(|(id, name)| {
+                (name == label).then_some(graphforge_value::EntityTypeId::runtime(id))
+            }))
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "checksum": "9664e703795c68762a5780ac35f5403e3e1054d6cab57793f55eb960c44a3116",
+  "checksum": "fca1c5d99fa96c8dd9e2ea21abcf55911bedd45e0ac258d58762e06915d0db0f",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14051,6 +14051,65 @@
           ],
           "selects": {}
         },
+        "version": "0.5.2"
+      },
+      "license": "Apache-2.0",
+      "license_ids": [
+        "Apache-2.0"
+      ],
+      "license_file": "../../LICENSE"
+    },
+    "graphforge-value 0.5.2": {
+      "name": "graphforge-value",
+      "version": "0.5.2",
+      "package_url": "https://github.com/CurateLabs/graphforge",
+      "repository": null,
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "graphforge_value",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "graphforge_value",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "arrow 58.4.0",
+              "target": "arrow"
+            },
+            {
+              "id": "serde 1.0.229",
+              "target": "serde"
+            },
+            {
+              "id": "thiserror 2.0.20",
+              "target": "thiserror"
+            }
+          ],
+          "selects": {}
+        },
+        "deps_dev": {
+          "common": [
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
         "version": "0.5.2"
       },
       "license": "Apache-2.0",
@@ -34325,7 +34384,8 @@
     "graphforge-provenance 0.5.2": "crates/graphforge-provenance",
     "graphforge-rel 0.5.2": "crates/graphforge-rel",
     "graphforge-search 0.5.2": "crates/graphforge-search",
-    "graphforge-storage 0.5.2": "crates/graphforge-storage"
+    "graphforge-storage 0.5.2": "crates/graphforge-storage",
+    "graphforge-value 0.5.2": "crates/graphforge-value"
   },
   "conditions": {
     "aarch64-apple-darwin": [

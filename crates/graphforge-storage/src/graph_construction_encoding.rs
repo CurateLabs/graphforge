@@ -24,9 +24,9 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
 use graphforge_filesystem::{StableDirectory, file_identity, file_link_count};
-use graphforge_ir::runtime_entity_type_id;
 use graphforge_ir::{CompositionBindingContext, SymbolBinding};
 use graphforge_ontology::{QualifiedSymbol, SymbolKind};
+use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
@@ -850,7 +850,7 @@ struct ResolvedOwner {
     input: String,
     symbol: Option<QualifiedSymbol>,
     topology_route: String,
-    storage_id: Option<u32>,
+    storage_id: Option<TaggedTypeId>,
 }
 
 fn resolve_owner(
@@ -889,7 +889,15 @@ fn resolve_owner(
                 input: input.to_owned(),
                 symbol: Some(symbol),
                 topology_route: physical.route.clone(),
-                storage_id: Some(physical.storage_id),
+                storage_id: Some(match route_kind {
+                    SemanticRouteKind::Entity => EntityTypeId::decode(physical.storage_id)
+                        .map_err(storage)?
+                        .tagged(),
+                    SemanticRouteKind::Relation => RelationTypeId::decode(physical.storage_id)
+                        .map_err(storage)?
+                        .tagged(),
+                    _ => return Err(storage("owner must have an entity or relation route")),
+                }),
             })
         }
     }
@@ -950,7 +958,7 @@ fn encode_nodes(
     output: &StableDirectory,
     shape: &ConstructionShape,
     shape_outputs: &[ArtifactReceipt],
-    label_ids: &BTreeMap<String, u32>,
+    label_ids: &BTreeMap<String, EntityTypeId>,
     ontology_mode: OntologyMode,
     semantic_context: Option<&CompositionBindingContext>,
     semantic_bindings: Option<&SemanticStorageBindings>,
@@ -1061,7 +1069,9 @@ fn encode_nodes(
                     owner
                 };
                 let type_id = match owner.storage_id {
-                    Some(storage_id) => storage_id,
+                    Some(storage_id) => {
+                        EntityTypeId::decode(storage_id.encode()).map_err(storage)?
+                    }
                     None => *label_ids
                         .get(label)
                         .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
@@ -1680,11 +1690,11 @@ fn next_kind(
 fn node_batch(
     uuids: &[[u8; 16]],
     ids: &[u64],
-    types: &[u32],
+    types: &[EntityTypeId],
     now: i64,
 ) -> Result<RecordBatch, GfError> {
     let nullable = ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
-        types.iter().map(|value| Some([Some(*value)])),
+        types.iter().map(|value| Some([Some(value.encode())])),
     );
     let labels = ListArray::new(
         Arc::new(Field::new("item", DataType::UInt32, false)),
@@ -1697,7 +1707,9 @@ fn node_batch(
         vec![
             Arc::new(FixedSizeBinaryArray::try_from_iter(uuids.iter().copied()).map_err(storage)?),
             Arc::new(UInt64Array::from(ids.to_vec())),
-            Arc::new(UInt32Array::from(types.to_vec())),
+            Arc::new(UInt32Array::from(
+                types.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+            )),
             Arc::new(labels),
             Arc::new(TimestampMicrosecondArray::from(vec![now; ids.len()]).with_timezone("UTC")),
             Arc::new(TimestampMicrosecondArray::from(vec![now; ids.len()]).with_timezone("UTC")),
@@ -1826,7 +1838,7 @@ fn read_runtime_label_ids(
     file: File,
     budgets: GraphConstructionBudgets,
     evidence: &mut GraphConstructionEncodingEvidence,
-) -> Result<BTreeMap<String, u32>, GfError> {
+) -> Result<BTreeMap<String, EntityTypeId>, GfError> {
     let counter = IoCounter::default();
     let chunk_reader = CountingChunkReader::new(file, counter.clone());
     let cache_release = chunk_reader.cache_release_tracker();
@@ -1848,25 +1860,16 @@ fn read_runtime_label_ids(
             unreachable!("failed runtime catalog reader construction returned success");
         }
     };
-    let mut labels = BTreeMap::new();
+    let mut catalog = graphforge_value::RuntimeCatalogData::new();
     let decoded = (|| -> Result<(), GfError> {
         for batch in &mut reader {
             let batch = batch.map_err(storage)?;
             account_batch(&batch, budgets, evidence)?;
-            let kinds = required_string(&batch, "entry_kind")?;
-            let names = required_string(&batch, "name")?;
-            let ids = batch
-                .column_by_name("runtime_id")
-                .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
-                .ok_or_else(|| storage("runtime catalog id is not UInt32"))?;
-            for row in 0..batch.num_rows() {
-                if kinds.value(row) == "entity_type" {
-                    let tagged =
-                        runtime_entity_type_id(graphforge_ir::RuntimeTypeId(ids.value(row))).0;
-                    if labels.insert(names.value(row).to_owned(), tagged).is_some() {
-                        return Err(storage("runtime catalog repeats an entity type"));
-                    }
-                }
+            catalog.extend_from_record_batch(&batch)?;
+            if catalog.entry_count() > budgets.max_catalog_entries
+                || catalog.retained_identifier_bytes() > budgets.max_catalog_identifier_bytes
+            {
+                return Err(storage("runtime catalog exceeds encoding budget"));
             }
         }
         Ok(())
@@ -1899,7 +1902,10 @@ fn read_runtime_label_ids(
         operations,
         "runtime catalog spool read operations",
     )?;
-    Ok(labels)
+    Ok(catalog
+        .entity_type_names_with_ids()
+        .map(|(id, name)| (name.to_owned(), EntityTypeId::runtime(id)))
+        .collect())
 }
 
 fn write_surrogate_tails(
@@ -2686,6 +2692,41 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_label_decode_rejects_cross_batch_duplicate_identity() {
+        let mut catalog = graphforge_value::RuntimeCatalogData::new();
+        catalog.intern_label_at("First", 1).unwrap();
+        catalog.intern_label_at("Second", 1).unwrap();
+        let batch = catalog.to_record_batch();
+        let mut columns = batch.columns().to_vec();
+        columns[2] = Arc::new(UInt32Array::from(vec![0, 0]));
+        let invalid = RecordBatch::try_new(batch.schema(), columns).unwrap();
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("catalog.parquet");
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            invalid.schema(),
+            None,
+        )
+        .unwrap();
+        writer.write(&invalid).unwrap();
+        writer.close().unwrap();
+        let budgets = GraphConstructionBudgets {
+            max_batch_rows: 1,
+            ..Default::default()
+        };
+        let error = read_runtime_label_ids(
+            File::open(path).unwrap(),
+            budgets,
+            &mut GraphConstructionEncodingEvidence::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unique and contiguous"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn proof_counter_addition_rejects_overflow_without_clamping() {

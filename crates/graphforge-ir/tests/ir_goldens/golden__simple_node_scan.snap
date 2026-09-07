@@ -3,8 +3,8 @@ source: crates/graphforge-ir/tests/golden.rs
 ---
 {
   "ir_version": {
-    "major": 0,
-    "minor": 3,
+    "major": 1,
+    "minor": 0,
     "patch": 0
   },
   "dialect": "openCypher",
@@ -39,7 +39,9 @@ source: crates/graphforge-ir/tests/golden.rs
       {
         "PropertyAccess": {
           "base": 0,
-          "prop": 0
+          "prop": {
+            "Runtime": 0
+          }
         }
       }
     ]

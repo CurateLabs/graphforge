@@ -16,7 +16,9 @@ use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use graphforge_core::{GfError, OntologyMode, TypeId};
+#[cfg(test)]
+use graphforge_core::TypeId;
+use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
 use sha2::{Digest, Sha256};
 

@@ -18,7 +18,9 @@ use graphforge_ast::{
     RemoveItem, ReturnItem, SetClause, SetItem, SortItem, SortOrder as AstSortOrder, StringOpKind,
     UnaryOpKind as AstUnOp, VarRef, WhereClause, WithClause,
 };
-use graphforge_core::{PropId, Span, TypeId};
+#[cfg(test)]
+use graphforge_core::TypeId;
+use graphforge_core::{PropId, Span};
 use graphforge_ontology::OntologyHandle;
 use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
@@ -506,6 +508,29 @@ impl Binder {
         }
     }
 
+    /// Finish independent name diagnostics after a pattern has failed admission.
+    /// Resolution records its errors in `s`; no scan or expansion is emitted.
+    fn diagnose_remaining_pattern_names<'a>(
+        &self,
+        elements: impl Iterator<Item = &'a PathElement>,
+        s: &mut BinderState,
+    ) {
+        for element in elements {
+            match element {
+                PathElement::Node(node) => {
+                    for label in &node.labels {
+                        let _ = self.resolve_label(label, node.span, s);
+                    }
+                }
+                PathElement::Rel(rel) => {
+                    for name in &rel.types {
+                        let _ = self.resolve_relation_type(name, rel.span, s);
+                    }
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn lower_path_pattern(&self, pat: &PathPattern, s: &mut BinderState) {
         let mut prev_node_var: Option<VarId> = None;
@@ -530,6 +555,10 @@ impl Binder {
                     let ty = match node.labels.first() {
                         Some(label) => {
                             let Some(id) = self.resolve_label(label, node.span, s) else {
+                                for label in &node.labels[1..] {
+                                    let _ = self.resolve_label(label, node.span, s);
+                                }
+                                self.diagnose_remaining_pattern_names(iter, s);
                                 return;
                             };
                             Some(id)
@@ -572,6 +601,7 @@ impl Binder {
                     let rel_ty = match rel_name.as_ref() {
                         Some(name) => {
                             let Some(id) = self.resolve_relation_type(name, rel.span, s) else {
+                                self.diagnose_remaining_pattern_names(iter, s);
                                 return;
                             };
                             Some(id)
@@ -4697,7 +4727,7 @@ impl Binder {
                                 s.errors.push(BindError::new(
                                     BindErrorKind::InvalidArgument,
                                     span,
-                                    error.to_string(),
+                                    error,
                                 ));
                                 None
                             }

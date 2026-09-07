@@ -263,7 +263,7 @@ pub enum AggFunc {
 pub struct CreateNodeSpec {
     /// The pattern variable bound to this node.
     pub var: VarId,
-    /// The node's complete label set, resolved to [`TypeId`] values.
+    /// The node's complete label set, resolved to [`EntityTypeId`] values.
     pub labels: Vec<EntityTypeId>,
     /// Property map expression (an [`IrExpr::MapLiteral`](crate::IrExpr)), or
     /// `None` when no `{…}` was given.
@@ -284,7 +284,7 @@ pub struct CreateEdgeSpec {
     pub src: VarId,
     /// Destination node variable.
     pub dst: VarId,
-    /// The relation type, resolved to a [`TypeId`] (or `None` if untyped).
+    /// The relation type, resolved to a [`RelationTypeId`] (or `None` if untyped).
     pub rel_type: Option<RelationTypeId>,
     /// Edge direction.
     pub direction: Direction,
@@ -323,9 +323,9 @@ pub struct CreatePattern {
 pub struct SetPropItem {
     /// The bound variable whose property is written.
     pub target: VarId,
-    /// The property, resolved to a [`PropId`].
+    /// The property, resolved to a [`PropertyId`].
     pub prop: PropertyId,
-    /// The property name (carried so the lowering layer needs no `PropId →
+    /// The property name (carried so the lowering layer needs no `PropertyId →
     /// name` catalog round-trip — mirrors how [`CreateNodeSpec`] carries
     /// resolved names alongside ids).
     pub prop_name: String,
@@ -376,7 +376,7 @@ pub enum MergeSetItem {
 pub struct RemovePropItem {
     /// The bound variable whose property is removed.
     pub target: VarId,
-    /// The property, resolved to a [`PropId`].
+    /// The property, resolved to a [`PropertyId`].
     pub prop: PropertyId,
     /// The property name (see [`SetPropItem::prop_name`]).
     pub prop_name: String,
@@ -497,7 +497,7 @@ mod tests {
         let p = CreatePattern {
             nodes: vec![CreateNodeSpec {
                 var: VarId(0),
-                labels: vec![TypeId(3)],
+                labels: vec![EntityTypeId::ontology(TypeId(3)).unwrap()],
                 properties: Some(ExprId(1)),
                 is_reference: false,
             }],
@@ -505,7 +505,7 @@ mod tests {
                 var: VarId(1),
                 src: VarId(0),
                 dst: VarId(2),
-                rel_type: Some(TypeId(4)),
+                rel_type: Some(RelationTypeId::ontology(TypeId(4)).unwrap()),
                 direction: Direction::Out,
                 properties: None,
             }],

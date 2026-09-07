@@ -92,10 +92,10 @@ pub struct GraphPlanLowerer<'a> {
     catalog: Option<&'a GraphCatalog>,
     /// Reverse map: `TypeId.0` → relation type name.
     /// Populated at construction from the ontology; empty in exploratory mode.
-    type_id_to_rel_name: HashMap<u32, String>,
+    type_id_to_rel_name: HashMap<RelationTypeId, String>,
     /// Reverse map: `TypeId.0` → entity (label) name.
     /// Populated at construction from the ontology; empty in exploratory mode.
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<EntityTypeId, String>,
     /// Write target for `CREATE`/`MERGE` lowering: the project directory and
     /// ontology mode.  Set **only** by [`new_for_writes`](Self::new_for_writes)
     /// — this is the gate that authorizes the write path.  `None` for read
@@ -116,7 +116,7 @@ pub struct GraphPlanLowerer<'a> {
     /// construction (#605). Empty in exploratory mode — the TCK-safety gate: a
     /// var-len expand only wraps in `OntologyInferNode` when this lookup is
     /// non-empty, so the no-ontology TCK plan is byte-identical.
-    inference_rules: HashMap<u32, Vec<(String, String)>>,
+    inference_rules: HashMap<RelationTypeId, Vec<(String, String)>>,
     /// Test-only escape hatch that retains the relational fixed-hop lowering
     /// as an independent semantic oracle. Absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
@@ -132,8 +132,11 @@ impl<'a> GraphPlanLowerer<'a> {
     ///
     /// Lowering a `CREATE` plan with this constructor errors — use
     /// [`new_for_writes`](Self::new_for_writes) instead.
-    #[must_use]
-    pub fn new(catalog: Option<&'a GraphCatalog>, ontology: Option<&'a OntologyHandle>) -> Self {
+    /// Returns a validation error if a supplied runtime carries an invalid declared identity.
+    pub fn new(
+        catalog: Option<&'a GraphCatalog>,
+        ontology: Option<&'a OntologyHandle>,
+    ) -> Result<Self, GfError> {
         Self::build(catalog, ontology, None, None)
     }
 
@@ -143,13 +146,13 @@ impl<'a> GraphPlanLowerer<'a> {
     /// This is the **only** constructor that authorizes the write path.  The
     /// same directory is also exposed read-side, so read operators that need it
     /// (variable-length `Expand`) work in mixed read/write pipelines.
-    #[must_use]
+    /// Returns a validation error if a supplied runtime carries an invalid declared identity.
     pub fn new_for_writes(
         catalog: Option<&'a GraphCatalog>,
         ontology: Option<&'a OntologyHandle>,
         dir: &'a Path,
         mode: OntologyMode,
-    ) -> Self {
+    ) -> Result<Self, GfError> {
         Self::build(catalog, ontology, Some((dir, mode)), Some((dir, mode)))
     }
 
@@ -159,13 +162,13 @@ impl<'a> GraphPlanLowerer<'a> {
     /// node reads edges directly from `dir`.  Equivalent to [`new`](Self::new)
     /// for all other read operators.  Unlike [`new_for_writes`], this does
     /// **not** authorize the write path — `CREATE` still errors.
-    #[must_use]
+    /// Returns a validation error if a supplied runtime carries an invalid declared identity.
     pub fn new_with_dir(
         catalog: Option<&'a GraphCatalog>,
         ontology: Option<&'a OntologyHandle>,
         dir: &'a Path,
         mode: OntologyMode,
-    ) -> Self {
+    ) -> Result<Self, GfError> {
         Self::build(catalog, ontology, None, Some((dir, mode)))
     }
 
@@ -174,20 +177,20 @@ impl<'a> GraphPlanLowerer<'a> {
         ontology: Option<&'a OntologyHandle>,
         write_target: Option<(&'a Path, OntologyMode)>,
         read_dir: Option<(&'a Path, OntologyMode)>,
-    ) -> Self {
+    ) -> Result<Self, GfError> {
         // Relation-name map: ontology IDs and tagged runtime-catalog IDs occupy
         // disjoint plan key spaces. This is essential in advisory mode, where
         // both source ID spaces begin at zero and an unknown relation must not
         // resolve through a colliding ontology ID.
-        let mut type_id_to_rel_name = build_type_id_map(ontology);
+        let mut type_id_to_rel_name = build_type_id_map(ontology)?;
         if let Some(c) = catalog {
             type_id_to_rel_name.extend(c.semantic_rel_routes().clone());
             for (id, name) in c.rel_names() {
                 let plan_id = RelationTypeId::runtime(*id);
-                type_id_to_rel_name.insert(plan_id.encode(), name.clone());
+                type_id_to_rel_name.insert(plan_id, name.clone());
             }
         }
-        Self {
+        Ok(Self {
             catalog,
             type_id_to_rel_name,
             // Ontology-only: this map drives property-table routing
@@ -196,7 +199,7 @@ impl<'a> GraphPlanLowerer<'a> {
             // per-label table). The runtime-catalog labels are merged in
             // separately for node-value rendering only — see `expr_lowerer`.
             type_id_to_entity_name: {
-                let mut names = build_entity_id_map(ontology);
+                let mut names = build_entity_id_map(ontology)?;
                 if let Some(c) = catalog {
                     names.extend(c.semantic_label_routes().clone());
                 }
@@ -205,10 +208,10 @@ impl<'a> GraphPlanLowerer<'a> {
             write_target,
             read_dir,
             node_shapes: std::sync::RwLock::new(HashMap::new()),
-            inference_rules: build_inference_rules(ontology),
+            inference_rules: build_inference_rules(ontology)?,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
-        }
+        })
     }
 
     /// Select the legacy relational fixed-hop lowering as a differential-test
@@ -263,7 +266,7 @@ impl<'a> GraphPlanLowerer<'a> {
             for (id, name) in c.label_names() {
                 let plan_id = EntityTypeId::runtime(*id);
                 node_label_names
-                    .entry(plan_id.encode())
+                    .entry(plan_id)
                     .or_insert_with(|| name.clone());
             }
         }
@@ -341,7 +344,7 @@ impl<'a> GraphPlanLowerer<'a> {
         match ty {
             Some(type_id) => Some(
                 self.type_id_to_entity_name
-                    .get(&type_id.encode())
+                    .get(&type_id)
                     .cloned()
                     .unwrap_or_else(|| "_untyped".to_owned()),
             ),
@@ -672,7 +675,7 @@ impl<'a> GraphPlanLowerer<'a> {
     /// The `TypeId.0 → entity name` map (from the ontology), for per-row
     /// property-file stem resolution in the statement driver.
     #[must_use]
-    pub fn entity_name_map(&self) -> HashMap<u32, String> {
+    pub fn entity_name_map(&self) -> HashMap<EntityTypeId, String> {
         self.type_id_to_entity_name.clone()
     }
 
@@ -2203,7 +2206,7 @@ impl<'a> GraphPlanLowerer<'a> {
                     label_names: n
                         .labels
                         .iter()
-                        .filter_map(|t| self.type_id_to_entity_name.get(&t.encode()).cloned())
+                        .filter_map(|t| self.type_id_to_entity_name.get(t).cloned())
                         .collect(),
                     properties,
                     computed_properties,
@@ -2225,7 +2228,7 @@ impl<'a> GraphPlanLowerer<'a> {
                     rel_type_id: e.rel_type,
                     rel_type_name: e
                         .rel_type
-                        .and_then(|t| self.type_id_to_rel_name.get(&t.encode()).cloned()),
+                        .and_then(|t| self.type_id_to_rel_name.get(&t).cloned()),
                     direction: e.direction,
                     properties,
                     computed_properties,
@@ -2837,27 +2840,37 @@ fn lower_agg_func(
 
 /// Build a `TypeId.0 → relation_name` map from the ontology at construction
 /// time so that scan lowering can resolve `TypeId`s without repeated iteration.
-fn build_type_id_map(ontology: Option<&OntologyHandle>) -> HashMap<u32, String> {
+fn build_type_id_map(
+    ontology: Option<&OntologyHandle>,
+) -> Result<HashMap<RelationTypeId, String>, GfError> {
     let mut map = HashMap::new();
     if let Some(h) = ontology {
         for name in h.relation_type_names() {
             if let Some(type_id) = h.relation_type_id(name) {
-                map.insert(type_id.0, name.to_owned());
+                map.insert(
+                    RelationTypeId::ontology(type_id)
+                        .map_err(|error| GfError::Validation(error.to_string()))?,
+                    name.to_owned(),
+                );
             }
         }
     }
-    map
+    Ok(map)
 }
 
 /// Build the `TypeId.0 → [(rule_id, confidence_model)]` inference-rule map from
 /// the ontology (#605): a relation flagged `transitive`/`symmetric` gets a rule
 /// (`transitive:NAME` / `symmetric:NAME`) with the `conservative_min` model.
 /// Empty when no ontology is loaded (exploratory) — the TCK-safety gate.
-fn build_inference_rules(ontology: Option<&OntologyHandle>) -> HashMap<u32, Vec<(String, String)>> {
+fn build_inference_rules(
+    ontology: Option<&OntologyHandle>,
+) -> Result<HashMap<RelationTypeId, Vec<(String, String)>>, GfError> {
     let mut map = HashMap::new();
     if let Some(h) = ontology {
         for name in h.relation_type_names() {
             if let Some(type_id) = h.relation_type_id(name) {
+                let relation_id = RelationTypeId::ontology(type_id)
+                    .map_err(|error| GfError::Validation(error.to_string()))?;
                 let flags = h.semantic_flags(type_id);
                 let mut rules = Vec::new();
                 if flags.transitive {
@@ -2867,26 +2880,32 @@ fn build_inference_rules(ontology: Option<&OntologyHandle>) -> HashMap<u32, Vec<
                     rules.push((format!("symmetric:{name}"), "conservative_min".to_owned()));
                 }
                 if !rules.is_empty() {
-                    map.insert(type_id.0, rules);
+                    map.insert(relation_id, rules);
                 }
             }
         }
     }
-    map
+    Ok(map)
 }
 
 /// Build a `TypeId.0 → entity (label) name` map from the ontology, mirroring
 /// [`build_type_id_map`] for relation types.  Empty in exploratory mode.
-fn build_entity_id_map(ontology: Option<&OntologyHandle>) -> HashMap<u32, String> {
+fn build_entity_id_map(
+    ontology: Option<&OntologyHandle>,
+) -> Result<HashMap<EntityTypeId, String>, GfError> {
     let mut map = HashMap::new();
     if let Some(h) = ontology {
         for name in h.entity_type_names() {
             if let Some(type_id) = h.entity_type_id(name) {
-                map.insert(type_id.0, name.to_owned());
+                map.insert(
+                    EntityTypeId::ontology(type_id)
+                        .map_err(|error| GfError::Validation(error.to_string()))?,
+                    name.to_owned(),
+                );
             }
         }
     }
-    map
+    Ok(map)
 }
 
 /// Constant-fold a lowered value expression to a scalar: a literal is taken
@@ -3173,7 +3192,7 @@ fn lower_typed_edge_scan(
     rel_ty: RelationTypeId,
     var_map: &mut VarMap,
     catalog: Option<&GraphCatalog>,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     dir: Option<&Path>,
     mode: OntologyMode,
 ) -> Result<LogicalPlan, LoweringError> {
@@ -3185,7 +3204,7 @@ fn lower_typed_edge_scan(
 
     // Require a known relation name — silently falling back to _exploratory
     // would change query semantics (wrong table / over-scan).
-    let rel_name = type_id_to_rel_name.get(&rel_ty.encode()).ok_or_else(|| {
+    let rel_name = type_id_to_rel_name.get(&rel_ty).ok_or_else(|| {
         LoweringError::UnsupportedExpr(format!(
             "TypedEdgeScan: TypeId({}) has no known relation name; \
              ontology may be incomplete or stale",
@@ -3197,9 +3216,9 @@ fn lower_typed_edge_scan(
     // authenticated and registered by GraphCatalog. Reconstructing a provider
     // from a string route loses that authority and must never fall back to the
     // exploratory relation-name filter.
-    if catalog.is_some_and(|catalog| catalog.semantic_rel_routes().contains_key(&rel_ty.encode())) {
+    if catalog.is_some_and(|catalog| catalog.semantic_rel_routes().contains_key(&rel_ty)) {
         let provider = catalog
-            .and_then(|catalog| catalog.semantic_edge_table(rel_ty.encode()))
+            .and_then(|catalog| catalog.semantic_edge_table(rel_ty))
             .ok_or_else(|| {
                 LoweringError::UnsupportedExpr(format!(
                     "semantic relation TypeId({}) has no authenticated catalog provider",
@@ -3242,7 +3261,7 @@ fn lower_edge_scan(
     var: VarId,
     ty: Option<RelationTypeId>,
     var_map: &mut VarMap,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     dir: Option<&Path>,
     mode: OntologyMode,
 ) -> Result<LogicalPlan, LoweringError> {
@@ -3255,7 +3274,7 @@ fn lower_edge_scan(
     let mut builder = LogicalPlanBuilder::scan(alias, src, None).map_unsupported_expr()?;
 
     if let Some(type_id) = ty
-        && let Some(name) = type_id_to_rel_name.get(&type_id.encode())
+        && let Some(name) = type_id_to_rel_name.get(&type_id)
     {
         builder = builder
             .filter(col("rel_type_name").eq(lit(name.as_str())))
@@ -3540,8 +3559,8 @@ fn lower_var_len_expand(
     max_hops: Option<u16>,
     input: LogicalPlan,
     var_map: &mut VarMap,
-    type_id_to_rel_name: &HashMap<u32, String>,
-    inference_rules: &HashMap<u32, Vec<(String, String)>>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
+    inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&Path, OntologyMode)>,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::logical_expr::col;
@@ -3552,16 +3571,13 @@ fn lower_var_len_expand(
         .as_ref()
         .map_or(dst, |_| VarId(u32::MAX.saturating_sub(dst.0)));
     let rel_name = match rel_ty {
-        Some(rt) => type_id_to_rel_name
-            .get(&rt.encode())
-            .cloned()
-            .ok_or_else(|| {
-                LoweringError::UnsupportedExpr(format!(
-                    "VarLenExpand: TypeId({}) has no known relation name; \
+        Some(rt) => type_id_to_rel_name.get(&rt).cloned().ok_or_else(|| {
+            LoweringError::UnsupportedExpr(format!(
+                "VarLenExpand: TypeId({}) has no known relation name; \
                  ontology may be incomplete or stale",
-                    rt.encode()
-                ))
-            })?,
+                rt.encode()
+            ))
+        })?,
         None => "*".to_owned(),
     };
     // Ontology inference (#605): if this relation carries semantic rules
@@ -3569,7 +3585,7 @@ fn lower_var_len_expand(
     // so the closure is auditable. Empty in exploratory mode (no ontology) → the
     // TCK-safety gate. Captured here before `rel_name` is moved into the node.
     let infer_rules: Vec<(String, String)> = rel_ty
-        .and_then(|rt| inference_rules.get(&rt.encode()))
+        .and_then(|rt| inference_rules.get(&rt))
         .cloned()
         .unwrap_or_default();
     let rel_for_infer = rel_name.clone();
@@ -3736,8 +3752,8 @@ fn lower_expand(
     input: LogicalPlan,
     var_map: &mut VarMap,
     catalog: Option<&GraphCatalog>,
-    type_id_to_rel_name: &HashMap<u32, String>,
-    inference_rules: &HashMap<u32, Vec<(String, String)>>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
+    inference_rules: &HashMap<RelationTypeId, Vec<(String, String)>>,
     target: Option<(&Path, OntologyMode)>,
     #[cfg(feature = "differential-testing")] relational_reference: bool,
 ) -> Result<LogicalPlan, LoweringError> {
@@ -3948,7 +3964,7 @@ fn try_lower_provider_expand(
     dir: Direction,
     input: &LogicalPlan,
     var_map: &mut VarMap,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     target: Option<(&Path, OntologyMode)>,
 ) -> Result<Option<LogicalPlan>, LoweringError> {
     let Some((dir_path, mode)) = target else {
@@ -3959,7 +3975,7 @@ fn try_lower_provider_expand(
     }
     let rel_name = match rel_ty {
         Some(rt) => {
-            let Some(name) = type_id_to_rel_name.get(&rt.encode()) else {
+            let Some(name) = type_id_to_rel_name.get(&rt) else {
                 return Ok(None); // relational path reports the unknown TypeId
             };
             name.clone()
@@ -4078,7 +4094,7 @@ fn expand_single_dir(
     input: LogicalPlan,
     var_map: &mut VarMap,
     catalog: Option<&GraphCatalog>,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     target: Option<(&Path, OntologyMode)>,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::logical_expr::col;
@@ -4196,7 +4212,7 @@ fn expand_bound_edge_single_dir(
     out_direction: bool,
     input: LogicalPlan,
     var_map: &mut VarMap,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     target: Option<(&Path, OntologyMode)>,
 ) -> Result<LogicalPlan, LoweringError> {
     use datafusion::common::TableReference;
@@ -4208,7 +4224,7 @@ fn expand_bound_edge_single_dir(
         col(format!("{src_alias}.node_id")).eq(col(format!("{edge_alias}.{edge_src_field}")));
 
     if let Some(rt) = rel_ty {
-        let rel_name = type_id_to_rel_name.get(&rt.encode()).ok_or_else(|| {
+        let rel_name = type_id_to_rel_name.get(&rt).ok_or_else(|| {
             LoweringError::UnsupportedExpr(format!(
                 "bound edge TypeId({}) has no known relation name; ontology may be incomplete or stale",
                 rt.encode()
@@ -4271,7 +4287,7 @@ fn expand_bound_edge_single_dir(
 fn join_edge_properties(
     edge_alias: &str,
     rel_ty: Option<RelationTypeId>,
-    type_id_to_rel_name: &HashMap<u32, String>,
+    type_id_to_rel_name: &HashMap<RelationTypeId, String>,
     catalog: Option<&GraphCatalog>,
     dir: Option<&Path>,
     scan: LogicalPlan,
@@ -4321,11 +4337,10 @@ fn join_edge_properties(
             prop_sources.push((stem, table, prop_cols));
         };
     if let Some(rel_ty) = rel_ty {
-        let Some(rel_name) = type_id_to_rel_name.get(&rel_ty.encode()) else {
+        let Some(rel_name) = type_id_to_rel_name.get(&rel_ty) else {
             return Ok(scan); // unknown relation name: nothing to resolve
         };
-        let registered =
-            catalog.and_then(|catalog| catalog.semantic_edge_property_table(rel_ty.encode()));
+        let registered = catalog.and_then(|catalog| catalog.semantic_edge_property_table(rel_ty));
         push_source(rel_name.clone(), registered);
     } else {
         for stem in graphforge_storage::list_edge_property_stems(dir) {
@@ -4400,6 +4415,82 @@ mod tests {
     use graphforge_ir::expr::{IrExpr, IrLiteral};
     use graphforge_ir::{Direction, ExprArena, GraphPlan, VarId};
 
+    fn admission_runtime() -> graphforge_ontology::OntologyRuntime {
+        let doc = graphforge_ontology::OntologyLoader::load_yaml(
+            br#"ontology_id: admission
+version: "1"
+entity_types:
+  - name: Person
+relation_types:
+  - name: KNOWS
+    src: Person
+    dst: Person
+    semantic:
+      transitive: true
+"#
+            .as_slice(),
+        )
+        .unwrap();
+        graphforge_ontology::OntologyCompiler::compile(&doc).unwrap()
+    }
+
+    #[test]
+    fn lowerer_admission_rejects_public_runtime_identity_bypass() {
+        for entity in [true, false] {
+            for invalid in [graphforge_value::TYPE_LOCAL_ID_LIMIT, 1 << 31, u32::MAX] {
+                let mut runtime = admission_runtime();
+                if entity {
+                    runtime.entity_name_to_id.insert("Person".into(), invalid);
+                } else {
+                    runtime.relation_name_to_id.insert("KNOWS".into(), invalid);
+                }
+                let handle = OntologyHandle::new(runtime);
+                for result in [
+                    GraphPlanLowerer::new(None, Some(&handle)),
+                    GraphPlanLowerer::new_with_dir(
+                        None,
+                        Some(&handle),
+                        Path::new("."),
+                        OntologyMode::Strict,
+                    ),
+                    GraphPlanLowerer::new_for_writes(
+                        None,
+                        Some(&handle),
+                        Path::new("."),
+                        OntologyMode::Strict,
+                    ),
+                ] {
+                    assert!(
+                        matches!(result, Err(GfError::Validation(_))),
+                        "entity={entity}, id={invalid}"
+                    );
+                }
+                if !entity {
+                    assert!(build_inference_rules(Some(&handle)).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lowerer_admission_preserves_independent_declared_namespaces_and_boundary() {
+        for raw in [0, graphforge_value::TYPE_LOCAL_ID_LIMIT - 1] {
+            let mut runtime = admission_runtime();
+            runtime.entity_name_to_id.insert("Person".into(), raw);
+            runtime.relation_name_to_id.insert("KNOWS".into(), raw);
+            let handle = OntologyHandle::new(runtime);
+            let lowerer = GraphPlanLowerer::new(None, Some(&handle)).unwrap();
+            assert_eq!(
+                lowerer.type_id_to_entity_name[&EntityTypeId::ontology(TypeId(raw)).unwrap()],
+                "Person"
+            );
+            assert_eq!(
+                lowerer.type_id_to_rel_name[&RelationTypeId::ontology(TypeId(raw)).unwrap()],
+                "KNOWS"
+            );
+        }
+    }
+
     fn empty_base() -> LogicalPlan {
         LogicalPlanBuilder::empty(false).build().unwrap()
     }
@@ -4458,7 +4549,7 @@ mod tests {
     #[test]
     fn filter_lowers_predicate() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let mut arena = ExprArena::new();
         let lit = arena.push(IrExpr::Literal(IrLiteral::Bool(true)));
@@ -4484,7 +4575,7 @@ mod tests {
     #[test]
     fn project_lowers_columns() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let mut arena = ExprArena::new();
         let lit = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
@@ -4518,7 +4609,7 @@ mod tests {
     #[test]
     fn project_with_distinct_wraps_in_distinct() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let mut arena = ExprArena::new();
         let lit = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
@@ -4552,7 +4643,7 @@ mod tests {
     #[test]
     fn with_where_scalar_alias_uses_projected_scope_then_drops_inputs() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let mut builder = GraphPlan::builder("openCypher");
         let value = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
         let predicate = builder.push_expr(IrExpr::VarRef(VarId(9)));
@@ -4583,7 +4674,7 @@ mod tests {
     #[test]
     fn with_where_forwards_complete_node_shape_through_new_scope() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let mut builder = GraphPlan::builder("openCypher");
         let node = builder.push_expr(IrExpr::VarRef(VarId(0)));
         let predicate = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
@@ -4620,7 +4711,7 @@ mod tests {
     #[test]
     fn aggregate_count_star() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let arena = ExprArena::new();
         let agg = AggExpr {
@@ -4751,7 +4842,7 @@ mod tests {
     #[test]
     fn sort_lowers_keys() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         // Use a literal rather than a VarRef to avoid schema validation on
         // the empty base relation (DataFusion rejects unknown column names).
@@ -4784,7 +4875,7 @@ mod tests {
     #[test]
     fn limit_lowers_correctly() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let arena = ExprArena::new();
         let var_map = VarMap::new();
@@ -4809,7 +4900,7 @@ mod tests {
     #[test]
     fn skip_lowers_correctly() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let arena = ExprArena::new();
         let var_map = VarMap::new();
@@ -4835,7 +4926,7 @@ mod tests {
     #[test]
     fn unsupported_op_returns_error() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let arena = ExprArena::new();
         let var_map = VarMap::new();
@@ -4867,7 +4958,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
 
         let mut set_builder = GraphPlan::builder("openCypher");
         let map = set_builder.push_expr(IrExpr::MapLiteral(vec![]));
@@ -4896,7 +4988,7 @@ mod tests {
                 map_items: vec![],
                 label_items: vec![LabelItem {
                     target: VarId(1),
-                    labels: vec![TypeId(7)],
+                    labels: vec![EntityTypeId::ontology(TypeId(7)).unwrap()],
                 }],
             })
             .build();
@@ -4913,7 +5005,7 @@ mod tests {
                 items: Vec::<RemovePropItem>::new(),
                 label_items: vec![LabelItem {
                     target: VarId(1),
-                    labels: vec![TypeId(7)],
+                    labels: vec![EntityTypeId::ontology(TypeId(7)).unwrap()],
                 }],
             })
             .build();
@@ -4928,7 +5020,7 @@ mod tests {
 
     #[test]
     fn correlated_subquery_shapes_fail_with_precise_contract_errors() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
 
         let no_alternatives = GraphPlan::builder("openCypher")
             .push_op(GraphOp::Exists {
@@ -5000,7 +5092,7 @@ mod tests {
 
     #[test]
     fn pattern_comprehension_projection_contract_is_strict() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
         let cases = [
             (
                 true,
@@ -5041,7 +5133,7 @@ mod tests {
         use datafusion::arrow::datatypes::{DataType, Field, Schema};
         use datafusion::common::DFSchema;
 
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
         let schema = Arc::new(
             DFSchema::try_from(Schema::new(vec![Field::new(
                 "seed",
@@ -5076,7 +5168,7 @@ mod tests {
     #[test]
     fn lower_plan_empty_ops_succeeds() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let plan = GraphPlan::builder("openCypher").build();
         let result = lowerer.lower_plan(&plan);
@@ -5086,7 +5178,7 @@ mod tests {
     #[test]
     fn union_requires_two_branch_plans() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::Union {
                 all: true,
@@ -5103,7 +5195,7 @@ mod tests {
     #[test]
     fn integration_filter_project_limit_pipeline() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         // Build the plan using GraphPlanBuilder so expressions live in plan.exprs.
         let mut builder = GraphPlan::builder("openCypher");
@@ -5138,7 +5230,7 @@ mod tests {
     #[test]
     fn node_scan_no_type_produces_table_scan() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
@@ -5156,12 +5248,12 @@ mod tests {
     #[test]
     fn node_scan_with_type_produces_filter_over_scan() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
                 var: VarId(0),
-                ty: Some(TypeId(1)),
+                ty: Some(EntityTypeId::ontology(TypeId(1)).unwrap()),
             })
             .build();
         let lp = lowerer.lower_plan(&plan).unwrap();
@@ -5175,12 +5267,12 @@ mod tests {
     fn typed_edge_scan_unknown_type_id_returns_error() {
         // TypeId(42) is not in the type_id_to_rel_name map (no ontology),
         // so lower_plan must return an error rather than silently falling back.
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
 
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::TypedEdgeScan {
                 var: VarId(0),
-                rel_ty: TypeId(42),
+                rel_ty: RelationTypeId::ontology(TypeId(42)).unwrap(),
             })
             .build();
         let result = lowerer.lower_plan(&plan);
@@ -5192,7 +5284,7 @@ mod tests {
 
     #[test]
     fn edge_scan_wildcard_produces_table_scan() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
 
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::EdgeScan {
@@ -5232,7 +5324,8 @@ mod tests {
 
         let (dir, catalog, _rc) = make_catalog_and_lowerer();
         let lowerer =
-            GraphPlanLowerer::new_with_dir(Some(&catalog), None, dir.path(), OntologyMode::Strict);
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, dir.path(), OntologyMode::Strict)
+                .unwrap();
 
         let lp = lowerer.lower_plan(&var_len_plan()).unwrap();
         let DfLogicalPlan::Extension(ext) = &lp else {
@@ -5265,7 +5358,7 @@ mod tests {
         // The read-only constructor has no project directory, so a
         // variable-length expand cannot bake its edge-read path.
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let err = lowerer.lower_plan(&var_len_plan()).unwrap_err();
         assert!(
             err.to_string().contains("project directory"),
@@ -5275,7 +5368,7 @@ mod tests {
 
     #[test]
     fn unwind_produces_extension_node() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
 
         let mut builder = GraphPlan::builder("openCypher");
         let list_expr = builder.push_expr(IrExpr::Literal(IrLiteral::Int(1)));
@@ -5295,7 +5388,7 @@ mod tests {
     #[test]
     fn optional_produces_extension_node() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         let child = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
@@ -5325,7 +5418,7 @@ mod tests {
         use graphforge_plan::OptionalMatchNode;
 
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
 
         // Outer binds var_0; the optional child binds a fresh, unshared var_1,
         // so `join_keys` is empty and all 5 inner columns are kept. This test
@@ -5376,7 +5469,7 @@ mod tests {
 
     #[test]
     fn expand_single_hop_out_produces_join() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
 
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
@@ -5408,7 +5501,7 @@ mod tests {
         // already bound by Expand), but b's label must still filter the result
         // rather than being dropped (#718). The optimizer leaves a `Filter` on
         // `var_2.type_id` somewhere in the tree.
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
                 var: VarId(0),
@@ -5425,7 +5518,7 @@ mod tests {
             })
             .push_op(GraphOp::NodeScan {
                 var: VarId(2),
-                ty: Some(TypeId(7)),
+                ty: Some(EntityTypeId::ontology(TypeId(7)).unwrap()),
             })
             .build();
         let lp = lowerer.lower_plan(&plan).unwrap();
@@ -5446,7 +5539,7 @@ mod tests {
         // NOT be appended again (they live on the outer side) — otherwise the
         // node's schema would carry duplicate `var_0` fields (#718).
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let child = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
                 var: VarId(0),
@@ -5507,7 +5600,7 @@ mod tests {
                 pattern: CreatePattern {
                     nodes: vec![CreateNodeSpec {
                         var: VarId(0),
-                        labels: vec![TypeId(0)],
+                        labels: vec![EntityTypeId::ontology(TypeId(0)).unwrap()],
                         properties: Some(map),
                         is_reference: false,
                     }],
@@ -5525,7 +5618,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let plan = create_plan_with_props();
         let lp = lowerer.lower_plan(&plan).unwrap();
         assert!(
@@ -5545,7 +5639,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let mut builder = GraphPlan::builder("openCypher");
         let returned = builder.push_expr(IrExpr::VarRef(VarId(0)));
         let plan = builder
@@ -5592,7 +5687,7 @@ mod tests {
     #[test]
     fn create_without_write_target_errors() {
         // The read-only `new` constructor has no write target.
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
         let plan = create_plan_with_props();
         let result = lowerer.lower_plan(&plan);
         assert!(
@@ -5612,7 +5707,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let result = lowerer.lower_plan(&create_plan_with_props());
         assert!(
             result.is_err(),
@@ -5629,7 +5725,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let mut builder = GraphPlan::builder("openCypher");
         // A non-literal property value (here a parameter) is no longer rejected
         // (#814): it lowers to a row-dependent computed `Expr` on the create node,
@@ -5856,7 +5953,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let lp = lowerer.lower_plan(&match_delete_plan(false)).unwrap();
         assert!(
             matches!(lp, DfLogicalPlan::Extension(_)),
@@ -5875,7 +5973,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         assert!(
             lowerer.lower_plan(&match_delete_plan(false)).is_err(),
             "DELETE without a write target should error"
@@ -5897,7 +5996,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
                 var: VarId(0),
@@ -6009,6 +6109,7 @@ mod tests {
             dir,
             graphforge_core::OntologyMode::Exploratory,
         )
+        .unwrap()
     }
 
     #[test]
@@ -6029,7 +6130,7 @@ mod tests {
             .push_op(GraphOp::Set {
                 items: vec![SetPropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
                     prop_name: "age".into(),
                     value,
                 }],
@@ -6063,7 +6164,7 @@ mod tests {
         let var = builder.push_expr(IrExpr::VarRef(VarId(0)));
         let age = builder.push_expr(IrExpr::PropertyAccess {
             base: var,
-            prop: graphforge_core::PropId(0),
+            prop: PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
         });
         let one = builder.push_expr(IrExpr::Literal(IrLiteral::Int(1)));
         let sum = builder.push_expr(IrExpr::BinaryOp {
@@ -6079,7 +6180,7 @@ mod tests {
             .push_op(GraphOp::Set {
                 items: vec![SetPropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
                     prop_name: "age".into(),
                     value: sum,
                 }],
@@ -6108,7 +6209,7 @@ mod tests {
             .push_op(GraphOp::Remove {
                 items: vec![RemovePropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
                     prop_name: "age".into(),
                 }],
                 label_items: vec![],
@@ -6135,7 +6236,8 @@ mod tests {
             None,
             dir.path(),
             graphforge_core::OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let mut builder = GraphPlan::builder("openCypher");
         let value = builder.push_expr(IrExpr::Literal(IrLiteral::Int(1)));
         let plan = builder
@@ -6146,7 +6248,7 @@ mod tests {
             .push_op(GraphOp::Set {
                 items: vec![SetPropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
                     prop_name: "age".into(),
                     value,
                 }],
@@ -6175,8 +6277,7 @@ mod tests {
     ) {
         let tmp = tempfile::TempDir::new().unwrap();
         let mut rc = graphforge_ir::RuntimeCatalog::new();
-        let rel =
-            graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS").unwrap());
+        let rel = RelationTypeId::runtime(rc.intern_relation_type("KNOWS").unwrap());
         let catalog = graphforge_storage::GraphCatalog::open(tmp.path(), None, &rc).unwrap();
         let plan = GraphPlan::builder("openCypher")
             .push_op(GraphOp::NodeScan {
@@ -6202,7 +6303,8 @@ mod tests {
 
         let (tmp, catalog, plan) = typed_single_hop_fixture(Direction::Out);
         let lowerer =
-            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict)
+                .unwrap();
 
         let lp = lowerer.lower_plan(&plan).unwrap();
         let DfLogicalPlan::Extension(ext) = &lp else {
@@ -6238,7 +6340,8 @@ mod tests {
     fn project_backed_undirected_single_hop_emits_plain_extension() {
         let (tmp, catalog, plan) = typed_single_hop_fixture(Direction::Undirected);
         let lowerer =
-            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict)
+                .unwrap();
 
         let lp = lowerer.lower_plan(&plan).unwrap();
         // No DISTINCT wrapper: the self-loop dedup happens inside ExpandExec
@@ -6258,7 +6361,7 @@ mod tests {
     #[test]
     fn schema_only_single_hop_keeps_join_path() {
         let (_tmp, catalog, plan) = typed_single_hop_fixture(Direction::Out);
-        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None).unwrap();
         let lp = lowerer.lower_plan(&plan).unwrap();
         assert!(
             matches!(lp, DfLogicalPlan::Join(_)),
@@ -6276,7 +6379,8 @@ mod tests {
             None,
             tmp.path(),
             OntologyMode::Exploratory,
-        );
+        )
+        .unwrap();
         let lp = lowerer.lower_plan(&plan).unwrap();
         let DfLogicalPlan::Extension(ext) = &lp else {
             panic!("expected exploratory ExpandNode, got {lp:?}");
@@ -6315,7 +6419,8 @@ mod tests {
             })
             .build();
         let lowerer =
-            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict)
+                .unwrap();
         let lp = lowerer.lower_plan(&plan).unwrap();
         let DfLogicalPlan::Extension(ext) = &lp else {
             panic!("expected wildcard ExpandNode, got {lp:?}");
@@ -6336,8 +6441,7 @@ mod tests {
         // silently column-0-seeded ExpandNode.
         let tmp = tempfile::TempDir::new().unwrap();
         let mut rc = graphforge_ir::RuntimeCatalog::new();
-        let rel =
-            graphforge_ir::runtime_relation_type_id(rc.intern_relation_type("KNOWS").unwrap());
+        let rel = RelationTypeId::runtime(rc.intern_relation_type("KNOWS").unwrap());
         let catalog = graphforge_storage::GraphCatalog::open(tmp.path(), None, &rc).unwrap();
         // No NodeScan: src VarId(0) is never registered.
         let plan = GraphPlan::builder("openCypher")
@@ -6352,7 +6456,8 @@ mod tests {
             })
             .build();
         let lowerer =
-            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict);
+            GraphPlanLowerer::new_with_dir(Some(&catalog), None, tmp.path(), OntologyMode::Strict)
+                .unwrap();
         let err = lowerer.lower_plan(&plan).unwrap_err();
         assert!(
             err.to_string().contains("unbound") || err.to_string().contains("Unbound"),
@@ -6405,9 +6510,9 @@ mod tests {
             );
         }
         assert_eq!(var_alias(VarId(42)), "var_42");
-        assert!(build_type_id_map(None).is_empty());
-        assert!(build_entity_id_map(None).is_empty());
-        assert!(build_inference_rules(None).is_empty());
+        assert!(build_type_id_map(None).unwrap().is_empty());
+        assert!(build_entity_id_map(None).unwrap().is_empty());
+        assert!(build_inference_rules(None).unwrap().is_empty());
 
         let schema = Arc::new(
             DFSchema::try_from(Schema::new(vec![
@@ -6519,7 +6624,7 @@ mod tests {
                 src: VarId(0),
                 edge: VarId(1),
                 dst: VarId(2),
-                rel_ty: Some(TypeId(999_999)),
+                rel_ty: Some(RelationTypeId::ontology(TypeId(999_999)).unwrap()),
                 dir: Direction::Out,
                 min_hops: 1,
                 max_hops: Some(3),
@@ -6527,6 +6632,7 @@ mod tests {
             .build();
         assert!(
             GraphPlanLowerer::new(None, None)
+                .unwrap()
                 .lower_plan(&unknown)
                 .unwrap_err()
                 .to_string()
@@ -6553,7 +6659,10 @@ mod tests {
                     max_hops: Some(1),
                 })
                 .build();
-            let lowered = GraphPlanLowerer::new(None, None).lower_plan(&plan).unwrap();
+            let lowered = GraphPlanLowerer::new(None, None)
+                .unwrap()
+                .lower_plan(&plan)
+                .unwrap();
             let rendered = lowered.display_indent_schema().to_string();
             assert!(rendered.contains("Filter"), "{direction:?}: {rendered}");
         }
@@ -6615,7 +6724,7 @@ mod tests {
             },
             GraphOp::TypedEdgeScan {
                 var: wanted,
-                rel_ty: TypeId(1),
+                rel_ty: RelationTypeId::ontology(TypeId(1)).unwrap(),
             },
             GraphOp::Expand {
                 src: other,
@@ -6686,7 +6795,7 @@ mod tests {
 
     #[test]
     fn exact_zero_validation_errors_are_specific_and_non_interpolated() {
-        let lowerer = GraphPlanLowerer::new(None, None);
+        let lowerer = GraphPlanLowerer::new(None, None).unwrap();
         let empty_vm = VarMap::new();
         let no_alternatives = lowerer
             .lower_exists_alternatives(&[], false, empty_base(), &empty_vm)
@@ -6723,7 +6832,7 @@ mod tests {
         let mut edge_vm = VarMap::new();
         let bound_error = expand_bound_edge_single_dir(
             VarId(2),
-            Some(TypeId(999_999)),
+            Some(RelationTypeId::ontology(TypeId(999_999)).unwrap()),
             "var_0",
             "var_1",
             true,
