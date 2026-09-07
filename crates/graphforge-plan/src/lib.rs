@@ -24,6 +24,9 @@
 // the literal values.
 #![allow(clippy::unnecessary_literal_bound)]
 
+pub mod read_resource;
+pub use read_resource::{GraphReadContract, GraphReadSource, GraphReadTable};
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
@@ -126,12 +129,8 @@ pub fn var_len_edge_list_field(prop_fields: &[Field]) -> Arc<Field> {
 /// sequence, so the physical layer ([`VarLenExpandExec`](../graphforge_exec) in physical execution)
 /// performs an iterative BFS over the Parquet edge table.
 ///
-/// # Baked execution context
-///
-/// Like [`GraphCreateNode`], the project `dir` and ontology `mode` are baked in
-/// at lowering time because the physical-planning `ExtensionPlanner` only sees
-/// the DataFusion session state, not the GraphForge project path.  The physical
-/// node reads edges directly from `dir` at execution time.
+/// Execution binds this descriptor to its session's pinned graph resources.
+/// No directory, provider or ontology mode is part of logical identity.
 ///
 /// # Output schema
 ///
@@ -161,14 +160,19 @@ pub struct VarLenExpandNode {
     pub direction: Direction,
     /// Resolved relation type id (`TypeId.0`), or `None` for a wildcard.
     pub rel_ty: Option<RelationTypeId>,
-    /// Project directory the physical node reads edges from.
-    pub dir: PathBuf,
-    /// Ontology mode (drives typed vs exploratory edge-file routing).
-    pub mode: OntologyMode,
+    /// Logical semantic assumptions checked against the execution resource.
+    pub read_contract: Option<GraphReadContract>,
     schema: DFSchemaRef,
 }
 
 impl VarLenExpandNode {
+    /// Attach semantic assumptions without any execution authority.
+    #[must_use]
+    pub fn with_read_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.read_contract = contract;
+        self
+    }
+
     /// Create a variable-length expand node.
     ///
     /// `dst_fields` is the destination node's column list (the storage layer's
@@ -188,8 +192,6 @@ impl VarLenExpandNode {
         edge_var: u32,
         direction: Direction,
         rel_ty: Option<RelationTypeId>,
-        dir: PathBuf,
-        mode: OntologyMode,
         dst_fields: Vec<Arc<Field>>,
         edge_field: Arc<Field>,
     ) -> Self {
@@ -204,8 +206,7 @@ impl VarLenExpandNode {
             edge_var,
             direction,
             rel_ty,
-            dir,
-            mode,
+            read_contract: None,
             schema,
         }
     }
@@ -313,11 +314,10 @@ impl UserDefinedLogicalNodeCore for VarLenExpandNode {
             self.edge_var,
             self.direction,
             self.rel_ty,
-            self.dir.clone(),
-            self.mode,
             dst_fields,
             edge_field,
-        ))
+        )
+        .with_read_contract(self.read_contract.clone()))
     }
 }
 
@@ -362,10 +362,8 @@ pub struct ExpandNode {
     pub direction: Direction,
     /// Resolved relation type id (`TypeId.0`), absent for wildcard expansion.
     pub rel_ty: Option<RelationTypeId>,
-    /// Project directory the physical node reads from.
-    pub dir: PathBuf,
-    /// Ontology mode controlling the persisted edge layout.
-    pub mode: OntologyMode,
+    /// Logical semantic assumptions checked against the execution resource.
+    pub read_contract: Option<GraphReadContract>,
     /// How many of the `var_<edge_var>` fields are edge-property columns
     /// (the trailing ones); the rest are edge topology columns.
     pub edge_prop_count: usize,
@@ -373,6 +371,13 @@ pub struct ExpandNode {
 }
 
 impl ExpandNode {
+    /// Attach semantic assumptions without any execution authority.
+    #[must_use]
+    pub fn with_read_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.read_contract = contract;
+        self
+    }
+
     /// Create an adjacency-backed single-hop expand node.
     ///
     /// `edge_fields` are the typed edge table's topology columns and
@@ -390,8 +395,6 @@ impl ExpandNode {
         edge_var: u32,
         direction: Direction,
         rel_ty: Option<RelationTypeId>,
-        dir: PathBuf,
-        mode: OntologyMode,
         edge_fields: Vec<Arc<Field>>,
         edge_prop_fields: Vec<Arc<Field>>,
         dst_fields: Vec<Arc<Field>>,
@@ -413,8 +416,7 @@ impl ExpandNode {
             edge_var,
             direction,
             rel_ty,
-            dir,
-            mode,
+            read_contract: None,
             edge_prop_count,
             schema,
         }
@@ -528,12 +530,11 @@ impl UserDefinedLogicalNodeCore for ExpandNode {
             self.edge_var,
             self.direction,
             self.rel_ty,
-            self.dir.clone(),
-            self.mode,
             edge_fields,
             edge_prop_fields,
             dst_fields,
-        ))
+        )
+        .with_read_contract(self.read_contract.clone()))
     }
 }
 
@@ -2009,8 +2010,6 @@ mod tests {
             2,
             Direction::Out,
             Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
             dst_node_fields(),
             var_len_edge_list_field(&[]),
         )
@@ -2722,8 +2721,6 @@ mod tests {
             1,
             Direction::Out,
             Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
-            PathBuf::from("/tmp/p"),
-            OntologyMode::Strict,
             edge_fields,
             edge_prop_fields,
             dst_node_fields(),

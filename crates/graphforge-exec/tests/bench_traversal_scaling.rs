@@ -141,7 +141,7 @@ fn frontier_schema() -> Arc<Schema> {
     )]))
 }
 
-fn make_node(dir: &Path, min_hops: u16, max_hops: Option<u16>) -> VarLenExpandNode {
+fn make_node(_dir: &Path, min_hops: u16, max_hops: Option<u16>) -> VarLenExpandNode {
     use datafusion::logical_expr::LogicalPlanBuilder;
     use datafusion::logical_expr::logical_plan::LogicalTableSource;
 
@@ -162,8 +162,6 @@ fn make_node(dir: &Path, min_hops: u16, max_hops: Option<u16>) -> VarLenExpandNo
         edge_var,
         Direction::Out,
         Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
-        dir.to_path_buf(),
-        OntologyMode::Strict,
         dst_fields,
         var_len_edge_list_field(&[]),
     )
@@ -174,6 +172,7 @@ fn make_node(dir: &Path, min_hops: u16, max_hops: Option<u16>) -> VarLenExpandNo
 /// caller-held [`GUARD`]) so only the traversal's reads are attributed. Returns
 /// the sorted reached destination `node_id`s and the I/O snapshot.
 async fn run_measured(
+    dir: &Path,
     node: &VarLenExpandNode,
     provider: Arc<dyn AdjacencyProvider>,
     seeds: &[u64],
@@ -190,7 +189,13 @@ async fn run_measured(
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = Arc::new(VarLenExpandExec::new(node, input, provider));
+    let exec = Arc::new(VarLenExpandExec::new(
+        node,
+        input,
+        provider,
+        dir.to_path_buf(),
+        OntologyMode::Strict,
+    ));
 
     io_stats::reset();
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
@@ -252,7 +257,12 @@ fn io_smoke_index_hit_issues_no_full_edge_scan() {
         .unwrap();
 
     // Index Hit: adjacency from CSR, only traversed edge records read.
-    let (hit_reached, hit) = rt.block_on(run_measured(&node, persistent(dir.path()), &seeds));
+    let (hit_reached, hit) = rt.block_on(run_measured(
+        dir.path(),
+        &node,
+        persistent(dir.path()),
+        &seeds,
+    ));
     assert_eq!(
         hit.edge_full_reads, 0,
         "index Hit must not full-scan the edge file: {hit:?}"
@@ -286,7 +296,12 @@ fn io_smoke_index_hit_issues_no_full_edge_scan() {
     );
 
     // Scan-build Miss baseline: full edge-file scan to build adjacency.
-    let (miss_reached, miss) = rt.block_on(run_measured(&node, scan_build(dir.path()), &seeds));
+    let (miss_reached, miss) = rt.block_on(run_measured(
+        dir.path(),
+        &node,
+        scan_build(dir.path()),
+        &seeds,
+    ));
     assert!(
         miss.edge_full_reads >= 1,
         "scan-build must full-scan the edge file: {miss:?}"
@@ -333,7 +348,13 @@ async fn median_expand(
             .create_physical_plan()
             .await
             .unwrap();
-        let exec = Arc::new(VarLenExpandExec::new(&node, input, Arc::clone(provider)));
+        let exec = Arc::new(VarLenExpandExec::new(
+            &node,
+            input,
+            Arc::clone(provider),
+            dir.to_path_buf(),
+            OntologyMode::Strict,
+        ));
         let start = std::time::Instant::now();
         let _ = collect(exec, ctx.task_ctx()).await.unwrap();
         samples.push(start.elapsed());
@@ -369,7 +390,7 @@ async fn bench_scale(n: usize, fan_out: usize, num_seeds: usize, localized: bool
 
     // The edge-count-independent signal: traversed edge records for *1..3.
     let node3 = make_node(dir.path(), 1, Some(3));
-    let (_, io) = run_measured(&node3, Arc::clone(&provider), &seeds).await;
+    let (_, io) = run_measured(dir.path(), &node3, Arc::clone(&provider), &seeds).await;
 
     ScaleResult {
         edges: n * fan_out,

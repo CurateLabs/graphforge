@@ -299,6 +299,7 @@ export default defineConfig({
                   label: '0025 Storage value contract',
                   slug: 'adr/0025-storage-value-contract',
                 },
+                { label: '0026 Read plan resources', slug: 'adr/0026-read-plan-resources' },
               ],
             },
           ],
