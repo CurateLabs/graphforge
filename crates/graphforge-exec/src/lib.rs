@@ -61,6 +61,7 @@ pub(crate) mod algorithm_embedding_graphsage;
 pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
+pub mod read_resource;
 pub use algorithm_embedding_options::validate_embedding_options;
 pub use algorithm_graph::AlgorithmProjectionFingerprint;
 pub(crate) mod algorithm_arrow_sink;
@@ -2252,6 +2253,8 @@ impl VarLenExpandExec {
         node: &VarLenExpandNode,
         input: Arc<dyn ExecutionPlan>,
         provider: Arc<dyn AdjacencyProvider>,
+        dir: PathBuf,
+        mode: OntologyMode,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
         let props = Arc::new(PlanProperties::new(
@@ -2276,8 +2279,8 @@ impl VarLenExpandExec {
             direction: node.direction,
             min_hops: node.min_hops,
             max_hops: node.max_hops,
-            dir: node.dir.clone(),
-            mode: node.mode,
+            dir,
+            mode,
             src_col_idx,
             schema,
             props,
@@ -3212,6 +3215,7 @@ impl ExpandExec {
         provider: Arc<dyn AdjacencyProvider>,
         ordinal_identities: Option<Arc<V4OrdinalIdentitySession>>,
         ordinal_identity_required: bool,
+        resource: &read_resource::GraphReadContext,
     ) -> Self {
         let schema: SchemaRef = Arc::new(node.schema().as_arrow().clone());
         let props = Arc::new(PlanProperties::new(
@@ -3230,8 +3234,8 @@ impl ExpandExec {
             input,
             rel_type_name: node.rel_type_name.clone(),
             direction: node.direction,
-            dir: node.dir.clone(),
-            mode: node.mode,
+            dir: resource.dir.clone(),
+            mode: resource.mode,
             src_col_idx,
             edge_prop_count: node.edge_prop_count,
             input_width: node.input.schema().fields().len(),
@@ -4682,18 +4686,14 @@ fn plan_expand_extension(
         .first()
         .cloned()
         .ok_or_else(|| DataFusionError::Internal("Expand requires one physical input".into()))?;
+    let resource = read_resource::required(session_state)?;
+    resource.validate(expand.read_contract.as_ref())?;
     let provider = session_state
         .config()
         .get_extension::<AdjacencyProviderExt>()
-        .map_or_else(
-            || {
-                Arc::new(ScanBuildAdjacencyProvider::new(
-                    expand.dir.clone(),
-                    expand.mode,
-                )) as Arc<dyn AdjacencyProvider>
-            },
-            |ext| Arc::clone(&ext.0),
-        );
+        .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
+        .0
+        .clone();
     let identity_extension = session_state
         .config()
         .get_extension::<OrdinalIdentityResolverExt>();
@@ -4707,6 +4707,7 @@ fn plan_expand_extension(
         provider,
         ordinal_identities,
         ordinal_identity_required,
+        &resource,
     )))
 }
 
@@ -4756,23 +4757,20 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("VarLenExpand requires one physical input".into())
             })?;
-            // The session-scoped provider (#761) travels via SessionConfig
-            // extension; a foreign SessionState without one falls back to a
-            // fresh scan-build provider (today's pre-index behavior).
+            let resource = read_resource::required(session_state)?;
+            resource.validate(var_len.read_contract.as_ref())?;
             let provider = session_state
                 .config()
                 .get_extension::<AdjacencyProviderExt>()
-                .map_or_else(
-                    || {
-                        Arc::new(ScanBuildAdjacencyProvider::new(
-                            var_len.dir.clone(),
-                            var_len.mode,
-                        )) as Arc<dyn AdjacencyProvider>
-                    },
-                    |ext| Arc::clone(&ext.0),
-                );
+                .ok_or_else(|| DataFusionError::Plan("GF_READ_RESOURCE_MISSING: adjacency".into()))?
+                .0
+                .clone();
             return Ok(Some(Arc::new(VarLenExpandExec::new(
-                var_len, input, provider,
+                var_len,
+                input,
+                provider,
+                resource.dir.clone(),
+                resource.mode,
             ))));
         }
         if let Some(opt) = node.as_any().downcast_ref::<OptionalMatchNode>() {
@@ -4820,11 +4818,12 @@ impl QueryPlanner for GraphForgeQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let logical_plan = read_resource::bind(logical_plan, session_state)?;
         let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             GraphForgeExtensionPlanner,
         )]);
         planner
-            .create_physical_plan(logical_plan, session_state)
+            .create_physical_plan(&logical_plan, session_state)
             .await
     }
 }
@@ -5106,7 +5105,14 @@ impl ExecutionSession {
             },
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
+        let catalog = Arc::new(catalog);
         let mut config = datafusion::prelude::SessionConfig::new()
+            .with_extension(Arc::new(read_resource::GraphReadContext {
+                dir: dir.clone(),
+                mode,
+                catalog: catalog.clone(),
+                ontology: ontology.clone(),
+            }))
             .with_extension(Arc::new(AdjacencyProviderExt(provider)))
             .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt::new(
                 resources.io_concurrency,
@@ -5156,7 +5162,6 @@ impl ExecutionSession {
         let semantic_composition_fingerprint = catalog
             .semantic_composition_fingerprint()
             .map(str::to_owned);
-        let catalog = Arc::new(catalog);
         ctx.register_catalog("graph", catalog.clone());
         Self {
             ctx,
@@ -7577,8 +7582,6 @@ mod tests {
             3,
             graphforge_ir::Direction::Out,
             None,
-            dir.path().to_path_buf(),
-            OntologyMode::Exploratory,
             vec![],
             vec![],
             vec![],
@@ -7593,8 +7596,6 @@ mod tests {
             3,
             graphforge_ir::Direction::Out,
             None,
-            dir.path().to_path_buf(),
-            OntologyMode::Exploratory,
             vec![],
             graphforge_plan::var_len_edge_list_field(&[]),
         );
@@ -7677,8 +7678,6 @@ mod tests {
             3,
             graphforge_ir::Direction::Out,
             None,
-            dir.path().to_path_buf(),
-            OntologyMode::Exploratory,
             vec![],
             vec![],
             vec![],
@@ -7693,8 +7692,6 @@ mod tests {
             3,
             graphforge_ir::Direction::Out,
             None,
-            dir.path().to_path_buf(),
-            OntologyMode::Exploratory,
             vec![],
             graphforge_plan::var_len_edge_list_field(&[]),
         );

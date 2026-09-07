@@ -31,10 +31,21 @@ use graphforge_exec::{AdjacencyProvider, ScanBuildAdjacencyProvider, VarLenExpan
 /// Construct the exec node with a fresh scan-build provider over the node's
 /// project dir — the pre-index behavior these tests pin (the session-injected
 /// persistent provider is exercised by `tests/persistent_adjacency.rs`).
-fn make_exec(node: &VarLenExpandNode, input: Arc<dyn ExecutionPlan>) -> Arc<VarLenExpandExec> {
+fn make_exec(
+    dir: &std::path::Path,
+    mode: OntologyMode,
+    node: &VarLenExpandNode,
+    input: Arc<dyn ExecutionPlan>,
+) -> Arc<VarLenExpandExec> {
     let provider: Arc<dyn AdjacencyProvider> =
-        Arc::new(ScanBuildAdjacencyProvider::new(node.dir.clone(), node.mode));
-    Arc::new(VarLenExpandExec::new(node, input, provider))
+        Arc::new(ScanBuildAdjacencyProvider::new(dir.to_path_buf(), mode));
+    Arc::new(VarLenExpandExec::new(
+        node,
+        input,
+        provider,
+        dir.to_path_buf(),
+        mode,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -116,9 +127,9 @@ fn make_node(
 /// exploratory end-to-end coverage, #762).
 #[allow(clippy::too_many_arguments)]
 fn make_node_with(
-    dir: &Path,
+    _dir: &Path,
     rel_type_name: &str,
-    mode: OntologyMode,
+    _mode: OntologyMode,
     direction: Direction,
     min_hops: u16,
     max_hops: Option<u16>,
@@ -151,9 +162,7 @@ fn make_node_with(
         dst_var,
         edge_var,
         direction,
-        Some(graphforge_value::RelationTypeId::decode(0).unwrap()), // rel_ty (unused by the executor; typed mode reads KNOWS.parquet)
-        dir.to_path_buf(),
-        mode,
+        Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
         dst_fields,
         var_len_edge_list_field(&[]),
     )
@@ -161,7 +170,12 @@ fn make_node_with(
 
 /// Run `VarLenExpandExec` over a frontier of `seed` node_ids and return the
 /// multiset of reached destination `node_id`s.
-async fn run_expand(node: &VarLenExpandNode, seeds: &[u64]) -> Vec<u64> {
+async fn run_expand(
+    dir: &std::path::Path,
+    mode: OntologyMode,
+    node: &VarLenExpandNode,
+    seeds: &[u64],
+) -> Vec<u64> {
     let ctx = SessionContext::new();
 
     // Source frontier as an in-memory physical plan.
@@ -177,7 +191,7 @@ async fn run_expand(node: &VarLenExpandNode, seeds: &[u64]) -> Vec<u64> {
         .await
         .unwrap();
 
-    let exec = make_exec(node, input);
+    let exec = make_exec(dir, mode, node, input);
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
 
     // Destination node_id is the second `node_id` column (after the frontier's).
@@ -206,7 +220,11 @@ fn set(v: &[u64]) -> HashSet<u64> {
 /// (the trailing `var_<edge>.rels` `List<Struct>` column) — i.e. the hop count.
 /// Also asserts the column is a `List<Struct>` whose `edge_uuid` child is
 /// `FixedSizeBinary(16)` (the UUID-only relationship-list contract, #709).
-async fn run_expand_edge_list_lengths(node: &VarLenExpandNode, seeds: &[u64]) -> Vec<usize> {
+async fn run_expand_edge_list_lengths(
+    dir: &std::path::Path,
+    node: &VarLenExpandNode,
+    seeds: &[u64],
+) -> Vec<usize> {
     use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StructArray};
     use arrow::datatypes::DataType;
 
@@ -222,7 +240,7 @@ async fn run_expand_edge_list_lengths(node: &VarLenExpandNode, seeds: &[u64]) ->
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = make_exec(node, input);
+    let exec = make_exec(dir, OntologyMode::Strict, node, input);
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
 
     let mut lengths = Vec::new();
@@ -271,7 +289,7 @@ async fn bounded_1_to_2_on_chain() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 1, Some(2), 0, 1);
 
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[0]]).await;
     // 1 hop → n2 ; 2 hops → n3.
     assert_eq!(set(&reached), set(&[ids[1], ids[2]]));
     assert_eq!(reached.len(), 2, "one path each at hop 1 and hop 2");
@@ -284,7 +302,7 @@ async fn unbounded_on_acyclic_chain_terminates() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 1, None, 0, 1);
 
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[0]]).await;
     assert_eq!(set(&reached), set(&ids[1..]));
 }
 
@@ -296,7 +314,7 @@ async fn unbounded_on_cycle_terminates() {
     let ids = write_cycle(dir.path());
     let node = make_node(dir.path(), Direction::Out, 1, None, 0, 1);
 
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[0]]).await;
     // Reachable from n1: n2 (1 hop), n3 (2 hops), n1 (3 hops, full cycle).
     assert_eq!(set(&reached), set(&ids));
     // Exactly one simple path of each length 1/2/3 from n1.
@@ -310,7 +328,7 @@ async fn min_hops_excludes_one_hop_neighbours() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 2, Some(3), 0, 1);
 
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[0]]).await;
     // 2 hops → n3 ; 3 hops → n4. n2 (1 hop) excluded.
     assert_eq!(set(&reached), set(&[ids[2], ids[3]]));
     assert!(
@@ -326,7 +344,7 @@ async fn direction_in_reaches_predecessors() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::In, 1, Some(2), 0, 1);
 
-    let reached = run_expand(&node, &[ids[2]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[2]]).await;
     assert_eq!(set(&reached), set(&[ids[1], ids[0]]));
 }
 
@@ -335,7 +353,7 @@ async fn empty_graph_yields_no_rows() {
     let dir = TempDir::new().unwrap();
     // No nodes/edges written.
     let node = make_node(dir.path(), Direction::Out, 1, None, 0, 1);
-    let reached = run_expand(&node, &[1]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[1]).await;
     assert!(reached.is_empty(), "no edges → no expansions");
 }
 
@@ -381,8 +399,6 @@ async fn seeds_from_source_var_not_first_node_id() {
         2, // edge_var → trailing var_2.rels List column
         Direction::Out,
         Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
-        dir.path().to_path_buf(),
-        OntologyMode::Strict,
         dst_fields,
         var_len_edge_list_field(&[]),
     );
@@ -410,7 +426,7 @@ async fn seeds_from_source_var_not_first_node_id() {
         datafusion::catalog::TableProvider::scan(&mem, &ctx.state(), None, &[], None)
             .await
             .unwrap();
-    let exec = make_exec(&node, input);
+    let exec = make_exec(dir.path(), OntologyMode::Strict, &node, input);
     let out = collect(exec, ctx.task_ctx()).await.unwrap();
 
     // Destination node_id column = 2 input node_id cols + node_id position (1) = idx 3.
@@ -436,7 +452,7 @@ async fn min_hops_zero_includes_source_self() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 0, Some(1), 0, 1);
 
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[0]]).await;
     assert_eq!(set(&reached), set(&[ids[0], ids[1]]));
     assert!(
         reached.contains(&ids[0]),
@@ -457,7 +473,7 @@ async fn edge_list_records_hop_counts() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 1, Some(2), 0, 1);
 
-    let mut lengths = run_expand_edge_list_lengths(&node, &[ids[0]]).await;
+    let mut lengths = run_expand_edge_list_lengths(dir.path(), &node, &[ids[0]]).await;
     lengths.sort_unstable();
     assert_eq!(
         lengths,
@@ -474,7 +490,7 @@ async fn edge_list_zero_hop_self_path_is_empty_list() {
     let ids = write_chain(dir.path(), 5);
     let node = make_node(dir.path(), Direction::Out, 0, Some(1), 0, 1);
 
-    let mut lengths = run_expand_edge_list_lengths(&node, &[ids[0]]).await;
+    let mut lengths = run_expand_edge_list_lengths(dir.path(), &node, &[ids[0]]).await;
     lengths.sort_unstable();
     assert_eq!(
         lengths,
@@ -538,8 +554,6 @@ async fn edge_list_carries_edge_properties() {
             2,
             Direction::Out,
             Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
-            dir.path().to_path_buf(),
-            OntologyMode::Strict,
             dst_fields,
             var_len_edge_list_field(&[Field::new("since", DataType::Int64, true)]),
         )
@@ -558,9 +572,12 @@ async fn edge_list_carries_edge_properties() {
         .create_physical_plan()
         .await
         .unwrap();
-    let out = collect(make_exec(&node, input), ctx.task_ctx())
-        .await
-        .unwrap();
+    let out = collect(
+        make_exec(dir.path(), OntologyMode::Strict, &node, input),
+        ctx.task_ctx(),
+    )
+    .await
+    .unwrap();
 
     // One 2-hop path; its edge-list struct's `since` child is [2020, NULL].
     let total: usize = out.iter().map(RecordBatch::num_rows).sum();
@@ -599,7 +616,7 @@ async fn undirected_reaches_both_sides() {
     let dir = TempDir::new().unwrap();
     let ids = write_chain(dir.path(), 3);
     let node = make_node(dir.path(), Direction::Undirected, 1, Some(1), 0, 1);
-    let reached = run_expand(&node, &[ids[1]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Strict, &node, &[ids[1]]).await;
     assert_eq!(set(&reached), set(&[ids[0], ids[2]]));
 }
 
@@ -628,7 +645,7 @@ async fn exploratory_mode_filters_rel_types_end_to_end() {
         0,
         1,
     );
-    let reached = run_expand(&node, &[ids[0]]).await;
+    let reached = run_expand(dir.path(), OntologyMode::Exploratory, &node, &[ids[0]]).await;
     assert_eq!(set(&reached), set(&[ids[1]]), "OWNS edge not traversed");
 }
 
@@ -653,7 +670,7 @@ async fn explain_display_shows_adjacency_status() {
         .create_physical_plan()
         .await
         .unwrap();
-    let exec = make_exec(&node, input);
+    let exec = make_exec(dir.path(), OntologyMode::Strict, &node, input);
 
     let line = datafusion::physical_plan::displayable(exec.as_ref())
         .one_line()

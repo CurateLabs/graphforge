@@ -215,3 +215,148 @@ async fn equal_local_property_ids_execute_distinct_domain_columns() {
         assert_eq!(values.values().as_ref(), expected.as_slice());
     }
 }
+
+#[tokio::test]
+async fn logical_read_resources_relocate_and_bind_independently() {
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    use datafusion::logical_expr::LogicalPlan;
+    use std::hash::{Hash, Hasher};
+    let left = TempDir::new().unwrap();
+    let right = TempDir::new().unwrap();
+    let rc = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    for (root, name) in [(left.path(), "left"), (right.path(), "right")] {
+        let create = bind(
+            &format!(
+                "CREATE (a:Person {{name:'seed'}}), (b:Person {{name:'{name}'}}), (a)-[:KNOWS]->(b)"
+            ),
+            rc.clone(),
+        );
+        let writer = session_with(root, &rc.lock().unwrap());
+        writer.execute_create(&create).await.unwrap();
+        if name == "right" {
+            let extra = bind("CREATE (:Person {name:'unconnected'})", rc.clone());
+            writer.execute_create(&extra).await.unwrap();
+        }
+    }
+    let wrong_schema = TempDir::new().unwrap();
+    let create_wrong = bind("CREATE (:Person {name:7})", rc.clone());
+    let writer = session_with(wrong_schema.path(), &rc.lock().unwrap());
+    writer.execute_create(&create_wrong).await.unwrap();
+    for query in [
+        "MATCH (b) WHERE b.name <> 'seed' AND b.name <> 'unconnected' RETURN b.name AS name",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS name",
+        "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN b.name AS name",
+        "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN nodes(p)[1].name AS name",
+    ] {
+        let ir = bind(query, rc.clone());
+        let left_catalog = GraphCatalog::open(left.path(), None, &rc.lock().unwrap()).unwrap();
+        let right_catalog = GraphCatalog::open(right.path(), None, &rc.lock().unwrap()).unwrap();
+        let left_session = session_with(left.path(), &rc.lock().unwrap());
+        let right_session = session_with(right.path(), &rc.lock().unwrap());
+
+        let lower = |catalog: &GraphCatalog, root: &std::path::Path| {
+            graphforge_rel::GraphPlanLowerer::new_with_dir(
+                Some(catalog),
+                None,
+                root,
+                OntologyMode::Exploratory,
+            )
+            .unwrap()
+            .lower_plan(&ir)
+            .unwrap()
+        };
+        let plan = lower(&left_catalog, left.path());
+        let relocated = lower(&right_catalog, right.path());
+        assert_eq!(plan, relocated, "{query}");
+        let hash = |p: &LogicalPlan| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            p.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash(&plan), hash(&relocated));
+        let explain = plan.display_indent().to_string();
+        assert_eq!(explain, relocated.display_indent().to_string());
+        assert!(!explain.contains(left.path().to_str().unwrap()));
+        plan.apply(|node| {
+            if let LogicalPlan::TableScan(scan) = node {
+                assert!(
+                    scan.source
+                        .downcast_ref::<graphforge_plan::GraphReadSource>()
+                        .is_some()
+                );
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        let left_state = left_session.context().state();
+        let right_state = right_session.context().state();
+        let (left_physical, right_physical) = tokio::join!(
+            left_state.create_physical_plan(&plan),
+            right_state.create_physical_plan(&plan)
+        );
+        let retained = datafusion::physical_plan::execute_stream(
+            left_physical.unwrap(),
+            left_session.context().task_ctx(),
+        )
+        .unwrap();
+        let right_retained = datafusion::physical_plan::execute_stream(
+            right_physical.unwrap(),
+            right_session.context().task_ctx(),
+        )
+        .unwrap();
+        drop(left_session);
+        drop(right_session);
+        let (left_result, right_result) = tokio::join!(
+            datafusion::physical_plan::common::collect(retained),
+            datafusion::physical_plan::common::collect(right_retained)
+        );
+        let left_result = left_result.unwrap();
+        let right_result = right_result.unwrap();
+        for (batches, expected) in [(&left_result, "left"), (&right_result, "right")] {
+            assert_eq!(
+                batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+                1,
+                "{query}"
+            );
+            assert_eq!(
+                arrow::util::display::array_value_to_string(batches[0].column(0), 0).unwrap(),
+                expected,
+                "{query}; schema={:?}",
+                batches[0].schema()
+            );
+        }
+        let incompatible_schema = session_with(wrong_schema.path(), &rc.lock().unwrap());
+        let error = incompatible_schema
+            .context()
+            .state()
+            .create_physical_plan(&plan)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("GF_READ_RESOURCE_INCOMPATIBLE"),
+            "{query}: {error}"
+        );
+        let mut incompatible_catalog = RuntimeCatalog::new();
+        incompatible_catalog.intern_label("DifferentLabel").unwrap();
+        let incompatible = session_with(right.path(), &incompatible_catalog);
+        let error = incompatible
+            .context()
+            .state()
+            .create_physical_plan(&plan)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("GF_READ_RESOURCE_INCOMPATIBLE"),
+            "{error}"
+        );
+        let foreign = datafusion::execution::SessionStateBuilder::new()
+            .with_default_features()
+            .with_query_planner(Arc::new(graphforge_exec::GraphForgeQueryPlanner))
+            .build();
+        let error = foreign.create_physical_plan(&plan).await.unwrap_err();
+        assert!(
+            error.to_string().contains("GF_READ_RESOURCE_MISSING"),
+            "{error}"
+        );
+    }
+}
