@@ -442,10 +442,6 @@ impl<'a> LocalMutationLifecycle<'a> {
         session: &'a crate::ExecutionSession,
         resource: crate::write_resource::BoundWriteResource,
     ) -> Result<Self, graphforge_core::GfError> {
-        // Preserve GraphWriter::open_at's fresh-target behavior after explicit
-        // resource admission, before capturing the empty rollback baseline.
-        std::fs::create_dir_all(resource.directory())
-            .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
         Ok(Self {
             checkpoint: graphforge_storage::GraphWorkspaceCheckpoint::capture(
                 resource.directory(),
@@ -474,10 +470,16 @@ impl MutationLifecycle for LocalMutationLifecycle<'_> {
     }
     fn abort(&mut self) -> Result<(), graphforge_core::GfError> {
         let health = self.session.mutation_health.clone();
-        health.recover(|| {
-            self.checkpoint.restore(self.resource.directory())?;
-            self.complete()
-        })
+        health.recover(
+            || match self.checkpoint.restore(self.resource.directory())? {
+                graphforge_storage::GraphWorkspaceRestoration::Absent => {
+                    // Preserve the original inventory-less catalog: no writer ran.
+                    self.session.adjacency_provider.invalidate();
+                    Ok(())
+                }
+                graphforge_storage::GraphWorkspaceRestoration::Materialized => self.complete(),
+            },
+        )
     }
 }
 

@@ -1734,6 +1734,59 @@ mod tests {
         assert!(verify_graph_tree(&graph_tree_root(generation.path()), &inventory).is_err());
     }
 
+    #[test]
+    fn checkpoint_does_not_treat_disappeared_existing_target_as_originally_absent() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("existing");
+        fs::create_dir(&target).unwrap();
+        let mut checkpoint = GraphWorkspaceCheckpoint::capture(&target).unwrap();
+        let backup = checkpoint.backup.as_ref().unwrap().path().to_path_buf();
+        fs::remove_dir(&target).unwrap();
+        let error = checkpoint.restore(&target).unwrap_err();
+        assert!(
+            error.to_string().contains("rollback backup retained"),
+            "{error}"
+        );
+        drop(checkpoint);
+        assert!(backup.exists());
+        fs::remove_dir_all(backup).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_rejects_substituted_root_symlink_before_touching_outside_files() {
+        use std::os::unix::fs::symlink;
+        for originally_absent in [false, true] {
+            let parent = tempfile::tempdir().unwrap();
+            let target = parent.path().join("target");
+            if !originally_absent {
+                fs::create_dir(&target).unwrap();
+            }
+            let mut checkpoint = GraphWorkspaceCheckpoint::capture(&target).unwrap();
+            let backup = checkpoint.backup.as_ref().unwrap().path().to_path_buf();
+            if !originally_absent {
+                fs::remove_dir(&target).unwrap();
+            }
+            let outside = parent.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            let sentinel = outside.join("sentinel");
+            fs::write(&sentinel, b"outside remains unchanged").unwrap();
+            symlink(&outside, &target).unwrap();
+            let error = checkpoint.restore(&target).unwrap_err();
+            assert!(error.to_string().contains("symbolic link"), "{error}");
+            assert_eq!(
+                fs::read(&sentinel).ok(),
+                Some(b"outside remains unchanged".to_vec())
+            );
+            drop(checkpoint);
+            assert!(
+                backup.exists(),
+                "failed restore retains the recoverable backup after owner drop"
+            );
+            fs::remove_dir_all(backup).unwrap();
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn capture_rejects_symlinks() {
@@ -2004,6 +2057,16 @@ pub struct GraphWorkspaceCheckpoint {
     source: PathBuf,
     backup: Option<tempfile::TempDir>,
     inventory: GraphFilesInventory,
+    source_was_absent: bool,
+}
+
+/// Whether restoration retained an untouched absent target or restored a tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphWorkspaceRestoration {
+    /// The source was absent at capture and remains absent after an early error.
+    Absent,
+    /// A workspace tree was verified after restoration, possibly empty.
+    Materialized,
 }
 
 impl GraphWorkspaceCheckpoint {
@@ -2012,16 +2075,28 @@ impl GraphWorkspaceCheckpoint {
     /// # Errors
     /// Rejects links, invalid inventory and copy failures.
     pub fn capture(source: &Path) -> Result<Self, GfError> {
-        let (inventory, _) = capture_graph_files(source)?;
         let backup = tempfile::Builder::new()
             .prefix("graphforge-mutation-rollback-")
             .tempdir()
             .map_err(|error| storage("create mutation rollback directory", source, error))?;
-        materialize_graph_tree(source, &inventory, backup.path())?;
+        let (inventory, source_was_absent) = match fs::symlink_metadata(source) {
+            Ok(_) => {
+                let (inventory, _) = capture_graph_files(source)?;
+                materialize_graph_tree(source, &inventory, backup.path())?;
+                (inventory, false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Keep a fresh target absent until lowering captures its empty
+                // schema. GraphWriter creates it only after that boundary.
+                (capture_graph_files(backup.path())?.0, true)
+            }
+            Err(error) => return Err(storage("inspect mutation workspace", source, error)),
+        };
         Ok(Self {
             source: source.to_path_buf(),
             backup: Some(backup),
             inventory,
+            source_was_absent,
         })
     }
 
@@ -2031,32 +2106,48 @@ impl GraphWorkspaceCheckpoint {
     ///
     /// # Errors
     /// Fails closed if the backup, destination or restoration cannot be verified.
-    pub fn restore(&mut self, target: &Path) -> Result<(), GfError> {
+    pub fn restore(&mut self, target: &Path) -> Result<GraphWorkspaceRestoration, GfError> {
         if target != self.source {
             return Err(validation(
                 "mutation checkpoint target differs from captured workspace",
             ));
         }
-        let result = self.restore_inner(target);
-        if let Err(error) = result {
-            let Some(backup) = self.backup.take() else {
-                return Err(error);
-            };
-            let backup = backup.keep();
-            return Err(GfError::Storage(format!(
-                "mutation restore failed; rollback backup retained at {}: {error}",
-                backup.display()
-            )));
+        match self.restore_inner(target) {
+            Ok(restoration) => Ok(restoration),
+            Err(error) => {
+                let Some(backup) = self.backup.take() else {
+                    return Err(error);
+                };
+                let backup = backup.keep();
+                Err(GfError::Storage(format!(
+                    "mutation restore failed; rollback backup retained at {}: {error}",
+                    backup.display()
+                )))
+            }
         }
-        Ok(())
     }
 
-    fn restore_inner(&self, target: &Path) -> Result<(), GfError> {
+    fn restore_inner(&self, target: &Path) -> Result<GraphWorkspaceRestoration, GfError> {
         let backup = self
             .backup
             .as_ref()
             .ok_or_else(|| validation("mutation checkpoint already retained after failure"))?;
         verify_graph_tree(backup.path(), &self.inventory)?;
+        let metadata = match fs::symlink_metadata(target) {
+            Err(error)
+                if self.source_was_absent && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(GraphWorkspaceRestoration::Absent);
+            }
+            Err(error) => return Err(storage("inspect mutation restore target", target, error)),
+            Ok(metadata) => metadata,
+        };
+        // Validate the root before read_dir can follow a substituted link and
+        // before removing any current file, including on originally absent roots.
+        reject_link(target)?;
+        if !metadata.is_dir() {
+            return Err(validation("mutation restore target must be a directory"));
+        }
         let mut current = Vec::new();
         collect_source_files(target, &mut current)?;
         for path in current {
@@ -2081,6 +2172,7 @@ impl GraphWorkspaceCheckpoint {
                 false,
             )?;
         }
-        verify_graph_tree(target, &self.inventory)
+        verify_graph_tree(target, &self.inventory)?;
+        Ok(GraphWorkspaceRestoration::Materialized)
     }
 }

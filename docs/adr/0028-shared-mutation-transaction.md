@@ -141,3 +141,11 @@ recorded failure. The explicit multi-statement facade transaction uses the same
 abort adapter around its existing publication boundary, including errors after
 an earlier unpublished statement. Composite domain publication and its receipt
 remain owned by the existing facade publisher.
+
+A standalone target that did not exist at capture stays absent until its writer
+runs, preserving the lowering snapshot's empty-target contract. An early failure
+restores that absence without replacing the original inventory-less catalog;
+after writer creation, rollback verifies an empty materialized tree instead.
+Restoration validates the destination root as a non-link directory before any
+destructive walk. A substituted root is rejected and its rollback backup survives
+owner drop.

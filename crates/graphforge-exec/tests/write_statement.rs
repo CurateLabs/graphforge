@@ -731,3 +731,61 @@ async fn shared_transaction_preserves_fresh_standalone_target_creation() {
     assert_eq!(result.side_effects.unwrap().nodes_created, 1);
     assert_eq!(rows(&target.join("topology/nodes.parquet")), 1);
 }
+
+#[tokio::test]
+async fn shared_transaction_aborts_first_write_to_absent_target_then_accepts_new_write() {
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new-graph");
+    let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    assert!(!target.exists());
+    let error = run(
+        &target,
+        &catalog,
+        "CREATE (a:Person {name:'discarded'}) DELETE a SET a.name='invalid'",
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("entity deleted in this statement"),
+        "{error}"
+    );
+    assert!(
+        target.is_dir(),
+        "the writer created the target before rollback"
+    );
+    assert_eq!(rows(&target.join("topology/nodes.parquet")), 0);
+    let result = run(&target, &catalog, "CREATE (:Person {name:'retained'})")
+        .await
+        .unwrap();
+    assert_eq!(result.side_effects.unwrap().nodes_created, 1);
+    assert_eq!(rows(&target.join("topology/nodes.parquet")), 1);
+}
+
+#[tokio::test]
+async fn absent_target_prefix_error_preserves_original_error_and_same_session_health() {
+    use graphforge_exec::mutation::MutationTransaction;
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new-graph");
+    let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    let failed = bind(
+        "WITH $missing AS value CREATE (:Person {name:value})",
+        &catalog,
+    );
+    let valid = bind("CREATE (:Person {name:'retained'})", &catalog);
+    let session = session(&target, &catalog);
+    let mut probe = MutationTransaction::new(&catalog.lock().unwrap());
+    let expected = session
+        .prepare_write_statement_with_params(&failed, &Default::default(), &mut probe)
+        .await
+        .unwrap_err();
+    assert!(expected.to_string().contains("missing"), "{expected}");
+    assert!(!target.exists());
+    let actual = session.execute_write_statement(&failed).await.unwrap_err();
+    assert_eq!(actual.to_string(), expected.to_string());
+    assert!(!target.exists());
+    let result = session.execute_write_statement(&valid).await.unwrap();
+    assert_eq!(result.side_effects.unwrap().nodes_created, 1);
+    assert_eq!(rows(&target.join("topology/nodes.parquet")), 1);
+}

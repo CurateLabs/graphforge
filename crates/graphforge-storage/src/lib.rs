@@ -64,9 +64,9 @@ pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
     GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
     GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
-    GraphWorkspaceCheckpoint, capture_graph_files, decode_inventory, encode_inventory,
-    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
-    stage_graph_tree, verify_graph_tree,
+    GraphWorkspaceCheckpoint, GraphWorkspaceRestoration, capture_graph_files, decode_inventory,
+    encode_inventory, graph_tree_root, inventory_participant, materialize_graph_tree,
+    pinned_open_evidence, stage_graph_tree, verify_graph_tree,
 };
 pub(crate) use graph_files::{GraphFilesParticipant, decode_versioned_graph_files_participant};
 
