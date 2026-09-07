@@ -502,7 +502,20 @@ fn property_values(batch: &RecordBatch, row: usize) -> Result<BTreeMap<String, S
         .as_any()
         .downcast_ref::<StructArray>()
         .ok_or_else(|| schema("properties column is incompatible"))?;
-    if let Some(map) = s.column_by_name("__het_map") {
+    let layout = graphforge_value::heterogeneous::recognize(s.data_type())
+        .map_err(|error| schema(error.to_string()))?;
+    if layout.is_some() {
+        graphforge_value::heterogeneous::validate_array(s)
+            .map_err(|error| schema(error.to_string()))?;
+        let map = match graphforge_value::heterogeneous::decode_row(s, row)
+            .map_err(|error| schema(error.to_string()))?
+        {
+            graphforge_value::heterogeneous::Decoded::Null => return Ok(BTreeMap::new()),
+            graphforge_value::heterogeneous::Decoded::Map(map) => map,
+            graphforge_value::heterogeneous::Decoded::Payload(_) => {
+                return Err(schema("properties value is not a map"));
+            }
+        };
         let map = map
             .as_any()
             .downcast_ref::<ListArray>()
@@ -516,11 +529,11 @@ fn property_values(batch: &RecordBatch, row: usize) -> Result<BTreeMap<String, S
             .downcast_ref::<StructArray>()
             .ok_or_else(|| schema("properties map entries are incompatible"))?;
         let keys = entries
-            .column_by_name("__het_mkey")
+            .column_by_name(graphforge_value::heterogeneous::MAP_KEY)
             .and_then(|array| array.as_any().downcast_ref::<StringArray>())
             .ok_or_else(|| schema("properties map keys are incompatible"))?;
         let values = entries
-            .column_by_name("__het_mval")
+            .column_by_name(graphforge_value::heterogeneous::MAP_VALUE)
             .ok_or_else(|| schema("properties map values are incompatible"))?;
         let mut out = BTreeMap::new();
         for index in 0..entries.len() {

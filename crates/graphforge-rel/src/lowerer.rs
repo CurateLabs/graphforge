@@ -4915,8 +4915,12 @@ relation_types:
         );
 
         let heterogeneous = DataType::Struct(Fields::from(vec![
-            Field::new("__het_tag", DataType::Int8, false),
-            Field::new("__het_value_0", DataType::Int64, true),
+            Field::new(graphforge_value::heterogeneous::TAG, DataType::Int8, false),
+            Field::new(
+                graphforge_value::heterogeneous::payload_field(0),
+                DataType::Int64,
+                true,
+            ),
         ]));
         for function in [AggFunc::Min, AggFunc::Max] {
             let expression = lower_agg_func(
@@ -6704,8 +6708,14 @@ relation_types:
             );
         }
         for function in [AggFunc::Min, AggFunc::Max] {
-            let heterogeneous =
-                DataType::Struct(vec![Field::new("__het_tag", DataType::Int8, false)].into());
+            let heterogeneous = DataType::Struct(
+                vec![Field::new(
+                    graphforge_value::heterogeneous::TAG,
+                    DataType::Int8,
+                    false,
+                )]
+                .into(),
+            );
             assert!(
                 format!(
                     "{}",

@@ -2449,7 +2449,9 @@ fn collect_delete_scalar(
     if value.is_null() {
         return Ok(());
     }
-    if let Some(decoded) = graphforge_rel::expr::decode_het_scalar(value) {
+    if let Some(decoded) =
+        graphforge_rel::expr::decode_het_scalar(value).map_err(GfError::from_execution_error)?
+    {
         return collect_delete_scalar(&decoded, nodes, edges);
     }
     match value {
@@ -3015,7 +3017,10 @@ fn run_set_map_phase_with_input(
                 .ok_or_else(|| {
                     GfError::Execution("SET map expression must evaluate to a map".into())
                 })?;
-            if maps.column_by_name("__het_tag").is_some() {
+            if maps
+                .column_by_name(graphforge_value::heterogeneous::TAG)
+                .is_some()
+            {
                 for row in 0..batch.num_rows() {
                     if maps.is_null(row) {
                         continue;
@@ -3155,6 +3160,7 @@ fn decode_tagged_map_updates(
 ) -> Result<HashMap<String, graphforge_ir::IrLiteral>, GfError> {
     let tagged = ScalarValue::try_from_array(maps, row).map_err(GfError::from_execution_error)?;
     let decoded = graphforge_rel::expr::decode_het_scalar(&tagged)
+        .map_err(GfError::from_execution_error)?
         .ok_or_else(|| GfError::Execution("SET source is not a map".into()))?;
     let ScalarValue::Struct(values) = decoded else {
         return Err(GfError::Execution("SET source is not a map".into()));
@@ -3163,7 +3169,9 @@ fn decode_tagged_map_updates(
     for (field, column) in values.fields().iter().zip(values.columns()) {
         let tagged_value =
             ScalarValue::try_from_array(column, 0).map_err(GfError::from_execution_error)?;
-        let value = graphforge_rel::expr::decode_het_scalar(&tagged_value).unwrap_or(tagged_value);
+        let value = graphforge_rel::expr::decode_het_scalar(&tagged_value)
+            .map_err(GfError::from_execution_error)?
+            .unwrap_or(tagged_value);
         if !value.is_null() {
             updates.insert(
                 field.name().clone(),

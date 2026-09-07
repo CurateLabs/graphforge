@@ -3411,17 +3411,6 @@ fn is_plain_map_struct_type(dt: &DataType) -> bool {
         && !is_datetime_struct(dt)
 }
 
-/// The entry-struct fields of a het map element (ADR 0011 slice 2, #1005): a
-/// `__het_mkey: Utf8` key paired with a `__het_mval` tagged value one level
-/// shallower — so a map's values recurse by value exactly like list children.
-fn het_map_entry_fields(depth: usize) -> datafusion::arrow::datatypes::Fields {
-    use datafusion::arrow::datatypes::{DataType, Field};
-    datafusion::arrow::datatypes::Fields::from(vec![
-        Field::new("__het_mkey", DataType::Utf8, false),
-        Field::new("__het_mval", DataType::Struct(het_fields(depth)), true),
-    ])
-}
-
 /// Arrow fields of a tagged heterogeneous list element (ADR 0010/0011) that can
 /// nest to `depth` levels. `__het_key` is first (native `Struct` min/max orders
 /// flat numeric lists by value — ADR 0010). `__het_tag`: 0=int, 1=float, 2=str,
@@ -3432,35 +3421,7 @@ fn het_map_entry_fields(depth: usize) -> datafusion::arrow::datatypes::Fields {
 /// level (recursion by value, not a recursive Arrow type; the literal's depth is
 /// known at lowering time — ADR 0011).
 fn het_fields(depth: usize) -> datafusion::arrow::datatypes::Fields {
-    use datafusion::arrow::datatypes::{DataType, Field};
-    use std::sync::Arc;
-    let mut v = vec![
-        Field::new("__het_key", DataType::Float64, true),
-        Field::new("__het_tag", DataType::Int8, false),
-        Field::new("__het_int", DataType::Int64, true),
-        Field::new("__het_float", DataType::Float64, true),
-        Field::new("__het_str", DataType::Utf8, true),
-        Field::new("__het_bool", DataType::Boolean, true),
-    ];
-    if depth >= 1 {
-        let inner = Field::new("item", DataType::Struct(het_fields(depth - 1)), true);
-        v.push(Field::new(
-            "__het_list",
-            DataType::List(Arc::new(inner)),
-            true,
-        ));
-        let entry = Field::new(
-            "item",
-            DataType::Struct(het_map_entry_fields(depth - 1)),
-            true,
-        );
-        v.push(Field::new(
-            "__het_map",
-            DataType::List(Arc::new(entry)),
-            true,
-        ));
-    }
-    datafusion::arrow::datatypes::Fields::from(v)
+    graphforge_value::heterogeneous::constant_fields(depth)
 }
 
 /// The nesting depth of a value as a het element: a scalar is `0`, a list or map
@@ -3522,176 +3483,54 @@ fn build_het_struct(
     scalars: &[ScalarValue],
     depth: usize,
 ) -> Option<datafusion::arrow::array::StructArray> {
-    use datafusion::arrow::array::{
-        ArrayRef, BooleanArray, Float64Array, Int8Array, Int64Array, ListArray, StringArray,
-        StructArray,
-    };
-    use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer};
-    use datafusion::arrow::datatypes::{DataType, Field};
-    use std::sync::Arc;
+    let values = scalars
+        .iter()
+        .map(heterogeneous_literal)
+        .collect::<Option<Vec<_>>>()?;
+    graphforge_value::heterogeneous::encode_constant(&values, depth).ok()
+}
 
-    let n = scalars.len();
-    let mut keys: Vec<Option<f64>> = Vec::with_capacity(n);
-    let mut tags: Vec<i8> = Vec::with_capacity(n);
-    let mut ints: Vec<Option<i64>> = Vec::with_capacity(n);
-    let mut floats: Vec<Option<f64>> = Vec::with_capacity(n);
-    let mut strs: Vec<Option<String>> = Vec::with_capacity(n);
-    let mut bools: Vec<Option<bool>> = Vec::with_capacity(n);
-    let mut valid: Vec<bool> = Vec::with_capacity(n);
-    // Children of list elements, flattened, with one (offset, valid) per element.
-    let mut child_elems: Vec<ScalarValue> = Vec::new();
-    let mut child_offsets: Vec<i32> = vec![0];
-    let mut child_valid: Vec<bool> = Vec::new();
-    // Entries of map elements, flattened as parallel (key, tagged-value) columns,
-    // with one (offset, valid) per element (mirrors the list-child bookkeeping).
-    let mut map_keys: Vec<String> = Vec::new();
-    let mut map_vals: Vec<ScalarValue> = Vec::new();
-    let mut map_offsets: Vec<i32> = vec![0];
-    let mut map_valid: Vec<bool> = Vec::new();
-    for scalar in scalars {
-        let scalar = unwrap_het(scalar.clone());
-        // Scalar fields default to null/false; each arm sets only what it needs.
-        let (mut key, mut tag, mut int_v, mut float_v, mut str_v, mut bool_v, mut ok) =
-            (None, 0i8, None, None, None, None, true);
-        let mut child: Option<Vec<ScalarValue>> = None;
-        let mut map_child: Option<Vec<(String, ScalarValue)>> = None;
-        match &scalar {
-            ScalarValue::Int64(Some(x)) => {
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "key feeds only min/max ORDERING; the exact integer is preserved in __het_int"
-                )]
-                let k = Some(*x as f64);
-                key = k;
-                tag = 0;
-                int_v = Some(*x);
-            }
-            ScalarValue::Float64(Some(x)) => {
-                key = Some(*x);
-                tag = 1;
-                float_v = Some(*x);
-            }
-            ScalarValue::Utf8(Some(x))
-            | ScalarValue::LargeUtf8(Some(x))
-            | ScalarValue::Utf8View(Some(x)) => {
-                tag = 2;
-                str_v = Some(x.clone());
-            }
-            ScalarValue::Boolean(Some(x)) => {
-                tag = 3;
-                bool_v = Some(*x);
-            }
-            ScalarValue::List(arr) => {
-                if depth == 0 {
-                    return None; // shape deeper than the computed depth — defensive
-                }
-                tag = 4;
-                let inner = arr.value(0);
-                let mut elems = Vec::with_capacity(inner.len());
-                for idx in 0..inner.len() {
-                    elems.push(unwrap_het(ScalarValue::try_from_array(&inner, idx).ok()?));
-                }
-                child = Some(elems);
-            }
-            // A plain map (#1005): tag 5; its (key, value) entries recurse as
-            // tagged values one level shallower (empty map → zero entries).
-            ScalarValue::Struct(arr) if is_plain_map_struct(arr) => {
-                if depth == 0 {
-                    return None; // shape deeper than the computed depth — defensive
-                }
-                tag = 5;
-                let mut kv = Vec::with_capacity(arr.num_columns());
-                for (i, f) in arr.fields().iter().enumerate() {
-                    let v = unwrap_het(ScalarValue::try_from_array(arr.column(i), 0).ok()?);
-                    kv.push((f.name().clone(), v));
-                }
-                map_child = Some(kv);
-            }
-            // Null (typed or untyped) → a null element.
-            ScalarValue::Int64(None)
-            | ScalarValue::Float64(None)
-            | ScalarValue::Utf8(None)
-            | ScalarValue::LargeUtf8(None)
-            | ScalarValue::Utf8View(None)
-            | ScalarValue::Boolean(None)
-            | ScalarValue::Null => ok = false,
-            _ => return None, // entity/temporal/other struct → not this slice
-        }
-        keys.push(key);
-        tags.push(tag);
-        ints.push(int_v);
-        floats.push(float_v);
-        strs.push(str_v);
-        bools.push(bool_v);
-        valid.push(ok);
-        if depth >= 1 {
-            if let Some(elems) = child {
-                child_elems.extend(elems);
-                child_valid.push(true);
-            } else {
-                child_valid.push(false);
-            }
-            child_offsets.push(i32::try_from(child_elems.len()).ok()?);
-            if let Some(kv) = map_child {
-                for (k, v) in kv {
-                    map_keys.push(k);
-                    map_vals.push(v);
-                }
-                map_valid.push(true);
-            } else {
-                map_valid.push(false);
-            }
-            map_offsets.push(i32::try_from(map_keys.len()).ok()?);
-        }
+// DataFusion conversion stays here; layout/tag interpretation belongs to value.
+fn heterogeneous_literal(scalar: &ScalarValue) -> Option<graphforge_value::Literal> {
+    use graphforge_value::Literal;
+    let scalar = unwrap_het(scalar.clone());
+    if scalar.is_null() {
+        return Some(Literal::Null);
     }
-
-    let mut arrays: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(keys)),
-        Arc::new(Int8Array::from(tags)),
-        Arc::new(Int64Array::from(ints)),
-        Arc::new(Float64Array::from(floats)),
-        Arc::new(StringArray::from(strs)),
-        Arc::new(BooleanArray::from(bools)),
-    ];
-    if depth >= 1 {
-        let child_struct = build_het_struct(&child_elems, depth - 1)?;
-        let inner_field = Arc::new(Field::new(
-            "item",
-            DataType::Struct(het_fields(depth - 1)),
-            true,
-        ));
-        let het_list = ListArray::new(
-            inner_field,
-            OffsetBuffer::new(child_offsets.into()),
-            Arc::new(child_struct),
-            Some(NullBuffer::from(child_valid)),
-        );
-        arrays.push(Arc::new(het_list));
-
-        // __het_map: a List<Struct{__het_mkey, __het_mval}> — each map element's
-        // key/tagged-value entries, with values encoded one level shallower.
-        let entry_fields = het_map_entry_fields(depth - 1);
-        let mkey_arr = Arc::new(StringArray::from(map_keys)) as ArrayRef;
-        let mval_struct = build_het_struct(&map_vals, depth - 1)?;
-        let entry_struct = StructArray::new(
-            entry_fields.clone(),
-            vec![mkey_arr, Arc::new(mval_struct)],
-            None,
-        );
-        let entry_field = Arc::new(Field::new("item", DataType::Struct(entry_fields), true));
-        let het_map = ListArray::new(
-            entry_field,
-            OffsetBuffer::new(map_offsets.into()),
-            Arc::new(entry_struct),
-            Some(NullBuffer::from(map_valid)),
-        );
-        arrays.push(Arc::new(het_map));
-    }
-    Some(StructArray::new(
-        het_fields(depth),
-        arrays,
-        Some(NullBuffer::from(valid)),
-    ))
+    Some(match &scalar {
+        ScalarValue::Int64(Some(value)) => Literal::Int(*value),
+        ScalarValue::Float64(Some(value)) => Literal::Float(*value),
+        ScalarValue::Utf8(Some(value))
+        | ScalarValue::LargeUtf8(Some(value))
+        | ScalarValue::Utf8View(Some(value)) => Literal::Str(value.clone()),
+        ScalarValue::Boolean(Some(value)) => Literal::Bool(*value),
+        ScalarValue::List(values) => {
+            let values = values.value(0);
+            Literal::List(
+                (0..values.len())
+                    .map(|row| {
+                        heterogeneous_literal(&ScalarValue::try_from_array(&values, row).ok()?)
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )
+        }
+        ScalarValue::Struct(values) if is_plain_map_struct(values) => Literal::Map(
+            values
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, field)| {
+                    Some((
+                        field.name().clone(),
+                        heterogeneous_literal(
+                            &ScalarValue::try_from_array(values.column(index), 0).ok()?,
+                        )?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    })
 }
 
 /// Build a heterogeneous list literal as the ADR-0010/0011 tagged struct
@@ -3746,16 +3585,10 @@ impl CypherDynamicHetList {
 }
 
 fn dynamic_het_type(arg_types: &[DataType]) -> DataType {
-    use datafusion::arrow::datatypes::Fields;
-    let mut fields = Vec::with_capacity(arg_types.len() + 1);
-    fields.push(Field::new("__het_tag", DataType::Int8, false));
-    fields.extend(
-        arg_types
-            .iter()
-            .enumerate()
-            .map(|(i, ty)| Field::new(format!("__het_value_{i}"), ty.clone(), true)),
-    );
-    DataType::new_list(DataType::Struct(Fields::from(fields)), true)
+    DataType::new_list(
+        DataType::Struct(graphforge_value::heterogeneous::dynamic_fields(arg_types)),
+        true,
+    )
 }
 
 impl ScalarUDFImpl for CypherDynamicHetList {
@@ -3788,55 +3621,34 @@ impl ScalarUDFImpl for CypherDynamicHetList {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
-        use datafusion::arrow::array::{ArrayRef, Int8Array, Int32Array, StructArray};
-        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer};
-        use datafusion::arrow::compute::take;
-        use datafusion::error::DataFusionError;
-
-        let rows = args.number_rows;
-        let width = args.args.len();
-        let width_i8 = i8::try_from(width).map_err(|_| {
-            DataFusionError::Plan("heterogeneous list literal exceeds 127 elements".into())
-        })?;
-        let values = args
-            .args
-            .iter()
-            .map(|value| value.to_array(rows))
-            .collect::<datafusion::error::Result<Vec<_>>>()?;
-        let tags = Int8Array::from_iter_values((0..rows).flat_map(|_| 0..width_i8));
-        let mut columns: Vec<ArrayRef> = vec![Arc::new(tags)];
-        for (value_idx, value) in values.iter().enumerate() {
-            let indices = (0..rows)
-                .flat_map(|row| {
-                    (0..width).map(move |element_idx| {
-                        (element_idx == value_idx)
-                            .then(|| i32::try_from(row).ok())
-                            .flatten()
-                    })
-                })
-                .collect::<Int32Array>();
-            columns.push(take(value.as_ref(), &indices, None)?);
+        validate_heterogeneous_arguments(&args.args)?;
+        if args.args.len() > 127 {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "heterogeneous list literal exceeds 127 elements".into(),
+            ));
         }
-        let valid = (0..rows)
-            .flat_map(|row| values.iter().map(move |value| !value.is_null(row)))
-            .collect::<NullBuffer>();
         let DataType::List(item) = args.return_field.data_type() else {
-            return Err(DataFusionError::Internal(
+            return Err(datafusion::error::DataFusionError::Internal(
                 "dynamic heterogeneous list has a non-list return type".into(),
             ));
         };
-        let DataType::Struct(fields) = item.data_type() else {
-            return Err(DataFusionError::Internal(
+        if !matches!(item.data_type(), DataType::Struct(_)) {
+            return Err(datafusion::error::DataFusionError::Internal(
                 "dynamic heterogeneous list has a non-struct element type".into(),
             ));
-        };
-        let elements = StructArray::new(fields.clone(), columns, Some(valid));
-        let list = ListArray::new(
-            item.clone(),
-            OffsetBuffer::from_lengths(std::iter::repeat_n(width, rows)),
-            Arc::new(elements),
-            None,
-        );
+        }
+        let values = args
+            .args
+            .iter()
+            .map(|value| value.to_array(args.number_rows))
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
+        let list = graphforge_value::heterogeneous::encode_dynamic(&values, args.number_rows)
+            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+        if list.data_type() != args.return_field.data_type() {
+            return Err(datafusion::error::DataFusionError::External(Box::new(
+                graphforge_value::heterogeneous::ValueError::Schema,
+            )));
+        }
         Ok(ColumnarValue::Array(Arc::new(list)))
     }
 }
@@ -3954,6 +3766,7 @@ impl ScalarUDFImpl for CypherRelationshipDisjoint {
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::BooleanArray;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let left = args.args[0].to_array(rows)?;
         let right = args.args[1].to_array(rows)?;
@@ -4124,6 +3937,7 @@ impl ScalarUDFImpl for CypherListPlus {
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let left = args.args[0].to_array(rows)?;
         let right = args.args[1].to_array(rows)?;
@@ -4249,7 +4063,11 @@ impl ScalarUDFImpl for CypherListPlus {
         };
         let variants = fields
             .iter()
-            .filter(|field| field.name().starts_with("__het_value_"))
+            .filter(|field| {
+                field
+                    .name()
+                    .starts_with(graphforge_value::heterogeneous::DYNAMIC_PREFIX)
+            })
             .map(|field| field.data_type().clone())
             .collect::<Vec<_>>();
         let mut tags = Vec::with_capacity(flat.len());
@@ -4262,7 +4080,12 @@ impl ScalarUDFImpl for CypherListPlus {
                     value.data_type() == *variant
                         || graph_value_types_compatible(&value.data_type(), variant)
                 })
-                .unwrap_or(0);
+                .or_else(|| value.is_null().then_some(0))
+                .ok_or_else(|| {
+                    DataFusionError::External(Box::new(
+                        graphforge_value::heterogeneous::ValueError::Kind,
+                    ))
+                })?;
             tags.push(i8::try_from(tag).map_err(|_| {
                 DataFusionError::Execution("cypher_list_plus has too many value variants".into())
             })?);
@@ -4280,11 +4103,18 @@ impl ScalarUDFImpl for CypherListPlus {
             });
             columns.push(ScalarValue::iter_to_array(values)?);
         }
-        let values = datafusion::arrow::array::StructArray::new(
-            fields.clone(),
+        let tags = columns.remove(0);
+        let tags = tags
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int8Array>()
+            .ok_or_else(|| DataFusionError::Internal("dynamic tag column is not Int8".into()))?
+            .clone();
+        let values = graphforge_value::heterogeneous::encode_dynamic_rows(
+            tags,
             columns,
             Some(NullBuffer::from(valid)),
-        );
+        )
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let out = ListArray::new(
             field.clone(),
             OffsetBuffer::new(ScalarBuffer::from(offsets)),
@@ -4309,7 +4139,7 @@ fn invoke_tagged_list_element_plus(
     return_type: &DataType,
 ) -> datafusion::error::Result<Option<datafusion::arrow::array::ArrayRef>> {
     use arrow_data::transform::MutableArrayData;
-    use datafusion::arrow::array::{Array, Int8Array, ListArray, StructArray, make_array};
+    use datafusion::arrow::array::{Array, ListArray, StructArray, make_array};
     use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use datafusion::arrow::datatypes::DataType;
     use datafusion::arrow::error::ArrowError;
@@ -4332,14 +4162,8 @@ fn invoke_tagged_list_element_plus(
         return Ok(None);
     }
 
-    let Some(tags) = right
-        .column_by_name("__het_tag")
-        .and_then(|column| column.as_any().downcast_ref::<Int8Array>())
-    else {
-        return Ok(None);
-    };
     let Some(nested) = right
-        .column_by_name("__het_list")
+        .column_by_name(graphforge_value::heterogeneous::LIST)
         .and_then(|column| column.as_any().downcast_ref::<ListArray>())
     else {
         return Ok(None);
@@ -4349,7 +4173,12 @@ fn invoke_tagged_list_element_plus(
     let nested_offsets = nested.value_offsets();
     let mut promoted_ranges = vec![None; right.len()];
     for row in 0..right.len() {
-        if right.is_null(row) || tags.value(row) != 4 || nested.is_null(row) {
+        if !matches!(
+            graphforge_value::heterogeneous::decode_row(right, row)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            graphforge_value::heterogeneous::Decoded::Payload(value)
+                if value.data_type() == nested.data_type()
+        ) {
             continue;
         }
         let start = usize::try_from(nested_offsets[row]).map_err(|_| {
@@ -4488,8 +4317,6 @@ fn promote_het_array(
 }
 
 fn list_plus_return_type(arg_types: &[DataType]) -> DataType {
-    use datafusion::arrow::datatypes::Fields;
-
     let value_types = arg_types
         .iter()
         .flat_map(|arg_type| {
@@ -4519,26 +4346,24 @@ fn list_plus_return_type(arg_types: &[DataType]) -> DataType {
     for arg_type in arg_types {
         let value_type = list_item_type(arg_type).unwrap_or(arg_type);
         if let DataType::Struct(fields) = value_type
-            && fields
-                .iter()
-                .any(|field| field.name().starts_with("__het_value_"))
+            && is_dynamic_variant_struct(value_type)
         {
-            for field in fields
-                .iter()
-                .filter(|field| field.name().starts_with("__het_value_"))
-            {
+            for field in fields.iter().skip(1) {
                 if !variants.contains(field.data_type()) {
                     variants.push(field.data_type().clone());
                 }
             }
         } else if let DataType::Struct(fields) = value_type
-            && fields.iter().any(|field| field.name() == "__het_tag")
+            && matches!(
+                graphforge_value::heterogeneous::recognize(value_type),
+                Ok(Some(_))
+            )
         {
             for (name, data_type) in [
-                ("__het_int", DataType::Int64),
-                ("__het_float", DataType::Float64),
-                ("__het_str", DataType::Utf8),
-                ("__het_bool", DataType::Boolean),
+                (graphforge_value::heterogeneous::INT, DataType::Int64),
+                (graphforge_value::heterogeneous::FLOAT, DataType::Float64),
+                (graphforge_value::heterogeneous::STR, DataType::Utf8),
+                (graphforge_value::heterogeneous::BOOL, DataType::Boolean),
             ] {
                 if fields.iter().any(|field| field.name() == name) && !variants.contains(&data_type)
                 {
@@ -4552,14 +4377,10 @@ fn list_plus_return_type(arg_types: &[DataType]) -> DataType {
     if variants.is_empty() {
         variants.push(DataType::Null);
     }
-    let mut fields = vec![Field::new("__het_tag", DataType::Int8, false)];
-    fields.extend(
-        variants
-            .into_iter()
-            .enumerate()
-            .map(|(index, data_type)| Field::new(format!("__het_value_{index}"), data_type, true)),
-    );
-    DataType::new_list(DataType::Struct(Fields::from(fields)), true)
+    DataType::new_list(
+        DataType::Struct(graphforge_value::heterogeneous::dynamic_fields(&variants)),
+        true,
+    )
 }
 
 fn list_plus_has_graph_value(arg_types: &[DataType]) -> bool {
@@ -4581,21 +4402,23 @@ fn is_graph_value_struct(data_type: &DataType) -> bool {
 }
 
 fn is_dynamic_variant_struct(data_type: &DataType) -> bool {
-    matches!(data_type, DataType::Struct(fields) if fields
-        .iter()
-        .any(|field| field.name().starts_with("__het_value_")))
+    matches!(
+        graphforge_value::heterogeneous::recognize(data_type),
+        Ok(Some(
+            graphforge_value::heterogeneous::Layout::DynamicV1 { .. }
+        ))
+    )
 }
 
 fn dynamic_variant_types(data_type: &DataType) -> Vec<&DataType> {
-    if let DataType::Struct(fields) = data_type {
-        let variants = fields
+    if is_dynamic_variant_struct(data_type)
+        && let DataType::Struct(fields) = data_type
+    {
+        return fields
             .iter()
-            .filter(|field| field.name().starts_with("__het_value_"))
+            .skip(1)
             .map(|field| field.data_type())
-            .collect::<Vec<_>>();
-        if !variants.is_empty() {
-            return variants;
-        }
+            .collect();
     }
     vec![data_type]
 }
@@ -4657,7 +4480,10 @@ fn het_struct_type_depth(data_type: &DataType) -> Option<usize> {
     let DataType::Struct(fields) = data_type else {
         return None;
     };
-    let Some(list_field) = fields.iter().find(|field| field.name() == "__het_list") else {
+    let Some(list_field) = fields
+        .iter()
+        .find(|field| field.name() == graphforge_value::heterogeneous::LIST)
+    else {
         return Some(0);
     };
     match list_field.data_type() {
@@ -4976,6 +4802,11 @@ fn spatial_property_scalar(value: &graphforge_core::SpatialValue) -> ScalarValue
     reason = "closed exhaustive property scalar conversion table"
 )]
 pub fn scalar_to_ir_literal(value: &ScalarValue) -> Result<IrLiteral, LoweringError> {
+    if let Some(decoded) =
+        decode_het_scalar(value).map_err(|error| LoweringError::InvalidType(error.to_string()))?
+    {
+        return scalar_to_ir_literal(&decoded);
+    }
     // Any null (typed `Int64(None)` or untyped `Null`) stores as Cypher null.
     if value.is_null() {
         return Ok(IrLiteral::Null);
@@ -5683,6 +5514,7 @@ impl ScalarUDFImpl for CypherConversion {
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::{BooleanArray, Float64Array, Int64Array};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let array = args.args[0].to_array(args.number_rows)?;
         match self.kind {
             CypherConversionKind::Integer => {
@@ -5900,6 +5732,7 @@ impl ScalarUDFImpl for CypherRowMarker {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
+        validate_heterogeneous_arguments(&args.args)?;
         let values = datafusion::arrow::array::BooleanArray::from(vec![true; args.number_rows]);
         Ok(ColumnarValue::Array(Arc::new(values)))
     }
@@ -5940,6 +5773,7 @@ impl ScalarUDFImpl for CypherSize {
         use datafusion::arrow::compute::kernels::length::length;
         use datafusion::common::cast::{as_large_list_array, as_list_array};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let array = args.args[0].to_array(args.number_rows)?;
         let out: Int64Array = match array.data_type() {
             // Element count per list row (null lists → null).
@@ -6059,6 +5893,7 @@ impl ScalarUDFImpl for CypherGraphMetadata {
         use datafusion::arrow::array::new_empty_array;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let values = args.args[0].to_array(rows)?;
         let field = match self.kind {
@@ -6147,6 +5982,7 @@ impl ScalarUDFImpl for CypherEntityProperties {
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         if args.args.is_empty() || !(args.args.len() - 1).is_multiple_of(2) {
             return Err(DataFusionError::Plan(
@@ -6237,6 +6073,7 @@ impl ScalarUDFImpl for CypherMapKeys {
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let values = args.args[0].to_array(rows)?;
         if matches!(values.data_type(), DataType::Null) {
@@ -6298,19 +6135,13 @@ fn tagged_map_keys(
     map: &datafusion::arrow::array::StructArray,
     rows: usize,
 ) -> datafusion::error::Result<ColumnarValue> {
-    use datafusion::arrow::array::{
-        Array, ArrayRef, Int8Array, ListArray, StringArray, StructArray,
-    };
+    use datafusion::arrow::array::{Array, ArrayRef, ListArray, StringArray, StructArray};
     use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use datafusion::error::DataFusionError;
     use std::sync::Arc;
 
-    let tags = map
-        .column_by_name("__het_tag")
-        .and_then(|c| c.as_any().downcast_ref::<Int8Array>())
-        .ok_or_else(|| DataFusionError::Plan("tagged map is missing __het_tag".into()))?;
     let entries = map
-        .column_by_name("__het_map")
+        .column_by_name(graphforge_value::heterogeneous::MAP)
         .and_then(|c| c.as_any().downcast_ref::<ListArray>())
         .ok_or_else(|| DataFusionError::Plan("tagged map is missing __het_map".into()))?;
     let mut offsets = Vec::with_capacity(rows + 1);
@@ -6321,7 +6152,11 @@ fn tagged_map_keys(
         if map.is_null(row) {
             valid.push(false);
         } else {
-            if tags.value(row) != 5 {
+            if !matches!(
+                graphforge_value::heterogeneous::decode_row(map, row)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
+                graphforge_value::heterogeneous::Decoded::Map(_)
+            ) {
                 return Err(DataFusionError::Execution(
                     "keys() requires a map, node, relationship, or null".into(),
                 ));
@@ -6336,7 +6171,7 @@ fn tagged_map_keys(
                         DataFusionError::Plan("tagged map entries must be structs".into())
                     })?;
                 let map_keys = entry_struct
-                    .column_by_name("__het_mkey")
+                    .column_by_name(graphforge_value::heterogeneous::MAP_KEY)
                     .and_then(|c| c.as_any().downcast_ref::<StringArray>())
                     .ok_or_else(|| {
                         DataFusionError::Plan("tagged map entries must carry __het_mkey".into())
@@ -6413,6 +6248,7 @@ impl ScalarUDFImpl for CypherStaticValueAccess {
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let values = args.args[0].to_array(rows)?;
         let return_type = args.return_field.data_type();
@@ -6493,6 +6329,7 @@ impl ScalarUDFImpl for CypherValueAccess {
         use datafusion::arrow::array::StructArray;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let values = args.args[0].to_array(rows)?;
         let keys = args.args[1].to_array(rows)?;
@@ -6574,14 +6411,18 @@ fn static_value_access_return_type(
             .find(|field| field.name() == key)
             .map_or(Ok(DataType::Null), |field| Ok(field.data_type().clone()));
     }
-    if fields.iter().any(|field| field.name() == "__het_map") {
+    if fields
+        .iter()
+        .any(|field| field.name() == graphforge_value::heterogeneous::MAP)
+    {
         return het_value_access_return_type(&DataType::Struct(fields.clone()));
     }
     let mut data_type = None;
-    for variant in fields
-        .iter()
-        .filter(|field| field.name().starts_with("__het_value_"))
-    {
+    for variant in fields.iter().filter(|field| {
+        field
+            .name()
+            .starts_with(graphforge_value::heterogeneous::DYNAMIC_PREFIX)
+    }) {
         let DataType::Struct(value_fields) = variant.data_type() else {
             continue;
         };
@@ -6673,7 +6514,10 @@ fn het_value_access_return_type(dt: &DataType) -> datafusion::error::Result<Data
     let DataType::Struct(fields) = dt else {
         unreachable!("caller checked het struct type")
     };
-    let Some(map_field) = fields.iter().find(|f| f.name() == "__het_map") else {
+    let Some(map_field) = fields
+        .iter()
+        .find(|f| f.name() == graphforge_value::heterogeneous::MAP)
+    else {
         return Err(DataFusionError::Plan(
             "dynamic value access requires a tagged map element".into(),
         ));
@@ -6690,7 +6534,7 @@ fn het_value_access_return_type(dt: &DataType) -> datafusion::error::Result<Data
     };
     entry_fields
         .iter()
-        .find(|f| f.name() == "__het_mval")
+        .find(|f| f.name() == graphforge_value::heterogeneous::MAP_VALUE)
         .map(|f| f.data_type().clone())
         .ok_or_else(|| DataFusionError::Plan("tagged map entries must carry __het_mval".into()))
 }
@@ -6701,7 +6545,7 @@ fn het_map_access_value(
     row: usize,
     null_value: &ScalarValue,
 ) -> datafusion::error::Result<ScalarValue> {
-    use datafusion::arrow::array::{Array, Int8Array, ListArray, StringArray, StructArray};
+    use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
     use datafusion::error::DataFusionError;
 
     if map.is_null(row) {
@@ -6711,17 +6555,17 @@ fn het_map_access_value(
     let Some(key) = scalar_access_key(&key)? else {
         return Ok(null_value.clone());
     };
-    let tag = map
-        .column_by_name("__het_tag")
-        .and_then(|c| c.as_any().downcast_ref::<Int8Array>())
-        .ok_or_else(|| DataFusionError::Plan("tagged value is missing __het_tag".into()))?;
-    if tag.value(row) != 5 {
+    if !matches!(
+        graphforge_value::heterogeneous::decode_row(map, row)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        graphforge_value::heterogeneous::Decoded::Map(_)
+    ) {
         return Err(DataFusionError::Execution(
             "invalid argument type: dynamic value access requires a map".into(),
         ));
     }
     let entries = map
-        .column_by_name("__het_map")
+        .column_by_name(graphforge_value::heterogeneous::MAP)
         .and_then(|c| c.as_any().downcast_ref::<ListArray>())
         .ok_or_else(|| DataFusionError::Plan("tagged map value is missing __het_map".into()))?;
     if entries.is_null(row) {
@@ -6733,11 +6577,11 @@ fn het_map_access_value(
         .downcast_ref::<StructArray>()
         .ok_or_else(|| DataFusionError::Plan("tagged map entries must be structs".into()))?;
     let map_keys = entry_struct
-        .column_by_name("__het_mkey")
+        .column_by_name(graphforge_value::heterogeneous::MAP_KEY)
         .and_then(|c| c.as_any().downcast_ref::<StringArray>())
         .ok_or_else(|| DataFusionError::Plan("tagged map entries must carry __het_mkey".into()))?;
     let map_values = entry_struct
-        .column_by_name("__het_mval")
+        .column_by_name(graphforge_value::heterogeneous::MAP_VALUE)
         .ok_or_else(|| DataFusionError::Plan("tagged map entries must carry __het_mval".into()))?;
     for idx in 0..entry_struct.len() {
         if !map_keys.is_null(idx) && map_keys.value(idx) == key {
@@ -6831,6 +6675,7 @@ impl ScalarUDFImpl for CypherReverse {
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let array = args.args[0].to_array(args.number_rows)?;
         match array.data_type() {
             DataType::Utf8 => {
@@ -6938,6 +6783,7 @@ impl ScalarUDFImpl for CypherBoolOp {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::BooleanArray;
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let lhs = args.args[0].to_array(rows)?;
         let rhs = args.args[1].to_array(rows)?;
@@ -7015,6 +6861,7 @@ impl ScalarUDFImpl for CypherCmpPred {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::BooleanArray;
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let lhs = args.args[0].to_array(rows)?;
         let rhs = args.args[1].to_array(rows)?;
@@ -7126,6 +6973,7 @@ impl ScalarUDFImpl for CypherStringPredicate {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::BooleanArray;
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let lhs = args.args[0].to_array(rows)?;
         let rhs = args.args[1].to_array(rows)?;
@@ -7193,6 +7041,7 @@ impl ScalarUDFImpl for CypherRange {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::{Int64Builder, ListBuilder};
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let starts = args.args[0].to_array(rows)?;
         let ends = args.args[1].to_array(rows)?;
@@ -7286,6 +7135,7 @@ impl ScalarUDFImpl for CypherOrderKey {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::StringArray;
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let values = args.args[0].to_array(rows)?;
         let out: StringArray = (0..rows)
@@ -7479,6 +7329,7 @@ impl ScalarUDFImpl for CypherEq {
         use datafusion::arrow::array::BooleanArray;
         use datafusion::arrow::compute::kernels::cmp::eq;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let lhs = args.args[0].to_array(rows)?;
         let rhs = args.args[1].to_array(rows)?;
@@ -7627,6 +7478,7 @@ impl ScalarUDFImpl for CypherIn {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::BooleanArray;
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let lhs = args.args[0].to_array(rows)?;
         let rhs = args.args[1].to_array(rows)?;
@@ -7762,7 +7614,7 @@ fn is_list_literal(e: &DfExpr) -> bool {
 /// Whether a DataType is the ADR-0011 heterogeneous tagged-struct element type
 /// (so `min`/`max` over it must use Cypher orderability, not native min/max).
 pub(crate) fn is_het_struct_type(t: Option<&DataType>) -> bool {
-    matches!(t, Some(DataType::Struct(fields)) if fields.iter().any(|f| f.name() == "__het_tag"))
+    matches!(t, Some(DataType::Struct(fields)) if fields.iter().any(|f| f.name() == graphforge_value::heterogeneous::TAG))
 }
 
 /// Cypher ORDERABILITY total order, used by `min`/`max` (which exclude nulls).
@@ -8523,94 +8375,86 @@ fn cypher_value_eq(l: &ScalarValue, r: &ScalarValue) -> Option<bool> {
 /// (`__het_tag == 4`) → a `List` of tagged children; a map element
 /// (`__het_tag == 5`) → a `Struct` map whose values stay tagged (decoded in turn
 /// by recursion through `cypher_value_eq`).
-fn decode_het(s: &ScalarValue) -> Option<ScalarValue> {
-    use datafusion::arrow::array::{
-        Array, ArrayRef, BooleanArray, Float64Array, Int8Array, Int64Array, ListArray, StringArray,
-        StructArray,
-    };
-    use datafusion::arrow::datatypes::{Field, Fields};
-    use std::sync::Arc;
-    let ScalarValue::Struct(arr) = s else {
-        return None;
-    };
-    arr.column_by_name("__het_tag")?; // not a tagged element → leave as-is
-    if arr.is_null(0) {
-        return Some(ScalarValue::Null);
-    }
-    let tag = arr
-        .column_by_name("__het_tag")?
-        .as_any()
-        .downcast_ref::<Int8Array>()?
-        .value(0);
-    let col = |name: &str| arr.column_by_name(name);
-    if let Some(value) = col(&format!("__het_value_{tag}")) {
-        return ScalarValue::try_from_array(value, 0).ok();
-    }
-    let v = match tag {
-        0 => ScalarValue::Int64(Some(
-            col("__het_int")?
-                .as_any()
-                .downcast_ref::<Int64Array>()?
-                .value(0),
-        )),
-        1 => ScalarValue::Float64(Some(
-            col("__het_float")?
-                .as_any()
-                .downcast_ref::<Float64Array>()?
-                .value(0),
-        )),
-        2 => ScalarValue::Utf8(Some(
-            col("__het_str")?
-                .as_any()
-                .downcast_ref::<StringArray>()?
-                .value(0)
-                .to_string(),
-        )),
-        3 => ScalarValue::Boolean(Some(
-            col("__het_bool")?
-                .as_any()
-                .downcast_ref::<BooleanArray>()?
-                .value(0),
-        )),
-        4 => ScalarValue::try_from_array(col("__het_list")?, 0).ok()?,
-        5 => {
-            let entries = col("__het_map")?
-                .as_any()
-                .downcast_ref::<ListArray>()?
-                .value(0);
-            let es = entries.as_any().downcast_ref::<StructArray>()?;
-            if es.is_empty() {
-                return Some(ScalarValue::Struct(Arc::new(
-                    StructArray::new_empty_fields(1, None),
-                )));
-            }
-            let mkeys = es
-                .column_by_name("__het_mkey")?
-                .as_any()
-                .downcast_ref::<StringArray>()?;
-            let mvals = es.column_by_name("__het_mval")?;
-            let mut fields: Vec<Field> = Vec::with_capacity(es.len());
-            let mut cols: Vec<ArrayRef> = Vec::with_capacity(es.len());
-            for i in 0..es.len() {
-                // Keep the value tagged (its length-1 slice); `cypher_value_eq`
-                // decodes it per-field, mirroring the list (`tag 4`) decode.
-                let varr = mvals.slice(i, 1);
-                fields.push(Field::new(mkeys.value(i), varr.data_type().clone(), true));
-                cols.push(varr);
-            }
-            ScalarValue::Struct(Arc::new(
-                StructArray::try_new(Fields::from(fields), cols, None).ok()?,
-            ))
+// UDF admission keeps the pure three-valued comparison helpers operating on
+// checked values. Malformed wire data is an error, never Cypher null.
+fn validate_heterogeneous_arguments(values: &[ColumnarValue]) -> datafusion::error::Result<()> {
+    for value in values {
+        let data_type = match value {
+            ColumnarValue::Array(array) => array.data_type().clone(),
+            ColumnarValue::Scalar(scalar) => scalar.data_type(),
+        };
+        if graphforge_value::heterogeneous::contains_heterogeneous(&data_type)
+            .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?
+        {
+            let array = value.to_array(1)?;
+            graphforge_value::heterogeneous::validate_array(array.as_ref())
+                .map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
         }
-        _ => return None,
-    };
-    Some(v)
+    }
+    Ok(())
 }
 
-/// Decode one tagged heterogeneous scalar into its logical value.
-#[must_use]
-pub fn decode_het_scalar(value: &ScalarValue) -> Option<ScalarValue> {
-    decode_het(value)
+fn decode_het(s: &ScalarValue) -> Option<ScalarValue> {
+    decode_het_scalar(s).ok().flatten()
+}
+
+/// Decode one tagged value, distinguishing ordinary values from malformed wire data.
+///
+/// # Errors
+/// Returns the shared typed schema/tag error for malformed heterogeneous values.
+pub fn decode_het_scalar(value: &ScalarValue) -> datafusion::error::Result<Option<ScalarValue>> {
+    use datafusion::arrow::array::{ArrayRef, ListArray, StringArray, StructArray};
+    use datafusion::arrow::datatypes::{Field, Fields};
+    use graphforge_value::heterogeneous::{self as het, Decoded};
+    let ScalarValue::Struct(array) = value else {
+        return Ok(None);
+    };
+    let error = |error| datafusion::error::DataFusionError::External(Box::new(error));
+    if het::recognize(array.data_type()).map_err(error)?.is_none() {
+        return Ok(None);
+    }
+    let decoded = match het::decode_row(array, 0).map_err(error)? {
+        Decoded::Null => ScalarValue::Null,
+        Decoded::Payload(payload) => ScalarValue::try_from_array(payload, 0)?,
+        Decoded::Map(payload) => {
+            let entries = payload
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| error(het::ValueError::Schema))?
+                .value(0);
+            let entries = entries
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .ok_or_else(|| error(het::ValueError::Schema))?;
+            let keys = entries
+                .column_by_name(het::MAP_KEY)
+                .and_then(|a| a.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| error(het::ValueError::Schema))?;
+            let values = entries
+                .column_by_name(het::MAP_VALUE)
+                .ok_or_else(|| error(het::ValueError::Schema))?;
+            let mut fields = Vec::with_capacity(entries.len());
+            let mut columns: Vec<ArrayRef> = Vec::with_capacity(entries.len());
+            for row in 0..entries.len() {
+                if keys.is_null(row) {
+                    return Err(error(het::ValueError::NullPayload));
+                }
+                let value = values.slice(row, 1);
+                fields.push(Field::new(keys.value(row), value.data_type().clone(), true));
+                columns.push(value);
+            }
+            if entries.is_empty() {
+                ScalarValue::Struct(Arc::new(StructArray::new_empty_fields(1, None)))
+            } else {
+                ScalarValue::Struct(Arc::new(StructArray::try_new(
+                    Fields::from(fields),
+                    columns,
+                    None,
+                )?))
+            }
+        }
+    };
+    Ok(Some(decoded))
 }
 
 /// Whether a `Struct` is a node / relationship / path value (whose equality is
@@ -8669,6 +8513,7 @@ impl ScalarUDFImpl for CypherDateComponent {
         use crate::temporal::date_component;
         use datafusion::arrow::array::{Array, Int64Array, StringArray, StructArray};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let dates = args.args[0].to_array(rows)?;
         let names = args.args[1].to_array(rows)?;
@@ -8729,6 +8574,7 @@ impl ScalarUDFImpl for CypherDurationComponent {
         use crate::temporal::duration_component;
         use datafusion::arrow::array::{Array, Int64Array, StringArray, StructArray};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let durs = args.args[0].to_array(rows)?;
         let names = args.args[1].to_array(rows)?;
@@ -8826,6 +8672,7 @@ impl ScalarUDFImpl for CypherTemporalComponent {
         };
         use datafusion::arrow::datatypes::TimeUnit;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let vals = args.args[0].to_array(rows)?;
         let names = args.args[1].to_array(rows)?;
@@ -8919,6 +8766,7 @@ impl ScalarUDFImpl for CypherTemporalZoneStr {
         use crate::temporal::zone_str_component;
         use datafusion::arrow::array::{Array, StringArray, StructArray};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let vals = args.args[0].to_array(rows)?;
         let names = args.args[1].to_array(rows)?;
@@ -9035,6 +8883,7 @@ impl ScalarUDFImpl for CypherDurationBetween {
         use datafusion::arrow::compute::cast;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let mode_arr = cast(&cols[2], &DataType::Utf8).map_err(DataFusionError::from)?;
@@ -9121,6 +8970,7 @@ impl ScalarUDFImpl for CypherTemporalArith {
         };
         use datafusion::arrow::datatypes::TimeUnit;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let temporal = &cols[0];
@@ -9273,6 +9123,7 @@ impl ScalarUDFImpl for CypherDurationParse {
         use datafusion::arrow::array::{Array, StringArray};
         use datafusion::arrow::compute::cast;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let arr = cast(&args.args[0].to_array(rows)?, &DataType::Utf8)?;
         let s = arr.as_any().downcast_ref::<StringArray>();
@@ -9330,6 +9181,7 @@ impl ScalarUDFImpl for CypherDurationAdd {
     ) -> datafusion::error::Result<ColumnarValue> {
         use datafusion::arrow::array::{Array, Int64Array, StructArray};
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let a = cols[0].as_any().downcast_ref::<StructArray>();
@@ -9406,6 +9258,7 @@ impl ScalarUDFImpl for CypherDurationScale {
         use datafusion::arrow::array::{Array, BooleanArray, Float64Array, StructArray};
         use datafusion::arrow::compute::cast;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let dur = cols[0].as_any().downcast_ref::<StructArray>();
@@ -9567,6 +9420,7 @@ impl ScalarUDFImpl for CypherInvariantQuantifier {
         use datafusion::arrow::array::{Array, BooleanArray, ListArray};
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         #[cfg(test)]
         INVARIANT_QUANTIFIER_ROWS.fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
@@ -9610,6 +9464,7 @@ impl ScalarUDFImpl for CypherQuantifier {
         use datafusion::physical_expr::create_physical_expr;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols: Vec<ArrayRef> = args
             .args
@@ -9915,6 +9770,7 @@ impl ScalarUDFImpl for CypherListComp {
         use datafusion::physical_expr::create_physical_expr;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols: Vec<ArrayRef> = args
             .args
@@ -10121,6 +9977,7 @@ impl ScalarUDFImpl for CypherDateProject {
         use datafusion::arrow::array::{Array, StringArray, StructArray};
         use datafusion::arrow::compute::cast;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // A typed temporal-struct base (date / localdatetime / time / datetime) is
@@ -10236,6 +10093,7 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // A `Time64(Nanosecond)` or `localdatetime`-struct base is read directly;
@@ -10349,6 +10207,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
@@ -10708,6 +10567,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // Typed sources (`date`/`localdatetime`/`time`/`datetime` struct or
@@ -10872,6 +10732,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
@@ -11089,6 +10950,7 @@ impl ScalarUDFImpl for CypherTimeProject {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
@@ -11218,6 +11080,7 @@ impl ScalarUDFImpl for CypherTimeTruncate {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
@@ -11447,6 +11310,7 @@ impl ScalarUDFImpl for CypherDateTimeProject {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         let typed_or_utf8 = |a: &ArrayRef| -> datafusion::error::Result<ArrayRef> {
@@ -11620,6 +11484,7 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
@@ -11800,6 +11665,7 @@ impl ScalarUDFImpl for CypherToString {
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let arr = args.args[0].to_array(args.number_rows)?;
         let rows = arr.len();
         // Render one canonical string per row from a closure, preserving nulls.
@@ -11998,6 +11864,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
         use datafusion::arrow::compute::cast;
         use datafusion::error::DataFusionError;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let rows = args.number_rows;
         let cols = udf_argument_arrays(&args)?;
         // DataFusion emits `Utf8View` for string *columns* by default (string
@@ -12236,6 +12103,10 @@ impl ScalarUDFImpl for CypherPathNodes {
         ))
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "path hydration keeps offsets, selected rows, and graph identity columns in one checked pass"
+    )]
     fn invoke_with_args(
         &self,
         args: ScalarFunctionArgs,
@@ -12249,6 +12120,7 @@ impl ScalarUDFImpl for CypherPathNodes {
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
+        validate_heterogeneous_arguments(&args.args)?;
         let exec_err = |m: String| DataFusionError::Execution(m);
         let as_fsb16 =
             |array: &dyn Array, what: &str| -> datafusion::error::Result<FixedSizeBinaryArray> {
@@ -12956,6 +12828,7 @@ mod tests {
             args: ScalarFunctionArgs,
         ) -> datafusion::error::Result<ColumnarValue> {
             use datafusion::arrow::array::BooleanArray;
+            validate_heterogeneous_arguments(&args.args)?;
             VOLATILE_CALLS.fetch_add(1, Ordering::SeqCst);
             VOLATILE_ROWS.fetch_add(args.number_rows, Ordering::SeqCst);
             Ok(ColumnarValue::Array(std::sync::Arc::new(
@@ -16439,12 +16312,12 @@ mod tests {
         for dtype in [
             DataType::Struct(Fields::empty()),
             DataType::Struct(Fields::from(vec![Field::new(
-                "__het_map",
+                graphforge_value::heterogeneous::MAP,
                 DataType::Utf8,
                 true,
             )])),
             DataType::Struct(Fields::from(vec![Field::new(
-                "__het_map",
+                graphforge_value::heterogeneous::MAP,
                 DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                 true,
             )])),
@@ -17841,11 +17714,19 @@ mod tests {
         );
 
         let legacy = DataType::Struct(Fields::from(vec![
-            Field::new("__het_tag", DataType::Int8, false),
-            Field::new("__het_int", DataType::Int64, true),
-            Field::new("__het_float", DataType::Float64, true),
-            Field::new("__het_str", DataType::Utf8, true),
-            Field::new("__het_bool", DataType::Boolean, true),
+            Field::new(graphforge_value::heterogeneous::TAG, DataType::Int8, false),
+            Field::new(graphforge_value::heterogeneous::INT, DataType::Int64, true),
+            Field::new(
+                graphforge_value::heterogeneous::FLOAT,
+                DataType::Float64,
+                true,
+            ),
+            Field::new(graphforge_value::heterogeneous::STR, DataType::Utf8, true),
+            Field::new(
+                graphforge_value::heterogeneous::BOOL,
+                DataType::Boolean,
+                true,
+            ),
         ]));
         let return_type = list_plus_return_type(&[
             DataType::new_list(legacy, true),
@@ -18238,6 +18119,26 @@ mod tests {
             .to_string()
             .contains("index must be an integer")
         );
+    }
+
+    #[test]
+    fn malformed_heterogeneous_values_fail_ordering_and_property_admission() {
+        use graphforge_value::heterogeneous::{self as het, Scalar};
+        let original = het::encode_scalar([Some(Scalar::Int(7))]);
+        let mut columns = original.columns().to_vec();
+        columns[0] = Arc::new(datafusion::arrow::array::Int8Array::from(vec![99]));
+        let value = ScalarValue::Struct(Arc::new(datafusion::arrow::array::StructArray::new(
+            het::scalar_fields(),
+            columns,
+            None,
+        )));
+        let error = invoke_test_udf(&CypherOrderKey::new(), vec![value.clone()]).unwrap_err();
+        assert!(error.to_string().contains("GF_VALUE_TAG"), "{error}");
+        let error = scalar_to_ir_literal(&value).unwrap_err();
+        assert!(error.to_string().contains("GF_VALUE_TAG"), "{error}");
+        let valid = ScalarValue::Struct(Arc::new(original));
+        assert_eq!(scalar_to_ir_literal(&valid).unwrap(), IrLiteral::Int(7));
+        invoke_test_udf(&CypherOrderKey::new(), vec![valid]).unwrap();
     }
 
     #[test]

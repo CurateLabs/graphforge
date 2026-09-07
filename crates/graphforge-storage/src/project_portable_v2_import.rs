@@ -906,6 +906,7 @@ fn import_materialized(
         .map(|_| stage.join("data/components/graph-data/graph-tree"));
     if let Some(graph_tree) = &package_graph_tree {
         validate_import_graph_identities(graph_tree, cancelled)?;
+        validate_import_property_values(graph_tree, report.entry_count, cancelled)?;
     }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
@@ -1069,6 +1070,49 @@ fn validate_import_graph_identities(
     }
     validate_import_delta_identities(graph_tree, cancelled)?;
     check_identity_validation_cancelled(cancelled)
+}
+
+fn validate_import_property_values(
+    graph_tree: &Path,
+    entry_count: u64,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let directory = graphforge_filesystem::StableDirectory::open(graph_tree)
+        .map_err(invalid_import_identity)?;
+    let mut paths = Vec::new();
+    let mut remaining = usize::try_from(entry_count)
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "portable entry count exceeds capacity",
+            )
+        })?
+        .saturating_mul(2)
+        .saturating_add(1024);
+    collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
+    for path in paths {
+        check_identity_validation_cancelled(cancelled)?;
+        if !(path.starts_with("properties") || path.starts_with("edge_properties"))
+            || path
+                .extension()
+                .is_none_or(|extension| extension != "parquet")
+        {
+            continue;
+        }
+        let reader = crate::catalog::admitted_parquet(&graph_tree.join(path))
+            .map_err(invalid_import_identity)?
+            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
+            .build()
+            .map_err(invalid_import_identity)?;
+        for batch in reader {
+            check_identity_validation_cancelled(cancelled)?;
+            crate::writer::validate_property_values(&batch.map_err(invalid_import_identity)?)
+                .map_err(|error| {
+                    PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, error.code())
+                })?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_import_delta_identities(
@@ -1889,6 +1933,67 @@ mod tests {
         }
         let batch = arrow::record_batch::RecordBatch::try_new(batch.schema(), columns).unwrap();
         crate::graph_projection::write_parquet(&nodes[0], &batch).unwrap();
+    }
+
+    #[test]
+    fn malformed_heterogeneous_property_package_preserves_target_authority() {
+        use arrow::array::{Array, ArrayRef, Int8Array, StructArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use graphforge_value::heterogeneous::{self as het, Scalar};
+        use std::sync::Arc;
+
+        for expected_error in [None, Some("GF_VALUE_TAG"), Some("GF_VALUE_SCHEMA")] {
+            let (_owner, package) = identity_package(|tree| {
+                let values = het::encode_scalar([Some(Scalar::Int(7))]);
+                let mut columns = values.columns().to_vec();
+                if expected_error == Some("GF_VALUE_TAG") {
+                    columns[0] = Arc::new(Int8Array::from(vec![99]));
+                }
+                let mut fields = het::scalar_fields()
+                    .iter()
+                    .map(|field| field.as_ref().clone())
+                    .collect::<Vec<_>>();
+                if expected_error == Some("GF_VALUE_SCHEMA") {
+                    fields[1] = Field::new(het::INT, DataType::UInt64, true);
+                    columns[1] = Arc::new(arrow::array::UInt64Array::from(vec![7]));
+                }
+                let values = StructArray::new(fields.into(), columns, None);
+                let uuid = Uuid::now_v7();
+                let ids = arrow::array::FixedSizeBinaryArray::try_from_iter(
+                    [uuid.as_bytes().as_slice()].into_iter(),
+                )
+                .unwrap();
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new("mixed", values.data_type().clone(), true),
+                ]));
+                let batch = arrow::record_batch::RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(ids) as ArrayRef, Arc::new(values)],
+                )
+                .unwrap();
+                let path = tree.join("properties/_untyped.parquet");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                crate::graph_projection::write_parquet(&path, &batch).unwrap();
+            });
+            if let Some(expected_error) = expected_error {
+                let error = assert_identity_package_rejected(&package);
+                assert!(error.to_string().contains(expected_error), "{error}");
+            } else {
+                let target = tempfile::tempdir().unwrap();
+                import_complete_portable_v2(
+                    &package,
+                    target.path(),
+                    Uuid::now_v7(),
+                    Uuid::now_v7(),
+                    &supported(),
+                    PortableV2Limits::default(),
+                    None,
+                )
+                .unwrap();
+                crate::resolve_project_generation(target.path()).unwrap();
+            }
+        }
     }
 
     #[test]

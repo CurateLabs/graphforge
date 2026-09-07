@@ -5336,3 +5336,134 @@ fn certified_spatial_point_and_distance_execute_in_rust() {
         "{error}"
     );
 }
+
+/// The constant and dynamic encodings have different tag meanings. Both must
+/// survive actual write-back into the persisted scalar layout and a fresh open.
+#[test]
+fn shared_value_codec_scalar_writeback_survives_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let gf = GraphForge::new(dir.path().to_str()).expect("persistent codec fixture");
+    gf.execute(
+        "UNWIND range(0, 4) AS slot \
+         WITH slot, [7, 2.5, 'text', true, null][slot] AS value \
+         CREATE (:CodecConstant {slot:slot, value:value})",
+    )
+    .expect("write every constant scalar variant");
+    gf.execute("CREATE (:CodecInput {i:7, f:2.5, s:'text', b:true})")
+        .expect("seed runtime values");
+    gf.execute(
+        "MATCH (source:CodecInput) UNWIND range(0, 4) AS slot \
+         WITH slot, [source.s, source.b, source.i, source.f, source.absent][slot] AS value \
+         CREATE (:CodecDynamic {slot:slot, value:value})",
+    )
+    .expect("write every dynamic scalar payload index");
+
+    let check = |graph: &GraphForge| {
+        let constant_expected = [
+            graphforge_value::Literal::Int(7),
+            graphforge_value::Literal::Float(2.5),
+            graphforge_value::Literal::Str("text".into()),
+            graphforge_value::Literal::Bool(true),
+            graphforge_value::Literal::Null,
+        ];
+        let dynamic_expected = [
+            graphforge_value::Literal::Str("text".into()),
+            graphforge_value::Literal::Bool(true),
+            graphforge_value::Literal::Int(7),
+            graphforge_value::Literal::Float(2.5),
+            graphforge_value::Literal::Null,
+        ];
+        for (label, expected) in [
+            ("CodecConstant", &constant_expected),
+            ("CodecDynamic", &dynamic_expected),
+        ] {
+            let result = rows(
+                graph,
+                &format!("MATCH (n:{label}) RETURN n.value AS value ORDER BY n.slot"),
+            );
+            let mut actual = Vec::new();
+            for batch in &result.batches {
+                let values = batch.column_by_name("value").unwrap();
+                let values = values
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .expect("mixed scalar properties retain tagged Arrow storage");
+                assert_eq!(
+                    graphforge_value::heterogeneous::recognize(values.data_type()).unwrap(),
+                    Some(graphforge_value::heterogeneous::Layout::ScalarV1)
+                );
+                for row in 0..values.len() {
+                    actual
+                        .push(graphforge_value::heterogeneous::decode_scalar(values, row).unwrap());
+                }
+            }
+            assert_eq!(actual.as_slice(), expected, "{label}");
+        }
+    };
+    check(&gf);
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen scalar codec writes");
+    check(&reopened);
+}
+
+#[test]
+fn shared_value_codec_nested_extraction_writeback_survives_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let gf = GraphForge::new(dir.path().to_str()).expect("persistent nested codec fixture");
+    // Map values remain expression values, not a new persisted property format.
+    // Extract their supported values through rel and exec before storage writes.
+    gf.execute(
+        "WITH [1, [2, 3], {answer:4}] AS values \
+         CREATE (:CodecNested {number:values[0], numbers:values[1], answer:values[2].answer})",
+    )
+    .expect("extract constant list and map variants into supported properties");
+    gf.execute(
+        "MATCH (source:CodecNested) \
+         WITH [source.number, source.numbers, {answer:source.answer}] AS values \
+         CREATE (:CodecNestedDynamic \
+         {number:values[0], numbers:values[1], answer:values[2].answer})",
+    )
+    .expect("extract runtime list and map payloads into supported properties");
+    let check = |graph: &GraphForge| {
+        for label in ["CodecNested", "CodecNestedDynamic"] {
+            let result = rows(
+                graph,
+                &format!(
+                    "MATCH (n:{label}) \
+                     RETURN n.number = 1 AND n.numbers = [2, 3] AND n.answer = 4 AS correct"
+                ),
+            );
+            assert_eq!(result.stats.rows_produced, 1, "{label}");
+            assert_eq!(bool_cell(&result, "correct", 0), Some(true), "{label}");
+        }
+    };
+    check(&gf);
+    drop(gf);
+    let reopened = GraphForge::new(dir.path().to_str()).expect("reopen nested codec writes");
+    check(&reopened);
+}
+
+#[test]
+fn shared_value_codec_keeps_ordinary_property_names_deletable() {
+    let gf = GraphForge::new(None).expect("in-memory codec property fixture");
+    let ordinary_map = rows(&gf, "RETURN {__het_tag:1} = {__het_tag:1} AS same");
+    assert_eq!(bool_cell(&ordinary_map, "same", 0), Some(true));
+    gf.execute("CREATE (:CodecNames {__het_int:1, __het_key:2, __het_value_0:3, __het_tag:4})")
+        .expect("ordinary names are not an internal tagged schema");
+    let result = rows(
+        &gf,
+        "MATCH (n:CodecNames) \
+         RETURN n.__het_int = 1 AND n.__het_key = 2 AND n.__het_value_0 = 3 AND n.__het_tag = 4 AS correct",
+    );
+    assert_eq!(bool_cell(&result, "correct", 0), Some(true));
+    let deleted = gf
+        .execute("MATCH (n:CodecNames) DELETE n")
+        .expect("decode node identity despite ordinary heterogeneous-looking property names");
+    assert_eq!(deleted.side_effects.unwrap().nodes_deleted, 1);
+    assert_eq!(
+        rows(&gf, "MATCH (n:CodecNames) RETURN n")
+            .stats
+            .rows_produced,
+        0
+    );
+}
