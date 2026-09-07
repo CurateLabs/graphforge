@@ -36,7 +36,7 @@ use datafusion::functions_aggregate::expr_fn::{
 };
 use datafusion::logical_expr::{
     Expr as DfExpr, ExprFunctionExt, ExprSchemable, Extension, JoinType, LogicalPlanBuilder,
-    SortExpr, logical_plan::LogicalTableSource,
+    SortExpr,
 };
 
 use graphforge_core::{GfError, OntologyMode};
@@ -461,7 +461,13 @@ impl<'a> GraphPlanLowerer<'a> {
         }
 
         let prop_alias = format!("{node_alias}__props");
-        let prop_src = datafusion::datasource::provider_as_source(Arc::new(prop_table));
+        let prop_src = graphforge_plan::GraphReadSource::new(
+            graphforge_plan::GraphReadTable::Properties(stem.clone()),
+            &prop_schema,
+            self.catalog
+                .and_then(GraphCatalog::semantic_composition_fingerprint)
+                .map(str::to_owned),
+        );
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()?;
@@ -520,7 +526,77 @@ impl<'a> GraphPlanLowerer<'a> {
             self.build_node_shapes(&plan.ops);
         let mut var_map = VarMap::new();
         self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map)
+            .and_then(|plan| self.attach_read_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
+    }
+
+    /// The semantic assumptions for rebinding this query's current graph.
+    #[must_use]
+    pub fn read_contract(&self) -> graphforge_plan::GraphReadContract {
+        let mut labels = self.type_id_to_entity_name.clone();
+        if let Some(catalog) = self.catalog {
+            labels.extend(catalog.semantic_label_names().clone());
+            labels.extend(
+                catalog
+                    .label_names()
+                    .iter()
+                    .map(|(id, name)| (EntityTypeId::runtime(*id), name.clone())),
+            );
+        }
+        let mut labels: Vec<_> = labels.into_iter().collect();
+        labels.sort_by_key(|(id, _)| id.encode());
+        let mut relations: Vec<_> = self
+            .type_id_to_rel_name
+            .iter()
+            .map(|(id, name)| (*id, name.clone()))
+            .collect();
+        relations.sort_by_key(|(id, _)| id.encode());
+        graphforge_plan::GraphReadContract {
+            labels,
+            relations,
+            composition: self
+                .catalog
+                .and_then(GraphCatalog::semantic_composition_fingerprint)
+                .map(str::to_owned),
+        }
+    }
+
+    fn attach_read_contract(&self, plan: LogicalPlan) -> Result<LogicalPlan, LoweringError> {
+        use datafusion::common::tree_node::Transformed;
+        let contract = self.read_contract();
+        plan.transform_up_with_subqueries(|mut plan| {
+            match &mut plan {
+                LogicalPlan::TableScan(scan) => {
+                    if let Some(source) = scan
+                        .source
+                        .downcast_ref::<graphforge_plan::GraphReadSource>()
+                    {
+                        let mut source = source.clone();
+                        source.contract = Some(contract.clone());
+                        scan.source = Arc::new(source);
+                    }
+                }
+                LogicalPlan::Extension(extension) => {
+                    if let Some(node) = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<graphforge_plan::ExpandNode>()
+                    {
+                        extension.node =
+                            Arc::new(node.clone().with_read_contract(Some(contract.clone())));
+                    } else if let Some(node) =
+                        extension.node.as_any().downcast_ref::<VarLenExpandNode>()
+                    {
+                        extension.node =
+                            Arc::new(node.clone().with_read_contract(Some(contract.clone())));
+                    }
+                }
+                _ => {}
+            }
+            Ok(Transformed::yes(plan))
+        })
+        .map(|result| result.data)
+        .map_unsupported_expr()
     }
 
     // -----------------------------------------------------------------------
@@ -550,6 +626,7 @@ impl<'a> GraphPlanLowerer<'a> {
     ) -> Result<LogicalPlan, GfError> {
         *self.node_shapes.write().expect("node shapes lock poisoned") = self.build_node_shapes(ops);
         self.lower_pipeline(ops, exprs, var_map)
+            .and_then(|plan| self.attach_read_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -568,6 +645,7 @@ impl<'a> GraphPlanLowerer<'a> {
             schema: input_schema,
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, None)
+            .and_then(|plan| self.attach_read_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -586,6 +664,7 @@ impl<'a> GraphPlanLowerer<'a> {
             schema: input_schema,
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, Some(pending_nodes))
+            .and_then(|plan| self.attach_read_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -3036,55 +3115,51 @@ fn is_source_op(op: &GraphOp) -> bool {
 
 /// Wrap a schema in a [`LogicalTableSource`] suitable for
 /// [`LogicalPlanBuilder::scan`].
-fn table_source(schema: datafusion::arrow::datatypes::SchemaRef) -> Arc<LogicalTableSource> {
-    Arc::new(LogicalTableSource::new(schema))
+fn table_source(
+    schema: datafusion::arrow::datatypes::SchemaRef,
+) -> Arc<datafusion::logical_expr::logical_plan::LogicalTableSource> {
+    Arc::new(datafusion::logical_expr::logical_plan::LogicalTableSource::new(schema))
 }
 
 /// The data source for a node scan.
 ///
-/// With a project `dir`, build a real Parquet-backed [`TopologyNodeTable`]
-/// provider (wrapped via `provider_as_source`) so the scan reads actual rows at
-/// execution time. Without a `dir` (pure logical/explain lowering, e.g. golden
-/// tests), fall back to the schema-only [`LogicalTableSource`].
+/// Discover the admitted project's schema when available, then retain only a
+/// logical descriptor. Execution resolves its provider from the session.
 fn node_scan_source(
     dir: Option<&Path>,
 ) -> Result<Arc<dyn datafusion::logical_expr::TableSource>, LoweringError> {
-    use datafusion::datasource::provider_as_source;
-    match dir {
+    let schema = match dir {
         Some(d) => graphforge_storage::TopologyNodeTable::open_project(d)
-            .map(|table| provider_as_source(Arc::new(table)))
-            .map_unsupported_expr(),
-        None => Ok(table_source(TOPOLOGY_NODES_SCHEMA.clone())),
-    }
+            .map(|table| datafusion::datasource::TableProvider::schema(&table))
+            .map_unsupported_expr()?,
+        // Schema-only plans retain their existing non-executable placeholder
+        // and optimizer/explain contract. Admitted reads use descriptors below.
+        None => return Ok(table_source(TOPOLOGY_NODES_SCHEMA.clone())),
+    };
+    Ok(graphforge_plan::GraphReadSource::new(
+        graphforge_plan::GraphReadTable::Nodes,
+        &schema,
+        None,
+    ))
 }
 
-/// The data source for an edge scan over `stem` (a relation name for the typed
-/// table, or `"_exploratory"`). Real provider when `dir` is set; otherwise the
-/// schema-only source (`schema` chooses typed vs exploratory shape).
-///
-/// In a typed project (Strict/Advisory) there is no `_exploratory.parquet`, so
-/// an untyped edge scan over the `"_exploratory"` stem reads the **union** of
-/// every per-relation file via [`graphforge_storage::UnionEdgeTable`] (#823) — the same
-/// `EXPLORATORY_EDGE_SCHEMA`-shaped, `rel_type_name`-tagged rows the shared
-/// exploratory file would have carried, so the untyped single-hop join path is
-/// unchanged otherwise. Exploratory mode keeps reading its shared file.
+/// Logical edge source over a relation stem or the wildcard `_exploratory`.
+/// Execution selects the typed union or shared exploratory file from its mode.
 fn edge_scan_source(
     dir: Option<&Path>,
     stem: &str,
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
     mode: OntologyMode,
 ) -> Arc<dyn datafusion::logical_expr::TableSource> {
-    use datafusion::datasource::provider_as_source;
-    match dir {
-        Some(d)
-            if stem == "_exploratory"
-                && matches!(mode, OntologyMode::Strict | OntologyMode::Advisory) =>
-        {
-            provider_as_source(Arc::new(graphforge_storage::UnionEdgeTable::open(d)))
-        }
-        Some(d) => provider_as_source(Arc::new(graphforge_storage::TypedEdgeTable::open(d, stem))),
-        None => table_source(schema),
+    if dir.is_none() {
+        return table_source(schema.clone());
     }
+    let _ = mode; // Layout selection belongs to the execution resource.
+    graphforge_plan::GraphReadSource::new(
+        graphforge_plan::GraphReadTable::Edges(stem.to_owned()),
+        schema,
+        None,
+    )
 }
 
 /// Filter an already-bound node variable by its label type.
@@ -3227,7 +3302,13 @@ fn lower_typed_edge_scan(
             })?;
         return LogicalPlanBuilder::scan(
             alias,
-            datafusion::datasource::provider_as_source(provider),
+            graphforge_plan::GraphReadSource::new(
+                graphforge_plan::GraphReadTable::SemanticEdges(rel_ty),
+                &provider.schema(),
+                catalog
+                    .and_then(GraphCatalog::semantic_composition_fingerprint)
+                    .map(str::to_owned),
+            ),
             None,
         )
         .and_then(LogicalPlanBuilder::build)
@@ -3240,7 +3321,7 @@ fn lower_typed_edge_scan(
         .is_none_or(|s| !s.table_exist(&format!("edges_{rel_name}")));
 
     if use_exploratory {
-        let src = edge_scan_source(dir, "_exploratory", EXPLORATORY_EDGE_SCHEMA.clone(), mode);
+        let src = edge_scan_source(dir, "_exploratory", &EXPLORATORY_EDGE_SCHEMA, mode);
         let filter_expr = col("rel_type_name").eq(lit(rel_name.as_str()));
         // Use alias as the scan qualifier so var_map column refs resolve correctly.
         LogicalPlanBuilder::scan(alias, src, None)
@@ -3248,7 +3329,7 @@ fn lower_typed_edge_scan(
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()
     } else {
-        let src = edge_scan_source(dir, rel_name, TYPED_EDGE_SCHEMA.clone(), mode);
+        let src = edge_scan_source(dir, rel_name, &TYPED_EDGE_SCHEMA, mode);
         // Use alias as the scan qualifier so downstream join predicates
         // (var_map.get(edge) → "var_N") can resolve edge columns correctly.
         LogicalPlanBuilder::scan(alias, src, None)
@@ -3270,7 +3351,7 @@ fn lower_edge_scan(
     let alias = var_alias(var);
     var_map.insert(var, alias.clone());
 
-    let src = edge_scan_source(dir, "_exploratory", EXPLORATORY_EDGE_SCHEMA.clone(), mode);
+    let src = edge_scan_source(dir, "_exploratory", &EXPLORATORY_EDGE_SCHEMA, mode);
     let mut builder = LogicalPlanBuilder::scan(alias, src, None).map_unsupported_expr()?;
 
     if let Some(type_id) = ty
@@ -3589,10 +3670,9 @@ fn lower_var_len_expand(
         .cloned()
         .unwrap_or_default();
     let rel_for_infer = rel_name.clone();
-    // The physical node reads edges directly from the project directory, so the
-    // dir/mode must be threaded through at lowering time (the ExtensionPlanner
-    // only sees DataFusion session state).
-    let (dir_path, mode) = target.ok_or_else(|| {
+    // Lowering discovers the logical output schema here; execution resolves
+    // the graph resource from its own session context.
+    let (dir_path, _mode) = target.ok_or_else(|| {
         LoweringError::UnsupportedExpr(
             "variable-length expand requires a project directory; \
              lower via new_for_writes or new_with_dir"
@@ -3653,8 +3733,6 @@ fn lower_var_len_expand(
         edge.0,
         dir,
         rel_ty,
-        dir_path.to_path_buf(),
-        mode,
         dst_fields,
         graphforge_plan::var_len_edge_list_field(&prop_fields),
     );
@@ -4028,8 +4106,6 @@ fn try_lower_provider_expand(
         edge.0,
         dir,
         rel_ty,
-        dir_path.to_path_buf(),
-        mode,
         edge_fields,
         edge_prop_fields,
         dst_fields,
@@ -4270,6 +4346,21 @@ fn expand_bound_edge_single_dir(
         .map_unsupported_expr()
 }
 
+fn edge_property_read_source(
+    stem: &str,
+    rel_ty: Option<RelationTypeId>,
+    catalog: Option<&GraphCatalog>,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Arc<graphforge_plan::GraphReadSource> {
+    let semantic_id =
+        rel_ty.filter(|id| catalog.is_some_and(|c| c.semantic_edge_property_table(*id).is_some()));
+    let composition = catalog
+        .and_then(GraphCatalog::semantic_composition_fingerprint)
+        .map(str::to_owned);
+    let table = graphforge_plan::GraphReadTable::EdgeProperties(stem.to_owned(), semantic_id);
+    graphforge_plan::GraphReadSource::new(table, schema, composition)
+}
+
 /// LEFT-join an edge scan with its persisted properties (#784), the edge
 /// analogue of [`GraphPlanLowerer::join_node_properties`].
 ///
@@ -4356,7 +4447,7 @@ fn join_edge_properties(
     let mut prop_refs: StdHashMap<String, Vec<DfExpr>> = StdHashMap::new();
     for (idx, (stem, prop_table, prop_cols)) in prop_sources.into_iter().enumerate() {
         let prop_alias = format!("{edge_alias}__eprops_{idx}");
-        let prop_src = datafusion::datasource::provider_as_source(prop_table);
+        let prop_src = edge_property_read_source(&stem, rel_ty, catalog, &prop_table.schema());
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()?;
@@ -5337,14 +5428,14 @@ relation_types:
             .downcast_ref::<VarLenExpandNode>()
             .expect("VarLenExpandNode");
 
-        // Baked execution context + pattern fields.
+        // Logical pattern fields and the semantic binding contract.
         assert_eq!(node.src_var, 0);
         assert_eq!(node.dst_var, 2);
         assert_eq!(node.direction, Direction::Out);
         assert_eq!(node.min_hops, 1);
         assert_eq!(node.max_hops, Some(3));
-        assert_eq!(node.dir, dir.path());
-        assert_eq!(node.mode, OntologyMode::Strict);
+        assert_eq!(node.read_contract.as_ref(), Some(&lowerer.read_contract()));
+        assert!(!format!("{node:?}").contains(&dir.path().display().to_string()));
 
         // Output schema carries the destination node's columns, qualified
         // `var_2`, so a downstream `RETURN b.node_id` can resolve them.
@@ -6323,7 +6414,16 @@ relation_types:
         assert_eq!(node.edge_var, 1);
         assert_eq!(node.dst_var, 2);
         assert_eq!(node.direction, Direction::Out);
-        assert_eq!(node.mode, OntologyMode::Strict);
+        assert_eq!(node.read_contract.as_ref(), Some(&lowerer.read_contract()));
+        assert!(
+            node.read_contract
+                .as_ref()
+                .unwrap()
+                .relations
+                .iter()
+                .any(|(_, name)| name == "KNOWS")
+        );
+        assert!(!format!("{node:?}").contains(&tmp.path().display().to_string()));
         assert_eq!(node.edge_prop_count, 0, "no edge_properties file on disk");
 
         // Schema parity essentials: edge topology under var_1, dst under var_2.
