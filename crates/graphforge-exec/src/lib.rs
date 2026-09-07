@@ -7600,8 +7600,34 @@ mod tests {
             graphforge_plan::var_len_edge_list_field(&[]),
         );
         let optional = OptionalMatchNode::new(input.clone(), input, vec![], vec![]);
-        let state = SessionContext::new().state();
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        let session = ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Strict,
+        )
+        .unwrap();
+        let state = session.context().state();
         let planner = DefaultPhysicalPlanner::default();
+
+        let unbound = SessionContext::new().state();
+        for node in [
+            &expand as &dyn UserDefinedLogicalNode,
+            &var_len as &dyn UserDefinedLogicalNode,
+        ] {
+            let error = GraphForgeExtensionPlanner
+                .plan_extension(
+                    &planner,
+                    node,
+                    &[],
+                    std::slice::from_ref(&physical),
+                    &unbound,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("GF_READ_RESOURCE_MISSING"));
+        }
 
         let physical_expand = GraphForgeExtensionPlanner
             .plan_extension(
@@ -7708,7 +7734,15 @@ mod tests {
             "transitive:KNOWS",
             "conservative_min",
         );
-        let state = SessionContext::new().state();
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        let session = ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Strict,
+        )
+        .unwrap();
+        let state = session.context().state();
         let planner = DefaultPhysicalPlanner::default();
         let extension = GraphForgeExtensionPlanner;
 

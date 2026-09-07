@@ -227,7 +227,7 @@ async fn logical_read_resources_relocate_and_bind_independently() {
     for (root, name) in [(left.path(), "left"), (right.path(), "right")] {
         let create = bind(
             &format!(
-                "CREATE (a:Person {{name:'seed'}}), (b:Person {{name:'{name}'}}), (a)-[:KNOWS]->(b)"
+                "CREATE (a:Person {{name:'seed'}}), (b:Person {{name:'{name}'}}), (a)-[:KNOWS {{selected:true,name:'{name}'}}]->(b), (a)-[:OTHER {{selected:false,name:'ignored'}}]->(b)"
             ),
             rc.clone(),
         );
@@ -244,6 +244,7 @@ async fn logical_read_resources_relocate_and_bind_independently() {
     writer.execute_create(&create_wrong).await.unwrap();
     for query in [
         "MATCH (b) WHERE b.name <> 'seed' AND b.name <> 'unconnected' RETURN b.name AS name",
+        "MATCH ()-[r]->() WHERE r.selected = true RETURN r.name AS name",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS name",
         "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN b.name AS name",
         "MATCH p=(a:Person)-[:KNOWS*1..2]->(b) RETURN nodes(p)[1].name AS name",
@@ -293,6 +294,10 @@ async fn logical_read_resources_relocate_and_bind_independently() {
         let (left_physical, right_physical) = tokio::join!(
             left_state.create_physical_plan(&plan),
             right_state.create_physical_plan(&plan)
+        );
+        assert_eq!(
+            plan, relocated,
+            "binding must leave the logical plan unchanged"
         );
         let retained = datafusion::physical_plan::execute_stream(
             left_physical.unwrap(),

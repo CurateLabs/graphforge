@@ -3115,7 +3115,6 @@ fn is_source_op(op: &GraphOp) -> bool {
 
 /// Wrap a schema in a [`LogicalTableSource`] suitable for
 /// [`LogicalPlanBuilder::scan`].
-#[cfg(any(test, feature = "differential-testing"))]
 fn table_source(
     schema: datafusion::arrow::datatypes::SchemaRef,
 ) -> Arc<datafusion::logical_expr::logical_plan::LogicalTableSource> {
@@ -3133,7 +3132,9 @@ fn node_scan_source(
         Some(d) => graphforge_storage::TopologyNodeTable::open_project(d)
             .map(|table| datafusion::datasource::TableProvider::schema(&table))
             .map_unsupported_expr()?,
-        None => TOPOLOGY_NODES_SCHEMA.clone(),
+        // Schema-only plans retain their existing non-executable placeholder
+        // and optimizer/explain contract. Admitted reads use descriptors below.
+        None => return Ok(table_source(TOPOLOGY_NODES_SCHEMA.clone())),
     };
     Ok(graphforge_plan::GraphReadSource::new(
         graphforge_plan::GraphReadTable::Nodes,
@@ -3150,7 +3151,10 @@ fn edge_scan_source(
     schema: &datafusion::arrow::datatypes::SchemaRef,
     mode: OntologyMode,
 ) -> Arc<dyn datafusion::logical_expr::TableSource> {
-    let _ = (dir, mode); // Layout selection belongs to the execution resource.
+    if dir.is_none() {
+        return table_source(schema.clone());
+    }
+    let _ = mode; // Layout selection belongs to the execution resource.
     graphforge_plan::GraphReadSource::new(
         graphforge_plan::GraphReadTable::Edges(stem.to_owned()),
         schema,
