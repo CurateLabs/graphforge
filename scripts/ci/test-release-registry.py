@@ -206,7 +206,7 @@ def main() -> None:
     result = plan(manifest, all_verified)
     assert result["actions"] == []
     assert result["download_groups"] == []
-    assert result["summary"]["verified"] == 25
+    assert result["summary"]["verified"] == 26
 
     for node_id in (
         "pypi:graphforge",

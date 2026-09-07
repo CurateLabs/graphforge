@@ -898,6 +898,15 @@ fn import_materialized(
                 &right.participant.record_family_id,
             ))
     });
+    // Validate identity-bearing data while it is still private: publication must
+    // not make a malformed package authoritative before the facade reopens it.
+    let package_graph_tree = runtime
+        .graph_tree
+        .as_ref()
+        .map(|_| stage.join("data/components/graph-data/graph-tree"));
+    if let Some(graph_tree) = &package_graph_tree {
+        validate_import_graph_identities(graph_tree, cancelled)?;
+    }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -930,10 +939,6 @@ fn import_materialized(
         None => open_or_initialize_project_admitted(admission.root())
             .map_err(|error| storage(&error))?,
     };
-    let package_graph_tree = runtime
-        .graph_tree
-        .as_ref()
-        .map(|_| stage.join("data/components/graph-data/graph-tree"));
     let graph_object_lease = prepare_compact_import_graph(
         admission.root(),
         package_graph_tree.as_deref(),
@@ -1002,6 +1007,109 @@ fn import_materialized(
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
     })
+}
+
+const IMPORT_IDENTITY_BATCH_ROWS: usize = 8192;
+
+fn check_identity_validation_cancelled(
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Cancelled,
+            "verification cancelled",
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_import_identity(_: impl std::fmt::Display) -> PortableV2Error {
+    PortableV2Error::new(
+        PortableV2ErrorCode::InvalidStructure,
+        "portable graph identity data is invalid",
+    )
+}
+
+fn validate_import_graph_identities(
+    graph_tree: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    check_identity_validation_cancelled(cancelled)?;
+    for path in crate::mutator::node_parquet_files(graph_tree).map_err(invalid_import_identity)? {
+        check_identity_validation_cancelled(cancelled)?;
+        let reader = crate::catalog::admitted_parquet(&path)
+            .map_err(invalid_import_identity)?
+            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
+            .build()
+            .map_err(invalid_import_identity)?;
+        for batch in reader {
+            check_identity_validation_cancelled(cancelled)?;
+            let batch = batch.map_err(invalid_import_identity)?;
+            crate::catalog::normalize_topology_nodes(vec![batch])
+                .map_err(invalid_import_identity)?;
+        }
+    }
+    let catalog_path = graph_tree.join("topology/runtime_catalog.parquet");
+    if catalog_path.exists() {
+        check_identity_validation_cancelled(cancelled)?;
+        let reader = crate::catalog::admitted_parquet(&catalog_path)
+            .map_err(invalid_import_identity)?
+            .with_batch_size(IMPORT_IDENTITY_BATCH_ROWS)
+            .build()
+            .map_err(invalid_import_identity)?;
+        // Retain the catalog's identity state across batches, so duplicates in
+        // later batches cannot pass by being decoded as independent catalogs.
+        let mut catalog = graphforge_value::RuntimeCatalogData::new();
+        for batch in reader {
+            check_identity_validation_cancelled(cancelled)?;
+            catalog
+                .extend_from_record_batch(&batch.map_err(invalid_import_identity)?)
+                .map_err(invalid_import_identity)?;
+        }
+    }
+    validate_import_delta_identities(graph_tree, cancelled)?;
+    check_identity_validation_cancelled(cancelled)
+}
+
+fn validate_import_delta_identities(
+    graph_tree: &Path,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let directory = graph_tree.join(crate::graph_delta_journal::GRAPH_DELTA_DIR);
+    if !directory.exists() {
+        return Ok(());
+    }
+    let limits = crate::GraphDeltaJournalLimits::default();
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory).map_err(invalid_import_identity)? {
+        check_identity_validation_cancelled(cancelled)?;
+        paths.push(entry.map_err(invalid_import_identity)?.path());
+        if paths.len() as u64 > limits.max_runs {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "graph delta runs exceed limit",
+            ));
+        }
+    }
+    paths.sort();
+    for (index, path) in paths.iter().enumerate() {
+        check_identity_validation_cancelled(cancelled)?;
+        let sequence = u64::try_from(index).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "graph delta run count exceeds platform capacity",
+            )
+        })? + 1;
+        if *path != graph_tree.join(crate::delta_run_relative_path(sequence)) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::InvalidStructure,
+                "graph delta sequence is invalid",
+            ));
+        }
+        let bytes = read_bounded_payload(path, limits.max_run_bytes as u64, "graph delta run")?;
+        crate::decode_delta_run(&bytes, Some(sequence), limits).map_err(invalid_import_identity)?;
+    }
+    Ok(())
 }
 
 fn prepare_compact_import_graph(
@@ -1645,6 +1753,353 @@ mod tests {
                 capability_version: 1,
             },
         ]
+    }
+
+    fn identity_package(mutate: impl FnOnce(&Path)) -> (tempfile::TempDir, PathBuf) {
+        let source = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(source.path()).unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(tree.path(), graphforge_core::OntologyMode::Exploratory, 1)
+                .unwrap();
+        let label = graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0)).unwrap();
+        writer.create_node(Uuid::now_v7(), label).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        mutate(tree.path());
+        let (_, files) = crate::capture_graph_files(tree.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: supported(),
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) = crate::stage_project_generation_with_graph_tree(
+            source.path(),
+            &request,
+            Some(tree.path()),
+        )
+        .unwrap() else {
+            panic!("fresh malformed fixture must stage");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let generation = crate::resolve_project_generation(source.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("invalid.gfproject");
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&generation, limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        (package_parent, package)
+    }
+
+    fn import_authority_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, files);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = std::collections::BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    fn assert_identity_package_rejected(package: &Path) -> PortableV2Error {
+        let target = tempfile::tempdir().unwrap();
+        let before = crate::open_or_initialize_project(target.path())
+            .unwrap()
+            .generation_uuid();
+        let bytes = import_authority_bytes(target.path());
+        let result = import_complete_portable_v2(
+            package,
+            target.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        );
+        let error = result
+            .expect_err("checksum-valid invalid identity must be rejected before publication");
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
+        assert_eq!(
+            crate::resolve_project_generation(target.path())
+                .unwrap()
+                .generation_uuid(),
+            before
+        );
+        assert_eq!(import_authority_bytes(target.path()), bytes);
+        error
+    }
+
+    fn replace_node_identity(tree: &Path, primary: bool, raw: u32) {
+        use arrow::array::{ListArray, UInt32Array};
+        use arrow::datatypes::UInt32Type;
+        use std::sync::Arc;
+        let nodes = crate::catalog::topology_node_files(tree).unwrap();
+        let batch = crate::catalog::read_parquet_or_empty(
+            &nodes[0],
+            crate::schemas::TOPOLOGY_NODES_SCHEMA.clone(),
+        )
+        .unwrap()
+        .remove(0);
+        let mut columns = batch.columns().to_vec();
+        if primary {
+            columns[batch.schema().index_of("type_id").unwrap()] =
+                Arc::new(UInt32Array::from(vec![raw]));
+        } else {
+            let labels =
+                ListArray::from_iter_primitive::<UInt32Type, _, _>([Some(vec![Some(raw)])]);
+            let index = batch.schema().index_of("type_ids").unwrap();
+            let schema = batch.schema();
+            let arrow::datatypes::DataType::List(field) = schema.field(index).data_type() else {
+                panic!("canonical membership must be a list");
+            };
+            columns[index] = Arc::new(ListArray::new(
+                field.clone(),
+                labels.offsets().clone(),
+                labels.values().clone(),
+                None,
+            ));
+        }
+        let batch = arrow::record_batch::RecordBatch::try_new(batch.schema(), columns).unwrap();
+        crate::graph_projection::write_parquet(&nodes[0], &batch).unwrap();
+    }
+
+    #[test]
+    fn invalid_topology_identity_package_preserves_pristine_target_authority() {
+        for (primary, raw) in [
+            (false, u32::MAX),
+            (false, 0x8000_0000),
+            (false, 0xc000_0000),
+            (true, 0x8000_0000),
+        ] {
+            let (_owner, package) =
+                identity_package(|tree| replace_node_identity(tree, primary, raw));
+            assert_identity_package_rejected(&package);
+        }
+    }
+
+    fn write_identity_delta(tree: &Path, raw: u32) {
+        const RECORD_START: usize = 84;
+        const PAYLOAD_LENGTH: usize = RECORD_START + 25;
+        const PAYLOAD_START: usize = PAYLOAD_LENGTH + 4;
+        let op = crate::GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: crate::GraphDeltaOpKind::UpsertNode,
+            payload: crate::GraphDeltaPayload::UpsertNodeV2 {
+                node_uuid: Uuid::now_v7().to_string(),
+                node_id: 2,
+                type_ids: vec![graphforge_value::EntityTypeId::decode(0).unwrap()],
+                created_at_micros: 1,
+                updated_at_micros: 1,
+            },
+        };
+        let bytes = crate::encode_delta_run(
+            1,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &[op],
+            crate::GraphDeltaJournalLimits::default(),
+        )
+        .unwrap();
+        let length =
+            u32::from_le_bytes(bytes[PAYLOAD_LENGTH..PAYLOAD_START].try_into().unwrap()) as usize;
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&bytes[PAYLOAD_START..PAYLOAD_START + length]).unwrap();
+        payload["type_ids"] = serde_json::json!([raw]);
+        let payload = serde_json::to_vec(&payload).unwrap();
+        let mut framed = bytes[..PAYLOAD_LENGTH].to_vec();
+        framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        framed.extend_from_slice(&payload);
+        let checksum = Sha256::digest(&framed[RECORD_START..]);
+        framed.extend_from_slice(&checksum);
+        let checksum = Sha256::digest(&framed);
+        framed.extend_from_slice(&checksum);
+        let path = tree.join(crate::delta_run_relative_path(1));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, framed).unwrap();
+    }
+
+    #[test]
+    fn invalid_delta_identity_package_preserves_pristine_target_authority() {
+        for raw in [u32::MAX, 0x8000_0000, 0xc000_0000] {
+            let (_owner, package) = identity_package(|tree| write_identity_delta(tree, raw));
+            assert_identity_package_rejected(&package);
+        }
+        let (_owner, package) = identity_package(|tree| write_identity_delta(tree, 0));
+        let target = tempfile::tempdir().unwrap();
+        import_complete_portable_v2(
+            &package,
+            target.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_delta_sequence_preserves_pristine_target_authority() {
+        let (_owner, package) = identity_package(|tree| {
+            write_identity_delta(tree, 0);
+            fs::rename(
+                tree.join(crate::delta_run_relative_path(1)),
+                tree.join(crate::delta_run_relative_path(2)),
+            )
+            .unwrap();
+        });
+        let error = assert_identity_package_rejected(&package);
+        assert_eq!(
+            error.to_string(),
+            "portable-v2 InvalidStructure: graph delta sequence is invalid"
+        );
+    }
+
+    #[test]
+    fn invalid_catalog_identity_package_preserves_pristine_target_authority() {
+        use arrow::array::{StringArray, UInt32Array};
+        use std::sync::Arc;
+        // Last row belongs to the second reader batch, so checking each batch
+        // as an independent catalog would incorrectly accept both conflicts.
+        for defect in ["duplicate_id", "duplicate_name", "reserved_id"] {
+            let (_owner, package) = identity_package(|tree| {
+                let mut catalog = graphforge_value::RuntimeCatalogData::new();
+                for row in 0..=IMPORT_IDENTITY_BATCH_ROWS {
+                    catalog.intern_label_at(&format!("Label{row}"), 1).unwrap();
+                }
+                let batch = catalog.to_record_batch();
+                let mut columns = batch.columns().to_vec();
+                if defect == "duplicate_name" {
+                    let names: Vec<_> = (0..=IMPORT_IDENTITY_BATCH_ROWS)
+                        .map(|row| {
+                            format!(
+                                "Label{}",
+                                if row == IMPORT_IDENTITY_BATCH_ROWS {
+                                    0
+                                } else {
+                                    row
+                                }
+                            )
+                        })
+                        .collect();
+                    columns[1] = Arc::new(StringArray::from(names));
+                } else {
+                    let mut ids: Vec<u32> = (0..=IMPORT_IDENTITY_BATCH_ROWS)
+                        .map(|row| u32::try_from(row).unwrap())
+                        .collect();
+                    ids[IMPORT_IDENTITY_BATCH_ROWS] = if defect == "duplicate_id" {
+                        0
+                    } else {
+                        u32::MAX
+                    };
+                    columns[2] = Arc::new(UInt32Array::from(ids));
+                }
+                let batch =
+                    arrow::record_batch::RecordBatch::try_new(batch.schema(), columns).unwrap();
+                crate::graph_projection::write_parquet(
+                    &tree.join("topology/runtime_catalog.parquet"),
+                    &batch,
+                )
+                .unwrap();
+            });
+            assert_identity_package_rejected(&package);
+        }
+    }
+
+    #[test]
+    fn valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes() {
+        use arrow::array::UInt32Array;
+        let mut expected_bytes = std::collections::BTreeMap::new();
+        let (_owner, package) = identity_package(|tree| {
+            replace_node_identity(tree, true, u32::MAX);
+            replace_node_identity(tree, false, 0x4000_0000);
+            let mut catalog = graphforge_value::RuntimeCatalogData::new();
+            catalog.intern_label_at("RuntimeLabel", 1).unwrap();
+            catalog
+                .intern_relation_type_at("RuntimeRelation", 1)
+                .unwrap();
+            crate::graph_projection::write_parquet(
+                &tree.join("topology/runtime_catalog.parquet"),
+                &catalog.to_record_batch(),
+            )
+            .unwrap();
+            for path in crate::catalog::topology_node_files(tree)
+                .unwrap()
+                .into_iter()
+                .chain(std::iter::once(
+                    tree.join("topology/runtime_catalog.parquet"),
+                ))
+            {
+                expected_bytes.insert(
+                    path.strip_prefix(tree).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        });
+        let target = tempfile::tempdir().unwrap();
+        import_complete_portable_v2(
+            &package,
+            target.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        let resolved = crate::resolve_project_generation(target.path()).unwrap();
+        for (relative, expected) in expected_bytes {
+            assert_eq!(
+                fs::read(resolved.graph_tree_root().join(relative)).unwrap(),
+                expected
+            );
+        }
+        let batches = crate::read_nodes(&resolved.graph_tree_root()).unwrap();
+        let primary = batches[0]
+            .column_by_name("type_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(primary.value(0), u32::MAX);
+        let path = resolved
+            .graph_tree_root()
+            .join("topology/runtime_catalog.parquet");
+        let batches = crate::catalog::read_parquet_or_empty(
+            &path,
+            graphforge_value::RUNTIME_CATALOG_SCHEMA.clone(),
+        )
+        .unwrap();
+        let restored = graphforge_value::RuntimeCatalogData::from_record_batches(&batches).unwrap();
+        assert_eq!(restored.to_record_batch().num_rows(), 2);
     }
 
     #[test]

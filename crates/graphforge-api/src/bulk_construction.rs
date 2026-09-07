@@ -601,19 +601,23 @@ impl GraphForge {
         let mut writer =
             graphforge_storage::GraphWriter::open_at(&self.dir, self.ontology_mode, now)?;
         for row in &normalized.rows {
-            let type_id = self
+            let type_id = match self
                 .ontology
                 .as_ref()
                 .and_then(|ontology| ontology.entity_type_id(&row.label))
-                .unwrap_or_else(|| {
-                    graphforge_ir::runtime_entity_type_id(next_catalog.intern_label(&row.label))
-                });
+            {
+                Some(id) => graphforge_value::EntityTypeId::ontology(id)
+                    .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?,
+                None => {
+                    graphforge_value::EntityTypeId::runtime(next_catalog.intern_label(&row.label)?)
+                }
+            };
             writer.create_node(row.node_uuid, type_id)?;
             let properties = row
                 .properties
                 .iter()
                 .map(|(name, value)| {
-                    next_catalog.intern_property(name, Some(&row.label));
+                    next_catalog.intern_property(name, Some(&row.label))?;
                     Ok((name.clone(), crate::construction::prop_literal(value)?))
                 })
                 .collect::<Result<HashMap<_, _>, super::GfError>>()?;
@@ -959,7 +963,7 @@ impl GraphForge {
             .collect::<BTreeSet<_>>();
         register_existing_endpoints(&mut writer, &self.dir, &endpoints)?;
         for row in &normalized.rows {
-            next_catalog.intern_relation_type(&row.rel_type);
+            next_catalog.intern_relation_type(&row.rel_type)?;
             writer.create_edge(
                 row.edge_uuid,
                 &row.rel_type,
@@ -970,7 +974,7 @@ impl GraphForge {
                 .properties
                 .iter()
                 .map(|(name, value)| {
-                    next_catalog.intern_property(name, Some(&row.rel_type));
+                    next_catalog.intern_property(name, Some(&row.rel_type))?;
                     Ok((name.clone(), crate::construction::prop_literal(value)?))
                 })
                 .collect::<Result<HashMap<_, _>, super::GfError>>()?;

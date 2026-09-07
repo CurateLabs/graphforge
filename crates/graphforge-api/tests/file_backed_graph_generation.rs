@@ -25,7 +25,7 @@ use graphforge_api::{
     CheckpointRequest, GraphForge, OperationId, PortableExportRequest, PortableSelection,
     PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
 };
-use graphforge_core::{OntologyMode, TypeId};
+use graphforge_core::OntologyMode;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GraphFileRole,
     GraphFilesOpenStrategy, GraphWriter, GraphWriterLimits, PortableV2GraphSelector,
@@ -312,7 +312,12 @@ fn sharded_append_io_evidence_is_process_isolated() {
     fs::create_dir(&direct).unwrap();
     let first_uuid = Uuid::now_v7();
     let mut first = GraphWriter::open_at(&direct, OntologyMode::Strict, 1).unwrap();
-    first.create_node(first_uuid, TypeId(0)).unwrap();
+    first
+        .create_node(
+            first_uuid,
+            graphforge_value::EntityTypeId::decode(0).unwrap(),
+        )
+        .unwrap();
     first.flush().unwrap();
     let writer_limits = GraphWriterLimits {
         max_buffered_topology_rows: 1,
@@ -323,7 +328,12 @@ fn sharded_append_io_evidence_is_process_isolated() {
     let mut second = GraphWriter::open_at(&direct, OntologyMode::Strict, 2)
         .unwrap()
         .with_limits(writer_limits);
-    second.create_node(Uuid::now_v7(), TypeId(0)).unwrap();
+    second
+        .create_node(
+            Uuid::now_v7(),
+            graphforge_value::EntityTypeId::decode(0).unwrap(),
+        )
+        .unwrap();
     second.flush().unwrap();
     let work = second.topology_write_work();
     let io = graphforge_storage::io_stats::snapshot();

@@ -144,3 +144,74 @@ async fn match_returns_property_value() {
         .expect("name is a Utf8 column");
     assert_eq!(names.value(0), "Alice");
 }
+
+/// Equal catalog-local integers must remain distinct through expression
+/// lowering and physical execution, not merely through IR serialization.
+#[tokio::test]
+async fn equal_local_property_ids_execute_distinct_domain_columns() {
+    use std::collections::HashMap;
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::prelude::SessionContext;
+    use graphforge_ir::{ExprArena, IrExpr, VarId};
+    use graphforge_rel::{ExprLowerer, VarMap};
+    use graphforge_value::{PropertyId, RuntimePropId};
+
+    let declared = PropertyId::ontology(graphforge_core::PropId(0)).unwrap();
+    let observed = PropertyId::runtime(RuntimePropId::new(0).unwrap());
+    let names = HashMap::from([
+        (declared, "declared_score".to_owned()),
+        (observed, "observed_score".to_owned()),
+    ]);
+    assert_eq!(names.len(), 2);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("declared_score", DataType::Int64, false),
+            Field::new("observed_score", DataType::Int64, false),
+        ])),
+        vec![
+            Arc::new(Int64Array::from(vec![11, 12])),
+            Arc::new(Int64Array::from(vec![91, 92])),
+        ],
+    )
+    .unwrap();
+    let context = SessionContext::new();
+    context.register_batch("n", batch).unwrap();
+    let input = context.table("n").await.unwrap();
+    let mut arena = ExprArena::new();
+    let base = arena.push(IrExpr::VarRef(VarId(0)));
+    let declared_access = arena.push(IrExpr::PropertyAccess {
+        base,
+        prop: declared,
+    });
+    let observed_access = arena.push(IrExpr::PropertyAccess {
+        base,
+        prop: observed,
+    });
+    let mut vars = VarMap::new();
+    vars.insert(VarId(0), "n");
+    let lowerer = ExprLowerer::with_prop_names(&arena, &vars, names)
+        .with_input_schema(input.schema().clone().into());
+    let output = input
+        .select(vec![
+            lowerer.lower(declared_access).unwrap().alias("declared"),
+            lowerer.lower(observed_access).unwrap().alias("observed"),
+        ])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].num_rows(), 2);
+    for (index, expected) in [(0, vec![11, 12]), (1, vec![91, 92])] {
+        let values = output[0]
+            .column(index)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.values().as_ref(), expected.as_slice());
+    }
+}

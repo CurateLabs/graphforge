@@ -1,7 +1,7 @@
 //! Runtime entity label identity reconciliation (#702).
 //!
 //! Bound/persisted node label TypeIds for runtime-catalog entities are tagged
-//! with [`graphforge_ir::RUNTIME_ENTITY_TYPE_TAG`]. Legacy projects may still
+//! with [`1_073_741_824`]. Legacy projects may still
 //! store untagged catalog IDs that collide with ontology entity type IDs.
 //!
 //! When an ontology is present, tagged runtime labels whose catalog **name**
@@ -23,10 +23,9 @@ use arrow::array::{Array, ListArray, UInt32Array, UInt32Builder};
 use arrow::datatypes::{DataType, Field};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, TypeId};
-use graphforge_ir::{
-    RuntimeCatalog, RuntimeTypeId, is_runtime_entity_type_id, runtime_entity_type_id,
-};
+use graphforge_ir::RuntimeCatalog;
 use graphforge_ontology::OntologyHandle;
+use graphforge_value::{EntityTypeId, PrimaryEntityTypeId, RuntimeEntityId};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{normalize_topology_nodes, read_nodes};
@@ -127,7 +126,7 @@ fn colliding_raw_ids(
 ) -> HashSet<u32> {
     runtime_catalog
         .entity_type_names_with_ids()
-        .map(|(id, _)| id.0)
+        .map(|(id, _)| id.get())
         .filter(|id| ontology_ids.contains(id))
         .collect()
 }
@@ -135,12 +134,19 @@ fn colliding_raw_ids(
 fn migratable_raw_ids(
     runtime_catalog: &RuntimeCatalog,
     ontology_ids: &HashSet<u32>,
-) -> HashMap<u32, u32> {
+) -> HashMap<EntityTypeId, EntityTypeId> {
     runtime_catalog
         .entity_type_names_with_ids()
         .map(|(id, _)| id)
-        .filter(|id| !ontology_ids.contains(&id.0))
-        .map(|id| (id.0, runtime_entity_type_id(id).0))
+        .filter(|id| !ontology_ids.contains(&id.get()))
+        // Only this legacy-admission boundary interprets a catalog-local integer
+        // as the old untagged topology representation, after collision checks.
+        .map(|id| {
+            (
+                EntityTypeId::ontology(TypeId(id.get())).expect("checked local range"),
+                EntityTypeId::runtime(id),
+            )
+        })
         .collect()
 }
 
@@ -151,18 +157,20 @@ fn migratable_raw_ids(
 fn adoption_name_remaps(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
-) -> Result<HashMap<u32, u32>, GfError> {
+) -> Result<HashMap<EntityTypeId, EntityTypeId>, GfError> {
     let Some(handle) = ontology else {
         return Ok(HashMap::new());
     };
     let mut remap = HashMap::new();
-    let mut ontology_targets: HashMap<u32, String> = HashMap::new();
+    let mut ontology_targets: HashMap<EntityTypeId, String> = HashMap::new();
     for (runtime_id, name) in runtime_catalog.entity_type_names_with_ids() {
         let Some(TypeId(ontology_id)) = handle.entity_type_id(name) else {
             continue;
         };
-        let tagged = runtime_entity_type_id(runtime_id).0;
-        if let Some(prior) = ontology_targets.get(&ontology_id)
+        let tagged = EntityTypeId::runtime(runtime_id);
+        let target =
+            EntityTypeId::ontology(TypeId(ontology_id)).map_err(|e| storage_err(e.to_string()))?;
+        if let Some(prior) = ontology_targets.get(&target)
             && prior != name
         {
             return Err(storage_err(format!(
@@ -170,9 +178,9 @@ fn adoption_name_remaps(
                  {prior:?} and {name:?} both claim ontology type id {ontology_id}"
             )));
         }
-        ontology_targets.insert(ontology_id, name.to_owned());
-        if tagged != ontology_id {
-            remap.insert(tagged, ontology_id);
+        ontology_targets.insert(target, name.to_owned());
+        if tagged != target {
+            remap.insert(tagged, target);
         }
     }
     Ok(remap)
@@ -180,8 +188,8 @@ fn adoption_name_remaps(
 
 fn collect_label_hits(
     batches: &[RecordBatch],
-    candidates: &HashSet<u32>,
-) -> Result<HashSet<u32>, GfError> {
+    candidates: &HashSet<EntityTypeId>,
+) -> Result<HashSet<EntityTypeId>, GfError> {
     let mut hits = HashSet::new();
     if candidates.is_empty() {
         return Ok(hits);
@@ -196,11 +204,13 @@ fn collect_label_hits(
             .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
             .ok_or_else(|| storage_err("node topology missing type_id"))?;
         for row in 0..batch.num_rows() {
-            if !primary.is_null(row) {
-                let value = primary.value(row);
-                if candidates.contains(&value) {
-                    hits.insert(value);
-                }
+            if !primary.is_null(row)
+                && let Some(value) = PrimaryEntityTypeId::decode(primary.value(row))
+                    .map_err(|e| storage_err(e.to_string()))?
+                    .label()
+                && candidates.contains(&value)
+            {
+                hits.insert(value);
             }
             if type_ids.is_null(row) {
                 continue;
@@ -211,7 +221,11 @@ fn collect_label_hits(
                 .downcast_ref::<UInt32Array>()
                 .ok_or_else(|| storage_err("node type_ids are not UInt32"))?;
             for index in 0..values.len() {
-                let value = values.value(index);
+                if values.is_null(index) {
+                    return Err(storage_err("null node membership"));
+                }
+                let value = EntityTypeId::decode(values.value(index))
+                    .map_err(|e| storage_err(e.to_string()))?;
                 if candidates.contains(&value) {
                     hits.insert(value);
                 }
@@ -241,7 +255,13 @@ fn collect_untagged_label_hits(
         for row in 0..batch.num_rows() {
             if !primary.is_null(row) {
                 let value = primary.value(row);
-                if candidates.contains(&value) && !is_runtime_entity_type_id(TypeId(value)) {
+                if candidates.contains(&value)
+                    && EntityTypeId::decode(value)
+                        .map_err(|e| storage_err(e.to_string()))?
+                        .tagged()
+                        .ontology_id()
+                        .is_some()
+                {
                     hits.insert(value);
                 }
             }
@@ -255,7 +275,13 @@ fn collect_untagged_label_hits(
                 .ok_or_else(|| storage_err("node type_ids are not UInt32"))?;
             for index in 0..values.len() {
                 let value = values.value(index);
-                if candidates.contains(&value) && !is_runtime_entity_type_id(TypeId(value)) {
+                if candidates.contains(&value)
+                    && EntityTypeId::decode(value)
+                        .map_err(|e| storage_err(e.to_string()))?
+                        .tagged()
+                        .ontology_id()
+                        .is_some()
+                {
                     hits.insert(value);
                 }
             }
@@ -264,7 +290,10 @@ fn collect_untagged_label_hits(
     Ok(hits)
 }
 
-fn remap_label_value(value: u32, remap: &HashMap<u32, u32>) -> (u32, bool) {
+fn remap_label_value(
+    value: EntityTypeId,
+    remap: &HashMap<EntityTypeId, EntityTypeId>,
+) -> (EntityTypeId, bool) {
     match remap.get(&value) {
         Some(&mapped) if mapped != value => (mapped, true),
         _ => (value, false),
@@ -273,7 +302,7 @@ fn remap_label_value(value: u32, remap: &HashMap<u32, u32>) -> (u32, bool) {
 
 fn remap_batches(
     batches: Vec<RecordBatch>,
-    remap: &HashMap<u32, u32>,
+    remap: &HashMap<EntityTypeId, EntityTypeId>,
 ) -> Result<(Vec<RecordBatch>, u64), GfError> {
     let mut remapped = 0u64;
     let mut out = Vec::with_capacity(batches.len());
@@ -292,11 +321,19 @@ fn remap_batches(
             arrow::array::ListBuilder::with_capacity(UInt32Builder::new(), batch.num_rows());
 
         for row in 0..batch.num_rows() {
-            let (primary_value, changed_primary) = remap_label_value(primary.value(row), remap);
+            let original_primary = PrimaryEntityTypeId::decode(primary.value(row))
+                .map_err(|e| storage_err(e.to_string()))?;
+            let (primary_value, changed_primary) = match original_primary.label() {
+                Some(id) => {
+                    let (id, changed) = remap_label_value(id, remap);
+                    (PrimaryEntityTypeId::known(id), changed)
+                }
+                None => (original_primary, false),
+            };
             if changed_primary {
                 remapped += 1;
             }
-            primary_builder.append_value(primary_value);
+            primary_builder.append_value(primary_value.encode());
 
             if type_ids.is_null(row) {
                 list_builder.append(false);
@@ -308,11 +345,16 @@ fn remap_batches(
                 .downcast_ref::<UInt32Array>()
                 .ok_or_else(|| storage_err("node type_ids are not UInt32"))?;
             for index in 0..values.len() {
-                let (value, changed) = remap_label_value(values.value(index), remap);
+                if values.is_null(index) {
+                    return Err(storage_err("null node membership"));
+                }
+                let id = EntityTypeId::decode(values.value(index))
+                    .map_err(|e| storage_err(e.to_string()))?;
+                let (value, changed) = remap_label_value(id, remap);
                 if changed {
                     remapped += 1;
                 }
-                list_builder.values().append_value(value);
+                list_builder.values().append_value(value.encode());
             }
             list_builder.append(true);
         }
@@ -346,16 +388,16 @@ fn remap_batches(
 }
 
 fn merge_remaps(
-    legacy: HashMap<u32, u32>,
-    adoption: HashMap<u32, u32>,
-) -> Result<HashMap<u32, u32>, GfError> {
+    legacy: HashMap<EntityTypeId, EntityTypeId>,
+    adoption: HashMap<EntityTypeId, EntityTypeId>,
+) -> Result<HashMap<EntityTypeId, EntityTypeId>, GfError> {
     let mut remap = legacy;
     for (from, to) in adoption {
         if let Some(existing) = remap.get(&from)
             && *existing != to
         {
             return Err(storage_err(format!(
-                "ambiguous runtime entity label remap for id {from}: {existing} vs {to}"
+                "ambiguous runtime entity label remap for id {from:?}: {existing:?} vs {to:?}"
             )));
         }
         remap.insert(from, to);
@@ -496,10 +538,11 @@ pub fn validate_runtime_entity_label_ids(
 /// Pure helper: tagged runtime entity plan IDs stay disjoint from ontology IDs.
 #[must_use]
 pub fn runtime_entity_plan_id_is_disjoint_from_ontology(
-    runtime_id: RuntimeTypeId,
+    runtime_id: RuntimeEntityId,
     ontology_id: TypeId,
 ) -> bool {
-    runtime_entity_type_id(runtime_id) != ontology_id
+    EntityTypeId::ontology(ontology_id)
+        .is_ok_and(|ontology| EntityTypeId::runtime(runtime_id) != ontology)
 }
 
 #[cfg(test)]
@@ -565,6 +608,44 @@ mod tests {
         writer.close().unwrap();
     }
 
+    #[test]
+    fn membership_remap_preserves_absent_original_primary() {
+        let directory = TempDir::new().unwrap();
+        write_nodes(directory.path(), &[&[0]]);
+        let batch = read_topology_batches(directory.path()).unwrap().remove(0);
+        let mut columns = batch.columns().to_vec();
+        columns[batch.schema().index_of("type_id").unwrap()] =
+            Arc::new(UInt32Array::from(vec![u32::MAX]));
+        let batch = RecordBatch::try_new(batch.schema(), columns).unwrap();
+        let legacy = EntityTypeId::ontology(TypeId(0)).unwrap();
+        let runtime = EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap());
+        let (batches, count) =
+            remap_batches(vec![batch], &HashMap::from([(legacy, runtime)])).unwrap();
+        assert_eq!(count, 1);
+        let primary = batches[0]
+            .column_by_name("type_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(primary.value(0), u32::MAX);
+        let membership = batches[0]
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(
+            membership
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .value(0),
+            runtime.encode()
+        );
+    }
+
     fn person_ontology() -> OntologyHandle {
         let yaml = r#"
 ontology_id: collision
@@ -584,12 +665,12 @@ migrations: []
     #[test]
     fn tagged_runtime_entity_id_is_disjoint_from_ontology_zero() {
         assert!(runtime_entity_plan_id_is_disjoint_from_ontology(
-            RuntimeTypeId(0),
+            RuntimeEntityId::new(0).unwrap(),
             TypeId(0)
         ));
         assert_eq!(
-            runtime_entity_type_id(RuntimeTypeId(0)).0,
-            graphforge_ir::RUNTIME_ENTITY_TYPE_TAG
+            EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap()).encode(),
+            1_073_741_824
         );
     }
 
@@ -613,12 +694,20 @@ migrations: []
         let mut seed =
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 1)
                 .unwrap();
-        seed.create_node(endpoints[0], TypeId(0)).unwrap();
-        seed.create_node(endpoints[1], TypeId(1)).unwrap();
+        seed.create_node(
+            endpoints[0],
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
+        seed.create_node(
+            endpoints[1],
+            graphforge_value::EntityTypeId::ontology(TypeId(1)).unwrap(),
+        )
+        .unwrap();
         seed.flush().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        assert_eq!(catalog.intern_label("Ghost").0, 0);
-        assert_eq!(catalog.intern_label("Spectre").0, 1);
+        assert_eq!(catalog.intern_label("Ghost").unwrap().get(), 0);
+        assert_eq!(catalog.intern_label("Spectre").unwrap().get(), 1);
 
         let outcome =
             reconcile_runtime_entity_label_ids(dir.path(), None, &catalog).expect("migrate");
@@ -648,7 +737,10 @@ migrations: []
             .unwrap();
         let row0 = type_ids.value(0);
         let row0 = row0.as_any().downcast_ref::<UInt32Array>().unwrap();
-        assert_eq!(row0.value(0), runtime_entity_type_id(RuntimeTypeId(0)).0);
+        assert_eq!(
+            row0.value(0),
+            EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap()).encode()
+        );
     }
 
     #[test]
@@ -656,8 +748,8 @@ migrations: []
         let dir = TempDir::new().unwrap();
         write_nodes(dir.path(), &[&[0], &[1]]);
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
-        catalog.intern_label("Spectre");
+        catalog.intern_label("Ghost").unwrap();
+        catalog.intern_label("Spectre").unwrap();
         reconcile_runtime_entity_label_ids(dir.path(), None, &catalog).unwrap();
 
         let stage_current = || {
@@ -714,7 +806,7 @@ migrations: []
         let dir = TempDir::new().unwrap();
         write_nodes(dir.path(), &[&[0]]);
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
         let handle = person_ontology();
         assert_eq!(handle.entity_type_id("Person"), Some(TypeId(0)));
 
@@ -730,11 +822,11 @@ migrations: []
     #[test]
     fn marked_project_keeps_ontology_zero_beside_runtime_catalog_zero() {
         let dir = TempDir::new().unwrap();
-        let ghost = runtime_entity_type_id(RuntimeTypeId(0)).0;
+        let ghost = EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap()).encode();
         write_nodes(dir.path(), &[&[0], &[ghost]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
         let handle = person_ontology();
 
         let outcome = reconcile_runtime_entity_label_ids(dir.path(), Some(&handle), &catalog)
@@ -746,11 +838,11 @@ migrations: []
     #[test]
     fn marked_project_without_ontology_does_not_remap_untagged_zero() {
         let dir = TempDir::new().unwrap();
-        let ghost = runtime_entity_type_id(RuntimeTypeId(0)).0;
+        let ghost = EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap()).encode();
         write_nodes(dir.path(), &[&[0], &[ghost]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label("Ghost");
+        catalog.intern_label("Ghost").unwrap();
 
         let outcome = reconcile_runtime_entity_label_ids(dir.path(), None, &catalog)
             .expect("marked project without ontology must not rewrite ontology zeros");
@@ -772,10 +864,10 @@ migrations: []
     fn adoption_promotes_same_named_tagged_person_keeps_ghost_tagged() {
         let dir = TempDir::new().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        let person_runtime = catalog.intern_label("Person");
-        let ghost_runtime = catalog.intern_label("Ghost");
-        let person_tagged = runtime_entity_type_id(person_runtime).0;
-        let ghost_tagged = runtime_entity_type_id(ghost_runtime).0;
+        let person_runtime = catalog.intern_label("Person").unwrap();
+        let ghost_runtime = catalog.intern_label("Ghost").unwrap();
+        let person_tagged = EntityTypeId::runtime(person_runtime).encode();
+        let ghost_tagged = EntityTypeId::runtime(ghost_runtime).encode();
         write_nodes(dir.path(), &[&[person_tagged], &[ghost_tagged]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let handle = person_ontology();
@@ -823,8 +915,8 @@ migrations: []
     fn validate_read_only_rejects_pending_adoption_remap() {
         let dir = TempDir::new().unwrap();
         let mut catalog = RuntimeCatalog::new();
-        let person_runtime = catalog.intern_label("Person");
-        let person_tagged = runtime_entity_type_id(person_runtime).0;
+        let person_runtime = catalog.intern_label("Person").unwrap();
+        let person_tagged = EntityTypeId::runtime(person_runtime).encode();
         write_nodes(dir.path(), &[&[person_tagged]]);
         write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
         let handle = person_ontology();

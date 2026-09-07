@@ -23,6 +23,9 @@
 //! consume the same canonical shard union; they are outside the query-provider
 //! scan path.
 
+use graphforge_value::{
+    EntityTypeId, PropertyId, RelationTypeId, RuntimeEntityId, RuntimeRelationId,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -98,23 +101,62 @@ pub(crate) fn normalize_topology_nodes(
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     use arrow::array::{Array, ListArray, UInt32Array};
     use arrow::datatypes::UInt32Type;
+    use graphforge_value::{EntityTypeId, PrimaryEntityTypeId};
 
     batches
         .into_iter()
         .map(|batch| {
-            if batch.schema().field_with_name("type_ids").is_ok() {
-                return Ok(batch);
-            }
-            let type_idx = batch.schema().index_of("type_id").map_err(|e| {
-                DataFusionError::Execution(format!("legacy node topology missing type_id: {e}"))
-            })?;
+            let invalid = |message: String| {
+                DataFusionError::Execution(format!("invalid node type identity: {message}"))
+            };
+            let type_idx = batch
+                .schema()
+                .index_of("type_id")
+                .map_err(|error| invalid(format!("missing primary route: {error}")))?;
             let primary_ids = batch
                 .column(type_idx)
                 .as_any()
                 .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| DataFusionError::Execution("type_id is not UInt32".into()))?;
+                .ok_or_else(|| invalid("type_id is not UInt32".into()))?;
+            for (row, raw) in primary_ids.iter().enumerate() {
+                let raw = raw.ok_or_else(|| invalid(format!("null primary route at row {row}")))?;
+                PrimaryEntityTypeId::decode(raw)
+                    .map_err(|error| invalid(format!("primary row {row}: {error}")))?;
+            }
+            if let Some(column) = batch.column_by_name("type_ids") {
+                let memberships = column
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(|| invalid("type_ids is not List<UInt32>".into()))?;
+                for row in 0..memberships.len() {
+                    if memberships.is_null(row) {
+                        return Err(invalid(format!("null membership list at row {row}")));
+                    }
+                    let values = memberships.value(row);
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .ok_or_else(|| invalid("type_ids values are not UInt32".into()))?;
+                    for raw in values {
+                        let raw =
+                            raw.ok_or_else(|| invalid(format!("null membership at row {row}")))?;
+                        EntityTypeId::decode(raw)
+                            .map_err(|error| invalid(format!("membership row {row}: {error}")))?;
+                    }
+                }
+                // The primary is immutable routing authority: do not infer or
+                // require membership from it, even when current labels are present.
+                return Ok(batch);
+            }
             let nullable_labels = ListArray::from_iter_primitive::<UInt32Type, _, _>(
-                (0..batch.num_rows()).map(|row| Some([Some(primary_ids.value(row))])),
+                primary_ids.values().iter().map(|raw| {
+                    Some(
+                        PrimaryEntityTypeId::decode(*raw)
+                            .expect("primary route checked above")
+                            .label()
+                            .map(|id| Some(id.encode())),
+                    )
+                }),
             );
             let labels = ListArray::new(
                 Arc::new(Field::new("item", DataType::UInt32, false)),
@@ -125,7 +167,7 @@ pub(crate) fn normalize_topology_nodes(
             let mut columns = batch.columns().to_vec();
             columns.insert(type_idx + 1, Arc::new(labels));
             RecordBatch::try_new(TOPOLOGY_NODES_SCHEMA.clone(), columns)
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
         })
         .collect()
 }
@@ -2832,22 +2874,22 @@ pub struct GraphCatalog {
     /// runtime catalog at [`open`](Self::open) time. The relational lowering
     /// layer borrows it to resolve numeric `PropertyAccess` IDs to real column
     /// names without re-plumbing the ontology/runtime catalog separately.
-    prop_names: HashMap<u32, String>,
+    prop_names: HashMap<PropertyId, String>,
     /// Reverse map `TypeId.0` → relation-type name, merged from the ontology and
     /// the runtime catalog. Lets the lowering layer resolve a `TypedEdgeScan`'s
     /// relation name in exploratory mode (where the ontology map is empty).
-    rel_names: HashMap<u32, String>,
-    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    rel_names: HashMap<RuntimeRelationId, String>,
+    /// Reverse map checked runtime identity → entity-type (node label) name, from the
     /// runtime catalog. The lowerer tags these keys with
-    /// [`graphforge_ir::runtime_entity_type_id`] before merging them with
+    /// [`EntityTypeId::runtime`] before merging them with
     /// ontology TypeIds (#702 / #889).
-    label_names: HashMap<u32, String>,
-    semantic_rel_routes: HashMap<u32, String>,
-    semantic_label_routes: HashMap<u32, String>,
-    semantic_label_names: HashMap<u32, String>,
+    label_names: HashMap<RuntimeEntityId, String>,
+    semantic_rel_routes: HashMap<RelationTypeId, String>,
+    semantic_label_routes: HashMap<EntityTypeId, String>,
+    semantic_label_names: HashMap<EntityTypeId, String>,
     semantic_composition_fingerprint: Option<String>,
-    semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>>,
-    semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>>,
+    semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
+    semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
 }
 
 impl fmt::Debug for GraphCatalog {
@@ -3036,22 +3078,25 @@ impl GraphCatalog {
         let mut semantic_rel_routes = HashMap::new();
         let mut semantic_label_routes = HashMap::new();
         let mut semantic_label_names = HashMap::new();
-        let mut semantic_edge_tables: HashMap<u32, Arc<dyn TableProvider>> = HashMap::new();
-        let mut semantic_edge_property_tables: HashMap<u32, Arc<dyn TableProvider>> =
+        let mut semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
+            HashMap::new();
+        let mut semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
             HashMap::new();
         if let Some(bindings) = semantic {
             for binding in &bindings.bindings {
                 match binding.route_kind {
                     crate::SemanticRouteKind::Entity => {
-                        semantic_label_routes.insert(binding.storage_id, binding.route.clone());
-                        semantic_label_names.insert(binding.storage_id, binding.symbol.display());
+                        let id = EntityTypeId::decode(binding.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+                        semantic_label_routes.insert(id, binding.route.clone());
+                        semantic_label_names.insert(id, binding.symbol.display());
                     }
                     crate::SemanticRouteKind::Relation => {
-                        semantic_rel_routes.insert(binding.storage_id, binding.route.clone());
-                        semantic_edge_tables.insert(
-                            binding.storage_id,
-                            Arc::new(TypedEdgeTable::open(dir, &binding.route)),
-                        );
+                        let id = RelationTypeId::decode(binding.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+                        semantic_rel_routes.insert(id, binding.route.clone());
+                        semantic_edge_tables
+                            .insert(id, Arc::new(TypedEdgeTable::open(dir, &binding.route)));
                     }
                     crate::SemanticRouteKind::NodeProperty
                     | crate::SemanticRouteKind::EdgeProperty => {
@@ -3060,7 +3105,11 @@ impl GraphCatalog {
                             .local_id
                             .split_once(':')
                             .map_or(binding.symbol.local_id.as_str(), |(_, name)| name);
-                        prop_names.insert(binding.storage_id, name.to_owned());
+                        prop_names.insert(
+                            PropertyId::ontology(graphforge_core::PropId(binding.storage_id))
+                                .map_err(|error| DataFusionError::Plan(error.to_string()))?,
+                            name.to_owned(),
+                        );
                     }
                 }
             }
@@ -3074,7 +3123,8 @@ impl GraphCatalog {
                         && binding.owner.as_ref() == Some(&relation.symbol)
                 }) {
                     semantic_edge_property_tables.insert(
-                        relation.storage_id,
+                        RelationTypeId::decode(relation.storage_id)
+                            .map_err(|e| DataFusionError::Plan(e.to_string()))?,
                         Arc::new(inventory.as_ref().map_or_else(
                             || EdgePropertyTable::open_discovered(dir, &relation.route),
                             |inventory| {
@@ -3213,42 +3263,42 @@ impl GraphCatalog {
     /// Reverse map `PropId.0` → property name (ontology + runtime catalog),
     /// used by the relational lowering layer to resolve `PropertyAccess`.
     #[must_use]
-    pub fn prop_names(&self) -> &HashMap<u32, String> {
+    pub fn prop_names(&self) -> &HashMap<PropertyId, String> {
         &self.prop_names
     }
 
-    /// Reverse map `RuntimeTypeId.0` → relation-type name from the runtime
+    /// Reverse map checked runtime identity → relation-type name from the runtime
     /// catalog. The relational lowerer tags these keys before merging them with
     /// ontology TypeIds so the two zero-based ID spaces cannot collide.
     #[must_use]
-    pub fn rel_names(&self) -> &HashMap<u32, String> {
+    pub fn rel_names(&self) -> &HashMap<RuntimeRelationId, String> {
         &self.rel_names
     }
 
-    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    /// Reverse map checked runtime identity → entity-type (node label) name, from the
     /// runtime catalog. The relational lowerer tags these keys before merging
     /// them with ontology TypeIds so the two zero-based ID spaces cannot collide
     /// (#702).
     #[must_use]
-    pub fn label_names(&self) -> &HashMap<u32, String> {
+    pub fn label_names(&self) -> &HashMap<RuntimeEntityId, String> {
         &self.label_names
     }
 
     /// Generation-pinned semantic relation ID to opaque physical route.
     #[must_use]
-    pub fn semantic_rel_routes(&self) -> &HashMap<u32, String> {
+    pub fn semantic_rel_routes(&self) -> &HashMap<RelationTypeId, String> {
         &self.semantic_rel_routes
     }
 
     /// Generation-pinned semantic entity ID to opaque property route.
     #[must_use]
-    pub fn semantic_label_routes(&self) -> &HashMap<u32, String> {
+    pub fn semantic_label_routes(&self) -> &HashMap<EntityTypeId, String> {
         &self.semantic_label_routes
     }
 
     /// Generation-pinned semantic entity ID to exact qualified display name.
     #[must_use]
-    pub fn semantic_label_names(&self) -> &HashMap<u32, String> {
+    pub fn semantic_label_names(&self) -> &HashMap<EntityTypeId, String> {
         &self.semantic_label_names
     }
 
@@ -3260,13 +3310,16 @@ impl GraphCatalog {
 
     /// Registered authenticated provider for one semantic relation ID.
     #[must_use]
-    pub fn semantic_edge_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+    pub fn semantic_edge_table(&self, id: RelationTypeId) -> Option<Arc<dyn TableProvider>> {
         self.semantic_edge_tables.get(&id).cloned()
     }
 
     /// Registered authenticated property provider for one semantic relation ID.
     #[must_use]
-    pub fn semantic_edge_property_table(&self, id: u32) -> Option<Arc<dyn TableProvider>> {
+    pub fn semantic_edge_property_table(
+        &self,
+        id: RelationTypeId,
+    ) -> Option<Arc<dyn TableProvider>> {
         self.semantic_edge_property_tables.get(&id).cloned()
     }
 }
@@ -3280,10 +3333,10 @@ impl GraphCatalog {
 fn build_prop_names(
     _ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
-) -> HashMap<u32, String> {
+) -> HashMap<PropertyId, String> {
     runtime_catalog
         .property_names()
-        .map(|(id, name)| (id.0, name.to_owned()))
+        .map(|(id, name)| (PropertyId::runtime(id), name.to_owned()))
         .collect()
 }
 
@@ -3293,25 +3346,25 @@ fn build_prop_names(
 /// types ontology-first (so an ontology-sourced `TypeId` is already covered by
 /// the lowerer's ontology map) and falls back to the `RuntimeCatalog` only in
 /// exploratory mode (or advisory misses) — the case this map fills.
-fn build_rel_names(runtime_catalog: &RuntimeCatalog) -> HashMap<u32, String> {
+fn build_rel_names(runtime_catalog: &RuntimeCatalog) -> HashMap<RuntimeRelationId, String> {
     runtime_catalog
         .relation_type_names_with_ids()
-        .map(|(id, name)| (id.0, name.to_owned()))
+        .map(|(id, name)| (id, name.to_owned()))
         .collect()
 }
 
-/// Build the `RuntimeTypeId.0 → label-name` map from the runtime catalog.
+/// Build the checked runtime entity → label-name map from the runtime catalog.
 ///
 /// As with [`build_rel_names`], only the runtime-catalog side is needed: the
 /// binder resolves labels ontology-first, so ontology-sourced label `TypeId`s
 /// are already covered by the lowerer's ontology map; this fills the exploratory
 /// / advisory-miss case. Consumers must tag keys with
-/// [`graphforge_ir::runtime_entity_type_id`] before comparing them to stored
+/// [`EntityTypeId::runtime`] before comparing them to stored
 /// plan/storage TypeIds (#702 / #889).
-fn build_label_names(runtime_catalog: &RuntimeCatalog) -> HashMap<u32, String> {
+fn build_label_names(runtime_catalog: &RuntimeCatalog) -> HashMap<RuntimeEntityId, String> {
     runtime_catalog
         .entity_type_names_with_ids()
-        .map(|(id, name)| (id.0, name.to_owned()))
+        .map(|(id, name)| (id, name.to_owned()))
         .collect()
 }
 
@@ -3461,7 +3514,10 @@ mod tests {
         for (index, name) in ["Ada", "Grace", "Katherine"].into_iter().enumerate() {
             let uuid = graphforge_core::uuid::new_v7();
             writer
-                .create_node(uuid, graphforge_core::TypeId(1))
+                .create_node(
+                    uuid,
+                    graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                )
                 .unwrap();
             let mut values = HashMap::from([(
                 "name".to_owned(),
@@ -3495,7 +3551,10 @@ mod tests {
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
                 .unwrap();
         writer
-            .create_node(uuid, graphforge_core::TypeId(1))
+            .create_node(
+                uuid,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -4366,6 +4425,61 @@ mod tests {
         assert!(catalog_provider.downcast_ref::<GraphCatalog>().is_some());
         assert!(catalog_provider.schema("graph").is_some());
         assert!(catalog_provider.schema("private").is_none());
+    }
+
+    #[test]
+    fn checked_topology_identity_preserves_primary_absence_independently_of_membership() {
+        use arrow::array::ListArray;
+        use arrow::datatypes::UInt32Type;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nodes.parquet");
+        write_nodes_parquet(&path);
+        let original = read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
+            .unwrap()
+            .remove(0);
+        let normalized = normalize_topology_nodes(vec![original]).unwrap().remove(0);
+        let primary_index = normalized.schema().index_of("type_id").unwrap();
+        let membership_index = normalized.schema().index_of("type_ids").unwrap();
+        let make = |primary: u32, members: &[u32]| {
+            let mut columns = normalized.columns().to_vec();
+            columns[primary_index] = Arc::new(UInt32Array::from(vec![primary]));
+            let values = ListArray::from_iter_primitive::<UInt32Type, _, _>([Some(
+                members.iter().copied().map(Some),
+            )]);
+            columns[membership_index] = Arc::new(ListArray::new(
+                Arc::new(Field::new("item", DataType::UInt32, false)),
+                values.offsets().clone(),
+                values.values().clone(),
+                None,
+            ));
+            RecordBatch::try_new(normalized.schema(), columns).unwrap()
+        };
+        for batch in [
+            make(u32::MAX, &[]),
+            make(u32::MAX, &[1073741824]),
+            make(7, &[]),
+            make(7, &[9]),
+        ] {
+            assert_eq!(
+                normalize_topology_nodes(vec![batch.clone()]).unwrap(),
+                vec![batch]
+            );
+        }
+        for batch in [
+            make(2147483648, &[]),
+            make(3221225472, &[]),
+            make(u32::MAX, &[u32::MAX]),
+            make(7, &[2147483648]),
+        ] {
+            assert!(normalize_topology_nodes(vec![batch]).is_err());
+        }
+        let modern = make(u32::MAX, &[]);
+        let indices = (0..modern.num_columns())
+            .filter(|index| *index != membership_index)
+            .collect::<Vec<_>>();
+        let legacy = modern.project(&indices).unwrap();
+        let decoded = normalize_topology_nodes(vec![legacy]).unwrap().remove(0);
+        assert_eq!(decoded, modern);
     }
 
     #[test]

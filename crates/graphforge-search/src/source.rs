@@ -50,7 +50,7 @@ pub struct TextSourceProjection {
 /// errors. No partial projection is returned.
 pub fn project_text_source<C>(
     project_dir: &Path,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     selected_properties: Option<&[String]>,
     limits: TextSearchLimits,
     mut checkpoint: C,
@@ -146,7 +146,7 @@ where
 #[allow(clippy::too_many_lines)] // one streaming callback preserves one admitted handle
 fn select_eligible_nodes<C>(
     project_dir: &Path,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     limits: TextSearchLimits,
     checkpoint: &mut C,
     source_bytes: &mut u64,
@@ -235,7 +235,14 @@ where
                     if label_values.null_count() != 0 {
                         return Err(source("topology type_ids contains null labels"));
                     }
-                    if label_values.values().contains(&label_id) {
+                    let mut selected =
+                        matches!(label_id, graphforge_value::EntityTypeSelection::All);
+                    for encoded in label_values.values() {
+                        let id = graphforge_value::EntityTypeId::decode(*encoded)
+                            .map_err(|error| source(error.to_string()))?;
+                        selected |= label_id == graphforge_value::EntityTypeSelection::Known(id);
+                    }
+                    if selected {
                         eligible.insert(node_uuid);
                     }
                 }
@@ -480,7 +487,7 @@ mod tests {
     use std::collections::HashMap;
 
     use graphforge_core::uuid::{Uuid, to_bytes};
-    use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
+    use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_storage::{GraphWriter, set_node_properties};
     use parquet::arrow::ArrowWriter;
     use tempfile::TempDir;
@@ -514,6 +521,91 @@ mod tests {
             ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&corrupted).unwrap();
         writer.close().unwrap();
+    }
+
+    #[test]
+    fn membership_projection_separates_domains_and_rejects_invalid_ids_even_when_missing() {
+        use crate::{VectorLifecycleLimits, project_label_members};
+        use graphforge_value::{EntityTypeId, EntityTypeSelection};
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer
+            .create_node(uuid(1), EntityTypeId::decode(1).unwrap())
+            .unwrap();
+        writer
+            .create_node(uuid(2), EntityTypeId::decode(1073741825).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+        for (selection, expected) in [
+            (
+                EntityTypeSelection::Known(EntityTypeId::decode(1).unwrap()),
+                vec![*uuid(1).as_bytes()],
+            ),
+            (
+                EntityTypeSelection::Known(EntityTypeId::decode(1073741825).unwrap()),
+                vec![*uuid(2).as_bytes()],
+            ),
+            (EntityTypeSelection::Missing, vec![]),
+        ] {
+            let members = project_label_members(
+                dir.path(),
+                selection,
+                VectorLifecycleLimits::default(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(members.into_iter().collect::<Vec<_>>(), expected);
+        }
+        let path = graphforge_storage::topology_node_files(dir.path())
+            .unwrap()
+            .remove(0);
+        let batch = graphforge_storage::read_nodes(dir.path())
+            .unwrap()
+            .remove(0);
+        let index = batch.schema().index_of("type_ids").unwrap();
+        for invalid in [2147483648_u32, 3221225472, u32::MAX] {
+            let lists = ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>([
+                Some(vec![Some(invalid)]),
+                Some(vec![Some(1073741825)]),
+            ]);
+            let lists = ListArray::new(
+                std::sync::Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    arrow::datatypes::DataType::UInt32,
+                    false,
+                )),
+                lists.offsets().clone(),
+                lists.values().clone(),
+                None,
+            );
+            let mut columns = batch.columns().to_vec();
+            columns[index] = std::sync::Arc::new(lists);
+            let corrupted = arrow::array::RecordBatch::try_new(batch.schema(), columns).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), batch.schema(), None)
+                    .unwrap();
+            writer.write(&corrupted).unwrap();
+            writer.close().unwrap();
+            assert!(
+                project_label_members(
+                    dir.path(),
+                    EntityTypeSelection::Missing,
+                    VectorLifecycleLimits::default(),
+                    || Ok(())
+                )
+                .is_err()
+            );
+            assert!(
+                project_text_source(
+                    dir.path(),
+                    EntityTypeSelection::Missing,
+                    None,
+                    TextSearchLimits::default(),
+                    || Ok(())
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -557,17 +649,29 @@ mod tests {
     fn source_byte_limit_counts_every_immutable_node_shard() {
         let dir = TempDir::new().unwrap();
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        first.create_node(uuid(1), TypeId(9)).unwrap();
+        first
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         first.flush().unwrap();
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
-        second.create_node(uuid(2), TypeId(9)).unwrap();
+        second
+            .create_node(uuid(2), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         second.flush().unwrap();
         let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();
         assert_eq!(paths.len(), 2);
         let mut limits = TextSearchLimits::default();
         limits.source_bytes = std::fs::metadata(&paths[0]).unwrap().len();
         assert!(matches!(
-            project_text_source(dir.path(), 9, None, limits, || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
+                None,
+                limits,
+                || Ok(())
+            ),
             Err(SearchArtifactError::ResourceExhausted {
                 resource: "text_source_bytes",
                 ..
@@ -582,7 +686,9 @@ mod tests {
             let mut writer =
                 GraphWriter::open_at(dir.path(), OntologyMode::Strict, i64::from(ordinal)).unwrap();
             let node = uuid(ordinal);
-            writer.create_node(node, TypeId(9)).unwrap();
+            writer
+                .create_node(node, graphforge_value::EntityTypeId::decode(9).unwrap())
+                .unwrap();
             writer
                 .set_properties(
                     &node,
@@ -605,7 +711,15 @@ mod tests {
         let mut limits = TextSearchLimits::default();
         limits.source_bytes = node_bytes + std::fs::metadata(&properties[0]).unwrap().len();
         assert!(matches!(
-            project_text_source(dir.path(), 9, None, limits, || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
+                None,
+                limits,
+                || Ok(())
+            ),
             Err(SearchArtifactError::ResourceExhausted {
                 resource: "text_source_bytes",
                 ..
@@ -618,7 +732,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let node = uuid(1);
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .create_node(node, graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &node,
@@ -644,9 +760,16 @@ mod tests {
             .chain(property_files)
             .map(|path| std::fs::metadata(path).unwrap().len())
             .sum::<u64>();
-        let projection =
-            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
-                .unwrap();
+        let projection = project_text_source(
+            dir.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
+            None,
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
 
         assert_eq!(projection.source_bytes, expected_bytes);
         assert_eq!(projection.documents.len(), 1);
@@ -658,7 +781,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let node = uuid(1);
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(node, TypeId(9)).unwrap();
+        writer
+            .create_node(node, graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &node,
@@ -678,9 +803,16 @@ mod tests {
             set_node_properties(dir.path(), "Secondary", &updates).unwrap(),
             1
         );
-        let projection =
-            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
-                .unwrap();
+        let projection = project_text_source(
+            dir.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
+            None,
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
         assert_eq!(projection.documents[0].fields.len(), 2);
 
         let collision = HashMap::from([(
@@ -692,7 +824,7 @@ mod tests {
             1
         );
         assert!(matches!(
-            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(())),
+            project_text_source(dir.path(), graphforge_value::EntityTypeSelection::Known(graphforge_value::EntityTypeId::decode(9).unwrap()), None, TextSearchLimits::default(), || Ok(())),
             Err(SearchArtifactError::SourceSnapshot { reason })
                 if reason.contains("repeats property")
         ));
@@ -706,10 +838,23 @@ mod tests {
         let primary = uuid(2);
         let unrelated = uuid(3);
         writer
-            .create_node_with_labels(secondary, &[TypeId(1), TypeId(9)])
+            .create_node_with_labels(
+                secondary,
+                &[
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    graphforge_value::EntityTypeId::decode(9).unwrap(),
+                ],
+            )
             .unwrap();
-        writer.create_node(primary, TypeId(9)).unwrap();
-        writer.create_node(unrelated, TypeId(3)).unwrap();
+        writer
+            .create_node(primary, graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
+        writer
+            .create_node(
+                unrelated,
+                graphforge_value::EntityTypeId::decode(3).unwrap(),
+            )
+            .unwrap();
         writer
             .set_properties(
                 &secondary,
@@ -742,9 +887,16 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let projection =
-            project_text_source(dir.path(), 9, None, TextSearchLimits::default(), || Ok(()))
-                .unwrap();
+        let projection = project_text_source(
+            dir.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
+            None,
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
         assert_eq!(projection.properties, ["name", "summary"]);
         assert_eq!(
             projection
@@ -765,7 +917,9 @@ mod tests {
         let properties = vec![" title ".to_owned(), "body".to_owned(), "title".to_owned()];
         let projection = project_text_source(
             dir.path(),
-            7,
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(7).unwrap(),
+            ),
             Some(&properties),
             TextSearchLimits::default(),
             || Ok(()),
@@ -779,22 +933,38 @@ mod tests {
     fn projection_limits_and_cancellation_return_no_partial_value() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(1)).unwrap();
+        writer
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(1).unwrap())
+            .unwrap();
         writer.flush().unwrap();
 
         let mut limits = TextSearchLimits::default();
         limits.topology_rows = 0;
         assert!(matches!(
-            project_text_source(dir.path(), 1, None, limits, || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(1).unwrap()
+                ),
+                None,
+                limits,
+                || Ok(())
+            ),
             Err(SearchArtifactError::ResourceExhausted {
                 resource: "text_topology_rows",
                 ..
             })
         ));
         assert!(matches!(
-            project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Err(
-                SearchArtifactError::Cancelled
-            )),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(1).unwrap()
+                ),
+                None,
+                TextSearchLimits::default(),
+                || Err(SearchArtifactError::Cancelled)
+            ),
             Err(SearchArtifactError::Cancelled)
         ));
     }
@@ -803,11 +973,21 @@ mod tests {
     fn projection_rejects_null_node_surrogate_explicitly() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(1)).unwrap();
+        writer
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(1).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         corrupt_node_surrogate_to_null(dir.path());
         assert!(matches!(
-            project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(1).unwrap()
+                ),
+                None,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
             Err(SearchArtifactError::SourceSnapshot { .. })
         ));
     }
@@ -816,14 +996,24 @@ mod tests {
     fn malformed_property_parquet_is_a_source_error() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(1)).unwrap();
+        writer
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(1).unwrap())
+            .unwrap();
         writer.flush().unwrap();
         let properties = dir.path().join("properties");
         std::fs::create_dir_all(&properties).unwrap();
         std::fs::write(properties.join("broken.parquet"), b"not parquet").unwrap();
 
         assert!(matches!(
-            project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(1).unwrap()
+                ),
+                None,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
             Err(SearchArtifactError::SourceSnapshot { .. })
         ));
     }
@@ -833,7 +1023,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         let selected = uuid(1);
-        writer.create_node(selected, TypeId(7)).unwrap();
+        writer
+            .create_node(selected, graphforge_value::EntityTypeId::decode(7).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &selected,
@@ -849,7 +1041,9 @@ mod tests {
 
         let projection = project_text_source(
             dir.path(),
-            7,
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(7).unwrap(),
+            ),
             Some(&["name".to_owned(), "absent".to_owned()]),
             TextSearchLimits::default(),
             || Ok(()),
@@ -863,7 +1057,15 @@ mod tests {
         let mut limits = TextSearchLimits::default();
         limits.property_rows = 0;
         assert!(matches!(
-            project_text_source(dir.path(), 7, None, limits, || Ok(())),
+            project_text_source(
+                dir.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(7).unwrap()
+                ),
+                None,
+                limits,
+                || Ok(())
+            ),
             Err(SearchArtifactError::ResourceExhausted {
                 resource: "text_property_rows",
                 limit: 0,
@@ -947,7 +1149,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         let node = uuid(1);
-        writer.create_node(node, TypeId(1)).unwrap();
+        writer
+            .create_node(node, graphforge_value::EntityTypeId::decode(1).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &node,
@@ -958,14 +1162,22 @@ mod tests {
         writer.flush().unwrap();
 
         let calls = Cell::new(0_usize);
-        let result = project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || {
-            calls.set(calls.get() + 1);
-            if calls.get() == 6 {
-                Err(SearchArtifactError::Cancelled)
-            } else {
-                Ok(())
-            }
-        });
+        let result = project_text_source(
+            dir.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+            ),
+            None,
+            TextSearchLimits::default(),
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 6 {
+                    Err(SearchArtifactError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert!(matches!(result, Err(SearchArtifactError::Cancelled)));
         assert_eq!(calls.get(), 6);
     }

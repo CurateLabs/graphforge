@@ -127,7 +127,7 @@ pub struct CompositionBindingContext {
     composition: Arc<CompiledComposition>,
     bridges: Vec<BridgeDocument>,
     limits: CompositionBindingLimits,
-    storage_ids: HashMap<QualifiedSymbol, u32>,
+    storage_ids: HashMap<QualifiedSymbol, graphforge_value::TaggedTypeId>,
 }
 
 impl CompositionBindingContext {
@@ -192,13 +192,12 @@ impl CompositionBindingContext {
 
     /// Attach generation-pinned storage IDs. The caller must authenticate the
     /// mapping against this context's exact composition before construction.
-    #[must_use]
     pub fn with_storage_ids(
         mut self,
         storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
-    ) -> Self {
-        self.storage_ids = storage_ids.into_iter().collect();
-        self
+    ) -> Result<Self, graphforge_core::GfError> {
+        self.storage_ids = checked_storage_ids(storage_ids)?;
+        Ok(self)
     }
 
     /// Exact composition fingerprint.
@@ -220,14 +219,13 @@ impl CompositionBindingContext {
     }
 
     /// Return a copy carrying authenticated generation storage IDs.
-    #[must_use]
     pub fn with_generation_storage_ids(
         &self,
         storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
-    ) -> Self {
+    ) -> Result<Self, graphforge_core::GfError> {
         let mut value = self.clone();
-        value.storage_ids = storage_ids.into_iter().collect();
-        value
+        value.storage_ids = checked_storage_ids(storage_ids)?;
+        Ok(value)
     }
 
     /// Deterministic composition-local semantic ID for a qualified symbol.
@@ -235,10 +233,16 @@ impl CompositionBindingContext {
     /// IDs are plan-local projections only; exact semantic identity remains in
     /// the fingerprint and binding receipt and is never confused with a runtime
     /// catalog ID.
-    #[must_use]
-    pub fn semantic_id(&self, symbol: &QualifiedSymbol) -> u32 {
+    pub fn semantic_id(
+        &self,
+        symbol: &QualifiedSymbol,
+    ) -> Result<graphforge_core::TypeId, graphforge_core::GfError> {
         if let Some(id) = self.storage_ids.get(symbol) {
-            return *id;
+            return id.ontology_id().ok_or_else(|| {
+                graphforge_core::GfError::Validation(
+                    "generation semantic identity has a runtime domain".into(),
+                )
+            });
         }
         let mut symbols = self
             .composition
@@ -253,11 +257,15 @@ impl CompositionBindingContext {
                 candidate.local_id.as_bytes().to_vec(),
             )
         });
-        symbols
+        let ordinal = symbols
             .iter()
             .position(|candidate| *candidate == symbol)
-            .and_then(|index| u32::try_from(index).ok())
-            .expect("compiled composition symbol count is bounded to u32")
+            .ok_or_else(|| {
+                graphforge_core::GfError::Validation(
+                    "composition symbol has no representable semantic identity".into(),
+                )
+            })?;
+        checked_semantic_ordinal(ordinal)
     }
 
     /// Resolve `local_id`, accepting `module-short:local` as an explicit qualifier.
@@ -673,5 +681,93 @@ impl CompositionBindingContext {
                     .collect(),
             },
         ))
+    }
+}
+
+fn checked_semantic_ordinal(
+    ordinal: usize,
+) -> Result<graphforge_core::TypeId, graphforge_core::GfError> {
+    let raw = u32::try_from(ordinal).map_err(|_| {
+        graphforge_core::GfError::Validation("composition semantic identity exceeds u32".into())
+    })?;
+    let id = graphforge_core::TypeId(raw);
+    graphforge_value::TaggedTypeId::ontology(id)
+        .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?;
+    Ok(id)
+}
+
+fn checked_storage_ids(
+    storage_ids: impl IntoIterator<Item = (QualifiedSymbol, u32)>,
+) -> Result<HashMap<QualifiedSymbol, graphforge_value::TaggedTypeId>, graphforge_core::GfError> {
+    let mut checked = HashMap::new();
+    let mut identities = HashMap::new();
+    for (symbol, raw) in storage_ids {
+        let id = graphforge_value::TaggedTypeId::ontology(graphforge_core::TypeId(raw))
+            .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?;
+        if identities
+            .insert((symbol.kind, raw), symbol.clone())
+            .is_some()
+        {
+            return Err(graphforge_core::GfError::Validation(
+                "conflicting generation semantic identity within symbol kind".into(),
+            ));
+        }
+        if checked.insert(symbol, id).is_some() {
+            return Err(graphforge_core::GfError::Validation(
+                "duplicate generation semantic symbol identity".into(),
+            ));
+        }
+    }
+    Ok(checked)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use graphforge_ontology::composition::OntologyModuleId;
+
+    fn symbol(kind: SymbolKind, local_id: &str) -> QualifiedSymbol {
+        QualifiedSymbol {
+            module: OntologyModuleId {
+                ontology_id: "https://example.test/schema".into(),
+                authored_version: "1".into(),
+                canonical_digest: "a".repeat(64),
+            },
+            kind,
+            local_id: local_id.into(),
+        }
+    }
+
+    #[test]
+    fn composition_local_assignment_enforces_declared_range() {
+        let limit = usize::try_from(graphforge_value::TYPE_LOCAL_ID_LIMIT).unwrap();
+        assert_eq!(
+            checked_semantic_ordinal(limit - 1).unwrap().0,
+            graphforge_value::TYPE_LOCAL_ID_LIMIT - 1
+        );
+        assert!(checked_semantic_ordinal(limit).is_err());
+        assert!(checked_semantic_ordinal(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn generation_semantic_ids_enforce_declared_range() {
+        let entity = symbol(SymbolKind::Entity, "Person");
+        let limit = graphforge_value::TYPE_LOCAL_ID_LIMIT;
+        assert!(checked_storage_ids([(entity.clone(), limit - 1)]).is_ok());
+        for invalid in [limit, 1 << 31, u32::MAX] {
+            assert!(checked_storage_ids([(entity.clone(), invalid)]).is_err());
+        }
+    }
+
+    #[test]
+    fn generation_identity_conflicts_are_scoped_to_symbol_kind() {
+        let entity = symbol(SymbolKind::Entity, "Person");
+        let relation = symbol(SymbolKind::Relation, "KNOWS");
+        assert!(checked_storage_ids([(entity.clone(), 0), (relation, 0)]).is_ok());
+        assert!(checked_storage_ids([(entity.clone(), 0), (entity.clone(), 1)]).is_err());
+        assert!(
+            checked_storage_ids([(entity, 0), (symbol(SymbolKind::Entity, "Company"), 0),])
+                .is_err()
+        );
     }
 }

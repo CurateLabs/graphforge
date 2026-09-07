@@ -514,7 +514,7 @@ impl GraphForge {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        );
+        )?;
         *self
             .default_composition_context
             .lock()

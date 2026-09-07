@@ -998,7 +998,7 @@ pub(crate) fn distinct_created_labels(nodes: &[ResolvedNodeSpec], nodes_created:
         .iter()
         .filter(|n| !n.is_reference)
         .flat_map(|n| n.label_ids.iter().copied())
-        .collect::<HashSet<u32>>()
+        .collect::<HashSet<graphforge_value::EntityTypeId>>()
         .len() as u64
 }
 
@@ -1136,7 +1136,7 @@ fn write_batch_creates(
                     )?;
                 }
                 if let Some(rec) = extras.recorder.as_deref_mut() {
-                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id.0);
+                    rec.record_node(spec.var, to_bytes(&uuid), node_id, type_id);
                 }
                 tally.nodes_created += 1;
             }
@@ -1191,17 +1191,15 @@ fn write_batch_creates(
 
 fn resolved_node_labels(
     spec: &ResolvedNodeSpec,
-) -> (Vec<graphforge_core::TypeId>, graphforge_core::TypeId) {
-    let labels: Vec<_> = spec
-        .label_ids
-        .iter()
-        .copied()
-        .map(graphforge_core::TypeId)
-        .collect();
-    let primary = labels
-        .first()
-        .copied()
-        .unwrap_or(graphforge_core::TypeId(u32::MAX));
+) -> (
+    Vec<graphforge_value::EntityTypeId>,
+    graphforge_value::PrimaryEntityTypeId,
+) {
+    let labels = spec.label_ids.clone();
+    let primary = labels.first().copied().map_or_else(
+        graphforge_value::PrimaryEntityTypeId::absent,
+        graphforge_value::PrimaryEntityTypeId::known,
+    );
     (labels, primary)
 }
 
@@ -1253,7 +1251,7 @@ fn append_created_node_output_cols(
 
     let empty_uuids: &[[u8; 16]] = &[];
     let empty_node_ids: &[u64] = &[];
-    let empty_type_ids: &[u32] = &[];
+    let empty_type_ids: &[graphforge_value::PrimaryEntityTypeId] = &[];
     let (uuids, node_ids, type_ids) = match recorder.node_identities(spec.var) {
         Some(identities) => identities,
         None if rows == 0 => (empty_uuids, empty_node_ids, empty_type_ids),
@@ -1279,7 +1277,9 @@ fn append_created_node_output_cols(
     }
     out_cols.push(Arc::new(uuid_b.finish()));
     out_cols.push(Arc::new(UInt64Array::from(node_ids.to_vec())));
-    out_cols.push(Arc::new(UInt32Array::from(type_ids.to_vec())));
+    out_cols.push(Arc::new(UInt32Array::from(
+        type_ids.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+    )));
     out_cols.push(write_driver::repeated_label_sets(&spec.label_ids, rows));
 
     for (_, lit) in &spec.properties {
@@ -1652,7 +1652,7 @@ impl WriteCol {
         batch: &RecordBatch,
         row: usize,
         mode: OntologyMode,
-        type_id_to_entity_name: &HashMap<u32, String>,
+        type_id_to_entity_name: &HashMap<graphforge_value::EntityTypeId, String>,
     ) -> Result<String, GfError> {
         if self.is_edge {
             let idx = self.rel_name_idx.ok_or_else(|| {
@@ -1680,9 +1680,14 @@ impl WriteCol {
             .as_any()
             .downcast_ref::<arrow::array::UInt32Array>()
             .ok_or_else(|| GfError::Execution("type_id is not a UInt32 column".into()))?;
-        let type_id = arr.value(row);
-        Ok(type_id_to_entity_name
-            .get(&type_id)
+        if arr.is_null(row) {
+            return Err(GfError::Execution("node primary identity is null".into()));
+        }
+        let primary = graphforge_value::PrimaryEntityTypeId::decode(arr.value(row))
+            .map_err(|error| GfError::Execution(error.to_string()))?;
+        Ok(primary
+            .label()
+            .and_then(|id| type_id_to_entity_name.get(&id))
             .cloned()
             .unwrap_or_else(|| UNTYPED_STEM.to_owned()))
     }
@@ -1869,7 +1874,7 @@ fn accumulate_set_batch(
     targets: &[(WriteCol, DfExpr)],
     phys_values: &[Arc<dyn datafusion::physical_expr::PhysicalExpr>],
     mode: OntologyMode,
-    type_map: &HashMap<u32, String>,
+    type_map: &HashMap<graphforge_value::EntityTypeId, String>,
     acc: &mut SetAccumulator,
 ) -> Result<(), GfError> {
     let n = batch.num_rows();
@@ -1903,7 +1908,7 @@ fn accumulate_remove_batch(
     batch: &RecordBatch,
     targets: &[WriteCol],
     mode: OntologyMode,
-    type_map: &HashMap<u32, String>,
+    type_map: &HashMap<graphforge_value::EntityTypeId, String>,
     acc: &mut RemoveAccumulator,
 ) -> Result<(), GfError> {
     for col in targets {
@@ -1935,7 +1940,7 @@ pub struct GraphSetExec {
     input: Arc<dyn ExecutionPlan>,
     /// Per target: resolved columns + the value expression to evaluate per row.
     targets: Vec<(WriteCol, DfExpr)>,
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
     /// Logical input schema (with `var_<n>` qualifiers) — used to build the
@@ -2079,7 +2084,7 @@ impl ExecutionPlan for GraphSetExec {
 pub struct GraphRemoveExec {
     input: Arc<dyn ExecutionPlan>,
     targets: Vec<WriteCol>,
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
     schema: SchemaRef,
@@ -5224,7 +5229,7 @@ impl ExecutionSession {
             self.ontology.as_ref(),
             &self.dir,
             self.mode,
-        );
+        )?;
         let logical = bind_query_params(lowerer.lower_plan(plan)?, params)?;
 
         let physical = self
@@ -5379,7 +5384,7 @@ impl ExecutionSession {
             self.ontology.as_ref(),
             &self.dir,
             self.mode,
-        );
+        )?;
 
         // Run the read prefix once, keeping the variable registrations the
         // write phases resolve against.
@@ -5842,7 +5847,7 @@ impl ExecutionSession {
                 self.ontology.as_ref(),
                 &self.dir,
                 self.mode,
-            );
+            )?;
             let logical = lowerer.lower_plan(plan)?;
             let physical = self
                 .ctx
@@ -5884,14 +5889,14 @@ impl ExecutionSession {
                         .into(),
                 ));
             }
-            GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())
+            GraphPlanLowerer::new(Some(&self.catalog), self.ontology.as_ref())?
         } else {
             GraphPlanLowerer::new_with_dir(
                 Some(&self.catalog),
                 self.ontology.as_ref(),
                 &self.dir,
                 self.mode,
-            )
+            )?
         };
         #[cfg(feature = "differential-testing")]
         let lowerer = if self.relational_fixed_hop_reference {
@@ -6117,7 +6122,7 @@ mod tests {
         let nodes = vec![
             ResolvedNodeSpec {
                 var: 1,
-                label_ids: vec![7],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![("name".into(), IrLiteral::Str("Alice".into()))],
                 computed_properties: vec![],
@@ -6125,7 +6130,10 @@ mod tests {
             },
             ResolvedNodeSpec {
                 var: 2,
-                label_ids: vec![7, 8],
+                label_ids: vec![
+                    graphforge_value::EntityTypeId::decode(7).unwrap(),
+                    graphforge_value::EntityTypeId::decode(8).unwrap(),
+                ],
                 label_names: vec!["Person".into(), "Employee".into()],
                 properties: vec![("missing".into(), IrLiteral::Null)],
                 computed_properties: vec![],
@@ -6136,7 +6144,7 @@ mod tests {
             var: 3,
             src: 1,
             dst: 2,
-            rel_type_id: Some(9),
+            rel_type_id: Some(graphforge_value::RelationTypeId::decode(9).unwrap()),
             rel_type_name: Some("KNOWS".into()),
             direction: graphforge_ir::Direction::In,
             properties: vec![("since".into(), IrLiteral::Int(2020))],
@@ -6278,7 +6286,7 @@ mod tests {
 
         let spec = ResolvedNodeSpec {
             var: 7,
-            label_ids: vec![1],
+            label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
             label_names: vec!["Person".into()],
             properties: vec![],
             computed_properties: vec![],
@@ -6299,7 +6307,12 @@ mod tests {
         );
 
         let mut recorder = write_driver::CreateRecorder::default();
-        recorder.record_node(7, [1; 16], 1, 1);
+        recorder.record_node(
+            7,
+            [1; 16],
+            1,
+            graphforge_value::PrimaryEntityTypeId::decode(1).unwrap(),
+        );
         assert!(
             append_created_node_output_cols(&spec, 2, &CreateComputed::new(), &recorder, &mut out,)
                 .unwrap_err()
@@ -6414,7 +6427,7 @@ mod tests {
             var: 3,
             src: 1,
             dst: 2,
-            rel_type_id: Some(9),
+            rel_type_id: Some(graphforge_value::RelationTypeId::decode(9).unwrap()),
             rel_type_name: Some("KNOWS".into()),
             direction: graphforge_ir::Direction::Out,
             properties: vec![],
@@ -6482,7 +6495,16 @@ mod tests {
         let logical_value = lit(42_i64);
         let physical_value =
             create_physical_expr(&logical_value, &df_schema, &ExecutionProps::new()).unwrap();
-        let type_map = HashMap::from([(7, "Person".into()), (8, "Employee".into())]);
+        let type_map = HashMap::from([
+            (
+                graphforge_value::EntityTypeId::decode(7).unwrap(),
+                "Person".into(),
+            ),
+            (
+                graphforge_value::EntityTypeId::decode(8).unwrap(),
+                "Employee".into(),
+            ),
+        ]);
 
         let mut set = SetAccumulator::default();
         accumulate_set_batch(
@@ -6543,7 +6565,7 @@ mod tests {
             semantic_composition_fingerprint: None,
             nodes: vec![ResolvedNodeSpec {
                 var: 1,
-                label_ids: vec![7],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
                 computed_properties: vec![],
@@ -6627,7 +6649,7 @@ mod tests {
                 logical,
                 vec![ResolvedNodeSpec {
                     var: 1,
-                    label_ids: vec![7],
+                    label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                     label_names: vec!["Person".into()],
                     properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
                     computed_properties: vec![],
@@ -7348,10 +7370,10 @@ mod tests {
                 graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
                     .unwrap();
             writer
-                .create_node(node, graphforge_core::TypeId(1))
+                .create_node(node, graphforge_value::EntityTypeId::decode(1).unwrap())
                 .unwrap();
             writer
-                .create_node(other, graphforge_core::TypeId(1))
+                .create_node(other, graphforge_value::EntityTypeId::decode(1).unwrap())
                 .unwrap();
             writer.create_edge(edge, "KNOWS", &node, &other).unwrap();
             writer.flush().unwrap();
@@ -7777,7 +7799,7 @@ mod tests {
         let parameter = arena.push(IrExpr::Parameter("value".into()));
         let property = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: graphforge_ir::PropId(0),
+            prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
         });
         let binary = arena.push(IrExpr::BinaryOp {
             op: graphforge_ir::BinaryOpKind::Add,
@@ -7987,7 +8009,7 @@ mod tests {
                 }],
                 label_items: vec![LabelItem {
                     target: VarId(0),
-                    labels: vec![graphforge_core::TypeId(7)],
+                    labels: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 }],
             })
             .build();
@@ -8008,7 +8030,8 @@ mod tests {
             .push_op(GraphOp::Set {
                 items: vec![SetPropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0))
+                        .unwrap(),
                     prop_name: "score".into(),
                     value: score,
                 }],
@@ -8032,12 +8055,13 @@ mod tests {
             .push_op(GraphOp::Remove {
                 items: vec![RemovePropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0))
+                        .unwrap(),
                     prop_name: "score".into(),
                 }],
                 label_items: vec![LabelItem {
                     target: VarId(0),
-                    labels: vec![graphforge_core::TypeId(7)],
+                    labels: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 }],
             })
             .build();

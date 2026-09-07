@@ -1737,7 +1737,7 @@ mod tests {
             .lock()
             .unwrap()
             .entity_type_names_with_ids()
-            .map(|(id, name)| (id.0, name.to_owned()))
+            .map(|(id, name)| (id.get(), name.to_owned()))
             .collect::<Vec<_>>();
         assert_eq!(projected_types, vec![(0, "Person".into())]);
         let reopened = GraphForge::new(root.path().to_str()).unwrap();

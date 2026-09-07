@@ -463,7 +463,7 @@ impl GraphForge {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        );
+        )?;
         crate::workspace_ontology::publish_workspace_records(
             self,
             request.context.operation_uuid.0,
@@ -1547,7 +1547,9 @@ mod tests {
         {
             let mut catalog = graph.runtime_catalog.lock().unwrap();
             for index in 0..80 {
-                catalog.intern_label(&format!("Exploratory{index:02}"));
+                catalog
+                    .intern_label(&format!("Exploratory{index:02}"))
+                    .unwrap();
             }
         }
         let request = request(

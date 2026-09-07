@@ -42,7 +42,10 @@ fn make_exec(node: &VarLenExpandNode, input: Arc<dyn ExecutionPlan>) -> Arc<VarL
 // ---------------------------------------------------------------------------
 
 const TS: i64 = 1_700_000_000_000_000;
-const PERSON: graphforge_core::TypeId = graphforge_core::TypeId(0);
+const PERSON: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
+    Ok(id) => id,
+    Err(_) => panic!("valid person fixture identity"),
+};
 
 /// Write `count` nodes joined into a `KNOWS` chain `n1 -> n2 -> … -> nN`.
 /// Returns the surrogate `node_id`s in chain order.
@@ -148,7 +151,7 @@ fn make_node_with(
         dst_var,
         edge_var,
         direction,
-        Some(0), // rel_ty (unused by the executor; typed mode reads KNOWS.parquet)
+        Some(graphforge_value::RelationTypeId::decode(0).unwrap()), // rel_ty (unused by the executor; typed mode reads KNOWS.parquet)
         dir.to_path_buf(),
         mode,
         dst_fields,
@@ -377,7 +380,7 @@ async fn seeds_from_source_var_not_first_node_id() {
         1, // dst_var
         2, // edge_var → trailing var_2.rels List column
         Direction::Out,
-        Some(0),
+        Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
         dir.path().to_path_buf(),
         OntologyMode::Strict,
         dst_fields,
@@ -534,7 +537,7 @@ async fn edge_list_carries_edge_properties() {
             1,
             2,
             Direction::Out,
-            Some(0),
+            Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
             dir.path().to_path_buf(),
             OntologyMode::Strict,
             dst_fields,

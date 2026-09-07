@@ -81,7 +81,7 @@ pub fn explain_logical_with_catalog(
     catalog: Option<&graphforge_storage::GraphCatalog>,
     ontology: Option<&OntologyHandle>,
 ) -> Result<String, GfError> {
-    let lowered = GraphPlanLowerer::new(catalog, ontology).lower_plan(plan)?;
+    let lowered = GraphPlanLowerer::new(catalog, ontology)?.lower_plan(plan)?;
     let ctx = datafusion::prelude::SessionContext::new();
     let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
     Ok(final_plan.display_indent_schema().to_string())
@@ -102,7 +102,7 @@ pub fn explain_logical_for_writes(
     mode: graphforge_core::OntologyMode,
 ) -> Result<String, GfError> {
     let lowered =
-        GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode).lower_plan(plan)?;
+        GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode)?.lower_plan(plan)?;
     let ctx = datafusion::prelude::SessionContext::new();
     let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
     Ok(final_plan.display_indent_schema().to_string())

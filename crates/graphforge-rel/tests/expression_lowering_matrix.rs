@@ -15,6 +15,7 @@ fn lower(query: &str) -> graphforge_rel::LogicalPlan {
     .bind(&ast)
     .unwrap_or_else(|errors| panic!("bind failed for {query:?}: {errors:?}"));
     graphforge_rel::GraphPlanLowerer::new(None, None)
+        .expect("no ontology identities to validate")
         .lower_plan(&plan)
         .unwrap_or_else(|error| panic!("lower failed for {query:?}: {error}"))
 }

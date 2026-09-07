@@ -3124,7 +3124,13 @@ mod tests {
         let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();
         let ids: Vec<u64> = uuids
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| {
+                w.create_node(
+                    *u,
+                    graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+                )
+                .unwrap()
+            })
             .collect();
         let (a, b, c, d) = (&uuids[0], &uuids[1], &uuids[2], &uuids[3]);
         for (src, dst) in [(a, b), (a, c), (b, d), (c, d), (a, b), (d, d)] {
@@ -3219,7 +3225,13 @@ mod tests {
         let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();
         let ids: Vec<u64> = uuids
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| {
+                w.create_node(
+                    *u,
+                    graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+                )
+                .unwrap()
+            })
             .collect();
         for pair in uuids.windows(2) {
             w.create_edge(new_v7(), "KNOWS", &pair[0], &pair[1])
@@ -3255,7 +3267,13 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let ids: Vec<u64> = [a, b, c]
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| {
+                w.create_node(
+                    *u,
+                    graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+                )
+                .unwrap()
+            })
             .collect();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
@@ -3282,7 +3300,11 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, BUILD_TS).unwrap();
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         for u in [a, b, c] {
-            w.create_node(u, TypeId(0)).unwrap();
+            w.create_node(
+                u,
+                graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+            )
+            .unwrap();
         }
         w.create_edge(new_v7(), "a/b", &a, &b).unwrap();
         w.create_edge(new_v7(), ALL_RELATIONS_STEM, &a, &c).unwrap();
@@ -3624,8 +3646,16 @@ mod tests {
         // A pure-append flush writes a delta segment (bumps the generation).
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, BUILD_TS).unwrap();
         let (a, b) = (new_v7(), new_v7());
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(
+            a,
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
+        w.create_node(
+            b,
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.flush().unwrap();
 
@@ -3655,8 +3685,16 @@ mod tests {
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, BUILD_TS).unwrap();
         let (a, b) = (new_v7(), new_v7());
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(
+            a,
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
+        w.create_node(
+            b,
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.flush().unwrap();
 
@@ -3727,8 +3765,11 @@ mod tests {
         let mut node_uuids = Vec::new();
         for _ in 0..=max_node {
             node_uuids.push(new_v7());
-            w.create_node(*node_uuids.last().unwrap(), TypeId(0))
-                .unwrap();
+            w.create_node(
+                *node_uuids.last().unwrap(),
+                graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+            )
+            .unwrap();
         }
         // At least one edge so flush creates topology/edges/.
         w.create_edge(
@@ -4051,7 +4092,11 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, BUILD_TS).unwrap();
         let nodes: Vec<_> = (0..256).map(|_| new_v7()).collect();
         for u in &nodes {
-            w.create_node(*u, TypeId(0)).unwrap();
+            w.create_node(
+                *u,
+                graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+            )
+            .unwrap();
         }
         for i in 0..4_096 {
             let src = &nodes[i % nodes.len()];

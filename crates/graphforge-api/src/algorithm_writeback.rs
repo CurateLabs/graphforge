@@ -68,7 +68,7 @@ impl GraphForge {
             .expect("runtime catalog poisoned");
         let prior_catalog = catalog.clone();
         let mut next_catalog = catalog.clone();
-        next_catalog.intern_property(property, Some(label));
+        next_catalog.intern_property(property, Some(label))?;
         let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
         let expected_generation = *self
             .current_generation_uuid

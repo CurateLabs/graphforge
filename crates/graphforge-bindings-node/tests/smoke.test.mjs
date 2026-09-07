@@ -105,7 +105,7 @@ function checkTypedUuidParameters() {
       "graphforge.ontology_mode",
       "graphforge.query_id",
     ]);
-    assert.equal(metadata.get("graphforge.ir_version"), "0.3.0");
+    assert.equal(metadata.get("graphforge.ir_version"), "1.0.0");
     assert.equal(metadata.get("graphforge.ontology_mode"), "exploratory");
     assert.match(
       metadata.get("graphforge.query_id"),

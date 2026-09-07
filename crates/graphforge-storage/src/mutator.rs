@@ -24,6 +24,7 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::SchemaRef;
 
 use graphforge_core::GfError;
+use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
 use crate::catalog::{
@@ -38,9 +39,9 @@ use crate::staging::RewriteBatch;
 pub fn stage_add_node_labels<S1: BuildHasher, S2: BuildHasher>(
     staged: &mut RewriteBatch,
     dir: &Path,
-    additions: &HashMap<[u8; 16], HashSet<u32, S2>, S1>,
+    additions: &HashMap<[u8; 16], HashSet<EntityTypeId, S2>, S1>,
 ) -> Result<u64, GfError> {
-    let removals: HashMap<[u8; 16], HashSet<u32>> = HashMap::new();
+    let removals: HashMap<[u8; 16], HashSet<EntityTypeId>> = HashMap::new();
     stage_mutate_node_labels(staged, dir, additions, &removals).map(|(added, _)| added)
 }
 
@@ -50,8 +51,8 @@ pub fn stage_add_node_labels<S1: BuildHasher, S2: BuildHasher>(
 pub fn stage_mutate_node_labels<AS1, AS2, RS1, RS2>(
     staged: &mut RewriteBatch,
     dir: &Path,
-    additions: &HashMap<[u8; 16], HashSet<u32, AS2>, AS1>,
-    removals: &HashMap<[u8; 16], HashSet<u32, RS2>, RS1>,
+    additions: &HashMap<[u8; 16], HashSet<EntityTypeId, AS2>, AS1>,
+    removals: &HashMap<[u8; 16], HashSet<EntityTypeId, RS2>, RS1>,
 ) -> Result<(u64, u64), GfError>
 where
     AS1: BuildHasher,
@@ -86,12 +87,24 @@ where
                 .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
             let mut rows = Vec::with_capacity(batch.num_rows());
             for row in 0..batch.num_rows() {
+                if labels.is_null(row) {
+                    return Err(GfError::Storage("node type_ids contains null list".into()));
+                }
                 let values = labels.value(row);
                 let values = values
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
-                let mut merged = values.values().to_vec();
+                let mut merged = (0..values.len())
+                    .map(|index| {
+                        if values.is_null(index) {
+                            return Err(GfError::Storage(
+                                "node type_ids contains null item".into(),
+                            ));
+                        }
+                        EntityTypeId::decode(values.value(index)).map_err(pq_err)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 if let Some(drop) = removals.get(&uuid_at(uuids, row)) {
                     let before = merged.len();
                     merged.retain(|label| !drop.contains(label));
@@ -100,11 +113,16 @@ where
                 if let Some(extra) = additions.get(&uuid_at(uuids, row)) {
                     let before = merged.len();
                     merged.extend(extra.iter().copied());
-                    merged.sort_unstable();
+                    merged.sort_unstable_by_key(|id| id.encode());
                     merged.dedup();
                     file_changed += merged.len().saturating_sub(before) as u64;
                 }
-                rows.push(Some(merged.into_iter().map(Some).collect::<Vec<_>>()));
+                rows.push(Some(
+                    merged
+                        .into_iter()
+                        .map(|id| Some(id.encode()))
+                        .collect::<Vec<_>>(),
+                ));
             }
             let nullable =
                 ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(rows);
@@ -853,9 +871,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
-        w.create_node(c, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(b, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(c, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "KNOWS", &b, &c).unwrap();
         w.flush().unwrap();
@@ -868,8 +889,10 @@ mod tests {
         let (a, b) = (new_v7(), new_v7());
         let (e1, e2) = (new_v7(), new_v7());
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(b, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         w.create_edge(e1, "KNOWS", &a, &b).unwrap();
         w.create_edge(e2, "KNOWS", &b, &a).unwrap();
         w.flush().unwrap();
@@ -885,11 +908,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (legacy, a, b, edge) = (new_v7(), new_v7(), new_v7(), new_v7());
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-        first.create_node(legacy, TypeId(0)).unwrap();
+        first
+            .create_node(legacy, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         first.flush().unwrap();
         let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
-        second.create_node(a, TypeId(0)).unwrap();
-        second.create_node(b, TypeId(0)).unwrap();
+        second
+            .create_node(a, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        second
+            .create_node(b, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         second.create_edge(edge, "KNOWS", &a, &b).unwrap();
         second.flush().unwrap();
 
@@ -905,18 +934,133 @@ mod tests {
     }
 
     #[test]
+    fn label_mutation_preserves_absent_primary_and_existing_integer_encoding() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node_with_labels(node, &[]).unwrap();
+        writer.flush().unwrap();
+        let path = node_parquet_files(dir.path()).unwrap().remove(0);
+        let before = crate::read_nodes(dir.path()).unwrap().remove(0);
+        let runtime = EntityTypeId::runtime(graphforge_value::RuntimeEntityId::new(7).unwrap());
+        let semantic = EntityTypeId::ontology(TypeId(7)).unwrap();
+        let additions = HashMap::from([(to_bytes(&node), HashSet::from([runtime, semantic]))]);
+        let removals = HashMap::<[u8; 16], HashSet<EntityTypeId>>::new();
+        let mut staged = RewriteBatch::new();
+        assert_eq!(
+            stage_mutate_node_labels(&mut staged, dir.path(), &additions, &removals).unwrap(),
+            (2, 0)
+        );
+        staged.commit_unsealed_for_test().unwrap();
+        let after = crate::read_nodes(dir.path()).unwrap().remove(0);
+        for name in [
+            "node_uuid",
+            "node_id",
+            "type_id",
+            "created_at",
+            "updated_at",
+        ] {
+            assert_eq!(
+                before.column_by_name(name),
+                after.column_by_name(name),
+                "{name}"
+            );
+        }
+        let primary = after
+            .column_by_name("type_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(primary.value(0).to_le_bytes(), [255, 255, 255, 255]);
+        let labels = after
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let labels = labels.as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(labels.values().as_ref(), &[7, 1_073_741_831]);
+        let mut staged = RewriteBatch::new();
+        assert_eq!(
+            stage_mutate_node_labels(&mut staged, dir.path(), &removals, &additions).unwrap(),
+            (0, 2)
+        );
+        staged.commit_unsealed_for_test().unwrap();
+        let restored = read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
+            .unwrap()
+            .remove(0);
+        assert_eq!(restored, before);
+    }
+
+    #[test]
+    fn invalid_membership_rejects_mutation_without_rewriting_authority() {
+        for invalid in [Some(u32::MAX), Some(1 << 31), None] {
+            let dir = TempDir::new().unwrap();
+            let node = new_v7();
+            let mut writer =
+                GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+            writer
+                .create_node(node, EntityTypeId::ontology(TypeId(0)).unwrap())
+                .unwrap();
+            writer.flush().unwrap();
+            let path = node_parquet_files(dir.path()).unwrap().remove(0);
+            let batch = crate::read_nodes(dir.path()).unwrap().remove(0);
+            let labels = ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>([
+                Some(vec![invalid]),
+            ]);
+            let index = batch.schema().index_of("type_ids").unwrap();
+            let mut fields = batch.schema().fields().to_vec();
+            fields[index] = std::sync::Arc::new(arrow::datatypes::Field::new(
+                "type_ids",
+                labels.data_type().clone(),
+                false,
+            ));
+            let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(fields));
+            let mut columns = batch.columns().to_vec();
+            columns[index] = std::sync::Arc::new(labels);
+            let invalid_batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+            let mut parquet = parquet::arrow::ArrowWriter::try_new(
+                std::fs::File::create(&path).unwrap(),
+                schema,
+                None,
+            )
+            .unwrap();
+            parquet.write(&invalid_batch).unwrap();
+            parquet.close().unwrap();
+            let original_bytes = std::fs::read(&path).unwrap();
+            let mut staged = RewriteBatch::new();
+            let additions = HashMap::from([(
+                to_bytes(&node),
+                HashSet::from([EntityTypeId::ontology(TypeId(1)).unwrap()]),
+            )]);
+            assert!(stage_add_node_labels(&mut staged, dir.path(), &additions).is_err());
+            drop(staged);
+            assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        }
+    }
+
+    #[test]
     fn mutate_labels_rewrites_only_matching_node_shard() {
         let dir = TempDir::new().unwrap();
         let (legacy, sharded) = (new_v7(), new_v7());
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        first.create_node(legacy, TypeId(1)).unwrap();
+        first
+            .create_node(legacy, EntityTypeId::ontology(TypeId(1)).unwrap())
+            .unwrap();
         first.flush().unwrap();
         let mut second =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
-        second.create_node(sharded, TypeId(1)).unwrap();
+        second
+            .create_node(sharded, EntityTypeId::ontology(TypeId(1)).unwrap())
+            .unwrap();
         second.flush().unwrap();
-        let additions = HashMap::from([(to_bytes(&sharded), HashSet::from([2]))]);
-        let removals: HashMap<[u8; 16], HashSet<u32>> = HashMap::new();
+        let additions = HashMap::from([(
+            to_bytes(&sharded),
+            HashSet::from([EntityTypeId::ontology(TypeId(2)).unwrap()]),
+        )]);
+        let removals: HashMap<[u8; 16], HashSet<EntityTypeId>> = HashMap::new();
         let mut staged = RewriteBatch::new();
         assert_eq!(
             stage_mutate_node_labels(&mut staged, dir.path(), &additions, &removals).unwrap(),
@@ -972,11 +1116,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (legacy, sharded) = (new_v7(), new_v7());
         let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        first.create_node(legacy, TypeId(0)).unwrap();
+        first
+            .create_node(legacy, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         first.flush().unwrap();
         let mut second =
             GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
-        second.create_node(sharded, TypeId(0)).unwrap();
+        second
+            .create_node(sharded, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         second.flush().unwrap();
         assert_eq!(
             delete_nodes(dir.path(), &HashSet::from([to_bytes(&sharded)])).unwrap(),
@@ -991,8 +1139,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (a, b) = (new_v7(), new_v7());
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(b, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         w.set_properties(
             &a,
             None,
@@ -1146,9 +1296,12 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let e_ab = new_v7();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
-        w.create_node(a, TypeId(0)).unwrap();
-        w.create_node(b, TypeId(0)).unwrap();
-        w.create_node(c, TypeId(0)).unwrap();
+        w.create_node(a, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(b, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
+        w.create_node(c, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
         w.create_edge(e_ab, "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "KNOWS", &b, &c).unwrap();
         w.set_properties(

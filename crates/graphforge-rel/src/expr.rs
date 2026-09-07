@@ -18,10 +18,10 @@ use datafusion::logical_expr::{
 };
 use datafusion::scalar::ScalarValue;
 
-use graphforge_core::PropId;
 use graphforge_ir::expr::{BinaryOpKind, IrExpr, IrLiteral, UnaryOpKind};
 use graphforge_ir::{ExprArena, ExprId, VarId};
 use graphforge_ontology::OntologyHandle;
+use graphforge_value::PropertyId;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -125,7 +125,7 @@ pub struct ExprLowerer<'a> {
     /// Reverse map `PropId.0` → property column name. Built from the ontology
     /// and/or the runtime catalog. Falls back to `"prop_<id>"` for any `PropId`
     /// not present (e.g. a strict-mode unresolved property).
-    prop_names: HashMap<u32, String>,
+    prop_names: HashMap<PropertyId, String>,
     /// `VarId.0` → node shape, for materializing a bare `RETURN n` as a whole
     /// node value (#785). Empty unless the plan projects a node var by value.
     node_shapes: HashMap<u32, NodeShape>,
@@ -133,12 +133,12 @@ pub struct ExprLowerer<'a> {
     /// ontology and runtime catalog. Used to render a real label for an
     /// *unlabelled* node value (`MATCH (n) RETURN n`) by switching on the node's
     /// stored `type_id` (#889). Empty in schema-only/no-catalog lowering.
-    type_id_to_entity_name: HashMap<u32, String>,
+    type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     /// Forward map of entity-type (node label) name to `TypeId.0`. Derived once
     /// from `type_id_to_entity_name` so a literal `'<label>' IN labels(node)` can
     /// lower directly to topology membership without rebuilding the complete
     /// string label list for every pattern predicate.
-    entity_name_to_type_id: HashMap<String, u32>,
+    entity_name_to_type_id: HashMap<String, graphforge_value::EntityTypeId>,
     /// Whether `node_shapes`' property lists are AUTHORITATIVE — i.e. read from a
     /// real backing dataset, so an absent property name truly means the node lacks
     /// it (→ Cypher `null`). False for schema-only / explain lowering (no dataset),
@@ -215,7 +215,7 @@ impl<'a> ExprLowerer<'a> {
     pub fn with_prop_names(
         arena: &'a ExprArena,
         var_map: &'a VarMap,
-        prop_names: HashMap<u32, String>,
+        prop_names: HashMap<PropertyId, String>,
     ) -> Self {
         Self {
             arena,
@@ -242,9 +242,9 @@ impl<'a> ExprLowerer<'a> {
     pub fn with_prop_names_and_nodes(
         arena: &'a ExprArena,
         var_map: &'a VarMap,
-        prop_names: HashMap<u32, String>,
+        prop_names: HashMap<PropertyId, String>,
         node_shapes: HashMap<u32, NodeShape>,
-        type_id_to_entity_name: HashMap<u32, String>,
+        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
         props_authoritative: bool,
     ) -> Self {
         let entity_name_to_type_id = type_id_to_entity_name
@@ -348,7 +348,7 @@ impl<'a> ExprLowerer<'a> {
             }
 
             IrExpr::PropertyAccess { base, prop } => {
-                if let Some(prop_name) = self.prop_names.get(&prop.0).cloned()
+                if let Some(prop_name) = self.prop_names.get(prop).cloned()
                     && let Some(out) = self.lower_static_value_access(*base, &prop_name)?
                 {
                     return Ok(out);
@@ -373,9 +373,9 @@ impl<'a> ExprLowerer<'a> {
                 {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     let is_topology = graphforge_storage::TOPOLOGY_NODES_SCHEMA
                         .field_with_name(&prop_name)
                         .is_ok();
@@ -391,7 +391,7 @@ impl<'a> ExprLowerer<'a> {
                 // accessors follow once those types are typed.)
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && crate::temporal::is_date_accessor(prop_name)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
@@ -404,7 +404,7 @@ impl<'a> ExprLowerer<'a> {
                 // `d` is a typed `duration` struct column.
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && crate::temporal::is_duration_accessor(prop_name)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
@@ -421,7 +421,7 @@ impl<'a> ExprLowerer<'a> {
                 // `Int64`; the UDFs inspect the column's Arrow type to pick the field.
                 if let IrExpr::VarRef(v) = self.arena.get(*base)
                     && let Some(col_name) = self.var_map.get(*v)
-                    && let Some(prop_name) = self.prop_names.get(&prop.0)
+                    && let Some(prop_name) = self.prop_names.get(prop)
                     && let Some(schema) = self.input_schema.as_ref()
                     && let Ok(field) = schema.field_with_unqualified_name(col_name)
                     && temporal_accessor_valid(field.data_type(), prop_name)
@@ -448,9 +448,9 @@ impl<'a> ExprLowerer<'a> {
                 {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     return Ok(datafusion::functions::core::expr_fn::get_field(
                         col_literal(col_name),
                         prop_name,
@@ -468,9 +468,9 @@ impl<'a> ExprLowerer<'a> {
                 if self.is_known_non_value_access_container(&base_expr) {
                     let prop_name = self
                         .prop_names
-                        .get(&prop.0)
+                        .get(prop)
                         .cloned()
-                        .unwrap_or_else(|| format!("prop_{}", prop.0));
+                        .unwrap_or_else(|| format!("prop_{prop}"));
                     return Err(LoweringError::InvalidType(format!(
                         "property access `{prop_name}` requires a map or graph element"
                     )));
@@ -3110,7 +3110,7 @@ impl<'a> ExprLowerer<'a> {
             .ok_or(LoweringError::UnboundVar(var_id.0))?;
         Ok(Some(array_has(
             col(format!("{base}.type_ids")),
-            lit(*type_id),
+            lit(type_id.encode()),
         )))
     }
 
@@ -3168,12 +3168,12 @@ impl<'a> ExprLowerer<'a> {
     /// If `base` resolved to a plain `col("a")`, the property column is
     /// `col("a.prop_name")`.  Falls back to `"prop_<id>"` for runtime-catalog
     /// properties not present in the ontology.
-    fn resolve_prop_col(&self, base_expr: DfExpr, prop: PropId) -> DfExpr {
+    fn resolve_prop_col(&self, base_expr: DfExpr, prop: PropertyId) -> DfExpr {
         let prop_name = self
             .prop_names
-            .get(&prop.0)
+            .get(&prop)
             .cloned()
-            .unwrap_or_else(|| format!("prop_{}", prop.0));
+            .unwrap_or_else(|| format!("prop_{prop}"));
 
         // If the base is a plain column, compose a dotted column name — UNLESS it
         // is a synthetic quantifier/comprehension element column (#1004) at any
@@ -3220,12 +3220,16 @@ impl<'a> ExprLowerer<'a> {
                 fields.push(f.as_ref().clone().with_nullable(true));
             }
         }
-        let mut labels_by_type: Vec<(u32, String)> = self
+        let mut labels_by_type: Vec<(graphforge_value::EntityTypeId, String)> = self
             .type_id_to_entity_name
             .iter()
             .map(|(id, name)| (*id, name.clone()))
             .collect();
-        labels_by_type.sort();
+        labels_by_type.sort_by(|(left, left_name), (right, right_name)| {
+            left.encode()
+                .cmp(&right.encode())
+                .then_with(|| left_name.cmp(right_name))
+        });
         Some(PathNodeHydration {
             dir: dir.clone(),
             labels_by_type,
@@ -3270,7 +3274,7 @@ pub(crate) fn qualified_col(relation: &str, name: &str) -> DfExpr {
 /// [`with_prop_names`](ExprLowerer::with_prop_names). This ontology-only
 /// constructor path has no runtime catalog, so it returns an empty map and
 /// property accesses fall back to `"prop_<id>"`.
-fn build_prop_names(_ontology: Option<&OntologyHandle>) -> HashMap<u32, String> {
+fn build_prop_names(_ontology: Option<&OntologyHandle>) -> HashMap<PropertyId, String> {
     HashMap::new()
 }
 
@@ -5461,7 +5465,11 @@ fn null_utf8_list() -> DfExpr {
     null_unless(lit(false), empty_utf8_list())
 }
 
-fn node_labels_list(base: &str, label: Option<&str>, type_id_map: &HashMap<u32, String>) -> DfExpr {
+fn node_labels_list(
+    base: &str,
+    label: Option<&str>,
+    type_id_map: &HashMap<graphforge_value::EntityTypeId, String>,
+) -> DfExpr {
     use datafusion::functions_nested::expr_fn::{array_concat, array_has, make_array};
 
     if type_id_map.is_empty() {
@@ -5470,7 +5478,7 @@ fn node_labels_list(base: &str, label: Option<&str>, type_id_map: &HashMap<u32, 
 
     let mut entries: Vec<(u32, &str)> = type_id_map
         .iter()
-        .map(|(id, name)| (*id, name.as_str()))
+        .map(|(id, name)| (id.encode(), name.as_str()))
         .collect();
     entries.sort_by_key(|(id, _)| *id);
     let labels = col(format!("{base}.type_ids"));
@@ -5496,7 +5504,7 @@ fn node_labels_list(base: &str, label: Option<&str>, type_id_map: &HashMap<u32, 
 fn node_value_struct(
     base: &str,
     label: Option<&str>,
-    type_id_map: &HashMap<u32, String>,
+    type_id_map: &HashMap<graphforge_value::EntityTypeId, String>,
     prop_names: &[String],
 ) -> DfExpr {
     let labels = node_labels_list(base, label, type_id_map);
@@ -12099,7 +12107,7 @@ struct PathNodeHydration {
     /// The project directory the invoke reads node/property files from.
     dir: std::path::PathBuf,
     /// `type_id → label` (ontology + runtime catalog), sorted by id.
-    labels_by_type: Vec<(u32, String)>,
+    labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
     /// The `properties/<stem>.parquet` stems whose fields form the union,
     /// sorted — the invoke coalesces each node's values across them.
     prop_stems: Vec<String>,
@@ -12344,7 +12352,9 @@ fn gather_path_node_labels(
     h: &PathNodeHydration,
     unique: &[[u8; 16]],
     batch_size: usize,
-) -> datafusion::error::Result<std::collections::HashMap<[u8; 16], Vec<u32>>> {
+) -> datafusion::error::Result<
+    std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
+> {
     use datafusion::arrow::array::{Array, ListArray, UInt32Array};
     use datafusion::error::DataFusionError;
     use std::collections::{HashMap, HashSet};
@@ -12354,7 +12364,8 @@ fn gather_path_node_labels(
         return Ok(HashMap::new());
     }
     let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
-    let mut label_ids_of: HashMap<[u8; 16], Vec<u32>> = HashMap::with_capacity(unique.len());
+    let mut label_ids_of: HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>> =
+        HashMap::with_capacity(unique.len());
 
     graphforge_storage::visit_nodes_batched(&h.dir, batch_size, |b| {
         check_path_hydration_cancel()?;
@@ -12386,7 +12397,15 @@ fn gather_path_node_labels(
             let mut ids = Vec::with_capacity(values.len());
             for i in 0..values.len() {
                 if !values.is_null(i) {
-                    ids.push(values.value(i));
+                    ids.push(
+                        graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
+                            |error| {
+                                exec_err(format!(
+                                    "cypher_path_nodes: invalid membership identity: {error}"
+                                ))
+                            },
+                        )?,
+                    );
                 }
             }
             label_ids_of.insert(u, ids);
@@ -12406,7 +12425,7 @@ fn gather_path_node_labels(
 fn expand_path_node_labels(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
-    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<u32>>,
+    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
 ) -> datafusion::arrow::array::ArrayRef {
     use datafusion::arrow::array::{ListBuilder, StringBuilder};
 
@@ -12414,7 +12433,10 @@ fn expand_path_node_labels(
     for u in flat {
         if let Some(ids) = label_ids_of.get(u) {
             for id in ids {
-                if let Ok(i) = h.labels_by_type.binary_search_by_key(id, |(tid, _)| *tid) {
+                if let Ok(i) = h
+                    .labels_by_type
+                    .binary_search_by_key(&id.encode(), |(tid, _)| tid.encode())
+                {
                     labels_b.values().append_value(&h.labels_by_type[i].1);
                 }
             }
@@ -12723,9 +12745,9 @@ mod path_hydration_stats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graphforge_core::PropId;
     use graphforge_ir::expr::{BinaryOpKind, IrExpr, IrLiteral, UnaryOpKind};
     use graphforge_ir::{ExprArena, VarId};
+    use graphforge_value::PropertyId;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static VOLATILE_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -13884,7 +13906,10 @@ mod tests {
         // (#1024) — the shape `render_node_struct` and `x.<prop>` need.
         let hydrated = CypherPathNodes::with_hydration(PathNodeHydration {
             dir: std::path::PathBuf::from("/nonexistent"),
-            labels_by_type: vec![(0, "A".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(0).unwrap(),
+                "A".to_owned(),
+            )],
             prop_stems: vec!["_untyped".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -13917,12 +13942,15 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "__gf_elem");
         let mut prop_names = HashMap::new();
-        prop_names.insert(0u32, "a".to_owned());
+        prop_names.insert(
+            PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
+            "a".to_owned(),
+        );
 
         // Without the marker: node-property dotted-column form — a QUALIFIED
         // column `__gf_elem.a` (relation `__gf_elem`, column `a`), which is
@@ -13971,12 +13999,15 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "input");
         let mut prop_names = HashMap::new();
-        prop_names.insert(0u32, "list".to_owned());
+        prop_names.insert(
+            PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
+            "list".to_owned(),
+        );
 
         let out = ExprLowerer::with_prop_names(&arena, &vm, prop_names)
             .with_input_schema(df_schema)
@@ -14617,7 +14648,10 @@ mod tests {
             var_map,
             HashMap::new(),
             HashMap::from([(0, NodeShape { prop_names: vec![] })]),
-            HashMap::from([(7, "Known".to_owned())]),
+            HashMap::from([(
+                graphforge_value::EntityTypeId::decode(7).unwrap(),
+                "Known".to_owned(),
+            )]),
             false,
         )
     }
@@ -15494,8 +15528,8 @@ mod tests {
         let _guard = PathHydrationTestGuard::arm();
         use datafusion::arrow::array::FixedSizeBinaryArray;
         use datafusion::arrow::datatypes::Field;
+        use graphforge_core::OntologyMode;
         use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_core::{OntologyMode, TypeId};
         use graphforge_storage::GraphWriter;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -15503,12 +15537,25 @@ mod tests {
         let multi = new_v7();
         let single = new_v7();
         let unknown_only = new_v7();
-        w.create_node_with_labels(multi, &[TypeId(1), TypeId(3)])
-            .unwrap();
-        w.create_node_with_labels(single, &[TypeId(2)]).unwrap();
+        w.create_node_with_labels(
+            multi,
+            &[
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+                graphforge_value::EntityTypeId::decode(3).unwrap(),
+            ],
+        )
+        .unwrap();
+        w.create_node_with_labels(
+            single,
+            &[graphforge_value::EntityTypeId::decode(2).unwrap()],
+        )
+        .unwrap();
         // type_ids present but absent from the baked catalog → empty label list.
-        w.create_node_with_labels(unknown_only, &[TypeId(99)])
-            .unwrap();
+        w.create_node_with_labels(
+            unknown_only,
+            &[graphforge_value::EntityTypeId::decode(99).unwrap()],
+        )
+        .unwrap();
         w.flush().unwrap();
 
         let multi_bytes = to_bytes(&multi);
@@ -15519,9 +15566,18 @@ mod tests {
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
             labels_by_type: vec![
-                (1, "Person".to_owned()),
-                (2, "Company".to_owned()),
-                (3, "Employee".to_owned()),
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(3).unwrap(),
+                    "Employee".to_owned(),
+                ),
             ],
             prop_stems: vec![],
             fields: vec![
@@ -15600,9 +15656,18 @@ mod tests {
         let hydrate2 = PathNodeHydration {
             dir: dir.path().to_path_buf(),
             labels_by_type: vec![
-                (1, "Person".to_owned()),
-                (2, "Company".to_owned()),
-                (3, "Employee".to_owned()),
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(3).unwrap(),
+                    "Employee".to_owned(),
+                ),
             ],
             prop_stems: vec![],
             fields: vec![
@@ -15656,8 +15721,8 @@ mod tests {
 
         use datafusion::arrow::array::FixedSizeBinaryArray;
         use datafusion::arrow::datatypes::Field;
+        use graphforge_core::OntologyMode;
         use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_core::{OntologyMode, TypeId};
         use graphforge_ir::IrLiteral;
         use graphforge_storage::GraphWriter;
 
@@ -15665,8 +15730,16 @@ mod tests {
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
         let keep_a = new_v7();
         let keep_b = new_v7();
-        w.create_node_with_labels(keep_a, &[TypeId(1)]).unwrap();
-        w.create_node_with_labels(keep_b, &[TypeId(1)]).unwrap();
+        w.create_node_with_labels(
+            keep_a,
+            &[graphforge_value::EntityTypeId::decode(1).unwrap()],
+        )
+        .unwrap();
+        w.create_node_with_labels(
+            keep_b,
+            &[graphforge_value::EntityTypeId::decode(1).unwrap()],
+        )
+        .unwrap();
         w.set_properties(
             &keep_a,
             None,
@@ -15682,7 +15755,8 @@ mod tests {
         // Many irrelevant property rows after the selected pair.
         for i in 0..200 {
             let u = new_v7();
-            w.create_node_with_labels(u, &[TypeId(1)]).unwrap();
+            w.create_node_with_labels(u, &[graphforge_value::EntityTypeId::decode(1).unwrap()])
+                .unwrap();
             w.set_properties(
                 &u,
                 None,
@@ -15696,7 +15770,10 @@ mod tests {
         let b = to_bytes(&keep_b);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+                "Person".to_owned(),
+            )],
             prop_stems: vec!["_untyped".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -15812,8 +15889,8 @@ mod tests {
             FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, StructBuilder,
         };
         use datafusion::arrow::datatypes::Field;
+        use graphforge_core::OntologyMode;
         use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_core::{OntologyMode, TypeId};
         use graphforge_ir::IrLiteral;
         use graphforge_storage::GraphWriter;
 
@@ -15821,8 +15898,14 @@ mod tests {
         let keep = new_v7();
         {
             let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 0).unwrap();
-            w.create_node_with_labels(keep, &[TypeId(1), TypeId(2)])
-                .unwrap();
+            w.create_node_with_labels(
+                keep,
+                &[
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                ],
+            )
+            .unwrap();
             w.set_properties(
                 &keep,
                 Some("Company"),
@@ -15831,7 +15914,11 @@ mod tests {
             .unwrap();
             for i in 0..200 {
                 let filler = new_v7();
-                w.create_node_with_labels(filler, &[TypeId(2)]).unwrap();
+                w.create_node_with_labels(
+                    filler,
+                    &[graphforge_value::EntityTypeId::decode(2).unwrap()],
+                )
+                .unwrap();
                 w.set_properties(
                     &filler,
                     Some("Company"),
@@ -15847,7 +15934,11 @@ mod tests {
             .unwrap();
             for i in 0..200 {
                 let filler = new_v7();
-                w.create_node_with_labels(filler, &[TypeId(1)]).unwrap();
+                w.create_node_with_labels(
+                    filler,
+                    &[graphforge_value::EntityTypeId::decode(1).unwrap()],
+                )
+                .unwrap();
                 w.set_properties(
                     &filler,
                     Some("Person"),
@@ -15861,7 +15952,16 @@ mod tests {
         let bytes = to_bytes(&keep);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned()), (2, "Company".to_owned())],
+            labels_by_type: vec![
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+            ],
             prop_stems: vec!["Company".to_owned(), "Person".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -15965,22 +16065,30 @@ mod tests {
         let _guard = PathHydrationTestGuard::arm();
         use datafusion::arrow::array::FixedSizeBinaryArray;
         use datafusion::arrow::datatypes::Field;
+        use graphforge_core::OntologyMode;
         use graphforge_core::uuid::{new_v7, to_bytes};
-        use graphforge_core::{OntologyMode, TypeId};
         use graphforge_storage::GraphWriter;
 
         let dir = tempfile::TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
         let u = new_v7();
-        w.create_node_with_labels(u, &[TypeId(1)]).unwrap();
+        w.create_node_with_labels(u, &[graphforge_value::EntityTypeId::decode(1).unwrap()])
+            .unwrap();
         for _ in 0..32 {
-            w.create_node_with_labels(new_v7(), &[TypeId(1)]).unwrap();
+            w.create_node_with_labels(
+                new_v7(),
+                &[graphforge_value::EntityTypeId::decode(1).unwrap()],
+            )
+            .unwrap();
         }
         w.flush().unwrap();
         let bytes = to_bytes(&u);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+                "Person".to_owned(),
+            )],
             prop_stems: vec![],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -16080,7 +16188,7 @@ mod tests {
         let var = arena.push(IrExpr::VarRef(VarId(0)));
         let age = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: PropId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let one = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
         let id = arena.push(IrExpr::ListLiteral(vec![age, one]));

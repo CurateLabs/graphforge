@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use arrow::array::{Array, FixedSizeBinaryArray, ListArray, UInt32Array};
 use graphforge_core::uuid::Uuid;
 use graphforge_ir::IrLiteral;
+use graphforge_value::EntityTypeId;
 
 use super::{GfError, GraphForge, NodeSelector, PropValue};
 
@@ -50,7 +51,7 @@ impl GraphForge {
         validate_name("label", label)?;
         validate_name("property", property)?;
         let expected = selector_literal(value)?;
-        let Some(label_id) = self.label_id(label) else {
+        let Some(label_id) = self.label_id(label)? else {
             return Err(validation("node selector matched no nodes"));
         };
         let candidates = self.node_uuids(Some(label_id))?;
@@ -88,22 +89,25 @@ impl GraphForge {
         }
     }
 
-    fn label_id(&self, label: &str) -> Option<u32> {
-        self.ontology
+    fn label_id(&self, label: &str) -> Result<Option<EntityTypeId>, GfError> {
+        if let Some(id) = self
+            .ontology
             .as_ref()
-            .and_then(|ontology| ontology.entity_type_id(label).map(|id| id.0))
-            .or_else(|| {
-                self.runtime_catalog
-                    .lock()
-                    .expect("runtime catalog poisoned")
-                    .entity_type_names_with_ids()
-                    .find_map(|(id, name)| {
-                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id).0)
-                    })
-            })
+            .and_then(|ontology| ontology.entity_type_id(label))
+        {
+            return EntityTypeId::ontology(id)
+                .map(Some)
+                .map_err(|error| validation(error.to_string()));
+        }
+        Ok(self
+            .runtime_catalog
+            .lock()
+            .expect("runtime catalog poisoned")
+            .entity_type_names_with_ids()
+            .find_map(|(id, name)| (name == label).then_some(EntityTypeId::runtime(id))))
     }
 
-    fn node_uuids(&self, label_id: Option<u32>) -> Result<HashSet<Uuid>, GfError> {
+    fn node_uuids(&self, label_id: Option<EntityTypeId>) -> Result<HashSet<Uuid>, GfError> {
         let mut uuids = HashSet::new();
         let mut scanned = 0usize;
         for batch in graphforge_storage::read_nodes(&self.dir)
@@ -132,8 +136,14 @@ impl GraphForge {
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| validation("topology has malformed type_ids data"))?;
-                let selected =
-                    label_id.is_none_or(|wanted| label_values.values().contains(&wanted));
+                let mut selected = label_id.is_none();
+                for value in label_values {
+                    let encoded =
+                        value.ok_or_else(|| validation("topology contains null label identity"))?;
+                    let identity = EntityTypeId::decode(encoded)
+                        .map_err(|error| validation(error.to_string()))?;
+                    selected |= label_id == Some(identity);
+                }
                 if selected && !uuids.insert(uuid) {
                     return Err(validation("topology contains duplicate node UUIDs"));
                 }

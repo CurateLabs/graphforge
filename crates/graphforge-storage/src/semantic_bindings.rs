@@ -486,9 +486,7 @@ impl SemanticStorageBindings {
                 id = id
                     .checked_add(1)
                     .ok_or_else(|| corrupt("migration id space exhausted"))?;
-                if id & ((1 << 30) | (1 << 31)) != 0 {
-                    return Err(corrupt("migration id space reached reserved runtime tags"));
-                }
+                checked_semantic_storage_id(id)?;
                 if ids.insert(id) {
                     break;
                 }
@@ -793,7 +791,7 @@ impl SemanticStorageBindings {
                 )
             })
             .unwrap_or_default();
-        let mut allocate = |key: &(SemanticRouteKind, QualifiedSymbol, Option<QualifiedSymbol>)| {
+        let mut allocate = |key: &(SemanticRouteKind, QualifiedSymbol, Option<QualifiedSymbol>)| -> Result<u32, GfError> {
             let key = lineage_key(key.0, &key.1, key.2.as_ref());
             if let Some(id) = carried.get(&key) {
                 return Ok(*id);
@@ -805,11 +803,7 @@ impl SemanticStorageBindings {
                 next = next
                     .checked_add(1)
                     .ok_or_else(|| corrupt("semantic storage id space is exhausted"))?;
-                if next & ((1 << 30) | (1 << 31)) != 0 {
-                    return Err(corrupt(
-                        "semantic storage id space reached reserved runtime tags",
-                    ));
-                }
+                checked_semantic_storage_id(next)?;
                 if ids.insert(next) {
                     return Ok(next);
                 }
@@ -992,11 +986,7 @@ impl SemanticStorageBindings {
                     return Err(corrupt("property binding is not declared by its owner"));
                 }
             }
-            if binding.storage_id & ((1 << 30) | (1 << 31)) != 0 {
-                return Err(corrupt(
-                    "runtime-tagged or reserved storage id is forbidden",
-                ));
-            }
+            checked_semantic_storage_id(binding.storage_id)?;
         }
         let expected_count = composition
             .modules
@@ -1059,19 +1049,29 @@ impl SemanticStorageBindings {
                             .ok_or_else(|| {
                                 corrupt("semantic topology type_ids has wrong element type")
                             })?;
-                    let primary_id = primary.value(row);
-                    if !values.values().contains(&primary_id) {
-                        return Err(corrupt(
-                            "semantic topology scalar type_id is absent from normalized type_ids",
-                        ));
-                    }
-                    for id in values.values() {
-                        let runtime = id & ((1 << 30) | (1 << 31)) != 0;
-                        if !runtime && !entity_ids.contains(id) {
+                    let validate_entity = |id: graphforge_value::EntityTypeId| {
+                        if let Some(declared) = id.tagged().ontology_id()
+                            && !entity_ids.contains(&declared.0)
+                        {
                             return Err(corrupt(
                                 "semantic topology contains an unbound ontology entity id",
                             ));
                         }
+                        Ok(())
+                    };
+                    // The primary is immutable property-routing authority, not
+                    // a requirement on the node's current label membership.
+                    let primary = graphforge_value::PrimaryEntityTypeId::decode(primary.value(row))
+                        .map_err(|error| corrupt(&error.to_string()))?;
+                    if let Some(id) = primary.label() {
+                        validate_entity(id)?;
+                    }
+                    for raw in values {
+                        let raw =
+                            raw.ok_or_else(|| corrupt("semantic topology membership is null"))?;
+                        let id = graphforge_value::EntityTypeId::decode(raw)
+                            .map_err(|error| corrupt(&error.to_string()))?;
+                        validate_entity(id)?;
                     }
                 }
             }
@@ -1195,6 +1195,7 @@ impl SemanticStorageBindings {
         let mut ids = BTreeSet::new();
         let mut routes = BTreeMap::new();
         for binding in &self.bindings {
+            checked_semantic_storage_id(binding.storage_id)?;
             if binding.symbol.local_id.len() > MAX_SEMANTIC_STRING_BYTES
                 || binding.symbol.module.ontology_id.len() > MAX_SEMANTIC_STRING_BYTES
                 || binding.symbol.module.authored_version.len() > MAX_SEMANTIC_STRING_BYTES
@@ -2017,6 +2018,12 @@ fn qualified(
     }
 }
 
+fn checked_semantic_storage_id(id: u32) -> Result<(), GfError> {
+    graphforge_value::TaggedTypeId::ontology(graphforge_core::TypeId(id))
+        .map(|_| ())
+        .map_err(|error| corrupt(&format!("invalid semantic storage id: {error}")))
+}
+
 fn binding(
     route_kind: SemanticRouteKind,
     storage_id: u32,
@@ -2275,6 +2282,198 @@ mod tests {
         );
     }
     #[test]
+    fn semantic_topology_preserves_absent_primary_after_label_addition() {
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let node = graphforge_core::uuid::new_v7();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer.create_node_with_labels(node, &[]).unwrap();
+        let label =
+            graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(entity.storage_id))
+                .unwrap();
+        assert_eq!(writer.add_pending_node_labels(node.as_bytes(), &[label]), 1);
+        writer.flush().unwrap();
+        let paths = crate::catalog::topology_node_files(dir.path()).unwrap();
+        let before: Vec<_> = paths
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        bindings.validate_physical_routes(dir.path()).unwrap();
+        assert_eq!(
+            paths
+                .iter()
+                .map(std::fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn semantic_topology_preserves_known_primary_after_label_removal() {
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let label =
+            graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(entity.storage_id))
+                .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let node = graphforge_core::uuid::new_v7();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer.create_node(node, label).unwrap();
+        assert_eq!(
+            writer.remove_pending_node_labels(node.as_bytes(), &[label]),
+            1
+        );
+        writer.flush().unwrap();
+        let paths = crate::catalog::topology_node_files(dir.path()).unwrap();
+        let before: Vec<_> = paths
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        bindings.validate_physical_routes(dir.path()).unwrap();
+        let nodes = crate::read_nodes(dir.path()).unwrap();
+        let primary = nodes[0]
+            .column_by_name("type_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .unwrap();
+        assert_eq!(primary.value(0), label.encode());
+        assert_eq!(
+            paths
+                .iter()
+                .map(std::fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn semantic_storage_id_codec_checks_canonical_decode_boundaries() {
+        let make = |storage_id| {
+            let symbol = symbol("a", SymbolKind::Entity, "Person");
+            SemanticStorageBinding {
+                route_kind: SemanticRouteKind::Entity,
+                storage_id,
+                route: SemanticStorageBindings::opaque_route(
+                    SemanticRouteKind::Entity,
+                    &symbol,
+                    None,
+                ),
+                symbol,
+                owner: None,
+            }
+        };
+        let valid = SemanticStorageBindings::new(
+            "1".repeat(64),
+            vec![make(graphforge_value::TYPE_LOCAL_ID_LIMIT - 1)],
+        )
+        .unwrap();
+        let bytes = valid.to_canonical_json().unwrap();
+        assert_eq!(
+            SemanticStorageBindings::from_canonical_json(&bytes)
+                .unwrap()
+                .to_canonical_json()
+                .unwrap(),
+            bytes
+        );
+        for invalid in [graphforge_value::TYPE_LOCAL_ID_LIMIT, 1 << 31, u32::MAX] {
+            assert!(SemanticStorageBindings::new("1".repeat(64), vec![make(invalid)]).is_err());
+            let mut wire = serde_json::to_value(&valid).unwrap();
+            wire["bindings"][0]["storage_id"] = serde_json::json!(invalid);
+            assert!(
+                SemanticStorageBindings::from_canonical_json(&serde_json::to_vec(&wire).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_topology_rejects_invalid_memberships_without_rewrite() {
+        use arrow::array::{Array, ListArray, UInt32Array};
+        use arrow::datatypes::DataType;
+        use std::sync::Arc;
+        let composition = compiled("1");
+        let bindings = SemanticStorageBindings::project(&composition, None).unwrap();
+        let entity = bindings
+            .bindings
+            .iter()
+            .find(|binding| binding.route_kind == SemanticRouteKind::Entity)
+            .unwrap();
+        let label =
+            graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(entity.storage_id))
+                .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer
+            .create_node(graphforge_core::uuid::new_v7(), label)
+            .unwrap();
+        writer.flush().unwrap();
+        let path = crate::catalog::topology_node_files(dir.path())
+            .unwrap()
+            .remove(0);
+        let batch = crate::read_nodes(dir.path()).unwrap().remove(0);
+        let column = batch.schema().index_of("type_ids").unwrap();
+        let original = batch
+            .column(column)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let DataType::List(field) = original.data_type() else {
+            panic!("list membership")
+        };
+        for invalid in [1 << 31, u32::MAX, entity.storage_id + 999] {
+            let mut columns = batch.columns().to_vec();
+            columns[column] = Arc::new(ListArray::new(
+                field.clone(),
+                original.offsets().clone(),
+                Arc::new(UInt32Array::from(vec![invalid])),
+                None,
+            ));
+            let malformed =
+                arrow::record_batch::RecordBatch::try_new(batch.schema(), columns).unwrap();
+            let mut output = parquet::arrow::ArrowWriter::try_new(
+                File::create(&path).unwrap(),
+                malformed.schema(),
+                None,
+            )
+            .unwrap();
+            output.write(&malformed).unwrap();
+            output.close().unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert!(
+                bindings.validate_physical_routes(dir.path()).is_err(),
+                "must reject membership {invalid}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "rejection must not rewrite topology"
+            );
+        }
+    }
+
+    #[test]
     fn corruption_and_limits_fail_before_acceptance() {
         let symbol = symbol("a", SymbolKind::Relation, "KNOWS");
         let mut binding = SemanticStorageBinding {
@@ -2452,7 +2651,13 @@ mod tests {
                 .with_semantic_composition_fingerprint(Some(old.fingerprint.clone()));
         let node = graphforge_core::uuid::new_v7();
         writer
-            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                node,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -2608,7 +2813,10 @@ mod tests {
         writer
             .create_node(
                 graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(entity.storage_id),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();
@@ -2743,10 +2951,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(1))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(1))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer
@@ -2775,10 +2989,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(1))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(1))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer
@@ -2822,11 +3042,14 @@ mod tests {
             writer
                 .create_node(
                     graphforge_core::uuid::new_v7(),
-                    graphforge_core::TypeId(if generation == 16 {
-                        entity.storage_id
-                    } else {
-                        999
-                    }),
+                    graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                        if generation == 16 {
+                            entity.storage_id
+                        } else {
+                            999
+                        },
+                    ))
+                    .unwrap(),
                 )
                 .unwrap();
             writer.flush().unwrap();
@@ -2884,7 +3107,11 @@ mod tests {
                     .unwrap();
             for _ in 0..rows {
                 writer
-                    .create_node(graphforge_core::uuid::new_v7(), graphforge_core::TypeId(0))
+                    .create_node(
+                        graphforge_core::uuid::new_v7(),
+                        graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0))
+                            .unwrap(),
+                    )
                     .unwrap();
             }
             writer.flush().unwrap();
@@ -2957,7 +3184,10 @@ mod tests {
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
                 .unwrap();
         writer
-            .create_node(graphforge_core::uuid::new_v7(), graphforge_core::TypeId(1))
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer.flush().unwrap();
         let path = crate::catalog::topology_node_files(dir.path())
@@ -2989,10 +3219,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(0))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(0))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
@@ -3048,10 +3284,22 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -3111,7 +3359,10 @@ mod tests {
         writer
             .create_node(
                 graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(entity.storage_id),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();
@@ -3182,7 +3433,13 @@ mod tests {
                 .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
         let node = graphforge_core::uuid::new_v7();
         writer
-            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                node,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(

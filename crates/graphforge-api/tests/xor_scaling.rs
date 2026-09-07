@@ -62,6 +62,7 @@ fn deterministic_work(plan: &GraphPlan) -> Work {
         })
         .count();
     let logical = graphforge_rel::GraphPlanLowerer::new(None, None)
+        .unwrap()
         .lower_plan(plan)
         .expect("XOR benchmark query lowers");
     let mut logical_xor_nodes = 0;

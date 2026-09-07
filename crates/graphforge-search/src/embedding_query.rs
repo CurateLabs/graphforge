@@ -27,7 +27,7 @@ pub struct EmbeddingGenerationQuery<'a> {
     /// Freshness-checked complete generation selected by the caller.
     pub prepared: &'a PreparedEmbeddingRead,
     /// Local catalog identity used only for current graph membership projection.
-    pub label_id: u32,
+    pub label_id: graphforge_value::EntityTypeSelection,
     /// Raw or existing-node query form.
     pub query: EmbeddingVectorQuery<'a>,
     /// Maximum exact-cosine hits.
@@ -149,7 +149,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     use graphforge_core::uuid::Uuid;
-    use graphforge_ir::{OntologyMode, TypeId};
+    use graphforge_ir::OntologyMode;
     use graphforge_storage::{
         EmbeddingBatchRow, EmbeddingCompatibilityDescriptor, EmbeddingCompatibilityInput,
         EmbeddingDistance, EmbeddingMutationJournalLimits, EmbeddingNormalization,
@@ -196,7 +196,10 @@ mod tests {
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         for &value in values {
             writer
-                .create_node(Uuid::from_bytes(uuid(value)), TypeId(LABEL_ID))
+                .create_node(
+                    Uuid::from_bytes(uuid(value)),
+                    graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+                )
                 .unwrap();
         }
         writer.flush().unwrap();
@@ -277,7 +280,9 @@ mod tests {
     ) -> EmbeddingGenerationQuery<'a> {
         EmbeddingGenerationQuery {
             prepared,
-            label_id: LABEL_ID,
+            label_id: graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+            ),
             query,
             limit,
         }

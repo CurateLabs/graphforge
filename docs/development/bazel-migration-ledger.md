@@ -169,6 +169,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | `//crates/graphforge-storage:graph_writer` | `mapped` | #8 |
 | `graphforge-storage` | `io_stats` | `integration-test` | `crates/graphforge-storage/tests/io_stats.rs` | `//crates/graphforge-storage:io_stats` | `mapped` | #8 |
 | `graphforge-storage` | `property_overlay_scale` | `integration-test` | `crates/graphforge-storage/tests/property_overlay_scale.rs` | `//crates/graphforge-storage:property_overlay_scale` | `mapped` | #940; bounded property-overlay scale qualification |
+| `graphforge-value` | `graphforge_value` | `lib` | `crates/graphforge-value/src/lib.rs` | `//crates/graphforge-value:graphforge_value` | `mapped` | #1011; unit tests `//crates/graphforge-value:graphforge_value_test` |
 
 ## Retained-tool exceptions
 

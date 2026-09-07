@@ -476,10 +476,16 @@ mod tests {
         let nodes = [uuid(1), uuid(2), uuid(3)];
         let edges = [uuid(11), uuid(12)];
         let mut runtime_catalog = graphforge_ir::RuntimeCatalog::new();
-        let person = graphforge_ir::runtime_entity_type_id(runtime_catalog.intern_label("Person"));
-        runtime_catalog.intern_relation_type("KNOWS");
-        runtime_catalog.intern_property("value", Some("Person"));
-        runtime_catalog.intern_property("secret", Some("Person"));
+        let person = graphforge_value::EntityTypeId::runtime(
+            runtime_catalog.intern_label("Person").unwrap(),
+        );
+        runtime_catalog.intern_relation_type("KNOWS").unwrap();
+        runtime_catalog
+            .intern_property("value", Some("Person"))
+            .unwrap();
+        runtime_catalog
+            .intern_property("secret", Some("Person"))
+            .unwrap();
         let mut writer =
             GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
         for (index, node) in nodes.iter().enumerate() {

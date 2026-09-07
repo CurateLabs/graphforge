@@ -39,7 +39,7 @@ use datafusion::scalar::ScalarValue;
 use datafusion_datasource::memory::MemorySourceConfig;
 
 use graphforge_core::uuid::{Uuid, to_bytes};
-use graphforge_core::{GfError, OntologyMode, TypeId};
+use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::plan::GraphOp;
 use graphforge_ir::{
     CreatePattern, Direction, ExprArena, ExprId, IrExpr, MergeSetItem, SetMapItem, SetPropItem,
@@ -48,6 +48,7 @@ use graphforge_ir::{
 use graphforge_plan::{ResolvedEdgeSpec, ResolvedNodeSpec};
 use graphforge_rel::expr::scalar_to_ir_literal;
 use graphforge_rel::{GraphPlanLowerer, VarMap};
+use graphforge_value::EntityTypeId;
 
 use crate::{
     CreateConfig, DeleteCol, RemoveAccumulator, SetAccumulator, WriteCol, build_ref_by_var,
@@ -264,11 +265,11 @@ pub(crate) struct StatementWriteContext {
     pub deleted: HashSet<[u8; 16]>,
     pub set_acc: SetAccumulator,
     pub remove_acc: RemoveAccumulator,
-    pub label_additions: HashMap<[u8; 16], HashSet<u32>>,
-    pub label_removals: HashMap<[u8; 16], HashSet<u32>>,
+    pub label_additions: HashMap<[u8; 16], HashSet<EntityTypeId>>,
+    pub label_removals: HashMap<[u8; 16], HashSet<EntityTypeId>>,
     /// Label tokens already present before, or introduced during, this statement.
-    pub known_labels: HashSet<u32>,
-    pub removed_label_tokens: HashSet<u32>,
+    pub known_labels: HashSet<EntityTypeId>,
+    pub removed_label_tokens: HashSet<EntityTypeId>,
     /// Entity/property pairs SET at least once in this statement.
     pub property_sets: HashSet<(bool, [u8; 16], String)>,
     pub counters: WriteCounters,
@@ -300,7 +301,7 @@ impl StatementWriteContext {
             for row in 0..labels.len() {
                 let values = labels.value(row);
                 if let Some(values) = values.as_any().downcast_ref::<UInt32Array>() {
-                    known_labels.extend(values.values().iter().copied());
+                    known_labels.extend(decode_memberships(values)?);
                 }
             }
         }
@@ -368,7 +369,7 @@ impl StatementWriteContext {
         crate::MutationReceipt::from_accumulators(self.mutation_effects.clone())
     }
 
-    fn record_label_tokens(&mut self, labels: impl IntoIterator<Item = u32>) {
+    fn record_label_tokens(&mut self, labels: impl IntoIterator<Item = EntityTypeId>) {
         for label in labels {
             if self.removed_label_tokens.remove(&label) {
                 self.counters.labels_removed -= 1;
@@ -388,7 +389,7 @@ impl StatementWriteContext {
         }
     }
 
-    fn record_removed_label_tokens(&mut self, labels: impl IntoIterator<Item = u32>) {
+    fn record_removed_label_tokens(&mut self, labels: impl IntoIterator<Item = EntityTypeId>) {
         for label in labels {
             if self.removed_label_tokens.insert(label) {
                 self.counters.labels_removed += 1;
@@ -427,11 +428,11 @@ impl LabelRewrite {
         }
     }
 
-    fn apply(self, current: &mut Vec<u32>, labels: &[u32]) {
+    fn apply(self, current: &mut Vec<EntityTypeId>, labels: &[EntityTypeId]) {
         match self {
             Self::Add => {
                 current.extend_from_slice(labels);
-                current.sort_unstable();
+                current.sort_unstable_by_key(|id| id.encode());
                 current.dedup();
             }
             Self::Remove => current.retain(|label| !labels.contains(label)),
@@ -578,7 +579,9 @@ impl Frontier {
                 Arc::new(uuid_b.finish()) as ArrayRef,
                 Arc::new(UInt64Array::from(node_ids[range.clone()].to_vec())),
                 Arc::new(UInt32Array::from(type_ids[range.clone()].to_vec())),
-                singleton_label_sets(&type_ids[range]),
+                non_null_label_items(&ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                    type_ids[range].iter().map(|id| Some([Some(*id)])),
+                )),
             ])
         })
     }
@@ -588,7 +591,7 @@ impl Frontier {
         spec: &ResolvedNodeSpec,
         uuids: &[[u8; 16]],
         node_ids: &[u64],
-        type_ids: &[u32],
+        type_ids: &[graphforge_value::PrimaryEntityTypeId],
         computed_batches: &[crate::CreateComputed],
     ) -> Result<(), GfError> {
         let mut fields = vec![
@@ -624,7 +627,12 @@ impl Frontier {
             let mut cols: Vec<ArrayRef> = vec![
                 Arc::new(uuid_b.finish()) as ArrayRef,
                 Arc::new(UInt64Array::from(node_ids[range.clone()].to_vec())),
-                Arc::new(UInt32Array::from(type_ids[range].to_vec())),
+                Arc::new(UInt32Array::from(
+                    type_ids[range]
+                        .iter()
+                        .map(|id| id.encode())
+                        .collect::<Vec<_>>(),
+                )),
                 repeated_label_sets(&spec.label_ids, rows),
             ];
             for (_, lit) in &spec.properties {
@@ -700,7 +708,10 @@ impl Frontier {
                     selected.iter().map(|row| row.node_id).collect::<Vec<_>>(),
                 )),
                 Arc::new(UInt32Array::from(
-                    selected.iter().map(|row| row.type_id).collect::<Vec<_>>(),
+                    selected
+                        .iter()
+                        .map(|row| row.type_id.encode())
+                        .collect::<Vec<_>>(),
                 )),
                 repeated_row_label_sets(selected),
             ];
@@ -977,7 +988,7 @@ impl Frontier {
     fn add_node_labels(
         &mut self,
         var: VarId,
-        labels: &[u32],
+        labels: &[EntityTypeId],
         mask: &[bool],
     ) -> Result<(), GfError> {
         if mask.len() != self.num_rows() {
@@ -988,7 +999,7 @@ impl Frontier {
         self.rewrite_node_labels(var, labels, mask, LabelRewrite::Add)
     }
 
-    fn remove_node_labels(&mut self, var: VarId, labels: &[u32]) -> Result<(), GfError> {
+    fn remove_node_labels(&mut self, var: VarId, labels: &[EntityTypeId]) -> Result<(), GfError> {
         let mask = vec![true; self.num_rows()];
         self.rewrite_node_labels(var, labels, &mask, LabelRewrite::Remove)
     }
@@ -996,7 +1007,7 @@ impl Frontier {
     fn rewrite_node_labels(
         &mut self,
         var: VarId,
-        labels: &[u32],
+        labels: &[EntityTypeId],
         mask: &[bool],
         rewrite: LabelRewrite,
     ) -> Result<(), GfError> {
@@ -1020,11 +1031,16 @@ impl Frontier {
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut rewritten = values.values().to_vec();
+                let mut rewritten = decode_memberships(values)?;
                 if mask[offset + row] {
                     rewrite.apply(&mut rewritten, labels);
                 }
-                rows.push(Some(rewritten.into_iter().map(Some).collect::<Vec<_>>()));
+                rows.push(Some(
+                    rewritten
+                        .into_iter()
+                        .map(|id| Some(id.encode()))
+                        .collect::<Vec<_>>(),
+                ));
             }
             let nullable = ListArray::from_iter_primitive::<UInt32Type, _, _>(rows);
             let list = ListArray::new(
@@ -1094,9 +1110,12 @@ impl Frontier {
     }
 }
 
-pub(crate) fn repeated_label_sets(labels: &[u32], rows: usize) -> ArrayRef {
+pub(crate) fn repeated_label_sets(
+    labels: &[graphforge_value::EntityTypeId],
+    rows: usize,
+) -> ArrayRef {
     let array = ListArray::from_iter_primitive::<UInt32Type, _, _>(
-        (0..rows).map(|_| Some(labels.iter().copied().map(Some))),
+        (0..rows).map(|_| Some(labels.iter().map(|id| Some(id.encode())))),
     );
     non_null_label_items(&array)
 }
@@ -1104,15 +1123,7 @@ pub(crate) fn repeated_label_sets(labels: &[u32], rows: usize) -> ArrayRef {
 fn repeated_row_label_sets(rows: &[MatchedMergeNode]) -> ArrayRef {
     let array = ListArray::from_iter_primitive::<UInt32Type, _, _>(
         rows.iter()
-            .map(|row| Some(row.label_ids.iter().copied().map(Some))),
-    );
-    non_null_label_items(&array)
-}
-
-#[cfg(test)]
-fn singleton_label_sets(labels: &[u32]) -> ArrayRef {
-    let array = ListArray::from_iter_primitive::<UInt32Type, _, _>(
-        labels.iter().map(|label| Some([Some(*label)])),
+            .map(|row| Some(row.label_ids.iter().map(|id| Some(id.encode())))),
     );
     non_null_label_items(&array)
 }
@@ -1172,10 +1183,14 @@ fn computed_array(
 struct NodeIdentities {
     uuids: Vec<[u8; 16]>,
     node_ids: Vec<u64>,
-    type_ids: Vec<u32>,
+    type_ids: Vec<graphforge_value::PrimaryEntityTypeId>,
 }
 
-type NodeIdentitySlices<'a> = (&'a [[u8; 16]], &'a [u64], &'a [u32]);
+type NodeIdentitySlices<'a> = (
+    &'a [[u8; 16]],
+    &'a [u64],
+    &'a [graphforge_value::PrimaryEntityTypeId],
+);
 
 /// One created edge variable's per-row identities, in frontier row order.
 #[derive(Default)]
@@ -1196,7 +1211,13 @@ pub(crate) struct CreateRecorder {
 }
 
 impl CreateRecorder {
-    pub(crate) fn record_node(&mut self, var: u32, uuid: [u8; 16], node_id: u64, type_id: u32) {
+    pub(crate) fn record_node(
+        &mut self,
+        var: u32,
+        uuid: [u8; 16],
+        node_id: u64,
+        type_id: graphforge_value::PrimaryEntityTypeId,
+    ) {
         let n = self.nodes.entry(var).or_default();
         n.uuids.push(uuid);
         n.node_ids.push(node_id);
@@ -1332,7 +1353,7 @@ pub(crate) struct PhaseEnv<'a> {
     pub mode: OntologyMode,
     pub params: &'a HashMap<String, graphforge_ir::IrLiteral>,
     /// `TypeId.0 → entity name`, for property-file stem resolution.
-    pub type_map: HashMap<u32, String>,
+    pub type_map: HashMap<graphforge_value::EntityTypeId, String>,
 }
 
 fn bind_expr_params(
@@ -1728,12 +1749,7 @@ fn create_single_merge_node(
     ctx: &mut StatementWriteContext,
 ) -> Result<MatchedMergeNode, GfError> {
     let uuid = graphforge_core::uuid::new_v7();
-    let labels = spec
-        .label_ids
-        .iter()
-        .copied()
-        .map(TypeId)
-        .collect::<Vec<_>>();
+    let labels = spec.label_ids.clone();
     let node_id = ctx.writer.create_node_with_labels(uuid, &labels)?;
     ctx.writer.set_properties(
         &uuid,
@@ -1743,7 +1759,10 @@ fn create_single_merge_node(
     ctx.counters.nodes_created += 1;
     ctx.counters.properties_set += spec.properties.len() as u64;
     ctx.record_label_tokens(spec.label_ids.iter().copied());
-    let type_id = spec.label_ids.first().copied().unwrap_or(u32::MAX);
+    let type_id = spec.label_ids.first().copied().map_or_else(
+        graphforge_value::PrimaryEntityTypeId::absent,
+        graphforge_value::PrimaryEntityTypeId::known,
+    );
     Ok(MatchedMergeNode {
         uuid: to_bytes(&uuid),
         node_id,
@@ -1844,8 +1863,8 @@ fn positional_eval_expr(expr: DfExpr, schema: &DFSchema) -> Result<(DfExpr, DFSc
 struct MatchedMergeNode {
     uuid: [u8; 16],
     node_id: u64,
-    type_id: u32,
-    label_ids: Vec<u32>,
+    type_id: graphforge_value::PrimaryEntityTypeId,
+    label_ids: Vec<graphforge_value::EntityTypeId>,
     properties: HashMap<String, graphforge_ir::IrLiteral>,
 }
 
@@ -1897,15 +1916,33 @@ fn find_matching_merge_nodes(
             .and_then(|a| a.as_any().downcast_ref::<ListArray>())
             .ok_or_else(|| GfError::Storage("node topology missing type_ids".into()))?;
         for row in 0..batch.num_rows() {
+            if uuids.is_null(row)
+                || node_ids.is_null(row)
+                || primary.is_null(row)
+                || labels.is_null(row)
+            {
+                return Err(GfError::Storage(
+                    "node topology contains null identity data".into(),
+                ));
+            }
             let row_labels = labels.value(row);
             let row_labels = row_labels
                 .as_any()
                 .downcast_ref::<UInt32Array>()
                 .ok_or_else(|| GfError::Storage("node type_ids are not UInt32".into()))?;
+            let checked_labels = row_labels
+                .iter()
+                .map(|value| {
+                    let encoded =
+                        value.ok_or_else(|| GfError::Storage("null node membership".into()))?;
+                    graphforge_value::EntityTypeId::decode(encoded)
+                        .map_err(|error| GfError::Storage(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             if !spec
                 .label_ids
                 .iter()
-                .all(|wanted| row_labels.values().iter().any(|actual| actual == wanted))
+                .all(|wanted| checked_labels.contains(wanted))
             {
                 continue;
             }
@@ -1928,8 +1965,9 @@ fn find_matching_merge_nodes(
                 matches.push(MatchedMergeNode {
                     uuid,
                     node_id: node_ids.value(row),
-                    type_id: primary.value(row),
-                    label_ids: row_labels.values().to_vec(),
+                    type_id: graphforge_value::PrimaryEntityTypeId::decode(primary.value(row))
+                        .map_err(|error| GfError::Storage(error.to_string()))?,
+                    label_ids: checked_labels,
                     properties: props,
                 });
             }
@@ -2280,7 +2318,7 @@ fn run_merge_actions_masked(
             .df_schema
             .index_of_column_by_name(Some(&qualifier), "type_ids")
             .ok_or_else(|| GfError::Plan("MERGE label target has no type_ids".into()))?;
-        let label_ids = labels.iter().map(|label| label.0).collect::<Vec<_>>();
+        let label_ids = labels.clone();
         let mut offset = 0usize;
         for batch in &frontier.batches {
             for row in 0..batch.num_rows() {
@@ -2302,7 +2340,7 @@ fn run_merge_actions_masked(
                 let missing = label_ids
                     .iter()
                     .copied()
-                    .filter(|label| !existing.values().contains(label))
+                    .filter(|label| !existing.values().contains(&label.encode()))
                     .collect::<Vec<_>>();
                 let added = if ctx.writer.contains_pending_node(&uuid) {
                     ctx.writer.add_pending_node_labels(&uuid, &missing)
@@ -2592,7 +2630,7 @@ fn run_delete_phase(
 fn persisted_node_labels(
     dir: &Path,
     targets: &HashSet<[u8; 16]>,
-) -> Result<HashMap<[u8; 16], HashSet<u32>>, GfError> {
+) -> Result<HashMap<[u8; 16], HashSet<EntityTypeId>>, GfError> {
     if targets.is_empty() {
         return Ok(HashMap::new());
     }
@@ -2609,7 +2647,7 @@ fn surviving_node_labels(
     dir: &Path,
     deleting: &HashSet<[u8; 16]>,
     ctx: &StatementWriteContext,
-) -> Result<HashSet<u32>, GfError> {
+) -> Result<HashSet<EntityTypeId>, GfError> {
     let mut nodes = HashMap::new();
     for batch in
         graphforge_storage::read_nodes(dir).map_err(|error| GfError::Storage(error.to_string()))?
@@ -2640,7 +2678,7 @@ fn surviving_node_labels(
 fn collect_node_label_batch(
     batch: &RecordBatch,
     targets: Option<&HashSet<[u8; 16]>>,
-    found: &mut HashMap<[u8; 16], HashSet<u32>>,
+    found: &mut HashMap<[u8; 16], HashSet<EntityTypeId>>,
 ) -> Result<(), GfError> {
     let uuids = batch
         .column_by_name("node_uuid")
@@ -2671,7 +2709,7 @@ fn collect_node_label_batch(
         found
             .entry(uuid)
             .or_default()
-            .extend(values.values().iter().copied());
+            .extend(decode_memberships(values)?);
     }
     Ok(())
 }
@@ -3351,7 +3389,7 @@ fn run_label_phase(
             .df_schema
             .index_of_column_by_name(Some(&qualifier), "type_ids")
             .ok_or_else(|| GfError::Plan("label mutation target has no type_ids".into()))?;
-        let requested = item.labels.iter().map(|label| label.0).collect::<Vec<_>>();
+        let requested = item.labels.clone();
         let mut seen = HashSet::new();
         for batch in &frontier.batches {
             let id_col = batch.column(identity.uuid_idx);
@@ -3381,7 +3419,7 @@ fn run_label_phase(
                 let changed = requested
                     .iter()
                     .copied()
-                    .filter(|label| values.values().contains(label) != add)
+                    .filter(|label| values.values().contains(&label.encode()) != add)
                     .collect::<Vec<_>>();
                 if changed.is_empty() {
                     continue;
@@ -3565,13 +3603,15 @@ mod tests {
             batches: vec![batch],
         };
         let add = frontier
-            .add_node_labels(VarId(0), &[1], &[true])
+            .add_node_labels(VarId(0), &[EntityTypeId::decode(1).unwrap()], &[true])
             .unwrap_err();
         assert!(
             add.to_string()
                 .contains("MERGE label target has no type_ids column")
         );
-        let remove = frontier.remove_node_labels(VarId(0), &[1]).unwrap_err();
+        let remove = frontier
+            .remove_node_labels(VarId(0), &[EntityTypeId::decode(1).unwrap()])
+            .unwrap_err();
         assert!(
             remove
                 .to_string()
@@ -3606,12 +3646,25 @@ mod tests {
     fn create_recorder_exposes_node_identity_slices() {
         let mut recorder = CreateRecorder::default();
         assert!(recorder.node_identities(8).is_none());
-        recorder.record_node(8, [1; 16], 9, 10);
-        recorder.record_node(8, [2; 16], 11, 12);
+        recorder.record_node(
+            8,
+            [1; 16],
+            9,
+            graphforge_value::PrimaryEntityTypeId::decode(10).unwrap(),
+        );
+        recorder.record_node(
+            8,
+            [2; 16],
+            11,
+            graphforge_value::PrimaryEntityTypeId::decode(12).unwrap(),
+        );
         let (uuids, node_ids, type_ids) = recorder.node_identities(8).unwrap();
         assert_eq!(uuids, &[[1; 16], [2; 16]]);
         assert_eq!(node_ids, &[9, 11]);
-        assert_eq!(type_ids, &[10, 12]);
+        assert_eq!(
+            type_ids.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+            &[10, 12]
+        );
     }
 
     #[test]
@@ -3699,10 +3752,10 @@ mod tests {
     fn recreating_a_removed_label_token_cancels_its_removal() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
-        ctx.known_labels.insert(7);
+        ctx.known_labels.insert(EntityTypeId::decode(7).unwrap());
 
-        ctx.record_removed_label_tokens([7]);
-        ctx.record_label_tokens([7]);
+        ctx.record_removed_label_tokens([EntityTypeId::decode(7).unwrap()]);
+        ctx.record_label_tokens([EntityTypeId::decode(7).unwrap()]);
 
         assert_eq!(ctx.counters.labels_removed, 0);
         assert_eq!(ctx.counters.labels_added, 0);
@@ -3716,7 +3769,7 @@ mod tests {
         let var2 = arena.push(IrExpr::VarRef(VarId(2)));
         let property = arena.push(IrExpr::PropertyAccess {
             base: var0,
-            prop: PropId(7),
+            prop: graphforge_value::PropertyId::ontology(PropId(7)).unwrap(),
         });
         let unary = arena.push(IrExpr::UnaryOp {
             op: UnaryOpKind::Neg,
@@ -4147,7 +4200,8 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                    .unwrap();
             let mut exprs = ExprArena::new();
             let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
             let params = HashMap::new();
@@ -4162,7 +4216,7 @@ mod tests {
                 &env,
                 &[SetPropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                     value,
                 }],
@@ -4193,7 +4247,8 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                    .unwrap();
             let exprs = ExprArena::new();
             let params = HashMap::new();
             let env = phase_env(&lowerer, &exprs, dir.path(), &params);
@@ -4214,7 +4269,7 @@ mod tests {
                 &env,
                 &[RemovePropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                 }],
                 &mut frontier,
@@ -4238,7 +4293,8 @@ mod tests {
     fn set_and_remove_reject_malformed_identity_and_edge_routing_columns() {
         let dir = tempfile::tempdir().unwrap();
         let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                .unwrap();
         let mut exprs = ExprArena::new();
         let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
         let params = HashMap::new();
@@ -4265,7 +4321,7 @@ mod tests {
             &env,
             &[SetPropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
                 value,
             }],
@@ -4301,7 +4357,7 @@ mod tests {
             &env,
             &[RemovePropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
             }],
             &mut malformed_route,
@@ -4323,11 +4379,17 @@ mod tests {
         let edge = graphforge_core::uuid::Uuid::from_bytes([7; 16]);
         pending_ctx
             .writer
-            .create_node(src, graphforge_core::TypeId(1))
+            .create_node(
+                src,
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         pending_ctx
             .writer
-            .create_node(dst, graphforge_core::TypeId(1))
+            .create_node(
+                dst,
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         pending_ctx
             .writer
@@ -4345,7 +4407,7 @@ mod tests {
             &env,
             &[RemovePropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
             }],
             &mut malformed_route,
@@ -4382,7 +4444,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                .unwrap();
         let exprs = ExprArena::new();
         let params = HashMap::new();
         let env = phase_env(&lowerer, &exprs, dir.path(), &params);
@@ -4394,10 +4457,16 @@ mod tests {
                 let src = graphforge_core::uuid::new_v7();
                 let dst = graphforge_core::uuid::new_v7();
                 ctx.writer
-                    .create_node(src, graphforge_core::TypeId(1))
+                    .create_node(
+                        src,
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                    )
                     .unwrap();
                 ctx.writer
-                    .create_node(dst, graphforge_core::TypeId(1))
+                    .create_node(
+                        dst,
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                    )
                     .unwrap();
                 ctx.writer
                     .create_edge(
@@ -4418,7 +4487,7 @@ mod tests {
                 ctx.writer
                     .create_node(
                         graphforge_core::uuid::Uuid::from_bytes([7; 16]),
-                        graphforge_core::TypeId(1),
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
                     )
                     .unwrap();
                 ctx.writer
@@ -4433,7 +4502,7 @@ mod tests {
                 &env,
                 &[RemovePropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                 }],
                 &mut frontier,
@@ -4491,11 +4560,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let add = graphforge_ir::LabelItem {
             target: VarId(1),
-            labels: vec![graphforge_core::TypeId(2)],
+            labels: vec![EntityTypeId::ontology(graphforge_core::TypeId(2)).unwrap()],
         };
         let remove = graphforge_ir::LabelItem {
             target: VarId(1),
-            labels: vec![graphforge_core::TypeId(1)],
+            labels: vec![EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap()],
         };
 
         let mut pending =
@@ -4504,7 +4573,7 @@ mod tests {
             .writer
             .create_node(
                 graphforge_core::uuid::Uuid::from_bytes([7; 16]),
-                graphforge_core::TypeId(1),
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
             )
             .unwrap();
         run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut pending).unwrap();
@@ -4512,12 +4581,14 @@ mod tests {
 
         let mut persisted =
             StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
-        persisted.label_removals.insert([7; 16], HashSet::from([2]));
+        persisted
+            .label_removals
+            .insert([7; 16], HashSet::from([EntityTypeId::decode(2).unwrap()]));
         run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut persisted).unwrap();
         assert!(persisted.label_removals[&[7; 16]].is_empty());
         persisted
             .label_additions
-            .insert([7; 16], HashSet::from([1]));
+            .insert([7; 16], HashSet::from([EntityTypeId::decode(1).unwrap()]));
         run_label_phase(
             &[remove.clone()],
             false,
@@ -4533,4 +4604,15 @@ mod tests {
         let error = run_label_phase(&[add], true, &mut make_frontier(), &mut deleted).unwrap_err();
         assert!(error.to_string().contains("deleted in this statement"));
     }
+}
+
+fn decode_memberships(values: &UInt32Array) -> Result<Vec<EntityTypeId>, GfError> {
+    values
+        .iter()
+        .map(|value| {
+            let encoded =
+                value.ok_or_else(|| GfError::Storage("null node membership identity".into()))?;
+            EntityTypeId::decode(encoded).map_err(|error| GfError::Storage(error.to_string()))
+        })
+        .collect()
 }

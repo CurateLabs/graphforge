@@ -33,6 +33,7 @@ DEFAULT_VERSION = "0.5.2"
 DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
 DEFAULT_CRATES = (
     "graphforge-core",
+    "graphforge-value",
     "graphforge-filesystem",
     "graphforge-ast",
     "graphforge-knowledge",

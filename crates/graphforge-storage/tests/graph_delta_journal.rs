@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 
-use graphforge_core::{OntologyMode, TypeId};
+use graphforge_core::OntologyMode;
 use graphforge_ir::IrLiteral;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaJournalLimits, GraphDeltaOp,
@@ -17,6 +17,7 @@ use graphforge_storage::{
     reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
     visit_authenticated_property_snapshots,
 };
+use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
 fn authenticated_property_rows(
@@ -97,7 +98,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
                 node_id: 3,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 1_700_000_000_000_001,
                 updated_at_micros: 1_700_000_000_000_001,
             },
@@ -108,7 +109,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
                 node_id: 4,
-                type_ids: vec![1],
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
                 created_at_micros: 1_700_000_000_000_002,
                 updated_at_micros: 1_700_000_000_000_002,
             },
@@ -156,11 +157,17 @@ fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize
         1_700_000_000_000_000,
     )
     .unwrap();
-    writer.create_node(first, TypeId(1)).unwrap();
-    writer.create_node(second, TypeId(1)).unwrap();
+    writer
+        .create_node(first, EntityTypeId::decode(1).unwrap())
+        .unwrap();
+    writer
+        .create_node(second, EntityTypeId::decode(1).unwrap())
+        .unwrap();
     writer.create_edge(edge, "KNOWS", &first, &second).unwrap();
     for _ in 0..extra_nodes {
-        writer.create_node(Uuid::now_v7(), TypeId(1)).unwrap();
+        writer
+            .create_node(Uuid::now_v7(), EntityTypeId::decode(1).unwrap())
+            .unwrap();
     }
     writer
         .set_properties(
@@ -844,6 +851,129 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "GF_IDEMPOTENCY_CONFLICT");
+}
+
+// Re-sign the single-record frame so malformed identities reach payload decoding,
+// rather than failing an unrelated checksum or inventory check.
+fn run_with_raw_membership(raw: u32) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    const RECORD_START: usize = 84;
+    const PAYLOAD_LENGTH: usize = RECORD_START + 25;
+    const PAYLOAD_START: usize = PAYLOAD_LENGTH + 4;
+    let limits = GraphDeltaJournalLimits::default();
+    let bytes = encode_delta_run(
+        1,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        &sample_ops()[..1],
+        limits,
+    )
+    .unwrap();
+    let length =
+        u32::from_le_bytes(bytes[PAYLOAD_LENGTH..PAYLOAD_START].try_into().unwrap()) as usize;
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&bytes[PAYLOAD_START..PAYLOAD_START + length]).unwrap();
+    payload["type_ids"] = serde_json::json!([raw]);
+    let payload = serde_json::to_vec(&payload).unwrap();
+    let mut framed = bytes[..PAYLOAD_LENGTH].to_vec();
+    framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+    framed.extend_from_slice(&payload);
+    let checksum = Sha256::digest(&framed[RECORD_START..]);
+    framed.extend_from_slice(&checksum);
+    let checksum = Sha256::digest(&framed);
+    framed.extend_from_slice(&checksum);
+    framed
+}
+
+fn snapshot_committed_files(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
+#[test]
+fn committed_checksum_valid_invalid_memberships_reject_without_authority_mutation() {
+    // Control proves the hand-built frame is accepted before changing its identity.
+    decode_delta_run(
+        &run_with_raw_membership(1),
+        Some(1),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+    for raw in [0x8000_0000, 0xc000_0000, u32::MAX] {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let graph = tempfile::tempdir().unwrap();
+        let run = run_with_raw_membership(raw);
+        let run_path = graph.path().join(delta_run_relative_path(1));
+        fs::create_dir_all(run_path.parent().unwrap()).unwrap();
+        fs::write(&run_path, &run).unwrap();
+        let (_, files) = capture_graph_files(graph.path()).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_with_graph_tree(root.path(), &request, Some(graph.path()))
+                .unwrap()
+        else {
+            panic!("unexpected replay")
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let resolved = resolve_project_generation(root.path()).unwrap();
+        let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+        let before = snapshot_committed_files(root.path());
+        let error = reconstruct_graph_state(
+            &resolved.graph_tree_root(),
+            &inventory,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(
+            error.to_string().contains("payload decode failed"),
+            "{error}"
+        );
+        assert_eq!(
+            snapshot_committed_files(root.path()),
+            before,
+            "rejected membership {raw} must not rewrite committed authority"
+        );
+    }
 }
 
 #[test]

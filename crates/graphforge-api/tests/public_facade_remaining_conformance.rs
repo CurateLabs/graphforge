@@ -74,7 +74,7 @@ fn assert_uuid_query_schema(schema: &Schema, field_name: &str) {
         .into_iter()
         .collect()
     );
-    assert_eq!(schema.metadata()["graphforge.ir_version"], "0.3.0");
+    assert_eq!(schema.metadata()["graphforge.ir_version"], "1.0.0");
     assert_eq!(schema.metadata()["graphforge.ontology_mode"], "exploratory");
     let query_id = Uuid::parse_str(&schema.metadata()["graphforge.query_id"]).unwrap();
     assert_eq!(query_id.get_version_num(), 7);

@@ -8,6 +8,7 @@
     reason = "algorithm foundation consumed by the Rust dispatch slice in issue #1146"
 )]
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -15,8 +16,10 @@ use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use graphforge_core::{GfError, OntologyMode, TypeId};
+use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
+#[cfg(test)]
+use graphforge_value::EntityTypeId;
 use sha2::{Digest, Sha256};
 
 use crate::adjacency::AdjacencyProvider;
@@ -31,7 +34,7 @@ const VECTOR_CELL_LIMIT: usize = 16_777_216;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AdjacencySelection<'a> {
     /// Resolved node label id. `None` includes every node.
-    pub label: Option<TypeId>,
+    pub label: EntityTypeSelection,
     /// Relationship name, or `"*"` for all relationships.
     pub via: &'a str,
     /// Traversal direction requested from the provider.
@@ -647,7 +650,7 @@ impl AdjacencyGraph {
 /// Export only stable node selection and UUID identity, without reading edges.
 pub(crate) fn export_node_selection(
     dir: &Path,
-    label: Option<TypeId>,
+    label: EntityTypeSelection,
 ) -> Result<AdjacencyGraph, GfError> {
     let (node_ids, node_uuid_by_id) = selected_nodes(dir, label)?;
     let node_id_by_uuid = node_uuid_by_id
@@ -1070,7 +1073,13 @@ fn validate_vector_shape(nodes: usize, dimension: usize) -> Result<(), GfError> 
     Ok(())
 }
 
-fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
+fn selected_nodes(
+    dir: &Path,
+    label: EntityTypeSelection,
+) -> Result<(Vec<u64>, NodeUuidMap), GfError> {
+    if label == EntityTypeSelection::Missing {
+        return Ok((Vec::new(), HashMap::new()));
+    }
     let mut rows = Vec::new();
     for batch in graphforge_storage::read_nodes(dir).map_err(storage_error)? {
         let uuids = fixed_binary(&batch, "node_uuid")?;
@@ -1083,7 +1092,7 @@ fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUu
             if ids.is_null(row) || uuids.is_null(row) {
                 continue;
             }
-            if let Some(label) = label {
+            if let EntityTypeSelection::Known(label) = label {
                 let values = labels.value(row);
                 let values = values
                     .as_any()
@@ -1091,7 +1100,7 @@ fn selected_nodes(dir: &Path, label: Option<TypeId>) -> Result<(Vec<u64>, NodeUu
                     .ok_or_else(|| {
                         GfError::Execution("node topology type_ids values are not UInt32".into())
                     })?;
-                if !values.values().contains(&label.0) {
+                if !values.values().contains(&label.encode()) {
                     continue;
                 }
             }
@@ -1336,16 +1345,22 @@ mod tests {
         let uuids = [new_v7(), new_v7(), new_v7(), new_v7()];
         let ids = [
             writer
-                .create_node_with_labels(uuids[0], &[TypeId(1)])
+                .create_node_with_labels(uuids[0], &[EntityTypeId::decode(1).unwrap()])
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[1], &[TypeId(1), TypeId(2)])
+                .create_node_with_labels(
+                    uuids[1],
+                    &[
+                        EntityTypeId::decode(1).unwrap(),
+                        EntityTypeId::decode(2).unwrap(),
+                    ],
+                )
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[2], &[TypeId(2)])
+                .create_node_with_labels(uuids[2], &[EntityTypeId::decode(2).unwrap()])
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[3], &[TypeId(1)])
+                .create_node_with_labels(uuids[3], &[EntityTypeId::decode(1).unwrap()])
                 .unwrap(),
         ];
         let edges = [new_v7(), new_v7(), new_v7(), new_v7()];
@@ -1405,7 +1420,7 @@ mod tests {
 
     fn selection(direction: Direction) -> AdjacencySelection<'static> {
         AdjacencySelection {
-            label: None,
+            label: EntityTypeSelection::All,
             via: "KNOWS",
             direction,
             weight: None,
@@ -1696,7 +1711,7 @@ mod tests {
             fixture.dir.path(),
             OntologyMode::Strict,
             AdjacencySelection {
-                label: Some(TypeId(1)),
+                label: EntityTypeSelection::Known(EntityTypeId::decode(1).unwrap()),
                 ..selection(Direction::Out)
             },
         )
@@ -1986,7 +2001,7 @@ mod tests {
     #[test]
     fn graph_native_partition_property_loads_without_knowledge_storage() {
         let fixture = fixture();
-        let graph = export_node_selection(fixture.dir.path(), None).unwrap();
+        let graph = export_node_selection(fixture.dir.path(), EntityTypeSelection::All).unwrap();
         let mapping = load_node_partition_property(&graph, fixture.dir.path(), "side").unwrap();
         assert_eq!(mapping.iter().count(), fixture.uuids.len());
         assert_eq!(

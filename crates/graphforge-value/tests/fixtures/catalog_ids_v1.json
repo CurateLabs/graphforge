@@ -1,0 +1,144 @@
+{
+  "source_commit": "ca3a56b6",
+  "source_contract": "Existing TypeId serde and graphforge-ir/src/catalog.rs runtime tag helpers; runtime entity bit 30, runtime relation bit 31, local range below 2^30.",
+  "valid": [
+    {
+      "kind": "ontology",
+      "local": 0,
+      "encoded": 0,
+      "little_endian": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "kind": "ontology",
+      "local": 1,
+      "encoded": 1,
+      "little_endian": [
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "kind": "ontology",
+      "local": 1073741823,
+      "encoded": 1073741823,
+      "little_endian": [
+        255,
+        255,
+        255,
+        63
+      ]
+    },
+    {
+      "kind": "runtime_entity",
+      "local": 0,
+      "encoded": 1073741824,
+      "little_endian": [
+        0,
+        0,
+        0,
+        64
+      ]
+    },
+    {
+      "kind": "runtime_entity",
+      "local": 1,
+      "encoded": 1073741825,
+      "little_endian": [
+        1,
+        0,
+        0,
+        64
+      ]
+    },
+    {
+      "kind": "runtime_entity",
+      "local": 1073741823,
+      "encoded": 2147483647,
+      "little_endian": [
+        255,
+        255,
+        255,
+        127
+      ]
+    },
+    {
+      "kind": "runtime_relation",
+      "local": 0,
+      "encoded": 2147483648,
+      "little_endian": [
+        0,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "kind": "runtime_relation",
+      "local": 1,
+      "encoded": 2147483649,
+      "little_endian": [
+        1,
+        0,
+        0,
+        128
+      ]
+    },
+    {
+      "kind": "runtime_relation",
+      "local": 1073741823,
+      "encoded": 3221225471,
+      "little_endian": [
+        255,
+        255,
+        255,
+        191
+      ]
+    }
+  ],
+  "invalid_tagged": [
+    3221225472,
+    3221225473,
+    4294967295
+  ],
+  "invalid_type_locals": [
+    1073741824,
+    2147483648,
+    4294967295
+  ],
+  "catalog_rows": [
+    {
+      "entry_kind": "entity_type",
+      "name": "Person",
+      "runtime_id": 0,
+      "observation_count": 2,
+      "first_seen": 100,
+      "last_seen": 103,
+      "owner_label": null
+    },
+    {
+      "entry_kind": "relation_type",
+      "name": "KNOWS",
+      "runtime_id": 1,
+      "observation_count": 1,
+      "first_seen": 101,
+      "last_seen": 101,
+      "owner_label": null
+    },
+    {
+      "entry_kind": "property",
+      "name": "name",
+      "runtime_id": 0,
+      "observation_count": 1,
+      "first_seen": 102,
+      "last_seen": 102,
+      "owner_label": "Person"
+    }
+  ]
+}

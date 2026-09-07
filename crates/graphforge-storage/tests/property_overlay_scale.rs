@@ -15,6 +15,7 @@ use graphforge_storage::{
     enumerate_property_fragments, remove_node_properties, set_node_properties,
     visit_authenticated_property_snapshots,
 };
+use graphforge_value::EntityTypeId;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -415,7 +416,9 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
         let mut topology =
             GraphWriter::open_at(project.path(), OntologyMode::Exploratory, TS).unwrap();
         for index in 0..MAX_ROWS {
-            topology.create_node(uuid(index), TypeId(0)).unwrap();
+            topology
+                .create_node(uuid(index), EntityTypeId::ontology(TypeId(0)).unwrap())
+                .unwrap();
         }
         topology.flush().unwrap();
         populate_through_graph_writer(project.path(), logical_rows);

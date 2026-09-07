@@ -168,6 +168,59 @@ mod tests {
     }
 
     #[test]
+    fn unlabelled_creation_then_label_before_publication_retains_absent_primary_on_reopen() {
+        use arrow::array::{Int64Array, ListArray, UInt32Array};
+
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph.execute("CREATE (n {rank: 7}) SET n:Person").unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Person) RETURN n.rank AS rank")
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            result.batches[0]
+                .column_by_name("rank")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            7
+        );
+        let generation = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
+        let nodes = graphforge_storage::read_nodes(&generation.graph_tree_root()).unwrap();
+        assert_eq!(nodes.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+        let primary = nodes[0]
+            .column_by_name("type_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(primary.value(0), u32::MAX);
+        let memberships = nodes[0]
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let memberships = memberships.as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(memberships.len(), 1);
+        assert!(graphforge_value::EntityTypeId::decode(memberships.value(0)).is_ok());
+    }
+
+    #[test]
     fn facade_reopen_queries_typed_delta_materialized_from_canonical_parquet() {
         use arrow::array::Int64Array;
         use graphforge_ir::IrLiteral;
@@ -349,7 +402,7 @@ mod tests {
                     payload: GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: Uuid::now_v7().hyphenated().to_string(),
                         node_id: 1,
-                        type_ids: vec![1],
+                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                         created_at_micros: 1,
                         updated_at_micros: 1,
                     },

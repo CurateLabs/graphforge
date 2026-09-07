@@ -20,7 +20,7 @@ fn fixture(count: usize) -> Vec<GraphDeltaOp> {
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: Uuid::from_u128(0x2000 + index as u128).to_string(),
                 node_id: index as u64 + 1,
-                type_ids: vec![1],
+                type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                 created_at_micros: index as i64,
                 updated_at_micros: index as i64,
             },

@@ -24,6 +24,7 @@ gf_rust_library(
     name = "graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -32,6 +33,7 @@ gf_rust_test(
     crate = ":graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -40,6 +42,7 @@ gf_rust_doc_test(
     crate = ":graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -50,6 +53,7 @@ gf_rust_integration_test(
     data = [":test_fixtures"],
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -59,6 +63,7 @@ gf_rust_integration_test(
     crate = ":graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -68,6 +73,7 @@ gf_rust_integration_test(
     crate = ":graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -77,6 +83,7 @@ gf_rust_integration_test(
     crate = ":graphforge_ontology",
     deps = [
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 

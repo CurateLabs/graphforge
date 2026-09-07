@@ -1,12 +1,13 @@
 //! Rust-owned similarity handlers registered under the shared algorithm dispatch contract.
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, SimilarAlgorithm};
-use graphforge_core::{GfError, OntologyMode, SimilarOptions, TypeId};
+use graphforge_core::{GfError, OntologyMode, SimilarOptions};
 use graphforge_ir::Direction;
 
 use crate::AdjacencyProvider;
@@ -332,7 +333,7 @@ pub fn similar_algorithm(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: SimilarOptions,
 ) -> Result<RecordBatch, GfError> {
@@ -353,7 +354,7 @@ pub fn similar_algorithm_with_limits(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: SimilarOptions,
     limits: crate::algorithm_dispatch::AlgorithmLimits,
@@ -379,7 +380,7 @@ pub fn similar_algorithm_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: SimilarOptions,
     limits: crate::algorithm_dispatch::AlgorithmLimits,
@@ -409,7 +410,7 @@ pub fn similar_projection_fingerprint(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &SimilarOptions,
 ) -> Result<[u8; 32], GfError> {
@@ -422,7 +423,7 @@ fn similar_projection(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &SimilarOptions,
 ) -> Result<AdjacencyGraph, GfError> {
@@ -477,14 +478,14 @@ fn similar_projection(
         SimilarAlgorithm::Knn | SimilarAlgorithm::FilteredKnn | SimilarAlgorithm::Cosine
     );
     let mut graph = if matches!(by, SimilarAlgorithm::Knn | SimilarAlgorithm::Cosine) {
-        export_node_selection(dir, Some(label))?
+        export_node_selection(dir, label)?
     } else {
         export_adjacency(
             provider,
             dir,
             mode,
             AdjacencySelection {
-                label: Some(label),
+                label,
                 via,
                 direction: Direction::Out,
                 weight: None,

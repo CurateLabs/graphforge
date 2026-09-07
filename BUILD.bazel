@@ -62,6 +62,7 @@ build_test(
     targets = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-value:graphforge_value",
         "//crates/graphforge-filesystem:graphforge_filesystem",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-discovery:graphforge_discovery",
@@ -79,6 +80,7 @@ test_suite(
     tests = [
         "//crates/graphforge-ast:graphforge_ast_test",
         "//crates/graphforge-core:graphforge_core_test",
+        "//crates/graphforge-value:graphforge_value_test",
         "//crates/graphforge-filesystem:graphforge_filesystem_test",
         "//crates/graphforge-cypher:graphforge_cypher_test",
         "//crates/graphforge-discovery:graphforge_discovery_test",

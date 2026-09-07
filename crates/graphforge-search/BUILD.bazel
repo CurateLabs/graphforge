@@ -10,6 +10,7 @@ gf_rust_library(
     name = "graphforge_search",
     deps = [
         "//crates/graphforge-storage:graphforge_storage",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )
 
@@ -22,5 +23,6 @@ gf_rust_test(
         "//crates/graphforge-core:graphforge_core",
         "//crates/graphforge-ir:graphforge_ir",
         "//crates/graphforge-storage:graphforge_storage",
+        "//crates/graphforge-value:graphforge_value",
     ],
 )

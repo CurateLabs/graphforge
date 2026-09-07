@@ -1425,8 +1425,8 @@ mod tests {
     use graphforge_storage::adjacency::build_adjacency_index;
     use std::path::Path;
 
-    use graphforge_core::TypeId;
     use graphforge_core::uuid::{Uuid, new_v7, to_bytes};
+    use graphforge_value::EntityTypeId;
     use tempfile::TempDir;
 
     use graphforge_storage::GraphWriter;
@@ -1443,7 +1443,7 @@ mod tests {
         let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();
         let ids: Vec<u64> = uuids
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         let (a, b, c, d) = (&uuids[0], &uuids[1], &uuids[2], &uuids[3]);
         for (src, dst) in [(a, b), (a, c), (b, d), (c, d), (a, b), (d, d)] {
@@ -1482,7 +1482,7 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let ids: Vec<u64> = [a, b, c]
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
@@ -1505,7 +1505,7 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let ids: Vec<u64> = [a, b, c]
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
@@ -1533,7 +1533,7 @@ mod tests {
         let (a, b, c) = (new_v7(), new_v7(), new_v7());
         let ids: Vec<u64> = [a, b, c]
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
@@ -1563,7 +1563,7 @@ mod tests {
         let uuids: Vec<Uuid> = (0..4).map(|_| new_v7()).collect();
         let ids: Vec<u64> = uuids
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         for pair in uuids.windows(2) {
             w.create_edge(new_v7(), "KNOWS", &pair[0], &pair[1])
@@ -1609,11 +1609,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
         let hub = new_v7();
-        let hub_id = w.create_node(hub, TypeId(0)).unwrap();
+        let hub_id = w
+            .create_node(hub, EntityTypeId::decode(0).unwrap())
+            .unwrap();
         let spokes: Vec<Uuid> = (0..3).map(|_| new_v7()).collect();
         let spoke_ids: Vec<u64> = spokes
             .iter()
-            .map(|u| w.create_node(*u, TypeId(0)).unwrap())
+            .map(|u| w.create_node(*u, EntityTypeId::decode(0).unwrap()).unwrap())
             .collect();
         for spoke in &spokes {
             w.create_edge(new_v7(), "KNOWS", &hub, spoke).unwrap();
@@ -1817,7 +1819,7 @@ mod tests {
                         dir.path(),
                         OntologyMode::Strict,
                         crate::algorithm_graph::AdjacencySelection {
-                            label: None,
+                            label: graphforge_ir::EntityTypeSelection::All,
                             via: "KNOWS",
                             direction: Direction::Out,
                             weight: None,

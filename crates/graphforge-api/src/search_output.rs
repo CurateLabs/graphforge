@@ -44,7 +44,7 @@ type LoadedProperties = (
 /// hit order is preserved exactly; retrieval owns scoring and ordering.
 pub(crate) fn shape_search_output(
     project_dir: &std::path::Path,
-    label_id: u32,
+    label_id: graphforge_value::EntityTypeSelection,
     hits: &[FusedSearchHit],
 ) -> Result<RecordBatch, GfError> {
     validate_hits(hits)?;
@@ -288,7 +288,7 @@ mod tests {
 
     use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
     use graphforge_core::uuid::Uuid;
-    use graphforge_ir::{IrLiteral, OntologyMode, TypeId};
+    use graphforge_ir::{IrLiteral, OntologyMode};
     use graphforge_search::MatchedOn;
     use graphforge_storage::GraphWriter;
 
@@ -313,11 +313,23 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let mut writer = GraphWriter::open_at(project.path(), OntologyMode::Strict, 1).unwrap();
         writer
-            .create_node_with_labels(uuid(1), &[TypeId(1), TypeId(9)])
+            .create_node_with_labels(
+                uuid(1),
+                &[
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    graphforge_value::EntityTypeId::decode(9).unwrap(),
+                ],
+            )
             .unwrap();
-        writer.create_node(uuid(2), TypeId(9)).unwrap();
-        writer.create_node(uuid(3), TypeId(9)).unwrap();
-        writer.create_node(uuid(4), TypeId(4)).unwrap();
+        writer
+            .create_node(uuid(2), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
+        writer
+            .create_node(uuid(3), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
+        writer
+            .create_node(uuid(4), graphforge_value::EntityTypeId::decode(4).unwrap())
+            .unwrap();
         writer
             .set_properties(
                 &uuid(1),
@@ -363,7 +375,14 @@ mod tests {
             hit(1, 0.5, MatchedOn::TextAndVector),
             hit(3, -0.25, MatchedOn::Text),
         ];
-        let batch = shape_search_output(project.path(), 9, &hits).unwrap();
+        let batch = shape_search_output(
+            project.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
+            &hits,
+        )
+        .unwrap();
         assert_eq!(
             batch
                 .schema()
@@ -432,7 +451,14 @@ mod tests {
             [Some("vector"), Some("text+vector"), Some("text")]
         );
 
-        let empty = shape_search_output(project.path(), 9, &[]).unwrap();
+        let empty = shape_search_output(
+            project.path(),
+            graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::decode(9).unwrap(),
+            ),
+            &[],
+        )
+        .unwrap();
         assert_eq!(empty.schema(), batch.schema());
         assert_eq!(empty.num_rows(), 0);
     }
@@ -441,23 +467,39 @@ mod tests {
     fn rejects_non_finite_duplicate_and_non_member_hits() {
         let project = tempfile::tempdir().unwrap();
         let mut writer = GraphWriter::open_at(project.path(), OntologyMode::Strict, 1).unwrap();
-        writer.create_node(uuid(1), TypeId(9)).unwrap();
+        writer
+            .create_node(uuid(1), graphforge_value::EntityTypeId::decode(9).unwrap())
+            .unwrap();
         writer.flush().unwrap();
 
         assert!(matches!(
-            shape_search_output(project.path(), 9, &[hit(1, f64::NAN, MatchedOn::Text)]),
+            shape_search_output(
+                project.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
+                &[hit(1, f64::NAN, MatchedOn::Text)]
+            ),
             Err(GfError::Validation(_))
         ));
         assert!(matches!(
             shape_search_output(
                 project.path(),
-                9,
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
                 &[hit(1, 1.0, MatchedOn::Text), hit(1, 0.5, MatchedOn::Vector),],
             ),
             Err(GfError::Validation(_))
         ));
         assert!(matches!(
-            shape_search_output(project.path(), 9, &[hit(2, 1.0, MatchedOn::Text)]),
+            shape_search_output(
+                project.path(),
+                graphforge_value::EntityTypeSelection::Known(
+                    graphforge_value::EntityTypeId::decode(9).unwrap()
+                ),
+                &[hit(2, 1.0, MatchedOn::Text)]
+            ),
             Err(GfError::Storage(_))
         ));
     }

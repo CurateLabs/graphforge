@@ -37,6 +37,7 @@ use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan, UserDefinedLogi
 
 use graphforge_core::OntologyMode;
 use graphforge_ir::{Direction, IrLiteral};
+use graphforge_value::{EntityTypeId, RelationTypeId};
 
 /// Implement `PartialOrd` for custom plan nodes that contain `DFSchemaRef`.
 ///
@@ -159,7 +160,7 @@ pub struct VarLenExpandNode {
     /// Edge traversal direction.
     pub direction: Direction,
     /// Resolved relation type id (`TypeId.0`), or `None` for a wildcard.
-    pub rel_ty: Option<u32>,
+    pub rel_ty: Option<RelationTypeId>,
     /// Project directory the physical node reads edges from.
     pub dir: PathBuf,
     /// Ontology mode (drives typed vs exploratory edge-file routing).
@@ -186,7 +187,7 @@ impl VarLenExpandNode {
         dst_var: u32,
         edge_var: u32,
         direction: Direction,
-        rel_ty: Option<u32>,
+        rel_ty: Option<RelationTypeId>,
         dir: PathBuf,
         mode: OntologyMode,
         dst_fields: Vec<Arc<Field>>,
@@ -360,7 +361,7 @@ pub struct ExpandNode {
     /// Edge traversal direction.
     pub direction: Direction,
     /// Resolved relation type id (`TypeId.0`), absent for wildcard expansion.
-    pub rel_ty: Option<u32>,
+    pub rel_ty: Option<RelationTypeId>,
     /// Project directory the physical node reads from.
     pub dir: PathBuf,
     /// Ontology mode controlling the persisted edge layout.
@@ -388,7 +389,7 @@ impl ExpandNode {
         dst_var: u32,
         edge_var: u32,
         direction: Direction,
-        rel_ty: Option<u32>,
+        rel_ty: Option<RelationTypeId>,
         dir: PathBuf,
         mode: OntologyMode,
         edge_fields: Vec<Arc<Field>>,
@@ -882,7 +883,7 @@ pub struct ResolvedNodeSpec {
     /// Pattern variable id (`VarId.0`).
     pub var: u32,
     /// Complete resolved label type-id set, in pattern order.
-    pub label_ids: Vec<u32>,
+    pub label_ids: Vec<EntityTypeId>,
     /// Complete resolved label-name set, in pattern order.
     pub label_names: Vec<String>,
     /// Literal property key/value pairs (constant or constant-folded values).
@@ -909,7 +910,7 @@ pub struct ResolvedEdgeSpec {
     /// Destination node variable id.
     pub dst: u32,
     /// Resolved relation type id, if any.
-    pub rel_type_id: Option<u32>,
+    pub rel_type_id: Option<RelationTypeId>,
     /// Resolved relation type name (for file routing), if known.
     pub rel_type_name: Option<String>,
     /// Edge direction.
@@ -1563,7 +1564,7 @@ pub struct GraphSetNode {
     pub targets: Vec<SetTarget>,
     /// Maps a node `type_id` to its property-file entity stem, for per-row node
     /// stem resolution (an empty map / missing id falls back to `_untyped`).
-    pub type_id_to_entity_name: HashMap<u32, String>,
+    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     /// Target project directory.
     pub dir: PathBuf,
     /// Ontology mode (drives node property-file routing).
@@ -1587,7 +1588,7 @@ impl GraphSetNode {
     pub fn new(
         input: Arc<LogicalPlan>,
         targets: Vec<SetTarget>,
-        type_id_to_entity_name: HashMap<u32, String>,
+        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Self {
@@ -1697,7 +1698,7 @@ pub struct GraphRemoveNode {
     pub targets: Vec<RemoveTarget>,
     /// Maps a node `type_id` to its property-file entity stem (see
     /// [`GraphSetNode::type_id_to_entity_name`]).
-    pub type_id_to_entity_name: HashMap<u32, String>,
+    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     /// Target project directory.
     pub dir: PathBuf,
     /// Ontology mode (drives node property-file routing).
@@ -1721,7 +1722,7 @@ impl GraphRemoveNode {
     pub fn new(
         input: Arc<LogicalPlan>,
         targets: Vec<RemoveTarget>,
-        type_id_to_entity_name: HashMap<u32, String>,
+        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Self {
@@ -2007,7 +2008,7 @@ mod tests {
             1,
             2,
             Direction::Out,
-            Some(7),
+            Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
             PathBuf::from("/tmp/gf"),
             OntologyMode::Strict,
             dst_node_fields(),
@@ -2182,7 +2183,7 @@ mod tests {
             empty_plan(),
             vec![ResolvedNodeSpec {
                 var: 0,
-                label_ids: vec![3],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(3).unwrap()],
                 label_names: vec!["Person".to_owned()],
                 properties: vec![("name".to_owned(), IrLiteral::Str("Alice".to_owned()))],
                 computed_properties: vec![],
@@ -2313,7 +2314,7 @@ mod tests {
                 empty_plan(),
                 vec![ResolvedNodeSpec {
                     var: 0,
-                    label_ids: vec![1],
+                    label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                     label_names: vec!["Person".into()],
                     properties: literals
                         .iter()
@@ -2434,7 +2435,7 @@ mod tests {
             empty_plan(),
             vec![ResolvedNodeSpec {
                 var: 0,
-                label_ids: vec![1],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![],
                 computed_properties: vec![("score".into(), lit(1_i64))],
@@ -2444,7 +2445,7 @@ mod tests {
                 var: 1,
                 src: 0,
                 dst: 2,
-                rel_type_id: Some(3),
+                rel_type_id: Some(graphforge_value::RelationTypeId::decode(3).unwrap()),
                 rel_type_name: Some("KNOWS".into()),
                 direction: Direction::Out,
                 properties: vec![],
@@ -2720,7 +2721,7 @@ mod tests {
             2,
             1,
             Direction::Out,
-            Some(7),
+            Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
             PathBuf::from("/tmp/p"),
             OntologyMode::Strict,
             edge_fields,

@@ -953,13 +953,15 @@ fn apply_graph_mutations(
             node_uuid, label, ..
         } = mutation
         {
-            let type_id = graph
+            let type_id = match graph
                 .ontology
                 .as_ref()
                 .and_then(|ontology| ontology.entity_type_id(label))
-                .unwrap_or_else(|| {
-                    graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
-                });
+            {
+                Some(id) => graphforge_value::EntityTypeId::ontology(id)
+                    .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?,
+                None => graphforge_value::EntityTypeId::runtime(catalog.intern_label(label)?),
+            };
             writer.create_node(*node_uuid, type_id)?;
         }
     }
@@ -975,7 +977,7 @@ fn apply_graph_mutations(
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(label));
+                            catalog.intern_property(name, Some(label))?;
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -996,13 +998,13 @@ fn apply_graph_mutations(
                 target_uuid,
                 properties,
             } => {
-                catalog.intern_relation_type(rel_type);
+                catalog.intern_relation_type(rel_type)?;
                 writer.create_edge(*edge_uuid, rel_type, source_uuid, target_uuid)?;
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
                         .map(|(name, value)| {
-                            catalog.intern_property(name, Some(rel_type));
+                            catalog.intern_property(name, Some(rel_type))?;
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
@@ -1017,7 +1019,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None);
+                catalog.intern_property(property, None)?;
                 let literal = prop_literal(value)?;
                 node_sets
                     .entry("_untyped".into())
@@ -1031,7 +1033,7 @@ fn apply_graph_mutations(
                 property,
                 value,
             } => {
-                catalog.intern_property(property, None);
+                catalog.intern_property(property, None)?;
                 let literal = prop_literal(value)?;
                 edge_sets
                     .entry("_untyped".into())
@@ -1535,7 +1537,7 @@ mod tests {
         let mut seed =
             graphforge_storage::GraphWriter::open_at(directory.path(), OntologyMode::Strict, 1)
                 .unwrap();
-        seed.create_node(existing, graphforge_core::TypeId(0))
+        seed.create_node(existing, graphforge_value::EntityTypeId::decode(0).unwrap())
             .unwrap();
         seed.flush().unwrap();
         graphforge_storage::rebuild_uuid_membership_indexes(
@@ -1567,7 +1569,10 @@ mod tests {
         assert_eq!(io.node_filtered_reads, 0);
 
         writer
-            .create_node(same_request, graphforge_core::TypeId(0))
+            .create_node(
+                same_request,
+                graphforge_value::EntityTypeId::decode(0).unwrap(),
+            )
             .unwrap();
         writer
             .create_edge(uuid7(182), "KNOWS", &existing, &same_request)
@@ -1770,6 +1775,47 @@ mod tests {
             publication_parent_changed(false).code(),
             "GF_IDEMPOTENCY_CONFLICT"
         );
+    }
+
+    #[test]
+    fn composite_catalog_observation_overflow_preserves_graph_authority() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .publish_composite_transaction(graph_request(230, 231, "existing"))
+            .unwrap();
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_property("score", None).unwrap();
+        let batch = catalog.to_record_batch();
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(arrow::array::UInt64Array::from(vec![u64::MAX]));
+        let batch = arrow::array::RecordBatch::try_new(batch.schema(), columns).unwrap();
+        let mut catalog = RuntimeCatalog::from_record_batch(&batch).unwrap();
+        let before = graphforge_storage::capture_graph_files(&graph.dir)
+            .unwrap()
+            .1
+            .bytes;
+        let generation = *graph.current_generation_uuid.lock().unwrap();
+        let inventory = graph.property_inventory_for_session();
+
+        let error = apply_graph_mutations(
+            &graph,
+            &property_request(232, 231, "score", "42"),
+            &mut catalog,
+            1,
+            inventory.as_ref(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("observation count overflow"));
+        assert_eq!(catalog.to_record_batch(), batch);
+        assert_eq!(
+            graphforge_storage::capture_graph_files(&graph.dir)
+                .unwrap()
+                .1
+                .bytes,
+            before
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
     }
 
     #[test]

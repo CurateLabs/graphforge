@@ -19,8 +19,8 @@ use graphforge_api::{
     OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
     PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
+use graphforge_core::OntologyMode;
 use graphforge_core::uuid::{Uuid, new_v7};
-use graphforge_core::{OntologyMode, TypeId};
 use graphforge_exec::demand::{self, DemandSnapshot};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::adjacency::build_adjacency_index;
@@ -34,7 +34,10 @@ use tempfile::TempDir;
 mod project_fixture;
 
 const TS: i64 = 1_700_000_000_000_000;
-const NODE_TYPE: TypeId = TypeId(0);
+const NODE_TYPE: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
+    Ok(id) => id,
+    Err(_) => panic!("valid fixture entity ID"),
+};
 const FAN_OUT: usize = 8;
 const LIMIT: usize = 1_000;
 const WRITE_WINDOW: usize = 32 * 1024;

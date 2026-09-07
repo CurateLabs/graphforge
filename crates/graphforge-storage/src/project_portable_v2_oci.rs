@@ -1628,7 +1628,12 @@ mod tests {
         )
         .unwrap();
         for (index, node) in nodes.iter().enumerate() {
-            writer.create_node(*node, TypeId(1)).unwrap();
+            writer
+                .create_node(
+                    *node,
+                    graphforge_value::EntityTypeId::ontology(TypeId(1)).unwrap(),
+                )
+                .unwrap();
             writer
                 .set_properties(
                     node,

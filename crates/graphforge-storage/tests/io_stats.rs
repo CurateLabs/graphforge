@@ -25,6 +25,7 @@ use graphforge_storage::io_stats;
 use graphforge_storage::{
     GraphWriter, read_edges, read_edges_filtered, read_nodes, read_nodes_filtered,
 };
+use graphforge_value::EntityTypeId;
 
 const TS: i64 = 1_700_000_000_000_000;
 
@@ -36,7 +37,8 @@ fn write_chain(dir: &Path, n: usize) -> Vec<u64> {
     let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
     let uuids: Vec<Uuid> = (0..=n).map(|_| new_v7()).collect();
     for u in &uuids {
-        w.create_node(*u, TypeId(0)).unwrap();
+        w.create_node(*u, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
     }
     let mut edge_ids = Vec::new();
     for pair in uuids.windows(2) {
@@ -236,12 +238,16 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
     let dir = TempDir::new().unwrap();
     let mut first = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     for _ in 0..8 {
-        first.create_node(new_v7(), TypeId(0)).unwrap();
+        first
+            .create_node(new_v7(), EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
     }
     first.flush().unwrap();
     let mut second = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     for _ in 0..12 {
-        second.create_node(new_v7(), TypeId(0)).unwrap();
+        second
+            .create_node(new_v7(), EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
     }
     second.flush().unwrap();
     let paths = graphforge_storage::topology_node_files(dir.path()).unwrap();

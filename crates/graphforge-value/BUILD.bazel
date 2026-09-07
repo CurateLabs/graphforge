@@ -1,0 +1,19 @@
+"""Checked identity/value contract shared by compiler and storage (#1011)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml", "tests/fixtures/catalog_ids_v1.json"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_value",
+    deps = ["//crates/graphforge-core:graphforge_core"],
+)
+
+gf_rust_test(
+    name = "graphforge_value_test",
+    crate = ":graphforge_value",
+    compile_data = ["tests/fixtures/catalog_ids_v1.json"],
+    deps = ["//crates/graphforge-core:graphforge_core"],
+)

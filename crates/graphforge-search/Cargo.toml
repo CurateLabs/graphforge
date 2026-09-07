@@ -8,6 +8,7 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
+graphforge-value = { version = "0.5.2", path = "../graphforge-value" }
 arrow = { workspace = true }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 serde = { workspace = true }

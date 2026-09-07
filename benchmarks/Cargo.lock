@@ -1773,6 +1773,7 @@ dependencies = [
  "graphforge-rel",
  "graphforge-search",
  "graphforge-storage",
+ "graphforge-value",
  "parquet",
  "serde",
  "serde_json",
@@ -1911,6 +1912,7 @@ dependencies = [
  "graphforge-plan",
  "graphforge-rel",
  "graphforge-storage",
+ "graphforge-value",
  "rayon",
  "sha2",
  "thiserror 2.0.20",
@@ -1944,6 +1946,7 @@ dependencies = [
  "graphforge-ast",
  "graphforge-core",
  "graphforge-ontology",
+ "graphforge-value",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1979,6 +1982,7 @@ version = "0.5.2"
 dependencies = [
  "arrow",
  "graphforge-core",
+ "graphforge-value",
  "parquet",
  "serde",
  "serde_json",
@@ -1995,6 +1999,7 @@ dependencies = [
  "datafusion",
  "graphforge-core",
  "graphforge-ir",
+ "graphforge-value",
  "thiserror 2.0.20",
 ]
 
@@ -2023,6 +2028,7 @@ dependencies = [
  "graphforge-ontology",
  "graphforge-plan",
  "graphforge-storage",
+ "graphforge-value",
  "serde_json",
  "thiserror 2.0.20",
 ]
@@ -2033,6 +2039,7 @@ version = "0.5.2"
 dependencies = [
  "arrow",
  "graphforge-storage",
+ "graphforge-value",
  "serde",
  "serde_json",
  "tantivy",
@@ -2057,6 +2064,7 @@ dependencies = [
  "graphforge-filesystem",
  "graphforge-ir",
  "graphforge-ontology",
+ "graphforge-value",
  "libc",
  "named-lock",
  "parquet",
@@ -2072,6 +2080,16 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "graphforge-value"
+version = "0.5.2"
+dependencies = [
+ "arrow",
+ "graphforge-core",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

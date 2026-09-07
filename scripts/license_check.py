@@ -34,6 +34,7 @@ CARGO_PACKAGE_DIRS = tuple(
         "graphforge-bindings-py",
         "graphforge-cli",
         "graphforge-core",
+        "graphforge-value",
         "graphforge-cypher",
         "graphforge-exec",
         "graphforge-filesystem",

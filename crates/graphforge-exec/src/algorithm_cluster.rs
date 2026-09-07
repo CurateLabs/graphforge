@@ -10,6 +10,7 @@
 //! topology-ordered node at a time, so it keeps a serial execution disposition
 //! unless a future contract explicitly changes the numeric/tie semantics.
 
+use graphforge_value::EntityTypeSelection;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -17,7 +18,7 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, ClusterAlgorithm};
-use graphforge_core::{ClusterOptions, GfError, OntologyMode, TypeId};
+use graphforge_core::{ClusterOptions, GfError, OntologyMode};
 use graphforge_ir::Direction;
 use rayon::prelude::*;
 
@@ -796,7 +797,7 @@ pub fn cluster_algorithm(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<RecordBatch, GfError> {
@@ -816,7 +817,7 @@ pub fn cluster_algorithm_with_limits(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
     limits: AlgorithmLimits,
@@ -843,7 +844,7 @@ pub fn cluster_algorithm_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
     limits: AlgorithmLimits,
@@ -870,7 +871,7 @@ pub fn cluster_projection_fingerprint(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<[u8; 32], GfError> {
@@ -883,7 +884,7 @@ fn cluster_projection(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
     mode: OntologyMode,
-    label: TypeId,
+    label: EntityTypeSelection,
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<AdjacencyGraph, GfError> {
@@ -953,7 +954,7 @@ fn cluster_projection(
         dir,
         mode,
         AdjacencySelection {
-            label: Some(label),
+            label,
             via,
             direction,
             weight: None,

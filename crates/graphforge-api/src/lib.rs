@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef;
-use graphforge_core::{GraphIdentity, TypeId};
+use graphforge_core::GraphIdentity;
 pub use graphforge_io::{
     ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
 };
@@ -791,7 +791,7 @@ impl GraphForge {
                             .bindings
                             .iter()
                             .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-                    ),
+                    )?,
                 )),
                 (None, Some(_)) => unreachable!("semantic composition validated above"),
                 (Some(context), None)
@@ -1142,7 +1142,7 @@ impl GraphForge {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        );
+        )?;
         *self
             .default_composition_context
             .lock()
@@ -1275,7 +1275,7 @@ impl GraphForge {
                 .bindings
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
-        );
+        )?;
         drop(current);
         Ok((Arc::new(context), projected, route_moves))
     }
@@ -1984,26 +1984,37 @@ impl GraphForge {
         cleanup_result
     }
 
-    fn algorithm_label(&self, label: &str, verb: &str) -> Result<(TypeId, String), GfError> {
+    fn algorithm_label(
+        &self,
+        label: &str,
+        verb: &str,
+    ) -> Result<(graphforge_value::EntityTypeSelection, String), GfError> {
         if label.is_empty() || label.trim() != label || label.chars().any(char::is_control) {
             return Err(GfError::Validation(format!(
                 "invalid {verb} label {label:?}"
             )));
         }
-        let label_id = self
+        let label_id = match self
             .ontology
             .as_ref()
             .and_then(|ontology| ontology.entity_type_id(label))
-            .or_else(|| {
-                self.runtime_catalog
-                    .lock()
-                    .expect("runtime catalog poisoned")
-                    .entity_type_names_with_ids()
-                    .find_map(|(id, name)| {
-                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id))
-                    })
-            })
-            .unwrap_or(TypeId(u32::MAX));
+        {
+            Some(id) => graphforge_value::EntityTypeSelection::Known(
+                graphforge_value::EntityTypeId::ontology(id)
+                    .map_err(|error| GfError::Validation(error.to_string()))?,
+            ),
+            None => self
+                .runtime_catalog
+                .lock()
+                .expect("runtime catalog poisoned")
+                .entity_type_names_with_ids()
+                .find_map(|(id, name)| {
+                    (name == label).then_some(graphforge_value::EntityTypeSelection::Known(
+                        graphforge_value::EntityTypeId::runtime(id),
+                    ))
+                })
+                .unwrap_or(graphforge_value::EntityTypeSelection::Missing),
+        };
         let stem = if matches!(self.ontology_mode, OntologyMode::Exploratory) {
             "_untyped".to_owned()
         } else {
@@ -2289,7 +2300,8 @@ impl GraphForge {
     ) -> Result<InvocationDescriptor, InvocationError> {
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -2601,7 +2613,8 @@ impl GraphForge {
     ) -> Result<InvocationDescriptor, InvocationError> {
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -3079,7 +3092,8 @@ impl GraphForge {
         let dispatch_options = options;
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -3113,7 +3127,8 @@ impl GraphForge {
         let _admission = self.admit_heavy_query()?;
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
@@ -4932,7 +4947,7 @@ mod tests {
                     payload: GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: uuid::Uuid::new_v4().hyphenated().to_string(),
                         node_id: 2,
-                        type_ids: vec![1],
+                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                         created_at_micros: 2,
                         updated_at_micros: 2,
                     },
@@ -4974,7 +4989,7 @@ mod tests {
             ));
         }
         let (unknown, stem) = graph.algorithm_label("Unknown", "rank").unwrap();
-        assert_eq!(unknown, TypeId(u32::MAX));
+        assert_eq!(unknown, graphforge_value::EntityTypeSelection::Missing);
         assert_eq!(stem, "_untyped");
 
         graph

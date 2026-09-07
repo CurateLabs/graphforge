@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use graphforge_core::OntologyMode;
 use graphforge_core::uuid::{Uuid, new_v7};
-use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::Direction;
 use graphforge_storage::GraphWriter;
 use graphforge_storage::adjacency::build_adjacency_index;
@@ -19,7 +19,10 @@ use graphforge_exec::{
 };
 
 const TS: i64 = 1_700_000_000_000_000;
-const PERSON: TypeId = TypeId(0);
+const PERSON: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
+    Ok(id) => id,
+    Err(_) => panic!("valid person fixture identity"),
+};
 
 fn force_stale_generation_fixture(dir: &Path) {
     let topology = graphforge_storage::read_topology_generation(dir).unwrap() + 1;
