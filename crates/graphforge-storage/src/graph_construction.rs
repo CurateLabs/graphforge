@@ -9247,7 +9247,10 @@ mod tests {
             crate::GraphWriter::open_at(root.path(), graphforge_core::OntologyMode::Exploratory, 1)
                 .unwrap();
         writer
-            .create_node(Uuid::now_v7(), graphforge_core::TypeId(0))
+            .create_node(
+                Uuid::now_v7(),
+                graphforge_value::EntityTypeId::decode(0).unwrap(),
+            )
             .unwrap();
         writer.flush().unwrap();
         drop(writer);

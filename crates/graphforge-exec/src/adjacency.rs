@@ -1819,7 +1819,7 @@ mod tests {
                         dir.path(),
                         OntologyMode::Strict,
                         crate::algorithm_graph::AdjacencySelection {
-                            label: None,
+                            label: graphforge_ir::EntityTypeSelection::All,
                             via: "KNOWS",
                             direction: Direction::Out,
                             weight: None,
