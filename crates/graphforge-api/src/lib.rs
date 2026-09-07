@@ -630,10 +630,7 @@ impl GraphForge {
             uuid_membership_index: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                dir.clone(),
-                ontology_mode,
-            )),
+            adjacency_provider: Arc::new(adjacency_provider_for_graph(&dir, ontology_mode)?),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -825,6 +822,7 @@ impl GraphForge {
         )?);
         let runtime = build_runtime(&resource_policy)?;
 
+        let adjacency_provider = adjacency_provider_for_graph(&dir, ontology_mode)?;
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
@@ -839,10 +837,7 @@ impl GraphForge {
             uuid_membership_index: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                dir.clone(),
-                ontology_mode,
-            )),
+            adjacency_provider: Arc::new(adjacency_provider),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -1397,10 +1392,7 @@ impl GraphForge {
         let adjacency_provider = if execution_mode == self.ontology_mode {
             Arc::clone(&self.adjacency_provider)
         } else {
-            Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                self.dir.clone(),
-                execution_mode,
-            ))
+            Arc::new(adjacency_provider_for_graph(&self.dir, execution_mode)?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
@@ -3373,10 +3365,8 @@ impl GraphForge {
             // reads by it (exploratory `_exploratory.parquet` vs typed
             // `topology/edges/<REL>.parquet`); rebuild it so the adjacency path
             // matches the new mode.
-            self.adjacency_provider = Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
-                self.dir.clone(),
-                self.ontology_mode,
-            ));
+            self.adjacency_provider =
+                Arc::new(adjacency_provider_for_graph(&self.dir, self.ontology_mode)?);
         }
         Ok(())
     }
@@ -3905,6 +3895,21 @@ fn ordinal_identity_resolver(
     Ok(Arc::new(graphforge_exec::V4OrdinalIdentityResolver::new(
         ordinal_identity_handle(generation, graph_root)?,
     )))
+}
+
+fn adjacency_provider_for_graph(
+    dir: &Path,
+    mode: OntologyMode,
+) -> Result<graphforge_exec::PersistentAdjacencyProvider, GfError> {
+    let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode);
+    // A pinned view must not mutate its generation. Writable workspaces also
+    // have concurrent readers that enumerate graph files, so lazy build temps
+    // must stay outside those trees. Each provider owns a unique cache root.
+    let artifacts = tempfile::Builder::new()
+        .prefix("graphforge-adjacency-cache-")
+        .tempdir()
+        .map_err(|error| GfError::Storage(format!("cannot create adjacency cache: {error}")))?;
+    Ok(provider.with_rebuild_root(artifacts))
 }
 
 fn hydrate_graph_workspace(

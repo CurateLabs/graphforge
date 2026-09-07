@@ -113,6 +113,25 @@ fn assert_equal(phase: &str, results: &[Fingerprints]) {
 }
 
 #[test]
+fn lazy_rank_keeps_graph_workspace_inventory_unchanged() {
+    let project = tempfile::tempdir().unwrap();
+    seed(project.path());
+    let graph = GraphForge::new(project.path().to_str()).unwrap();
+    let before = graphforge_storage::capture_graph_files(&graph.dir)
+        .unwrap()
+        .0;
+    assert!(!graphforge_storage::adjacency::adjacency_dir(&graph.dir).exists());
+    graph.rank("Person", RankOptions::default()).unwrap();
+    assert_eq!(
+        graphforge_storage::capture_graph_files(&graph.dir)
+            .unwrap()
+            .0,
+        before,
+        "read-time cache publication must be outside the graph workspace scanned by concurrent readers"
+    );
+}
+
+#[test]
 fn independent_instances_and_one_instance_reads_are_deterministic() {
     let first = tempfile::tempdir().expect("phase=independent first tempdir");
     let second = tempfile::tempdir().expect("phase=independent second tempdir");

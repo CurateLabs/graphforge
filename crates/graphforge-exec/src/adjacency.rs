@@ -29,7 +29,6 @@ use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::Direction;
 use graphforge_storage::adjacency::{
     self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, CsrIndex, CsrRow, ShardedCsrIndex,
-    build_adjacency_index,
 };
 use graphforge_storage::adjacency_delta::{
     CsrDeltaOverlay, DeltaSegment, overlay_delta_segments, read_delta_chain,
@@ -836,6 +835,10 @@ enum IndexState {
 /// supports it).
 pub struct PersistentAdjacencyProvider {
     dir: PathBuf,
+    /// Owned artifact root; a TempDir owner also removes it on provider drop.
+    rebuild_root: Option<Box<dyn AsRef<std::path::Path> + Send + Sync>>,
+    /// Serialize initial loads/builds; row reads retain their independent views.
+    load_lock: Mutex<()>,
     /// Scan-build fallback, fed the ORIGINAL relation name so per-row relation
     /// filtering still applies (the union read serves the typed `"*"` wildcard).
     scan: ScanBuildAdjacencyProvider,
@@ -852,9 +855,42 @@ impl PersistentAdjacencyProvider {
         Self {
             scan: ScanBuildAdjacencyProvider::new(dir.clone(), mode),
             dir,
+            rebuild_root: None,
+            load_lock: Mutex::new(()),
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keep lazy builds and repairs outside the source graph workspace.
+    /// Passing an owned temporary directory retains it for the provider's lifetime.
+    /// Existing source indexes remain readable until a private rebuild succeeds.
+    #[must_use]
+    pub fn with_rebuild_root(
+        mut self,
+        root: impl AsRef<std::path::Path> + Send + Sync + 'static,
+    ) -> Self {
+        self.rebuild_root = Some(Box::new(root));
+        self
+    }
+
+    fn index_root(&self) -> &std::path::Path {
+        self.rebuild_root
+            .as_deref()
+            .map(AsRef::as_ref)
+            .filter(|root| csr::manifest_path(root).is_file())
+            .unwrap_or(&self.dir)
+    }
+
+    fn rebuild(&self, now: i64) -> Result<Vec<AdjacencyManifestRow>, GfError> {
+        csr::build_adjacency_index_into(
+            &self.dir,
+            self.rebuild_root
+                .as_deref()
+                .map_or(self.dir.as_path(), AsRef::as_ref),
+            now,
+            || Ok(()),
+        )
     }
 
     /// The CSR file stem serving `rel_type_name`: the reserved
@@ -873,18 +909,18 @@ impl PersistentAdjacencyProvider {
     fn state(&self) -> IndexState {
         let mut guard = self.state.lock().expect("adjacency state lock");
         guard
-            .get_or_insert_with(|| Self::read_state(&self.dir))
+            .get_or_insert_with(|| Self::read_state(&self.dir, self.index_root()))
             .clone()
     }
 
-    fn read_state(dir: &std::path::Path) -> IndexState {
-        if !csr::adjacency_dir(dir).exists() {
+    fn read_state(dir: &std::path::Path, index_root: &std::path::Path) -> IndexState {
+        if !csr::adjacency_dir(index_root).exists() {
             return IndexState::Absent;
         }
         let Ok(generation) = read_topology_generation(dir) else {
             return IndexState::Unreadable;
         };
-        let Ok(rows) = csr::read_manifest(dir) else {
+        let Ok(rows) = csr::read_manifest(index_root) else {
             return IndexState::Unreadable;
         };
         // The base generation the CSRs were built at — uniform across rows on a
@@ -897,10 +933,12 @@ impl PersistentAdjacencyProvider {
             Some(b) if uniform && b == generation => (true, Vec::new()),
             // base < counter: serveable iff an intact, bounded delta chain
             // (#765) covers (base, counter]; otherwise stale ⇒ rebuild.
-            Some(b) if uniform && b < generation => match read_delta_chain(dir, b, generation) {
-                Some(chain) => (true, chain),
-                None => (false, Vec::new()),
-            },
+            Some(b) if uniform && b < generation => {
+                match read_delta_chain(index_root, b, generation) {
+                    Some(chain) => (true, chain),
+                    None => (false, Vec::new()),
+                }
+            }
             // Empty / torn manifest, or an index newer than the counter
             // (anomalous, e.g. a counter reset): stale.
             _ => (false, Vec::new()),
@@ -940,7 +978,7 @@ impl PersistentAdjacencyProvider {
         deltas: &[DeltaSegment],
     ) -> Result<Adjacency, GfError> {
         let directed = |d: csr::Direction| -> Result<AdjacencyInner, GfError> {
-            let path = csr::csr_path(&self.dir, stem, d);
+            let path = csr::csr_path(self.index_root(), stem, d);
             if csr::sharded_csr_exists(&path) {
                 let base = Arc::new(ShardedCsrIndex::open(&path)?);
                 if let Some(row) = rows
@@ -1020,7 +1058,7 @@ impl PersistentAdjacencyProvider {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
-        match build_adjacency_index(&self.dir, now) {
+        match self.rebuild(now) {
             Ok(rows) => {
                 let covered = Self::rows_cover(&rows, stem, direction);
                 // Index writes don't bump the topology counter, so re-read it
@@ -1170,6 +1208,10 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         if !matches!(error, GfError::Storage(_)) {
             return Err(error);
         }
+        let _load = self
+            .load_lock
+            .lock()
+            .map_err(|_| GfError::Storage("adjacency load lock poisoned".into()))?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| {
@@ -1177,7 +1219,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
             });
         // Unlike initial index admission, failed lazy reads must not hide a
         // failed rebuild behind scan-build. Perform one rebuild and one load.
-        let rows = build_adjacency_index(&self.dir, now)?;
+        let rows = self.rebuild(now)?;
         let stem = Self::stem_for(rel_type_name);
         let view = self.load(&stem, direction, &rows, &[])?;
         self.invalidate();
@@ -1189,6 +1231,10 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
         rel_type_name: &str,
         direction: Direction,
     ) -> Result<Arc<Adjacency>, GfError> {
+        let _load = self
+            .load_lock
+            .lock()
+            .map_err(|_| GfError::Storage("adjacency load lock poisoned".into()))?;
         let stem = Self::stem_for(rel_type_name);
         if let Some(view) = self
             .cache
@@ -1252,7 +1298,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                 fresh: true, rows, ..
             } => {
                 let files_exist = |d: csr::Direction| {
-                    let path = csr::csr_path(&self.dir, &stem, d);
+                    let path = csr::csr_path(self.index_root(), &stem, d);
                     path.exists() || csr::sharded_csr_exists(&path)
                 };
                 let present = Self::rows_cover(&rows, &stem, direction)
@@ -1293,7 +1339,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                         }
                 });
                 for row in relevant {
-                    let path = csr::csr_path(&self.dir, &stem, row.direction);
+                    let path = csr::csr_path(self.index_root(), &stem, row.direction);
                     if !ShardedCsrIndex::open(&path).is_ok_and(|index| {
                         index.node_count() == row.node_count && index.edge_count() == row.edge_count
                     }) {
@@ -1341,6 +1387,7 @@ fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
 
 #[cfg(test)]
 mod tests {
+    use graphforge_storage::adjacency::build_adjacency_index;
     use std::path::Path;
 
     use graphforge_core::TypeId;
@@ -1750,6 +1797,93 @@ mod tests {
             if operation < 3 {
                 assert!(Arc::ptr_eq(&reader.view, &repaired));
             }
+        }
+    }
+
+    #[test]
+    fn concurrent_private_loads_share_one_view_and_own_the_cache() {
+        let source = TempDir::new().unwrap();
+        let [src, ..] = write_diamond(source.path());
+        let artifacts = TempDir::new().unwrap();
+        let artifact_path = artifacts.path().to_path_buf();
+        let provider = Arc::new(
+            PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
+                .with_rebuild_root(artifacts),
+        );
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let provider = Arc::clone(&provider);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    provider.adjacency("KNOWS", Direction::Out).unwrap()
+                })
+            })
+            .collect();
+        let views: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        for view in &views {
+            assert!(Arc::ptr_eq(view, &views[0]));
+            assert_eq!(view.neighbors(src).unwrap().len(), 3);
+        }
+        assert!(!csr::adjacency_dir(source.path()).exists());
+        assert!(csr::manifest_path(&artifact_path).is_file());
+        drop(views);
+        drop(provider);
+        assert!(
+            !artifact_path.exists(),
+            "provider owns disposable cache cleanup"
+        );
+    }
+
+    #[test]
+    fn private_rebuild_keeps_source_inventory_unchanged() {
+        for corrupt_index in [false, true] {
+            let source = TempDir::new().unwrap();
+            let artifacts = TempDir::new().unwrap();
+            let [src, ..] = write_diamond(source.path());
+            if corrupt_index {
+                build_adjacency_index(source.path(), TS).unwrap();
+                assert!(overwrite_sharded_csr_payloads(source.path()) > 0);
+            }
+            let before = graphforge_storage::capture_graph_files(source.path())
+                .unwrap()
+                .0;
+            let provider =
+                PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
+                    .with_rebuild_root(artifacts.path().to_path_buf());
+            let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
+            assert_eq!(reader.with_neighbors(src, |row| row.len()).unwrap(), 3);
+            assert_eq!(reader.view.backing(), AdjacencyBacking::CsrNative);
+            assert!(csr::manifest_path(artifacts.path()).is_file());
+            provider.revalidate();
+            assert_eq!(
+                provider.status("KNOWS", Direction::Out),
+                AdjacencyStatus::Hit
+            );
+            assert_eq!(
+                provider.edge_cardinality("KNOWS", Direction::Out).unwrap(),
+                6
+            );
+            assert_eq!(
+                provider
+                    .adjacency("KNOWS", Direction::Out)
+                    .unwrap()
+                    .neighbors(src)
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert_eq!(
+                graphforge_storage::capture_graph_files(source.path())
+                    .unwrap()
+                    .0,
+                before,
+                "lazy build and corruption repair must not modify the pinned source"
+            );
         }
     }
 

@@ -121,6 +121,9 @@ use arrow::array::Array;
 async fn explain_shows_stable_expand_exec_across_index_states() {
     let dir = TempDir::new().unwrap();
     let rc = seed(dir.path()).await;
+    // Seeding the parallel edge traverses the first edge and can lazily build
+    // adjacency. Establish the absent-index precondition explicitly.
+    std::fs::remove_dir_all(graphforge_storage::adjacency::adjacency_dir(dir.path())).unwrap();
     let plan = bind(
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN b.name AS bn",
         &rc,
@@ -132,7 +135,7 @@ async fn explain_shows_stable_expand_exec_across_index_states() {
         .unwrap();
     assert!(
         without.contains("ExpandExec") && without.contains("adjacency=building"),
-        "no index: scan-build ExpandExec expected, got:\n{without}"
+        "no index: ExpandExec with pending adjacency build expected, got:\n{without}"
     );
 
     build_adjacency_index(dir.path(), TS).unwrap();
