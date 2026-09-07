@@ -909,6 +909,9 @@ impl StorageAttributionSnapshot {
 /// Classify one authenticated graph inventory path.
 #[must_use]
 pub fn classify_graph_artifact(relative_path: &str) -> ArtifactCategory {
+    if relative_path == "topology/runtime_entity_label_encoding.json" {
+        return ArtifactCategory::CatalogAndManifests;
+    }
     let path = Path::new(relative_path);
     let mut components = path.components().filter_map(|component| match component {
         std::path::Component::Normal(value) => value.to_str(),
@@ -1427,6 +1430,16 @@ mod tests {
             ArtifactCategory::CatalogAndManifests
         );
         assert_eq!(
+            classify_graph_artifact("topology/runtime_entity_label_encoding.json"),
+            ArtifactCategory::CatalogAndManifests
+        );
+        for unknown in [
+            "topology/runtime_entity_label_encoding.json/unknown",
+            "topology/runtime_entity_label_encoding.json.tmp",
+        ] {
+            assert_eq!(classify_graph_artifact(unknown), ArtifactCategory::Other);
+        }
+        assert_eq!(
             classify_graph_artifact("topology/surrogate_tails.parquet"),
             ArtifactCategory::UuidAndSurrogates
         );
@@ -1577,6 +1590,7 @@ mod tests {
             .unwrap();
         }
         let _ = crate::open_or_initialize_project(project.path()).unwrap();
+        crate::write_runtime_entity_label_encoding_marker(workspace.path()).unwrap();
         let generation = publish_compact_fixture(project.path(), workspace.path());
         let snapshot = capture_storage_attribution(&generation).unwrap();
         snapshot.validate_reconciliation().unwrap();
