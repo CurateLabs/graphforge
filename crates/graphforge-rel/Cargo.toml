@@ -17,7 +17,6 @@ graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
 graphforge-plan = { version = "0.5.2", path = "../graphforge-plan" }
-graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 datafusion = { workspace = true }
 arrow-data = { workspace = true }
 datafusion-functions-aggregate = "54"
@@ -27,6 +26,7 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 tempfile = "3"
 insta = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }

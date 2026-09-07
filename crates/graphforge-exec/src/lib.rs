@@ -62,6 +62,7 @@ pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
 pub mod mutation;
+mod path_hydration;
 pub mod read_resource;
 pub mod write_resource;
 pub use algorithm_embedding_options::validate_embedding_options;
@@ -4901,13 +4902,14 @@ impl QueryPlanner for GraphForgeQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let logical_plan = read_resource::bind(logical_plan, session_state)?;
+        let (logical_plan, hydration) = read_resource::bind(logical_plan, session_state)?;
         let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             GraphForgeExtensionPlanner,
         )]);
-        planner
+        let physical = planner
             .create_physical_plan(&logical_plan, session_state)
-            .await
+            .await?;
+        Ok(path_hydration::wrap(physical, hydration))
     }
 }
 
@@ -4963,6 +4965,7 @@ impl QueryEvidenceStream {
             return;
         }
         self.finalized = true;
+        path_hydration::cancel_plan(&self.physical);
         drop(self.inner.take());
         demand::record_plan_completion(
             &self.physical,
@@ -5362,7 +5365,7 @@ impl ExecutionSession {
             .await
             .map_err(GfError::from_plan_error)?;
 
-        let batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
+        let batches = path_hydration::collect_guarded(Arc::clone(&physical), self.ctx.task_ctx())
             .await
             .map_err(GfError::from_execution_error)?;
 
@@ -5547,7 +5550,7 @@ impl ExecutionSession {
             .create_physical_plan(&logical)
             .await
             .map_err(GfError::from_plan_error)?;
-        let batches = collect(physical, self.ctx.task_ctx())
+        let batches = path_hydration::collect_guarded(physical, self.ctx.task_ctx())
             .await
             .map_err(GfError::from_execution_error)?;
         let mut frontier = write_driver::Frontier { df_schema, batches };
@@ -5560,6 +5563,10 @@ impl ExecutionSession {
             mode: resource.mode,
             params,
             type_map: lowerer.entity_name_map(),
+            hydration: path_hydration::HydrationResource::new(
+                read_resource::required(&self.ctx.state()).map_err(GfError::from_plan_error)?,
+                Arc::clone(&self.ctx.runtime_env().memory_pool),
+            ),
         };
         let mut wctx = write_driver::StatementWriteContext::new(&resource.dir, resource.mode)?
             .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
@@ -5813,7 +5820,9 @@ impl ExecutionSession {
 
         let task_ctx = self.ctx.task_ctx();
         let memory_reserved_before = task_ctx.memory_pool().reserved();
-        let collected = collect(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
+        let collected =
+            path_hydration::collect_guarded(Arc::clone(&physical), Arc::clone(&task_ctx)).await;
+        path_hydration::cancel_plan(&physical);
         let memory_reserved_after = task_ctx.memory_pool().reserved();
         let returned_batch_bytes = collected.as_ref().map_or(0, |batches| {
             batches
@@ -5897,7 +5906,7 @@ impl ExecutionSession {
                 .create_physical_plan(&logical)
                 .await
                 .map_err(GfError::from_plan_error)?;
-            let batches = collect(physical, self.ctx.task_ctx())
+            let batches = path_hydration::collect_guarded(physical, self.ctx.task_ctx())
                 .await
                 .map_err(GfError::from_execution_error)?;
             let batch = batches.first().ok_or_else(|| {

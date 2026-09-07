@@ -40,6 +40,9 @@ use datafusion::logical_expr::{
 };
 
 use graphforge_core::{GfError, OntologyMode};
+use graphforge_ir::arrow_schema::{
+    EXPLORATORY_EDGE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA,
+};
 use graphforge_ir::plan::PATTERN_COMPREHENSION_VALUE_ALIAS;
 use graphforge_ir::{
     AggExpr, AggFunc, CreatePattern, Direction, ExprArena, ExprId, GraphOp, GraphPlan, IrExpr,
@@ -51,7 +54,6 @@ use graphforge_plan::{
     OptionalMatchNode, RemoveTarget, ResolvedEdgeSpec, ResolvedNodeSpec, SetTarget, UnwindNode,
     VarLenExpandNode,
 };
-use graphforge_storage::{EXPLORATORY_EDGE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA};
 use graphforge_value::{EntityTypeId, PropertyId, RelationTypeId};
 
 use crate::LogicalPlan;
@@ -4476,7 +4478,7 @@ fn node_property_schema(
         .node_properties
         .get(stem)
         .cloned()
-        .unwrap_or_else(|| graphforge_storage::schemas::PROPERTY_BASE_SCHEMA.clone())
+        .unwrap_or_else(|| graphforge_ir::arrow_schema::PROPERTY_BASE_SCHEMA.clone())
 }
 fn edge_property_schema(
     snapshot: &LoweringSnapshot,
@@ -4486,7 +4488,7 @@ fn edge_property_schema(
         .edge_properties
         .get(stem)
         .cloned()
-        .unwrap_or_else(|| graphforge_storage::schemas::EDGE_PROPERTY_BASE_SCHEMA.clone())
+        .unwrap_or_else(|| graphforge_ir::arrow_schema::EDGE_PROPERTY_BASE_SCHEMA.clone())
 }
 
 #[cfg(test)]

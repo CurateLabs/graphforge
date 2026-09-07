@@ -1314,16 +1314,18 @@ pub(crate) struct PhaseEnv<'a> {
     pub params: &'a HashMap<String, graphforge_ir::IrLiteral>,
     /// `TypeId.0 → entity name`, for property-file stem resolution.
     pub type_map: HashMap<graphforge_value::EntityTypeId, String>,
+    pub hydration: std::sync::Arc<crate::path_hydration::HydrationResource>,
+}
+
+impl Drop for PhaseEnv<'_> {
+    fn drop(&mut self) {
+        self.hydration.cancel();
+    }
 }
 
 impl PhaseEnv<'_> {
     fn bind_read_expression(&self, expr: DfExpr) -> Result<DfExpr, GfError> {
-        graphforge_rel::expr::bind_graph_read_expression(
-            expr,
-            Some(self.dir),
-            Some(&self.lowerer.read_contract().labels),
-        )
-        .map_err(GfError::from_plan_error)
+        self.hydration.bind(expr).map_err(GfError::from_plan_error)
     }
 }
 
@@ -1438,7 +1440,7 @@ pub(crate) async fn run_terminal_suffix(
         .map_err(GfError::from_plan_error)?;
     let physical = replace_empty_input(physical, input)?;
     let schema = physical.schema();
-    let mut batches = datafusion::physical_plan::collect(physical, session.task_ctx())
+    let mut batches = crate::path_hydration::collect_guarded(physical, session.task_ctx())
         .await
         .map_err(GfError::from_execution_error)?;
     if batches.is_empty() {
@@ -4145,6 +4147,24 @@ mod tests {
             mode: OntologyMode::Exploratory,
             params,
             type_map: HashMap::new(),
+            hydration: crate::path_hydration::HydrationResource::new(
+                std::sync::Arc::new(crate::read_resource::GraphReadContext {
+                    dir: dir.to_path_buf(),
+                    mode: OntologyMode::Exploratory,
+                    ontology: None,
+                    catalog: std::sync::Arc::new(
+                        graphforge_storage::GraphCatalog::open(
+                            dir,
+                            None,
+                            &graphforge_ir::RuntimeCatalog::new(),
+                        )
+                        .unwrap(),
+                    ),
+                }),
+                std::sync::Arc::new(
+                    datafusion::execution::memory_pool::UnboundedMemoryPool::default(),
+                ),
+            ),
         }
     }
 

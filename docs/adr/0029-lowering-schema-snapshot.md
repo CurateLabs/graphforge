@@ -27,20 +27,33 @@ Schema metadata follows the existing read-source contract: only transient
 property live-count metadata is omitted from logical identity. Other metadata
 and physical/public schemas retain their existing semantics.
 
-## Remaining parent work
+## Parent completion (#1006)
 
-Runtime path hydration remains in rel for this slice. Specifically,
-`expr::bind_graph_read_expression` revalidates property schemas at physical
-binding; `gather_path_node_labels` and `gather_path_node_props` still invoke
-storage visitors at execution. Rel also imports shared storage schema constants.
-The unused `StorageProvider` stubs live in `graphforge-storage/src/lib.rs`, not
-in rel. Its execution binding may
-validate stored schema facts and its visitors still perform runtime reads. The
-next #1006 slice moves that implementation behind ordinary execution demand,
-cancellation and accounting. Shared schema definitions and the unused
-StorageProvider abstraction also remain pending the parent's final dependency
-cleanup. This decision does not claim that rel's production storage dependency
-has been removed.
+Relational expressions retain a neutral path-node descriptor and a recursive
+expression-rewrite seam. Execution binds that descriptor to the selected read
+context, revalidates its schema, and retains authenticated property providers.
+The recursive rewrite preserves private quantifier and list-comprehension
+positions, including empty-list and short-circuit behavior. Runtime resource
+errors propagate through these nested evaluations.
+
+Each physical query plan owns a hydration resource using the same runtime
+memory pool as its execution task. Per-invocation fallible reservations cover
+retained UUID indexes, label vectors, property-row locations and gathered Arrow
+batches; they release on success or error. This follows ordinary DataFusion
+operator accounting, not process-RSS or output-lifetime accounting. Hydration
+reads remain bounded by requested UUIDs and stop once the selected rows are
+found. Query-local metrics expose examined rows, gathered rows and peak gathered
+entries. A transparent physical wrapper preserves child properties and
+partitions and exposes only its own hydration metrics.
+
+Whole-query stream and eager-collection owners cancel hydration on completion
+or drop. Completing one partition does not cancel sibling partitions. Direct
+write-expression evaluation has its own phase owner; independently planned
+write prefixes and suffixes retain whole-plan cancellation guards.
+
+Shared Arrow schemas now live in IR, with storage compatibility reexports.
+Rel's storage dependency is test-only. The unused storage-provider stubs were
+deleted rather than promoted into a second backend interface.
 
 ## Evidence
 

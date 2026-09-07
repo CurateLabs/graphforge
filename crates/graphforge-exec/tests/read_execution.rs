@@ -372,3 +372,54 @@ async fn logical_read_resources_relocate_and_bind_independently() {
         );
     }
 }
+
+#[tokio::test]
+async fn same_session_path_hydration_stream_cancellation_is_query_local() {
+    use futures::TryStreamExt;
+    let root = TempDir::new().unwrap();
+    let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    let create = bind(
+        "CREATE (a:Person {name:'a'}), (b:Person {name:'b'}), (a)-[:KNOWS]->(b)",
+        catalog.clone(),
+    );
+    session_with(root.path(), &catalog.lock().unwrap())
+        .execute_create(&create)
+        .await
+        .unwrap();
+    let query = bind(
+        "MATCH p=(a:Person)-[:KNOWS*1..2]->(b:Person) RETURN [n IN nodes(p) | n.name]",
+        catalog.clone(),
+    );
+    let session = session_with(root.path(), &catalog.lock().unwrap());
+    let first = session
+        .execute_plan_stream(&query, &Default::default())
+        .await
+        .unwrap();
+    let second = session
+        .execute_plan_stream(&query, &Default::default())
+        .await
+        .unwrap();
+    drop(first);
+    let batches = second.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    let names = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::ListArray>()
+        .unwrap();
+    let values = names.value(0);
+    let values = values
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(
+        values.iter().collect::<Vec<_>>(),
+        vec![Some("a"), Some("b")]
+    );
+    let fresh = session.execute_plan(&query).await.unwrap();
+    assert_eq!(fresh.batches[0].columns(), batches[0].columns());
+    assert_eq!(session.context().task_ctx().memory_pool().reserved(), 0);
+}

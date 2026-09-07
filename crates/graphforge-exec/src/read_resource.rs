@@ -110,26 +110,22 @@ pub(crate) fn required(
 pub(crate) fn bind(
     plan: &LogicalPlan,
     state: &datafusion::execution::SessionState,
-) -> Result<LogicalPlan> {
+) -> Result<(
+    LogicalPlan,
+    Option<Arc<crate::path_hydration::HydrationResource>>,
+)> {
     let resource = state
         .config()
         .get_extension::<GraphReadContext>()
         .filter(|resource| !resource.dir.as_os_str().is_empty());
-    let contract = resource
-        .as_ref()
-        .map(|r| {
-            graphforge_rel::GraphPlanLowerer::new(
-                Some(&graphforge_storage::lowering_snapshot(
-                    Some(&r.catalog),
-                    None,
-                )?),
-                r.ontology.as_ref(),
-            )
-            .map(|l| l.read_contract())
-        })
-        .transpose()
-        .map_err(|e| DataFusionError::Plan(e.to_string()))?;
-    plan.clone()
+    let hydration = resource.as_ref().map(|resource| {
+        crate::path_hydration::HydrationResource::new(
+            Arc::clone(resource),
+            Arc::clone(&state.runtime_env().memory_pool),
+        )
+    });
+    let bound = plan
+        .clone()
         .transform_up_with_subqueries(|mut node| {
             if let LogicalPlan::TableScan(scan) = &mut node
                 && let Some(source) = scan.source.downcast_ref::<GraphReadSource>()
@@ -146,16 +142,27 @@ pub(crate) fn bind(
                 )?;
             }
             node.map_expressions(|expr| {
-                graphforge_rel::expr::bind_graph_read_expression(
-                    expr,
-                    resource.as_ref().map(|r| r.dir.as_path()),
-                    contract.as_ref().map(|c| c.labels.as_slice()),
-                )
+                match &hydration {
+                    Some(resource) => resource.bind(expr),
+                    None => graphforge_rel::expr::rewrite_embedded_expressions(expr, &mut |expr| {
+                        if let datafusion::logical_expr::Expr::ScalarFunction(call) = &expr {
+                            if graphforge_rel::expr::path_node_hydration_descriptor(&call.func)
+                                .is_some()
+                            {
+                                return Err(DataFusionError::Plan(
+                                    "GF_READ_RESOURCE_MISSING: path hydration".into(),
+                                ));
+                            }
+                        }
+                        Ok(expr)
+                    }),
+                }
                 .map(Transformed::yes)
             })?
             .data
             .recompute_schema()
             .map(Transformed::yes)
         })
-        .map(|result| result.data)
+        .map(|result| result.data)?;
+    Ok((bound, hydration))
 }
