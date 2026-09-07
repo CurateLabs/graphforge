@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from graphforge_bench.local_admission import CommandResult, exit_code, qualify_local_host
 from graphforge_bench.local_admission_fixture import _parse_runexec_value
+from graphforge_bench.local_admission_fixture import main as fixture_main
 from graphforge_bench.validate_local_admission import validate
 
 
@@ -23,6 +29,44 @@ class LocalAdmissionTests(unittest.TestCase):
         self.assertEqual(_parse_runexec_value("4096B"), 4096)
         self.assertEqual(_parse_runexec_value("0.003s"), 0.003)
         self.assertEqual(_parse_runexec_value("walltime"), "walltime")
+
+    def test_fixture_uses_selected_interpreter_despite_shadow_runexec(self) -> None:
+        # Exercise the fixture's real dispatch and the installed BenchExec CLI.
+        # --help keeps this routing regression independent of native admission;
+        # native accounting and termination are checked by the host probe.
+        run = subprocess.run
+        invoked = []
+        with tempfile.TemporaryDirectory() as directory:
+            shadow = Path(directory) / "runexec"
+            marker = Path(directory) / "shadow-invoked"
+            shadow.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).touch()\n"
+                "raise SystemExit(93)\n",
+                encoding="utf-8",
+            )
+            shadow.chmod(0o755)
+
+            def run_help(command, **kwargs):
+                entrypoint = command[: command.index("--walltimelimit")]
+                completed = run([*entrypoint, "--help"], **kwargs)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("--walltimelimit", completed.stdout)
+                self.assertIn("--overlay-dir", completed.stdout)
+                invoked.append(entrypoint)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ["PATH"]}),
+                patch(
+                    "graphforge_bench.local_admission_fixture.subprocess.run", side_effect=run_help
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                fixture_main()
+            self.assertEqual(invoked, [[sys.executable, "-m", "benchexec.runexecutor"]])
+            self.assertFalse(marker.exists(), "PATH-selected runexec must never be invoked")
 
     @staticmethod
     def _linux_roots(directory: str) -> tuple[Path, Path]:

@@ -74,10 +74,14 @@ while True:
         # this explicit mount, the heartbeat would live in BenchExec's overlay
         # and disappear with the container, making descendant cleanup
         # impossible to verify from the supervising process.
+        # Keep BenchExec on the interpreter selected by native admission;
+        # uv's PATH may contain another runexec without host cgroup integration.
         with measure_hybrid_pressure() as hybrid_pressure:
             completed = subprocess.run(
                 [
-                    "runexec",
+                    sys.executable,
+                    "-m",
+                    "benchexec.runexecutor",
                     "--walltimelimit",
                     "1",
                     "--memlimit",
