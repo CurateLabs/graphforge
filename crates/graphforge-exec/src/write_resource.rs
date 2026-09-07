@@ -17,6 +17,7 @@ pub(crate) struct GraphWriteContext {
 /// An admitted target retained by physical write operators.
 #[derive(Debug, Clone)]
 pub struct BoundWriteResource {
+    pub(crate) health: crate::mutation::MutationHealth,
     pub(crate) dir: PathBuf,
     pub(crate) mode: OntologyMode,
     contract: GraphReadContract,
@@ -26,6 +27,9 @@ pub struct BoundWriteResource {
 
 impl BoundWriteResource {
     pub(crate) fn validate(&self, expected: Option<&GraphReadContract>) -> Result<()> {
+        self.health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         if expected.is_some_and(|expected| *expected != self.contract) {
             return Err(DataFusionError::Plan(
                 "GF_WRITE_RESOURCE_INCOMPATIBLE: logical identities".into(),
@@ -38,6 +42,50 @@ impl BoundWriteResource {
         if expected.is_some() && expected != self.composition.as_deref() {
             return Err(DataFusionError::Plan(
                 "GF_WRITE_RESOURCE_INCOMPATIBLE: semantic composition".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        self.dir == other.dir
+            && self.mode == other.mode
+            && self.contract == other.contract
+            && self.composition == other.composition
+            && self.type_map == other.type_map
+    }
+
+    pub(crate) fn validate_catalog(&self, catalog: &graphforge_ir::RuntimeCatalog) -> Result<()> {
+        let labels: std::collections::HashMap<_, _> = catalog
+            .entity_type_names_with_ids()
+            .map(|(id, name)| (graphforge_value::EntityTypeId::runtime(id), name.to_owned()))
+            .collect();
+        let relations: std::collections::HashMap<_, _> = catalog
+            .relation_type_names_with_ids()
+            .map(|(id, name)| {
+                (
+                    graphforge_value::RelationTypeId::runtime(id),
+                    name.to_owned(),
+                )
+            })
+            .collect();
+        let actual_labels: std::collections::HashMap<_, _> = self
+            .contract
+            .labels
+            .iter()
+            .filter(|(id, _)| id.tagged().runtime_entity_id().is_some())
+            .cloned()
+            .collect();
+        let actual_relations: std::collections::HashMap<_, _> = self
+            .contract
+            .relations
+            .iter()
+            .filter(|(id, _)| id.tagged().runtime_relation_id().is_some())
+            .cloned()
+            .collect();
+        if labels != actual_labels || relations != actual_relations {
+            return Err(DataFusionError::Plan(
+                "GF_WRITE_RESOURCE_INCOMPATIBLE: mutation catalog identities".into(),
             ));
         }
         Ok(())
@@ -85,6 +133,7 @@ pub(crate) fn required(
     )
     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
     Ok(BoundWriteResource {
+        health: binding.resource.health.clone(),
         dir: binding.resource.dir.clone(),
         mode: binding.resource.mode,
         contract: lowerer.read_contract(),

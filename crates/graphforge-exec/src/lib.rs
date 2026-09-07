@@ -61,7 +61,7 @@ pub(crate) mod algorithm_embedding_graphsage;
 pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
-mod mutation;
+pub mod mutation;
 pub mod read_resource;
 pub mod write_resource;
 pub use algorithm_embedding_options::validate_embedding_options;
@@ -446,6 +446,7 @@ pub struct GraphCreateExec {
     /// row-dependent computed property values (#814).
     in_df_schema: DFSchemaRef,
     dir: PathBuf,
+    mutation_health: mutation::MutationHealth,
     mode: OntologyMode,
     semantic_composition_fingerprint: Option<String>,
     schema: SchemaRef,
@@ -603,6 +604,7 @@ impl GraphCreateExec {
             ref_cols,
             in_df_schema: in_schema.clone(),
             dir: resource.dir.clone(),
+            mutation_health: resource.health.clone(),
             mode: resource.mode,
             semantic_composition_fingerprint: node.semantic_composition_fingerprint.clone(),
             schema,
@@ -690,6 +692,7 @@ impl ExecutionPlan for GraphCreateExec {
             ref_cols: self.ref_cols.clone(),
             in_df_schema: self.in_df_schema.clone(),
             dir: self.dir.clone(),
+            mutation_health: self.mutation_health.clone(),
             mode: self.mode,
             semantic_composition_fingerprint: self.semantic_composition_fingerprint.clone(),
             schema: self.schema.clone(),
@@ -706,6 +709,9 @@ impl ExecutionPlan for GraphCreateExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        self.mutation_health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         use futures::StreamExt;
 
         if partition != 0 {
@@ -802,10 +808,12 @@ impl ExecutionPlan for GraphCreateExec {
                 summary_batch(&cfg.out_schema, &tally).map_err(to_df_err)
             }
         };
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            futures::stream::once(fut),
-        )))
+        Ok(self
+            .mutation_health
+            .guard_stream(Box::pin(RecordBatchStreamAdapter::new(
+                schema,
+                futures::stream::once(fut),
+            ))))
     }
 }
 
@@ -1389,6 +1397,7 @@ pub struct GraphDeleteExec {
     cols: Vec<DeleteCol>,
     detach: bool,
     dir: PathBuf,
+    mutation_health: mutation::MutationHealth,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
 }
@@ -1432,6 +1441,7 @@ impl GraphDeleteExec {
             cols,
             detach: node.detach,
             dir: resource.dir.clone(),
+            mutation_health: resource.health.clone(),
             schema,
             props,
         })
@@ -1486,6 +1496,7 @@ impl ExecutionPlan for GraphDeleteExec {
             cols: self.cols.clone(),
             detach: self.detach,
             dir: self.dir.clone(),
+            mutation_health: self.mutation_health.clone(),
             schema: self.schema.clone(),
             props: self.props.clone(),
         }))
@@ -1496,6 +1507,9 @@ impl ExecutionPlan for GraphDeleteExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        self.mutation_health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         use futures::StreamExt;
 
         if partition != 0 {
@@ -1551,10 +1565,12 @@ impl ExecutionPlan for GraphDeleteExec {
                     .map_err(to_df_err)?;
             delete_summary_batch(&out_schema, nodes_deleted, edges_deleted).map_err(to_df_err)
         };
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            stream_schema,
-            futures::stream::once(fut),
-        )))
+        Ok(self
+            .mutation_health
+            .guard_stream(Box::pin(RecordBatchStreamAdapter::new(
+                stream_schema,
+                futures::stream::once(fut),
+            ))))
     }
 }
 
@@ -1966,6 +1982,7 @@ pub struct GraphSetExec {
     type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
+    mutation_health: mutation::MutationHealth,
     /// Logical input schema (with `var_<n>` qualifiers) — used to build the
     /// per-target physical value exprs.
     in_df_schema: DFSchemaRef,
@@ -2006,6 +2023,7 @@ impl GraphSetExec {
             type_id_to_entity_name: resource.type_map.clone(),
             mode: resource.mode,
             dir: resource.dir.clone(),
+            mutation_health: resource.health.clone(),
             in_df_schema,
             schema,
             props,
@@ -2052,6 +2070,7 @@ impl ExecutionPlan for GraphSetExec {
             type_id_to_entity_name: self.type_id_to_entity_name.clone(),
             mode: self.mode,
             dir: self.dir.clone(),
+            mutation_health: self.mutation_health.clone(),
             in_df_schema: self.in_df_schema.clone(),
             schema: self.schema.clone(),
             props: self.props.clone(),
@@ -2063,6 +2082,9 @@ impl ExecutionPlan for GraphSetExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        self.mutation_health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         use futures::StreamExt;
 
         if partition != 0 {
@@ -2097,10 +2119,12 @@ impl ExecutionPlan for GraphSetExec {
             let total = acc.apply(&dir).map_err(to_df_err)?;
             count_summary_batch(&out_schema, total).map_err(to_df_err)
         };
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            stream_schema,
-            futures::stream::once(fut),
-        )))
+        Ok(self
+            .mutation_health
+            .guard_stream(Box::pin(RecordBatchStreamAdapter::new(
+                stream_schema,
+                futures::stream::once(fut),
+            ))))
     }
 }
 
@@ -2117,6 +2141,7 @@ pub struct GraphRemoveExec {
     type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
     mode: OntologyMode,
     dir: PathBuf,
+    mutation_health: mutation::MutationHealth,
     schema: SchemaRef,
     props: Arc<PlanProperties>,
 }
@@ -2153,6 +2178,7 @@ impl GraphRemoveExec {
             type_id_to_entity_name: resource.type_map.clone(),
             mode: resource.mode,
             dir: resource.dir.clone(),
+            mutation_health: resource.health.clone(),
             schema,
             props,
         })
@@ -2198,6 +2224,7 @@ impl ExecutionPlan for GraphRemoveExec {
             type_id_to_entity_name: self.type_id_to_entity_name.clone(),
             mode: self.mode,
             dir: self.dir.clone(),
+            mutation_health: self.mutation_health.clone(),
             schema: self.schema.clone(),
             props: self.props.clone(),
         }))
@@ -2208,6 +2235,9 @@ impl ExecutionPlan for GraphRemoveExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream, DataFusionError> {
+        self.mutation_health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         use futures::StreamExt;
 
         if partition != 0 {
@@ -2235,10 +2265,12 @@ impl ExecutionPlan for GraphRemoveExec {
             let total = acc.apply(&dir).map_err(to_df_err)?;
             count_summary_batch(&out_schema, total).map_err(to_df_err)
         };
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            stream_schema,
-            futures::stream::once(fut),
-        )))
+        Ok(self
+            .mutation_health
+            .guard_stream(Box::pin(RecordBatchStreamAdapter::new(
+                stream_schema,
+                futures::stream::once(fut),
+            ))))
     }
 }
 
@@ -4981,6 +5013,7 @@ impl Drop for QueryEvidenceStream {
 ///
 /// `ExecutionSession` is `Send + Sync`.
 pub struct ExecutionSession {
+    mutation_health: mutation::MutationHealth,
     ctx: SessionContext,
     /// The graph catalog, retained so read lowering can decide typed-vs-
     /// exploratory edge tables. The same `Arc` is also registered on `ctx`.
@@ -5180,7 +5213,9 @@ impl ExecutionSession {
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
         let catalog = Arc::new(catalog);
+        let mutation_health = mutation::MutationHealth::default();
         let read_resource = Arc::new(read_resource::GraphReadContext {
+            health: mutation_health.clone(),
             dir: dir.clone(),
             mode,
             catalog: catalog.clone(),
@@ -5245,6 +5280,7 @@ impl ExecutionSession {
             .map(str::to_owned);
         ctx.register_catalog("graph", catalog.clone());
         Self {
+            mutation_health,
             ctx,
             catalog,
             ontology,
@@ -5456,6 +5492,34 @@ impl ExecutionSession {
         params: &HashMap<String, graphforge_ir::IrLiteral>,
     ) -> Result<ExecutionResult, GfError> {
         let resource = self.write_resource()?;
+        let mut lifecycle = mutation::LocalMutationLifecycle::new(self, resource.clone())?;
+        let mut transaction = mutation::MutationTransaction::local();
+        let result = match self
+            .prepare_write_statement_with_params(plan, params, &mut transaction)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => return transaction.abort(&mut lifecycle, error),
+        };
+        transaction.commit(&resource, false, &mut lifecycle)?;
+        Ok(result)
+    }
+
+    /// Evaluate and stage a statement without installing files or publishing.
+    /// The caller's transaction owns the catalog used to build this session.
+    ///
+    /// # Errors
+    /// Returns an error for missing write authority, evaluation or staging failure.
+    #[allow(clippy::too_many_lines)]
+    pub async fn prepare_write_statement_with_params(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, graphforge_ir::IrLiteral>,
+        transaction: &mut mutation::MutationTransaction,
+    ) -> Result<ExecutionResult, GfError> {
+        let resource = self.write_resource()?;
+        transaction.admit(&resource)?;
+        transaction.ensure_unprepared()?;
         resource
             .validate_composition(plan.composition_fingerprint.as_deref())
             .map_err(GfError::from_plan_error)?;
@@ -5547,14 +5611,9 @@ impl ExecutionSession {
             }
             None => None,
         };
-        write_driver::commit_statement(&mut wctx, &resource.dir)?;
-        self.catalog
-            .refresh_property_inventory(&resource.dir)
-            .map_err(GfError::from_execution_error)?;
-        self.adjacency_provider.invalidate();
-
         let c = wctx.mutation.counters;
         let mutation_receipt = Some(wctx.mutation_receipt());
+        transaction.prepare_statement(wctx, &resource)?;
         let side_effects = Some(SideEffects {
             nodes_created: c.nodes_created,
             nodes_deleted: c.nodes_deleted,
@@ -5578,7 +5637,7 @@ impl ExecutionSession {
             });
         }
 
-        let batch = write_driver::statement_summary_batch(&wctx.mutation.counters)?;
+        let batch = write_driver::statement_summary_batch(&transaction.state.counters)?;
         Ok(ExecutionResult {
             schema: batch.schema(),
             batches: vec![batch],
@@ -5886,17 +5945,19 @@ impl ExecutionSession {
             datafusion::physical_plan::execute_stream(Arc::clone(&physical), Arc::clone(&task_ctx))
                 .map_err(GfError::from_execution_error)?;
         let schema = stream.schema();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            QueryEvidenceStream {
-                inner: Some(stream),
-                physical,
-                task_ctx,
-                memory_reserved_before,
-                returned_batch_bytes: 0,
-                finalized: false,
-            },
-        )))
+        Ok(self
+            .mutation_health
+            .guard_stream(Box::pin(RecordBatchStreamAdapter::new(
+                schema,
+                QueryEvidenceStream {
+                    inner: Some(stream),
+                    physical,
+                    task_ctx,
+                    memory_reserved_before,
+                    returned_batch_bytes: 0,
+                    finalized: false,
+                },
+            ))))
     }
 
     /// Render the physical plan for a [`GraphPlan`] (indented, one line per
@@ -5952,6 +6013,7 @@ impl ExecutionSession {
         plan: &GraphPlan,
         params: &HashMap<String, graphforge_ir::IrLiteral>,
     ) -> Result<(Arc<dyn ExecutionPlan>, SchemaRef), GfError> {
+        self.mutation_health.check()?;
         // Read lowering always needs the catalog (typed-vs-exploratory edge
         // routing). Scans additionally bind their real Parquet-backed providers
         // from the project directory. A read-only session built via `new` has an
@@ -7547,6 +7609,7 @@ mod tests {
             let input = MemorySourceConfig::try_new_from_batches(schema, vec![batch]).unwrap();
             let summary = GraphDeleteNode::summary_schema();
             let exec: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec {
+                mutation_health: mutation::MutationHealth::default(),
                 input,
                 cols: if include_edge {
                     vec![

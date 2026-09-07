@@ -341,6 +341,7 @@ impl GraphForge {
         ),
         GfError,
     > {
+        self.graph_visibility.health.check()?;
         let root = self.resolved_generation.container_root();
         match selection {
             PortableSelection::Current => Ok((

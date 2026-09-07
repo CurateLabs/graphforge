@@ -4984,6 +4984,7 @@ pub fn stage_set_node_properties(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     stage_set_node_properties_from_inventory(staged, dir, None, stem, updates)
+        .map(|counts| counts.entities_touched)
 }
 
 #[allow(clippy::implicit_hasher)]
@@ -4996,6 +4997,28 @@ pub fn stage_set_node_properties_authenticated(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     stage_set_node_properties_from_inventory(staged, dir, Some(inventory), stem, updates)
+        .map(|counts| counts.entities_touched)
+}
+
+/// Data-level facts from a staged node property update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePropertySetCounts {
+    /// Distinct node rows touched by the update.
+    pub entities_touched: u64,
+    /// Non-null existing property values replaced by supplied keys.
+    pub properties_replaced: u64,
+}
+
+/// Stage authenticated node properties and report existing-value replacements.
+/// Uses the same before-map required by the rewrite, without another read pass.
+pub fn stage_set_node_properties_authenticated_with_counts(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    stem: &str,
+    updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
+) -> Result<NodePropertySetCounts, GfError> {
+    stage_set_node_properties_from_inventory(staged, dir, Some(inventory), stem, updates)
 }
 
 fn stage_set_node_properties_from_inventory(
@@ -5004,7 +5027,7 @@ fn stage_set_node_properties_from_inventory(
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
     stem: &str,
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
-) -> Result<u64, GfError> {
+) -> Result<NodePropertySetCounts, GfError> {
     let targets = updates.keys().copied().collect();
     let owned_inventory;
     let inventory = if let Some(inventory) = inventory {
@@ -5031,6 +5054,21 @@ fn stage_set_node_properties_from_inventory(
         stem,
     )?);
     existing.retain(|uuid, _| targets.contains(uuid));
+    let properties_replaced = existing
+        .iter()
+        .map(|(uuid, row)| {
+            updates.get(uuid).map_or(0, |properties| {
+                properties
+                    .keys()
+                    .filter(|name| {
+                        row.values
+                            .get(*name)
+                            .is_some_and(|value| !matches!(value, IrLiteral::Null))
+                    })
+                    .count() as u64
+            })
+        })
+        .sum();
     let before = existing.clone();
     let rows = existing
         .into_values()
@@ -5056,7 +5094,10 @@ fn stage_set_node_properties_from_inventory(
         inventory.generation_authority(),
         Some(&before),
     )?;
-    Ok(touched)
+    Ok(NodePropertySetCounts {
+        entities_touched: touched,
+        properties_replaced,
+    })
 }
 
 #[allow(

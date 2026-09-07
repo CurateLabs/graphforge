@@ -105,3 +105,39 @@ This is one concern under #1010. Implement the shared state/staging core first,
 route both entry points through it, then delete the duplicated catalog/receipt/
 rollback paths only after the common acceptance matrix passes. The API remains
 the owner of generation/domain publication and exec remains independent of API.
+
+
+## Compatibility details verified during implementation
+
+Exploratory Cypher SET/property-reference observation uses an unowned runtime
+property entry; CREATE property literals alone do not intern a property entry.
+Analyst write-back already supplies its selected label as owner. The transaction
+preserves these caller inputs while owning their private catalog and publication.
+Tests check each exact owner and persistence; they do not claim these catalog
+entries are identical. Neutral receipts and all side-effect counters are compared
+exactly for equivalent preexisting property state, including Cypher's replacement
+counter. The property rewrite reports replacement facts from its existing
+before-map without adding a read pass.
+
+Admission pins one destination, mode, semantic contract and immutable catalog
+batch. A transaction prepares one statement or one analyst update; a second
+preparation fails before evaluation and leaves the first prepared state intact.
+Catalog staging and final installation use the admitted batch, not a later read
+of a mutable catalog alias.
+
+A failed restoration retains its rollback directory and marks the shared
+execution-resource health owner unavailable. New reads/writes and already-returned
+lazy streams check that owner. The facade and standalone session paths use the
+same health semantics. A fresh facade can reopen the untouched durable parent;
+the failed owner does not silently resume. Checkpoint copying bounds memory, not
+total scratch-disk use. It adds no durable record or recovery protocol.
+
+Recovery advances an owner-local epoch before touching workspace files. Existing
+lazy streams check that epoch before and after each inner poll, so a poll that
+overlaps restoration cannot emit a partially read batch. Successful restoration
+admits new work but invalidates old streams; failure remains permanent for that
+owner. Overlapping recovery is rejected, and completion cannot clear a separately
+recorded failure. The explicit multi-statement facade transaction uses the same
+abort adapter around its existing publication boundary, including errors after
+an earlier unpublished statement. Composite domain publication and its receipt
+remain owned by the existing facade publisher.

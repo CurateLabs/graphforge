@@ -40,6 +40,23 @@ pub struct AstQuery {
     pub span: Span,
 }
 
+impl AstQuery {
+    /// Whether this query contains an explicit graph mutation clause.
+    #[must_use]
+    pub fn has_mutation_clauses(&self) -> bool {
+        self.clauses.iter().any(|clause| {
+            matches!(
+                clause,
+                AstClause::Create(_)
+                    | AstClause::Merge(_)
+                    | AstClause::Set(_)
+                    | AstClause::Remove(_)
+                    | AstClause::Delete(_)
+            )
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Clause variants
 // ---------------------------------------------------------------------------

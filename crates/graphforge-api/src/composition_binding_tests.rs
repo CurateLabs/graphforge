@@ -813,3 +813,87 @@ fn facade_reopens_relation_edge_property_through_default_context() {
         "1999"
     );
 }
+
+#[test]
+fn semantic_post_current_fault_helper() {
+    let Ok(root) = std::env::var("GF_SEMANTIC_MUTATION_FAULT_ROOT") else {
+        return;
+    };
+    let forge = GraphForge::new(Some(&root)).unwrap();
+    assert!(forge.semantic_storage_bindings.lock().unwrap().is_none());
+    let before = graphforge_storage::resolve_project_generation(std::path::Path::new(&root))
+        .unwrap()
+        .generation_uuid();
+    let error = forge
+        .execute_with_composition(
+            "CREATE (n:`research:Person` {name:'Ada'})",
+            single_module_fixture(),
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("cause=injected_failpoint"),
+        "{error}"
+    );
+    let selected =
+        graphforge_storage::resolve_project_generation(std::path::Path::new(&root)).unwrap();
+    assert_ne!(selected.generation_uuid(), before);
+    let durable = graphforge_storage::semantic_storage_bindings(&selected).unwrap();
+    assert!(durable.is_some());
+    // Check the recovered owner before a query can install a context or project
+    // bindings. This distinguishes recovery from merely successful reopen.
+    assert_eq!(*forge.semantic_storage_bindings.lock().unwrap(), durable);
+    assert_eq!(
+        *forge.current_generation_uuid.lock().unwrap(),
+        selected.generation_uuid()
+    );
+    let reopened = GraphForge::new(Some(&root)).unwrap();
+    assert_eq!(*reopened.semantic_storage_bindings.lock().unwrap(), durable);
+    for owner in [&forge, &reopened] {
+        let result = owner
+            .execute("MATCH (n:`research:Person`) RETURN n.name")
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() > 0)
+            .unwrap();
+        assert_eq!(
+            arrow::util::display::array_value_to_string(batch.column(0), 0).unwrap(),
+            "Ada"
+        );
+    }
+}
+
+#[test]
+fn semantic_post_current_failure_reconciles_new_bindings_on_existing_owner() {
+    let root = tempfile::TempDir::new().unwrap();
+    let forge = GraphForge::new(root.path().to_str()).unwrap();
+    install_composition_authority(&forge, &single_module_fixture());
+    drop(forge);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "composition_binding_tests::semantic_post_current_fault_helper",
+            "--nocapture",
+        ])
+        .env("GF_SEMANTIC_MUTATION_FAULT_ROOT", root.path())
+        .env(
+            "GRAPHFORGE_PROJECT_FAILPOINTS",
+            "graphforge-internal-subprocess-v1",
+        )
+        .env(
+            "GRAPHFORGE_PROJECT_FAILPOINT",
+            "project.after_current_replace.error",
+        )
+        .status()
+        .unwrap();
+    assert!(status.success(), "semantic post-CURRENT helper: {status}");
+}

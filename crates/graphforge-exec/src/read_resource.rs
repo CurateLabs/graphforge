@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 /// Session-local authority. Logical plans never own this value.
 pub struct GraphReadContext {
+    pub(crate) health: crate::mutation::MutationHealth,
     pub(crate) dir: PathBuf,
     pub(crate) mode: OntologyMode,
     pub(crate) catalog: Arc<GraphCatalog>,
@@ -21,6 +22,9 @@ impl GraphReadContext {
         &self,
         contract: Option<&graphforge_plan::GraphReadContract>,
     ) -> Result<()> {
+        self.health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         if let Some(contract) = contract {
             let actual = graphforge_rel::GraphPlanLowerer::new(
                 Some(

@@ -1993,3 +1993,94 @@ mod tests {
         );
     }
 }
+
+/// Disposable, file-backed rollback state for a private graph workspace.
+///
+/// This is not a durable recovery protocol. Generation owners use their
+/// authoritative parent instead; unpublished workspaces use this streaming-copy
+/// fallback so abort never needs to materialize all graph bytes in memory.
+/// The copy bounds memory, not total scratch-disk consumption.
+pub struct GraphWorkspaceCheckpoint {
+    source: PathBuf,
+    backup: Option<tempfile::TempDir>,
+    inventory: GraphFilesInventory,
+}
+
+impl GraphWorkspaceCheckpoint {
+    /// Copy an admitted workspace using the existing validated graph inventory.
+    ///
+    /// # Errors
+    /// Rejects links, invalid inventory and copy failures.
+    pub fn capture(source: &Path) -> Result<Self, GfError> {
+        let (inventory, _) = capture_graph_files(source)?;
+        let backup = tempfile::Builder::new()
+            .prefix("graphforge-mutation-rollback-")
+            .tempdir()
+            .map_err(|error| storage("create mutation rollback directory", source, error))?;
+        materialize_graph_tree(source, &inventory, backup.path())?;
+        Ok(Self {
+            source: source.to_path_buf(),
+            backup: Some(backup),
+            inventory,
+        })
+    }
+
+    /// Restore data files while preserving operational lock/cache files.
+    /// Callers must hold mutation admission and establish publication authority
+    /// before invoking this method.
+    ///
+    /// # Errors
+    /// Fails closed if the backup, destination or restoration cannot be verified.
+    pub fn restore(&mut self, target: &Path) -> Result<(), GfError> {
+        if target != self.source {
+            return Err(validation(
+                "mutation checkpoint target differs from captured workspace",
+            ));
+        }
+        let result = self.restore_inner(target);
+        if let Err(error) = result {
+            let Some(backup) = self.backup.take() else {
+                return Err(error);
+            };
+            let backup = backup.keep();
+            return Err(GfError::Storage(format!(
+                "mutation restore failed; rollback backup retained at {}: {error}",
+                backup.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn restore_inner(&self, target: &Path) -> Result<(), GfError> {
+        let backup = self
+            .backup
+            .as_ref()
+            .ok_or_else(|| validation("mutation checkpoint already retained after failure"))?;
+        verify_graph_tree(backup.path(), &self.inventory)?;
+        let mut current = Vec::new();
+        collect_source_files(target, &mut current)?;
+        for path in current {
+            fs::remove_file(&path)
+                .map_err(|error| storage("remove aborted mutation file", &path, error))?;
+        }
+        for entry in &self.inventory.files {
+            let relative = canonical_inventory_relative_path(&entry.relative_path)?;
+            let source = backup.path().join(&relative);
+            let destination = target.join(relative);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| storage("restore mutation directory", parent, error))?;
+            }
+            copy_regular_file(&source, &destination)?;
+            make_private_copy_owner_writable(&destination)?;
+            crate::project_failpoint::hit(
+                "mutation.restore.after_copy",
+                None,
+                None,
+                "MUTATION_RESTORE",
+                false,
+            )?;
+        }
+        verify_graph_tree(target, &self.inventory)
+    }
+}

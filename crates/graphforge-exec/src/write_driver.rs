@@ -3471,7 +3471,10 @@ fn run_label_phase(
 /// A statement whose net batch stages topology files bumps the project
 /// `topology_generation` counter exactly once, before the commit (#759);
 /// SET/REMOVE-only statements do not bump.
-pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> Result<(), GfError> {
+pub(crate) fn stage_statement(
+    ctx: &mut StatementWriteContext,
+    dir: &Path,
+) -> Result<graphforge_storage::RewriteBatch, GfError> {
     // Writes to entities deleted later in the statement are unobservable —
     // they must not resurrect rows in the rewrite.
     ctx.set_acc.scrub(&ctx.deleted);
@@ -3490,14 +3493,7 @@ pub(crate) fn commit_statement(ctx: &mut StatementWriteContext, dir: &Path) -> R
     graphforge_storage::stage_delete_nodes(&mut staged, dir, &ctx.pending_node_deletes)?;
     ctx.writer.flush_into(&mut staged)?;
 
-    ctx.mutation.commit_topology(
-        staged,
-        &mut ctx.writer,
-        dir,
-        &ctx.pending_node_deletes,
-        &ctx.pending_edge_deletes,
-    )?;
-    Ok(())
+    Ok(staged)
 }
 
 /// The unified write-statement summary schema: six openCypher write counters.

@@ -62,68 +62,57 @@ impl GraphForge {
             &known,
         )?;
 
-        let mut catalog = self
+        let prior_catalog = self
             .runtime_catalog
             .lock()
-            .expect("runtime catalog poisoned");
-        let prior_catalog = catalog.clone();
-        let mut next_catalog = catalog.clone();
-        next_catalog.intern_property(property, Some(label))?;
-        let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
-        let expected_generation = *self
-            .current_generation_uuid
-            .lock()
-            .expect("generation UUID lock poisoned");
-        let mut staged = graphforge_storage::RewriteBatch::new();
-        if self.path.is_some() {
-            let catalog_batch = next_catalog.to_record_batch();
-            staged.stage(
-                &self.dir.join("topology/runtime_catalog.parquet"),
-                catalog_batch.schema(),
-                &catalog_batch,
-            )?;
-        }
-        let inventory = self.property_inventory_for_session();
-        let touched = graphforge_storage::stage_set_node_properties_authenticated(
-            &mut staged,
+            .expect("runtime catalog poisoned")
+            .clone();
+        let mut transaction = graphforge_exec::mutation::MutationTransaction::new(&prior_catalog);
+        transaction.intern_property(property, Some(label))?;
+        let working = transaction.catalog();
+        let catalog = graphforge_storage::GraphCatalog::open_authenticated_with_semantic_bindings(
             &self.dir,
-            &inventory,
+            self.ontology.as_ref(),
+            &working.lock().expect("mutation catalog poisoned"),
+            self.semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned")
+                .as_ref(),
+            self.property_inventory_for_session(),
+        )
+        .map_err(GfError::from_execution_error)?;
+        let session =
+            graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
+                catalog,
+                self.ontology.clone(),
+                self.dir.clone(),
+                self.ontology_mode,
+                std::sync::Arc::clone(&self.adjacency_provider),
+                Some(std::sync::Arc::clone(&self.ordinal_identities)),
+                &self.session_resource_config(),
+            )?;
+        let session = if self.read_only {
+            session.restrict_to_reads()
+        } else {
+            session
+        };
+        let resource = session.write_resource()?;
+        let mut lifecycle = crate::mutation_transaction::FacadeMutationLifecycle::new(
+            self,
+            prior_catalog,
+            true,
+            None,
+        )?;
+        let touched = match transaction.stage_node_properties(
+            &resource,
+            &self.property_inventory_for_session(),
             stem,
             &updates,
-        )?;
-        staged.commit_at(&self.dir)?;
-        *catalog = next_catalog;
-        drop(catalog);
-        let mut outputs = updates
-            .keys()
-            .map(|uuid| graphforge_exec::MutationSubject {
-                uuid: *uuid,
-                kind: graphforge_exec::MutationSubjectKind::Node,
-            })
-            .collect::<Vec<_>>();
-        outputs.sort_unstable();
-        let receipt = graphforge_exec::MutationReceipt {
-            effects: vec![graphforge_exec::MutationEffect {
-                kind: graphforge_exec::MutationKind::SetProperty,
-                inputs: Vec::new(),
-                outputs,
-            }],
+        ) {
+            Ok(touched) => touched,
+            Err(error) => return transaction.abort(&mut lifecycle, error),
         };
-        if let Err(error) = self.publish_graph_mutation(&receipt) {
-            let still_prior = *self
-                .current_generation_uuid
-                .lock()
-                .expect("generation UUID lock poisoned")
-                == expected_generation;
-            if still_prior {
-                crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
-                *self
-                    .runtime_catalog
-                    .lock()
-                    .expect("runtime catalog poisoned") = prior_catalog;
-            }
-            return Err(error);
-        }
+        transaction.commit(&resource, true, &mut lifecycle)?;
         Ok(touched)
     }
 }

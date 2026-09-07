@@ -601,3 +601,133 @@ async fn mixed_create_set_merge_preserves_buffered_visibility_and_atomic_rollbac
         }
     }
 }
+
+#[tokio::test]
+async fn mutation_transaction_rejects_changed_destination_and_catalog_before_staging() {
+    use graphforge_exec::mutation::MutationTransaction;
+    let left = TempDir::new().unwrap();
+    let right = TempDir::new().unwrap();
+    let prior = RuntimeCatalog::new();
+    let mut transaction = MutationTransaction::new(&prior);
+    let working = transaction.catalog();
+    let plan = bind("CREATE (:Person {name: 'selected'})", &working);
+    let left_session = session(left.path(), &working);
+    left_session
+        .prepare_write_statement_with_params(&plan, &Default::default(), &mut transaction)
+        .await
+        .unwrap();
+    let first_receipt = transaction.receipt();
+    let error = left_session
+        .prepare_write_statement_with_params(&plan, &Default::default(), &mut transaction)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already prepared"), "{error}");
+    assert_eq!(transaction.receipt(), first_receipt);
+    let right_resource = session(right.path(), &working).write_resource().unwrap();
+    let before = std::fs::read_dir(right.path()).unwrap().count();
+    let error = transaction.stage_catalog(&right_resource).unwrap_err();
+    assert!(
+        error.to_string().contains("GF_WRITE_RESOURCE_INCOMPATIBLE"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_dir(right.path()).unwrap().count(), before);
+    assert_eq!(rows(&left.path().join("topology/nodes.parquet")), 0);
+
+    let mut other = RuntimeCatalog::new();
+    other.intern_label("DifferentName").unwrap();
+    let mut wrong_catalog = MutationTransaction::new(&other);
+    let error = wrong_catalog
+        .stage_catalog(&left_session.write_resource().unwrap())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("mutation catalog identities"),
+        "{error}"
+    );
+    assert!(
+        !left
+            .path()
+            .join("topology/runtime_catalog.parquet")
+            .exists()
+    );
+
+    working
+        .lock()
+        .unwrap()
+        .intern_label("LaterIdentity")
+        .unwrap();
+    let error = transaction
+        .stage_catalog(&left_session.write_resource().unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("catalog changed"), "{error}");
+    assert!(
+        !left
+            .path()
+            .join("topology/runtime_catalog.parquet")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn rejected_second_preparation_preserves_first_committed_data_and_receipt() {
+    use graphforge_exec::mutation::{MutationLifecycle, MutationOutcome, MutationTransaction};
+    struct LocalPublication(Option<MutationOutcome>);
+    impl MutationLifecycle for LocalPublication {
+        fn publish(
+            &mut self,
+            outcome: &MutationOutcome,
+            _: &RuntimeCatalog,
+        ) -> Result<(), GfError> {
+            self.0 = Some(outcome.clone());
+            Ok(())
+        }
+        fn complete(&mut self) -> Result<(), GfError> {
+            Ok(())
+        }
+        fn abort(&mut self) -> Result<(), GfError> {
+            panic!("successful local publication must not abort")
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let mut transaction = MutationTransaction::new(&RuntimeCatalog::new());
+    let working = transaction.catalog();
+    let first = bind("CREATE (:Person {name:'first'})", &working);
+    let second = bind("CREATE (:Person {name:'second'})", &working);
+    let session = session(dir.path(), &working);
+    let result = session
+        .prepare_write_statement_with_params(&first, &Default::default(), &mut transaction)
+        .await
+        .unwrap();
+    let receipt = transaction.receipt();
+    assert_eq!(result.mutation_receipt.as_ref(), Some(&receipt));
+    let error = session
+        .prepare_write_statement_with_params(&second, &Default::default(), &mut transaction)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already prepared"), "{error}");
+    assert_eq!(transaction.receipt(), receipt);
+    let mut publication = LocalPublication(None);
+    transaction
+        .commit(&session.write_resource().unwrap(), true, &mut publication)
+        .unwrap();
+    assert_eq!(publication.0.unwrap().receipt, receipt);
+    assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
+    let properties = logical_property_rows(dir.path(), "_untyped");
+    assert_eq!(properties.len(), 1);
+    assert_eq!(
+        properties[0].values.get("name"),
+        Some(&IrLiteral::Str("first".into()))
+    );
+}
+
+#[tokio::test]
+async fn shared_transaction_preserves_fresh_standalone_target_creation() {
+    let parent = TempDir::new().unwrap();
+    let target = parent.path().join("new-graph");
+    let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    assert!(!target.exists());
+    let result = run(&target, &catalog, "CREATE (:Person {name:'first'})")
+        .await
+        .unwrap();
+    assert_eq!(result.side_effects.unwrap().nodes_created, 1);
+    assert_eq!(rows(&target.join("topology/nodes.parquet")), 1);
+}
