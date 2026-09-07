@@ -856,6 +856,15 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
 // Re-sign the single-record frame so malformed identities reach payload decoding,
 // rather than failing an unrelated checksum or inventory check.
 fn run_with_raw_membership(raw: u32) -> Vec<u8> {
+    run_with_mutated_payload(&sample_ops()[0], |payload| {
+        payload["type_ids"] = serde_json::json!([raw]);
+    })
+}
+
+fn run_with_mutated_payload(
+    operation: &GraphDeltaOp,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     const RECORD_START: usize = 84;
     const PAYLOAD_LENGTH: usize = RECORD_START + 25;
@@ -865,7 +874,7 @@ fn run_with_raw_membership(raw: u32) -> Vec<u8> {
         1,
         Uuid::now_v7(),
         Uuid::now_v7(),
-        &sample_ops()[..1],
+        std::slice::from_ref(operation),
         limits,
     )
     .unwrap();
@@ -873,7 +882,7 @@ fn run_with_raw_membership(raw: u32) -> Vec<u8> {
         u32::from_le_bytes(bytes[PAYLOAD_LENGTH..PAYLOAD_START].try_into().unwrap()) as usize;
     let mut payload: serde_json::Value =
         serde_json::from_slice(&bytes[PAYLOAD_START..PAYLOAD_START + length]).unwrap();
-    payload["type_ids"] = serde_json::json!([raw]);
+    mutate(&mut payload);
     let payload = serde_json::to_vec(&payload).unwrap();
     let mut framed = bytes[..PAYLOAD_LENGTH].to_vec();
     framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
@@ -1103,4 +1112,83 @@ fn gapped_run_sequence_in_inventory_fails_closed() {
     };
     let err = list_delta_runs(&inventory, GraphDeltaJournalLimits::default()).unwrap_err();
     assert_eq!(err.code(), "GF_PROJECT_CORRUPT");
+}
+
+#[test]
+fn committed_checksum_valid_invalid_literal_values_preserve_authority() {
+    let operation = sample_ops().pop().unwrap();
+    assert_eq!(operation.kind, GraphDeltaOpKind::SetNodeProperty);
+    let run = |encoded: &str| {
+        run_with_mutated_payload(&operation, |payload| {
+            payload["value"] = serde_json::Value::String(encoded.to_owned());
+        })
+    };
+    let valid = encode_graph_delta_value(&IrLiteral::Int(7)).unwrap();
+    let decoded = decode_delta_run(&run(&valid), Some(1), GraphDeltaJournalLimits::default())
+        .expect("control frame has valid checksums and a valid shared literal");
+    assert_eq!(decoded.records.len(), 1);
+
+    for malformed in [
+        r#"{"type":"UnknownValue","value":7}"#,
+        r#"{"type":"Int","value":"seven"}"#,
+        r#"{"type":"List","value":[{"type":"UnknownValue"}]}"#,
+        r#"{"$float":"not-a-float-tag"}"#,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let graph = tempfile::tempdir().unwrap();
+        let run_path = graph.path().join(delta_run_relative_path(1));
+        fs::create_dir_all(run_path.parent().unwrap()).unwrap();
+        fs::write(&run_path, run(malformed)).unwrap();
+        let (_, files) = capture_graph_files(graph.path()).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        // Build an authenticated corrupt fixture deliberately; the real replay
+        // boundary below must reject its payload, not merely its file hashes.
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_with_graph_tree(root.path(), &request, Some(graph.path()))
+                .unwrap()
+        else {
+            panic!("unexpected replay")
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let resolved = resolve_project_generation(root.path()).unwrap();
+        let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+        let before = snapshot_committed_files(root.path());
+        let error = reconstruct_graph_state(
+            &resolved.graph_tree_root(),
+            &inventory,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT", "{error}");
+        assert!(
+            error.to_string().contains("GFDR property encoding"),
+            "{error}"
+        );
+        assert_eq!(
+            snapshot_committed_files(root.path()),
+            before,
+            "invalid shared literal must not mutate committed authority: {malformed}"
+        );
+    }
 }

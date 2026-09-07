@@ -9,8 +9,8 @@
 //! step vocabulary and result-value types are supported (#598–#601).
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int8Array, Int32Array, Int64Array,
-    ListArray, StringArray, StructArray, Time64NanosecondArray, UInt64Array,
+    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
+    StringArray, StructArray, Time64NanosecondArray, UInt64Array,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use cucumber::gherkin::Step;
@@ -1125,95 +1125,19 @@ fn render_cell(array: &dyn Array, row: usize) -> String {
                 )
             )
         }
-        // A heterogeneous ("tagged") flat-scalar list element (ADR 0010, #943):
-        // `Struct{__het_key, __het_tag, __het_int, __het_float, __het_str,
-        // __het_bool}` — render the live field by tag (0=int, 1=float, 2=string,
-        // 3=bool) so a mixed list keeps per-element types (`[1, 'a', 2.0]` →
-        // `1`, `'a'`, `2.0`; `max([1, 2.0, 5])` → `5`).
-        DataType::Struct(fields) if fields.iter().any(|f| f.name() == "__het_tag") => {
-            let s = array
-                .as_any()
-                .downcast_ref::<StructArray>()
-                .expect("Struct array");
-            let col = |name: &str| s.column_by_name(name).expect("tagged field").as_ref();
-            let tag = col("__het_tag")
-                .as_any()
-                .downcast_ref::<Int8Array>()
-                .expect("__het_tag is Int8")
-                .value(row);
-            if let Some(value) = s.column_by_name(&format!("__het_value_{tag}")) {
-                return render_cell(value.as_ref(), row);
-            }
-            match tag {
-                0 => col("__het_int")
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .expect("__het_int is Int64")
-                    .value(row)
-                    .to_string(),
-                1 => render_float(
-                    col("__het_float")
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .expect("__het_float is Float64")
-                        .value(row),
-                ),
-                2 => format!(
-                    "'{}'",
-                    escape_string(
-                        col("__het_str")
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .expect("__het_str is Utf8")
-                            .value(row)
-                    )
-                ),
-                3 => col("__het_bool")
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .expect("__het_bool is Boolean")
-                    .value(row)
-                    .to_string(),
-                // 4 = nested list (ADR 0011): recurse into the tagged children.
-                4 => {
-                    let l = col("__het_list")
-                        .as_any()
-                        .downcast_ref::<ListArray>()
-                        .expect("__het_list is List");
-                    let elems = l.value(row);
-                    let parts: Vec<String> = (0..elems.len())
-                        .map(|i| render_cell(elems.as_ref(), i))
-                        .collect();
-                    format!("[{}]", parts.join(", "))
-                }
-                // 5 = map (ADR 0011 slice 2, #1005): render `{key: value, …}` from
-                // the `__het_map` entry list, keys sorted, values recursed by tag.
-                _ => {
-                    let l = col("__het_map")
-                        .as_any()
-                        .downcast_ref::<ListArray>()
-                        .expect("__het_map is List");
-                    let entries = l.value(row);
-                    let es = entries
-                        .as_any()
-                        .downcast_ref::<StructArray>()
-                        .expect("map entries struct");
-                    let mkeys = es
-                        .column_by_name("__het_mkey")
-                        .expect("__het_mkey")
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .expect("__het_mkey is Utf8");
-                    let mvals = es.column_by_name("__het_mval").expect("__het_mval");
-                    let mut kv: Vec<(String, String)> = (0..es.len())
-                        .map(|i| (mkeys.value(i).to_string(), render_cell(mvals.as_ref(), i)))
-                        .collect();
-                    kv.sort();
-                    let body: Vec<String> =
-                        kv.into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
-                    format!("{{{}}}", body.join(", "))
-                }
-            }
+        // Render through the same checked codec as execution and storage.
+        DataType::Struct(fields)
+            if fields
+                .iter()
+                .any(|f| f.name() == graphforge_value::heterogeneous::TAG) =>
+        {
+            let value =
+                datafusion::scalar::ScalarValue::try_from_array(array, row).expect("tagged scalar");
+            let decoded = graphforge_rel::expr::decode_het_scalar(&value)
+                .expect("valid heterogeneous value")
+                .expect("heterogeneous layout");
+            let decoded = decoded.to_array().expect("decoded value array");
+            render_cell(decoded.as_ref(), 0)
         }
         // A `localdatetime` value (ADR 0009): `Struct{date: Date32, time:
         // Time64(ns)}` → quoted canonical `YYYY-MM-DDTHH:MM[:SS[.fff…]]`.
@@ -1349,14 +1273,19 @@ fn render_cell(array: &dyn Array, row: usize) -> String {
         // A heterogeneous property scalar persisted as the executor's tagged
         // value representation. Decode before rendering so each node property
         // retains its original openCypher type.
-        DataType::Struct(fields) if fields.iter().any(|f| f.name() == "__het_tag") => {
+        DataType::Struct(fields)
+            if fields
+                .iter()
+                .any(|f| f.name() == graphforge_value::heterogeneous::TAG) =>
+        {
             let value = datafusion::scalar::ScalarValue::try_from_array(
                 &arrow::array::make_array(array.to_data()),
                 row,
             )
             .expect("tagged property scalar");
             let decoded = graphforge_rel::expr::decode_het_scalar(&value)
-                .expect("valid tagged property scalar");
+                .expect("valid tagged property scalar")
+                .expect("tagged property layout");
             let decoded = decoded.to_array().expect("decoded property scalar array");
             render_cell(decoded.as_ref(), 0)
         }

@@ -145,9 +145,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 
 use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int8Array, ListBuilder,
-    RecordBatch, StringArray, StructArray, TimestampMicrosecondArray, UInt32Array, UInt32Builder,
-    UInt64Array, new_null_array,
+    Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, RecordBatch,
+    StringArray, StructArray, TimestampMicrosecondArray, UInt32Array, UInt32Builder, UInt64Array,
+    new_null_array,
 };
 use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use async_trait::async_trait;
@@ -538,7 +538,9 @@ impl RefNodeCols {
 
 fn dynamic_struct_contains_node(fields: &arrow::datatypes::Fields) -> bool {
     fields.iter().any(|field| {
-        field.name().starts_with("__het_value_")
+        field
+            .name()
+            .starts_with(graphforge_value::heterogeneous::DYNAMIC_PREFIX)
             && matches!(field.data_type(), DataType::Struct(value_fields)
                 if value_fields.iter().any(|value_field| value_field.name() == "node_uuid"))
     })
@@ -925,14 +927,17 @@ fn referenced_node_uuid(
             .as_any()
             .downcast_ref::<StructArray>()
             .ok_or_else(|| GfError::Execution("CREATE node reference is not a struct".into()))?;
-        let tag = tagged
-            .column_by_name("__het_tag")
-            .and_then(|column| column.as_any().downcast_ref::<Int8Array>())
-            .ok_or_else(|| GfError::Execution("CREATE node reference has no type tag".into()))?
-            .value(row);
-        let variant = tagged
-            .column_by_name(&format!("__het_value_{tag}"))
-            .and_then(|column| column.as_any().downcast_ref::<StructArray>())
+        let graphforge_value::heterogeneous::Decoded::Payload(payload) =
+            graphforge_value::heterogeneous::decode_row(tagged, row)
+                .map_err(|error| GfError::Execution(error.to_string()))?
+        else {
+            return Err(GfError::Execution(
+                "CREATE node reference is null or not a node".into(),
+            ));
+        };
+        let variant = payload
+            .as_any()
+            .downcast_ref::<StructArray>()
             .ok_or_else(|| {
                 GfError::Execution("CREATE node reference variant is not a node".into())
             })?;
@@ -6807,7 +6812,7 @@ mod tests {
         let dynamic_struct = DFSchema::try_from(Schema::new(vec![Field::new(
             "dynamic",
             DataType::Struct(Fields::from(vec![Field::new(
-                "__het_value_8",
+                graphforge_value::heterogeneous::payload_field(8),
                 DataType::Struct(node_fields),
                 true,
             )])),

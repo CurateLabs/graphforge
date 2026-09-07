@@ -327,3 +327,141 @@ where
     }
     Err(de::Error::missing_field("value"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Literal;
+    use graphforge_core::{
+        SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+    };
+
+    #[test]
+    fn literal_json_golden_vectors_preserve_existing_wire_encoding() {
+        // These bytes pin the pre-extraction IrLiteral serializer: adjacent
+        // type/value tags, tuple temporal payloads, and ordered map entries.
+        let vectors = [
+            (Literal::Null, r#"{"type":"Null"}"#),
+            (Literal::Bool(true), r#"{"type":"Bool","value":true}"#),
+            (Literal::Int(-7), r#"{"type":"Int","value":-7}"#),
+            (Literal::Float(2.5), r#"{"type":"Float","value":2.5}"#),
+            (
+                Literal::Str("line\n\"quoted\"".into()),
+                r#"{"type":"Str","value":"line\n\"quoted\""}"#,
+            ),
+            (
+                Literal::Uuid([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+                r#"{"type":"Uuid","value":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]}"#,
+            ),
+            (
+                Literal::Duration {
+                    months: 1,
+                    days: -2,
+                    seconds: 3,
+                    nanos: 4,
+                },
+                r#"{"type":"Duration","value":[1,-2,3,4]}"#,
+            ),
+            (Literal::DateTime(-1), r#"{"type":"DateTime","value":-1}"#),
+            (
+                Literal::Date(3_000_000_000),
+                r#"{"type":"Date","value":3000000000}"#,
+            ),
+            (
+                Literal::LocalDateTime {
+                    days: 3_000_000_000,
+                    nanos: 42,
+                },
+                r#"{"type":"LocalDateTime","value":[3000000000,42]}"#,
+            ),
+            (Literal::Time(42), r#"{"type":"Time","value":42}"#),
+            (
+                Literal::ZonedTime {
+                    nanos: 42,
+                    offset: -3600,
+                },
+                r#"{"type":"ZonedTime","value":[42,-3600]}"#,
+            ),
+            (
+                Literal::ZonedDateTime {
+                    days: 1,
+                    nanos: 42,
+                    offset: 3600,
+                    zone: Some("Europe/Paris".into()),
+                },
+                r#"{"type":"ZonedDateTime","value":[1,42,3600,"Europe/Paris"]}"#,
+            ),
+            (
+                Literal::ZonedDateTime {
+                    days: 1,
+                    nanos: 42,
+                    offset: 0,
+                    zone: None,
+                },
+                r#"{"type":"ZonedDateTime","value":[1,42,0,null]}"#,
+            ),
+            (
+                Literal::Spatial(SpatialValue {
+                    spatial_type: SpatialType {
+                        geometry: SpatialGeometryType::Point,
+                        crs: SpatialCrs::Epsg4326,
+                    },
+                    coordinates: SpatialCoordinates::Point([1.0, 2.0]),
+                    extension_name: None,
+                    extension_metadata: None,
+                }),
+                r#"{"type":"Spatial","value":{"spatial_type":{"geometry":"point","crs":"EPSG:4326"},"coordinates":{"Point":[1.0,2.0]}}}"#,
+            ),
+            (
+                Literal::List(vec![Literal::Int(1), Literal::Null]),
+                r#"{"type":"List","value":[{"type":"Int","value":1},{"type":"Null"}]}"#,
+            ),
+            (
+                Literal::Map(vec![
+                    ("z".into(), Literal::Bool(false)),
+                    ("a".into(), Literal::List(vec![])),
+                ]),
+                r#"{"type":"Map","value":[["z",{"type":"Bool","value":false}],["a",{"type":"List","value":[]}]]}"#,
+            ),
+        ];
+        for (value, expected) in vectors {
+            assert_eq!(serde_json::to_string(&value).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<Literal>(expected).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn nonfinite_literal_json_golden_vectors_preserve_nested_tags() {
+        for (number, expected) in [
+            (f64::NAN, r#"{"$float":"NaN"}"#),
+            (f64::INFINITY, r#"{"$float":"+Infinity"}"#),
+            (f64::NEG_INFINITY, r#"{"$float":"-Infinity"}"#),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&Literal::Float(number)).unwrap(),
+                expected
+            );
+            let Literal::Float(decoded) = serde_json::from_str::<Literal>(expected).unwrap() else {
+                panic!("nonfinite tag must remain a float");
+            };
+            if number.is_nan() {
+                assert!(decoded.is_nan());
+            } else {
+                assert_eq!(decoded, number);
+            }
+        }
+        let nested = Literal::List(vec![Literal::Map(vec![
+            ("nan".into(), Literal::Float(f64::NAN)),
+            (
+                "infinities".into(),
+                Literal::List(vec![
+                    Literal::Float(f64::INFINITY),
+                    Literal::Float(f64::NEG_INFINITY),
+                ]),
+            ),
+        ])]);
+        let expected = r#"{"type":"List","value":[{"type":"Map","value":[["nan",{"$float":"NaN"}],["infinities",{"type":"List","value":[{"$float":"+Infinity"},{"$float":"-Infinity"}]}]]}]}"#;
+        assert_eq!(serde_json::to_string(&nested).unwrap(), expected);
+        let decoded: Literal = serde_json::from_str(expected).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), expected);
+    }
+}

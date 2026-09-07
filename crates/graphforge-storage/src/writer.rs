@@ -3544,13 +3544,7 @@ fn spatial_field(
 }
 
 pub(crate) fn heterogeneous_scalar_fields() -> arrow::datatypes::Fields {
-    arrow::datatypes::Fields::from(vec![
-        Field::new("__het_tag", DataType::Int8, false),
-        Field::new("__het_int", DataType::Int64, true),
-        Field::new("__het_float", DataType::Float64, true),
-        Field::new("__het_str", DataType::Utf8, true),
-        Field::new("__het_bool", DataType::Boolean, true),
-    ])
+    graphforge_value::heterogeneous::scalar_fields()
 }
 
 /// Build the dynamic schema and column arrays for a **node**-property file
@@ -4220,75 +4214,17 @@ fn build_spatial_array<R: PropRowLike>(
 }
 
 fn build_heterogeneous_scalar_array<R: PropRowLike>(name: &str, rows: &[R]) -> ArrayRef {
-    use arrow::array::{BooleanBuilder, Float64Builder, Int8Builder, Int64Builder, StructArray};
-    use arrow::buffer::NullBuffer;
-
-    let mut tags = Int8Builder::new();
-    let mut ints = Int64Builder::new();
-    let mut floats = Float64Builder::new();
-    let mut strings = StringBuilder::new();
-    let mut bools = BooleanBuilder::new();
-    let mut valid = Vec::with_capacity(rows.len());
-    for row in rows {
-        let value = row.props().get(name);
-        let tag = match value {
-            Some(IrLiteral::Int(value)) => {
-                ints.append_value(*value);
-                floats.append_null();
-                strings.append_null();
-                bools.append_null();
-                Some(0)
-            }
-            Some(IrLiteral::Float(value)) => {
-                ints.append_null();
-                floats.append_value(*value);
-                strings.append_null();
-                bools.append_null();
-                Some(1)
-            }
-            Some(IrLiteral::Str(value)) => {
-                ints.append_null();
-                floats.append_null();
-                strings.append_value(value);
-                bools.append_null();
-                Some(2)
-            }
-            Some(IrLiteral::Bool(value)) => {
-                ints.append_null();
-                floats.append_null();
-                strings.append_null();
-                bools.append_value(*value);
-                Some(3)
-            }
-            Some(IrLiteral::Null) => {
-                ints.append_null();
-                floats.append_null();
-                strings.append_null();
-                bools.append_null();
-                Some(4)
-            }
-            _ => {
-                ints.append_null();
-                floats.append_null();
-                strings.append_null();
-                bools.append_null();
-                None
-            }
-        };
-        tags.append_value(tag.unwrap_or_default());
-        valid.push(tag.is_some());
-    }
-    Arc::new(StructArray::new(
-        heterogeneous_scalar_fields(),
-        vec![
-            Arc::new(tags.finish()),
-            Arc::new(ints.finish()),
-            Arc::new(floats.finish()),
-            Arc::new(strings.finish()),
-            Arc::new(bools.finish()),
-        ],
-        Some(NullBuffer::from(valid)),
-    ))
+    use graphforge_value::heterogeneous::{Scalar, encode_scalar};
+    Arc::new(encode_scalar(rows.iter().map(
+        |row| match row.props().get(name) {
+            Some(IrLiteral::Null) => Some(Scalar::Null),
+            Some(IrLiteral::Int(v)) => Some(Scalar::Int(*v)),
+            Some(IrLiteral::Float(v)) => Some(Scalar::Float(*v)),
+            Some(IrLiteral::Str(v)) => Some(Scalar::Str(v)),
+            Some(IrLiteral::Bool(v)) => Some(Scalar::Bool(*v)),
+            _ => None,
+        },
+    )))
 }
 
 /// Stringify a literal for a `Utf8`-coerced (mixed-type) property column.
@@ -4530,6 +4466,16 @@ pub fn count_entity_properties<S: std::hash::BuildHasher>(
     Ok(count)
 }
 
+/// Validate heterogeneous data before returning any property row from a batch.
+pub(crate) fn validate_property_values(
+    batch: &RecordBatch,
+) -> Result<(), graphforge_value::heterogeneous::ValueError> {
+    for column in batch.columns() {
+        graphforge_value::heterogeneous::validate_array(column.as_ref())?;
+    }
+    Ok(())
+}
+
 /// Decode one property batch row-by-row, invoking `emit(uuid, props)` per row.
 ///
 /// `uuid_field_name` is the join-key column (`node_uuid` / `edge_uuid`); every
@@ -4547,6 +4493,10 @@ pub(crate) fn decode_property_batch(
 ) -> Result<(), GfError> {
     use arrow::array::Array;
 
+    validate_property_values(batch).map_err(|error| GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+        message: error.to_string(),
+    })?;
     let schema = batch.schema();
     let uuid_col = batch
         .column_by_name(uuid_field_name)
@@ -4607,67 +4557,15 @@ fn decode_value(
         // structs, so the shape must select the decode.
         DataType::Struct(fields) => {
             let s = downcast::<StructArray>(col, field)?;
+            if graphforge_value::heterogeneous::recognize(field.data_type())
+                .map_err(|error| GfError::Storage(error.to_string()))?
+                .is_some()
+            {
+                return graphforge_value::heterogeneous::decode_scalar(s, r)
+                    .map_err(|error| GfError::Storage(error.to_string()));
+            }
             let names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
             match names.as_slice() {
-                [
-                    "__het_tag",
-                    "__het_int",
-                    "__het_float",
-                    "__het_str",
-                    "__het_bool",
-                ] => {
-                    let tag = s
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<arrow::array::Int8Array>()
-                        .ok_or_else(|| GfError::Storage("heterogeneous tag not Int8".into()))?
-                        .value(r);
-                    match tag {
-                        0 => IrLiteral::Int(
-                            s.column(1)
-                                .as_any()
-                                .downcast_ref::<Int64Array>()
-                                .ok_or_else(|| {
-                                    GfError::Storage("heterogeneous int not Int64".into())
-                                })?
-                                .value(r),
-                        ),
-                        1 => IrLiteral::Float(
-                            s.column(2)
-                                .as_any()
-                                .downcast_ref::<Float64Array>()
-                                .ok_or_else(|| {
-                                    GfError::Storage("heterogeneous float not Float64".into())
-                                })?
-                                .value(r),
-                        ),
-                        2 => IrLiteral::Str(
-                            s.column(3)
-                                .as_any()
-                                .downcast_ref::<StringArray>()
-                                .ok_or_else(|| {
-                                    GfError::Storage("heterogeneous string not Utf8".into())
-                                })?
-                                .value(r)
-                                .to_owned(),
-                        ),
-                        3 => IrLiteral::Bool(
-                            s.column(4)
-                                .as_any()
-                                .downcast_ref::<BooleanArray>()
-                                .ok_or_else(|| {
-                                    GfError::Storage("heterogeneous bool not Boolean".into())
-                                })?
-                                .value(r),
-                        ),
-                        4 => IrLiteral::Null,
-                        _ => {
-                            return Err(GfError::Storage(format!(
-                                "unsupported heterogeneous property tag {tag}"
-                            )));
-                        }
-                    }
-                }
                 ["months", "days", "seconds", "nanos"] => {
                     let i64_at = |idx: usize| -> Result<i64, GfError> {
                         Ok(s.column(idx)
@@ -7597,6 +7495,67 @@ mod tests {
             x.data_type(),
             &DataType::Struct(heterogeneous_scalar_fields())
         );
+    }
+
+    #[test]
+    fn malformed_persisted_heterogeneous_batch_emits_no_partial_rows() {
+        use arrow::array::{Int8Array, StructArray};
+        use graphforge_value::heterogeneous::{self as het, Scalar};
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        for expected_error in ["GF_VALUE_TAG", "GF_VALUE_SCHEMA"] {
+            let dir = TempDir::new().unwrap();
+            let values = het::encode_scalar([Some(Scalar::Int(7)), Some(Scalar::Str("two"))]);
+            let mut columns = values.columns().to_vec();
+            let mut fields = het::scalar_fields()
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect::<Vec<_>>();
+            if expected_error == "GF_VALUE_TAG" {
+                columns[0] = Arc::new(Int8Array::from(vec![0, 99]));
+            } else {
+                fields[1] = Field::new(het::INT, DataType::UInt64, true);
+                columns[1] = Arc::new(arrow::array::UInt64Array::from(vec![Some(7), None]));
+            }
+            let values = StructArray::new(fields.into(), columns, None);
+            let ids = FixedSizeBinaryArray::try_from_iter(
+                [new_v7(), new_v7()]
+                    .iter()
+                    .map(|id| id.as_bytes().as_slice()),
+            )
+            .unwrap();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    NODE_PROPERTY_UUID_FIELD,
+                    DataType::FixedSizeBinary(16),
+                    false,
+                ),
+                Field::new("mixed", values.data_type().clone(), true),
+            ]));
+            let batch =
+                RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(values)]).unwrap();
+            let path = dir.path().join("malformed.parquet");
+            crate::graph_projection::write_parquet(&path, &batch).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let persisted = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
+                .unwrap()
+                .build()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            let mut emitted = 0;
+            let error =
+                decode_property_batch(&persisted, NODE_PROPERTY_UUID_FIELD, |_, _| emitted += 1)
+                    .unwrap_err();
+            assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+            assert!(error.to_string().contains(expected_error), "{error}");
+            assert_eq!(
+                emitted, 0,
+                "a later malformed row must prevent partial exposure"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
     }
 
     #[test]
