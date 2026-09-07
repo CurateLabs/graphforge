@@ -30,6 +30,7 @@ PUBLICATION_STATES = {
 }
 CRATES = (
     "graphforge-core",
+    "graphforge-value",
     "graphforge-filesystem",
     "graphforge-ast",
     "graphforge-knowledge",
