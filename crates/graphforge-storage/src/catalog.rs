@@ -3514,7 +3514,10 @@ mod tests {
         for (index, name) in ["Ada", "Grace", "Katherine"].into_iter().enumerate() {
             let uuid = graphforge_core::uuid::new_v7();
             writer
-                .create_node(uuid, graphforge_core::TypeId(1))
+                .create_node(
+                    uuid,
+                    graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                )
                 .unwrap();
             let mut values = HashMap::from([(
                 "name".to_owned(),
@@ -3548,7 +3551,10 @@ mod tests {
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
                 .unwrap();
         writer
-            .create_node(uuid, graphforge_core::TypeId(1))
+            .create_node(
+                uuid,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(

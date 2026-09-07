@@ -14,16 +14,19 @@ use graphforge_storage::adjacency::{
 };
 use graphforge_storage::adjacency_delta::{apply_delta_segments, delta_path, read_delta_chain};
 use graphforge_storage::{GraphWriter, delete_edges, read_topology_generation};
+use graphforge_value::EntityTypeId;
 
 const TS: i64 = 1_700_000_000_000_000;
-const PERSON: TypeId = TypeId(0);
+fn person() -> EntityTypeId {
+    EntityTypeId::ontology(TypeId(0)).unwrap()
+}
 
 /// Create `KNOWS` edges among fresh nodes; returns the new node UUIDs.
 fn write_edges(dir: &Path, pairs: &[(usize, usize)], node_count: usize) -> Vec<Uuid> {
     let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
     let uuids: Vec<Uuid> = (0..node_count).map(|_| new_v7()).collect();
     for u in &uuids {
-        w.create_node(*u, PERSON).unwrap();
+        w.create_node(*u, person()).unwrap();
     }
     for &(s, d) in pairs {
         w.create_edge(new_v7(), "KNOWS", &uuids[s], &uuids[d])
@@ -45,7 +48,7 @@ fn pure_append_segment_overlay_equals_full_rebuild() {
     // More edges (and a new node 3) through the writer — a segment is written.
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
     let extra: Vec<Uuid> = (0..1).map(|_| new_v7()).collect();
-    w.create_node(extra[0], PERSON).unwrap();
+    w.create_node(extra[0], person()).unwrap();
     // Reuse existing nodes by reopening is awkward (UUIDs unknown here), so add
     // edges from/to the new node plus a self-loop to exercise growth.
     w.create_edge(new_v7(), "KNOWS", &extra[0], &extra[0])
@@ -94,7 +97,7 @@ fn node_only_flush_writes_empty_segment() {
     let base_gen = read_topology_generation(dir.path()).unwrap();
 
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
-    w.create_node(new_v7(), PERSON).unwrap();
+    w.create_node(new_v7(), person()).unwrap();
     w.flush().unwrap();
     let cur_gen = read_topology_generation(dir.path()).unwrap();
 

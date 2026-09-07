@@ -26,6 +26,7 @@ use graphforge_storage::{
     GraphWriter, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, read_edges_filtered,
     read_nodes_filtered_observed,
 };
+use graphforge_value::EntityTypeId;
 
 const TS: i64 = 1_700_000_000_000_000;
 
@@ -69,7 +70,8 @@ fn write_chain(dir: &Path, n: usize) -> Vec<u64> {
     let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, TS).unwrap();
     let uuids: Vec<Uuid> = (0..=n).map(|_| new_v7()).collect();
     for u in &uuids {
-        w.create_node(*u, TypeId(0)).unwrap();
+        w.create_node(*u, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
     }
     let mut edge_ids = Vec::new();
     for pair in uuids.windows(2) {
@@ -293,7 +295,8 @@ fn exploratory_mode_filters_the_shared_file() {
     let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
     let (a, b, c) = (new_v7(), new_v7(), new_v7());
     for u in [a, b, c] {
-        w.create_node(u, TypeId(0)).unwrap();
+        w.create_node(u, EntityTypeId::ontology(TypeId(0)).unwrap())
+            .unwrap();
     }
     let e1 = w.create_edge(new_v7(), "KNOWS", &a, &b).unwrap();
     let _e2 = w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();

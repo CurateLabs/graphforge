@@ -38,8 +38,6 @@ use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::scalar::ScalarValue;
 use datafusion_datasource::memory::MemorySourceConfig;
 
-#[cfg(test)]
-use graphforge_core::TypeId;
 use graphforge_core::uuid::{Uuid, to_bytes};
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::plan::GraphOp;
@@ -581,7 +579,9 @@ impl Frontier {
                 Arc::new(uuid_b.finish()) as ArrayRef,
                 Arc::new(UInt64Array::from(node_ids[range.clone()].to_vec())),
                 Arc::new(UInt32Array::from(type_ids[range.clone()].to_vec())),
-                singleton_label_sets(&type_ids[range]),
+                non_null_label_items(&ListArray::from_iter_primitive::<UInt32Type, _, _>(
+                    type_ids[range].iter().map(|id| Some([Some(*id)])),
+                )),
             ])
         })
     }
@@ -1124,14 +1124,6 @@ fn repeated_row_label_sets(rows: &[MatchedMergeNode]) -> ArrayRef {
     let array = ListArray::from_iter_primitive::<UInt32Type, _, _>(
         rows.iter()
             .map(|row| Some(row.label_ids.iter().map(|id| Some(id.encode())))),
-    );
-    non_null_label_items(&array)
-}
-
-#[cfg(test)]
-fn singleton_label_sets(labels: &[EntityTypeId]) -> ArrayRef {
-    let array = ListArray::from_iter_primitive::<UInt32Type, _, _>(
-        labels.iter().map(|label| Some([Some(label.encode())])),
     );
     non_null_label_items(&array)
 }
@@ -3611,13 +3603,15 @@ mod tests {
             batches: vec![batch],
         };
         let add = frontier
-            .add_node_labels(VarId(0), &[1], &[true])
+            .add_node_labels(VarId(0), &[EntityTypeId::decode(1).unwrap()], &[true])
             .unwrap_err();
         assert!(
             add.to_string()
                 .contains("MERGE label target has no type_ids column")
         );
-        let remove = frontier.remove_node_labels(VarId(0), &[1]).unwrap_err();
+        let remove = frontier
+            .remove_node_labels(VarId(0), &[EntityTypeId::decode(1).unwrap()])
+            .unwrap_err();
         assert!(
             remove
                 .to_string()
@@ -3652,12 +3646,25 @@ mod tests {
     fn create_recorder_exposes_node_identity_slices() {
         let mut recorder = CreateRecorder::default();
         assert!(recorder.node_identities(8).is_none());
-        recorder.record_node(8, [1; 16], 9, 10);
-        recorder.record_node(8, [2; 16], 11, 12);
+        recorder.record_node(
+            8,
+            [1; 16],
+            9,
+            graphforge_value::PrimaryEntityTypeId::decode(10).unwrap(),
+        );
+        recorder.record_node(
+            8,
+            [2; 16],
+            11,
+            graphforge_value::PrimaryEntityTypeId::decode(12).unwrap(),
+        );
         let (uuids, node_ids, type_ids) = recorder.node_identities(8).unwrap();
         assert_eq!(uuids, &[[1; 16], [2; 16]]);
         assert_eq!(node_ids, &[9, 11]);
-        assert_eq!(type_ids, &[10, 12]);
+        assert_eq!(
+            type_ids.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+            &[10, 12]
+        );
     }
 
     #[test]
@@ -3745,10 +3752,10 @@ mod tests {
     fn recreating_a_removed_label_token_cancels_its_removal() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
-        ctx.known_labels.insert(7);
+        ctx.known_labels.insert(EntityTypeId::decode(7).unwrap());
 
-        ctx.record_removed_label_tokens([7]);
-        ctx.record_label_tokens([7]);
+        ctx.record_removed_label_tokens([EntityTypeId::decode(7).unwrap()]);
+        ctx.record_label_tokens([EntityTypeId::decode(7).unwrap()]);
 
         assert_eq!(ctx.counters.labels_removed, 0);
         assert_eq!(ctx.counters.labels_added, 0);
@@ -3762,7 +3769,7 @@ mod tests {
         let var2 = arena.push(IrExpr::VarRef(VarId(2)));
         let property = arena.push(IrExpr::PropertyAccess {
             base: var0,
-            prop: PropId(7),
+            prop: graphforge_value::PropertyId::ontology(PropId(7)).unwrap(),
         });
         let unary = arena.push(IrExpr::UnaryOp {
             op: UnaryOpKind::Neg,
@@ -4193,7 +4200,8 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                    .unwrap();
             let mut exprs = ExprArena::new();
             let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
             let params = HashMap::new();
@@ -4208,7 +4216,7 @@ mod tests {
                 &env,
                 &[SetPropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                     value,
                 }],
@@ -4239,7 +4247,8 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer =
-                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                    .unwrap();
             let exprs = ExprArena::new();
             let params = HashMap::new();
             let env = phase_env(&lowerer, &exprs, dir.path(), &params);
@@ -4260,7 +4269,7 @@ mod tests {
                 &env,
                 &[RemovePropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                 }],
                 &mut frontier,
@@ -4284,7 +4293,8 @@ mod tests {
     fn set_and_remove_reject_malformed_identity_and_edge_routing_columns() {
         let dir = tempfile::tempdir().unwrap();
         let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                .unwrap();
         let mut exprs = ExprArena::new();
         let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
         let params = HashMap::new();
@@ -4311,7 +4321,7 @@ mod tests {
             &env,
             &[SetPropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
                 value,
             }],
@@ -4347,7 +4357,7 @@ mod tests {
             &env,
             &[RemovePropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
             }],
             &mut malformed_route,
@@ -4369,11 +4379,17 @@ mod tests {
         let edge = graphforge_core::uuid::Uuid::from_bytes([7; 16]);
         pending_ctx
             .writer
-            .create_node(src, graphforge_core::TypeId(1))
+            .create_node(
+                src,
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         pending_ctx
             .writer
-            .create_node(dst, graphforge_core::TypeId(1))
+            .create_node(
+                dst,
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         pending_ctx
             .writer
@@ -4391,7 +4407,7 @@ mod tests {
             &env,
             &[RemovePropItem {
                 target: VarId(1),
-                prop: PropId(9),
+                prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                 prop_name: "score".into(),
             }],
             &mut malformed_route,
@@ -4428,7 +4444,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let lowerer =
-            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory)
+                .unwrap();
         let exprs = ExprArena::new();
         let params = HashMap::new();
         let env = phase_env(&lowerer, &exprs, dir.path(), &params);
@@ -4440,10 +4457,16 @@ mod tests {
                 let src = graphforge_core::uuid::new_v7();
                 let dst = graphforge_core::uuid::new_v7();
                 ctx.writer
-                    .create_node(src, graphforge_core::TypeId(1))
+                    .create_node(
+                        src,
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                    )
                     .unwrap();
                 ctx.writer
-                    .create_node(dst, graphforge_core::TypeId(1))
+                    .create_node(
+                        dst,
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+                    )
                     .unwrap();
                 ctx.writer
                     .create_edge(
@@ -4464,7 +4487,7 @@ mod tests {
                 ctx.writer
                     .create_node(
                         graphforge_core::uuid::Uuid::from_bytes([7; 16]),
-                        graphforge_core::TypeId(1),
+                        EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
                     )
                     .unwrap();
                 ctx.writer
@@ -4479,7 +4502,7 @@ mod tests {
                 &env,
                 &[RemovePropItem {
                     target: VarId(1),
-                    prop: PropId(9),
+                    prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
                     prop_name: "score".into(),
                 }],
                 &mut frontier,
@@ -4537,11 +4560,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let add = graphforge_ir::LabelItem {
             target: VarId(1),
-            labels: vec![graphforge_core::TypeId(2)],
+            labels: vec![EntityTypeId::ontology(graphforge_core::TypeId(2)).unwrap()],
         };
         let remove = graphforge_ir::LabelItem {
             target: VarId(1),
-            labels: vec![graphforge_core::TypeId(1)],
+            labels: vec![EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap()],
         };
 
         let mut pending =
@@ -4550,7 +4573,7 @@ mod tests {
             .writer
             .create_node(
                 graphforge_core::uuid::Uuid::from_bytes([7; 16]),
-                graphforge_core::TypeId(1),
+                EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
             )
             .unwrap();
         run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut pending).unwrap();
@@ -4558,12 +4581,14 @@ mod tests {
 
         let mut persisted =
             StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
-        persisted.label_removals.insert([7; 16], HashSet::from([2]));
+        persisted
+            .label_removals
+            .insert([7; 16], HashSet::from([EntityTypeId::decode(2).unwrap()]));
         run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut persisted).unwrap();
         assert!(persisted.label_removals[&[7; 16]].is_empty());
         persisted
             .label_additions
-            .insert([7; 16], HashSet::from([1]));
+            .insert([7; 16], HashSet::from([EntityTypeId::decode(1).unwrap()]));
         run_label_phase(
             &[remove.clone()],
             false,

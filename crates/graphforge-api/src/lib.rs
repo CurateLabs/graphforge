@@ -35,8 +35,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef;
 use graphforge_core::GraphIdentity;
-#[cfg(test)]
-use graphforge_core::TypeId;
 pub use graphforge_io::{
     ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
 };
@@ -4949,7 +4947,7 @@ mod tests {
                     payload: GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: uuid::Uuid::new_v4().hyphenated().to_string(),
                         node_id: 2,
-                        type_ids: vec![1],
+                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                         created_at_micros: 2,
                         updated_at_micros: 2,
                     },

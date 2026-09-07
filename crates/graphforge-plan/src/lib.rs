@@ -2008,7 +2008,7 @@ mod tests {
             1,
             2,
             Direction::Out,
-            Some(7),
+            Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
             PathBuf::from("/tmp/gf"),
             OntologyMode::Strict,
             dst_node_fields(),
@@ -2183,7 +2183,7 @@ mod tests {
             empty_plan(),
             vec![ResolvedNodeSpec {
                 var: 0,
-                label_ids: vec![3],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(3).unwrap()],
                 label_names: vec!["Person".to_owned()],
                 properties: vec![("name".to_owned(), IrLiteral::Str("Alice".to_owned()))],
                 computed_properties: vec![],
@@ -2314,7 +2314,7 @@ mod tests {
                 empty_plan(),
                 vec![ResolvedNodeSpec {
                     var: 0,
-                    label_ids: vec![1],
+                    label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                     label_names: vec!["Person".into()],
                     properties: literals
                         .iter()
@@ -2435,7 +2435,7 @@ mod tests {
             empty_plan(),
             vec![ResolvedNodeSpec {
                 var: 0,
-                label_ids: vec![1],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![],
                 computed_properties: vec![("score".into(), lit(1_i64))],
@@ -2445,7 +2445,7 @@ mod tests {
                 var: 1,
                 src: 0,
                 dst: 2,
-                rel_type_id: Some(3),
+                rel_type_id: Some(graphforge_value::RelationTypeId::decode(3).unwrap()),
                 rel_type_name: Some("KNOWS".into()),
                 direction: Direction::Out,
                 properties: vec![],
@@ -2721,7 +2721,7 @@ mod tests {
             2,
             1,
             Direction::Out,
-            Some(7),
+            Some(graphforge_value::RelationTypeId::decode(7).unwrap()),
             PathBuf::from("/tmp/p"),
             OntologyMode::Strict,
             edge_fields,

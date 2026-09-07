@@ -116,6 +116,7 @@ fn render_lowered(query: &str) -> String {
         dir.path(),
         OntologyMode::Advisory,
     )
+    .expect("valid ontology identities")
     .lower_plan(&plan)
     .unwrap_or_else(|e| panic!("lowering failed for query {query:?}: {e}"));
     lowered.display_indent_schema().to_string()
@@ -133,7 +134,7 @@ fn render_property_read(query: &str) -> String {
     use std::sync::{Arc, Mutex};
 
     use graphforge_core::uuid::new_v7;
-    use graphforge_ir::{Binder, IrLiteral, RuntimeCatalog, RuntimeTypeId, runtime_entity_type_id};
+    use graphforge_ir::{Binder, EntityTypeId, IrLiteral, RuntimeCatalog, RuntimeEntityId};
     use graphforge_storage::{GraphCatalog, GraphWriter};
 
     let rc = Arc::new(Mutex::new(RuntimeCatalog::new()));
@@ -149,7 +150,7 @@ fn render_property_read(query: &str) -> String {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut writer = GraphWriter::open(dir.path(), OntologyMode::Exploratory).expect("writer");
     let uuid = new_v7();
-    let person = runtime_entity_type_id(RuntimeTypeId(0));
+    let person = EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap());
     writer.create_node(uuid, person).expect("create_node");
     let mut props = HashMap::new();
     props.insert("name".to_owned(), IrLiteral::Str("Alice".to_owned()));
@@ -165,6 +166,7 @@ fn render_property_read(query: &str) -> String {
         dir.path(),
         OntologyMode::Exploratory,
     )
+    .expect("valid ontology identities")
     .lower_plan(&plan)
     .unwrap_or_else(|e| panic!("lowering failed for query {query:?}: {e}"));
     lowered.display_indent_schema().to_string()

@@ -6122,7 +6122,7 @@ mod tests {
         let nodes = vec![
             ResolvedNodeSpec {
                 var: 1,
-                label_ids: vec![7],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![("name".into(), IrLiteral::Str("Alice".into()))],
                 computed_properties: vec![],
@@ -6130,7 +6130,10 @@ mod tests {
             },
             ResolvedNodeSpec {
                 var: 2,
-                label_ids: vec![7, 8],
+                label_ids: vec![
+                    graphforge_value::EntityTypeId::decode(7).unwrap(),
+                    graphforge_value::EntityTypeId::decode(8).unwrap(),
+                ],
                 label_names: vec!["Person".into(), "Employee".into()],
                 properties: vec![("missing".into(), IrLiteral::Null)],
                 computed_properties: vec![],
@@ -6141,7 +6144,7 @@ mod tests {
             var: 3,
             src: 1,
             dst: 2,
-            rel_type_id: Some(9),
+            rel_type_id: Some(graphforge_value::RelationTypeId::decode(9).unwrap()),
             rel_type_name: Some("KNOWS".into()),
             direction: graphforge_ir::Direction::In,
             properties: vec![("since".into(), IrLiteral::Int(2020))],
@@ -6283,7 +6286,7 @@ mod tests {
 
         let spec = ResolvedNodeSpec {
             var: 7,
-            label_ids: vec![1],
+            label_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
             label_names: vec!["Person".into()],
             properties: vec![],
             computed_properties: vec![],
@@ -6304,7 +6307,12 @@ mod tests {
         );
 
         let mut recorder = write_driver::CreateRecorder::default();
-        recorder.record_node(7, [1; 16], 1, 1);
+        recorder.record_node(
+            7,
+            [1; 16],
+            1,
+            graphforge_value::PrimaryEntityTypeId::decode(1).unwrap(),
+        );
         assert!(
             append_created_node_output_cols(&spec, 2, &CreateComputed::new(), &recorder, &mut out,)
                 .unwrap_err()
@@ -6419,7 +6427,7 @@ mod tests {
             var: 3,
             src: 1,
             dst: 2,
-            rel_type_id: Some(9),
+            rel_type_id: Some(graphforge_value::RelationTypeId::decode(9).unwrap()),
             rel_type_name: Some("KNOWS".into()),
             direction: graphforge_ir::Direction::Out,
             properties: vec![],
@@ -6487,7 +6495,16 @@ mod tests {
         let logical_value = lit(42_i64);
         let physical_value =
             create_physical_expr(&logical_value, &df_schema, &ExecutionProps::new()).unwrap();
-        let type_map = HashMap::from([(7, "Person".into()), (8, "Employee".into())]);
+        let type_map = HashMap::from([
+            (
+                graphforge_value::EntityTypeId::decode(7).unwrap(),
+                "Person".into(),
+            ),
+            (
+                graphforge_value::EntityTypeId::decode(8).unwrap(),
+                "Employee".into(),
+            ),
+        ]);
 
         let mut set = SetAccumulator::default();
         accumulate_set_batch(
@@ -6548,7 +6565,7 @@ mod tests {
             semantic_composition_fingerprint: None,
             nodes: vec![ResolvedNodeSpec {
                 var: 1,
-                label_ids: vec![7],
+                label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 label_names: vec!["Person".into()],
                 properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
                 computed_properties: vec![],
@@ -6632,7 +6649,7 @@ mod tests {
                 logical,
                 vec![ResolvedNodeSpec {
                     var: 1,
-                    label_ids: vec![7],
+                    label_ids: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                     label_names: vec!["Person".into()],
                     properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
                     computed_properties: vec![],
@@ -7353,10 +7370,10 @@ mod tests {
                 graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
                     .unwrap();
             writer
-                .create_node(node, graphforge_core::TypeId(1))
+                .create_node(node, graphforge_value::EntityTypeId::decode(1).unwrap())
                 .unwrap();
             writer
-                .create_node(other, graphforge_core::TypeId(1))
+                .create_node(other, graphforge_value::EntityTypeId::decode(1).unwrap())
                 .unwrap();
             writer.create_edge(edge, "KNOWS", &node, &other).unwrap();
             writer.flush().unwrap();
@@ -7782,7 +7799,7 @@ mod tests {
         let parameter = arena.push(IrExpr::Parameter("value".into()));
         let property = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: graphforge_ir::PropId(0),
+            prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0)).unwrap(),
         });
         let binary = arena.push(IrExpr::BinaryOp {
             op: graphforge_ir::BinaryOpKind::Add,
@@ -7992,7 +8009,7 @@ mod tests {
                 }],
                 label_items: vec![LabelItem {
                     target: VarId(0),
-                    labels: vec![graphforge_core::TypeId(7)],
+                    labels: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 }],
             })
             .build();
@@ -8013,7 +8030,8 @@ mod tests {
             .push_op(GraphOp::Set {
                 items: vec![SetPropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0))
+                        .unwrap(),
                     prop_name: "score".into(),
                     value: score,
                 }],
@@ -8037,12 +8055,13 @@ mod tests {
             .push_op(GraphOp::Remove {
                 items: vec![RemovePropItem {
                     target: VarId(0),
-                    prop: graphforge_core::PropId(0),
+                    prop: graphforge_value::PropertyId::ontology(graphforge_core::PropId(0))
+                        .unwrap(),
                     prop_name: "score".into(),
                 }],
                 label_items: vec![LabelItem {
                     target: VarId(0),
-                    labels: vec![graphforge_core::TypeId(7)],
+                    labels: vec![graphforge_value::EntityTypeId::decode(7).unwrap()],
                 }],
             })
             .build();

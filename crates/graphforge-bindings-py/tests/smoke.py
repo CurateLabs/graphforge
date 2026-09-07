@@ -147,7 +147,7 @@ def check_typed_uuid_parameters() -> None:
             b"graphforge.ontology_mode",
             b"graphforge.query_id",
         }
-        assert metadata[b"graphforge.ir_version"] == b"0.3.0"
+        assert metadata[b"graphforge.ir_version"] == b"1.0.0"
         assert metadata[b"graphforge.ontology_mode"] == b"exploratory"
         query_id = uuid.UUID(metadata[b"graphforge.query_id"].decode())
         assert query_id.version == 7

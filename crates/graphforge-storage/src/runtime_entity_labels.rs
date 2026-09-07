@@ -1,7 +1,7 @@
 //! Runtime entity label identity reconciliation (#702).
 //!
 //! Bound/persisted node label TypeIds for runtime-catalog entities are tagged
-//! with [`graphforge_ir::RUNTIME_ENTITY_TYPE_TAG`]. Legacy projects may still
+//! with [`1_073_741_824`]. Legacy projects may still
 //! store untagged catalog IDs that collide with ontology entity type IDs.
 //!
 //! When an ontology is present, tagged runtime labels whose catalog **name**
@@ -670,7 +670,7 @@ migrations: []
         ));
         assert_eq!(
             EntityTypeId::runtime(RuntimeEntityId::new(0).unwrap()).encode(),
-            graphforge_ir::RUNTIME_ENTITY_TYPE_TAG
+            1_073_741_824
         );
     }
 
@@ -694,8 +694,16 @@ migrations: []
         let mut seed =
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Exploratory, 1)
                 .unwrap();
-        seed.create_node(endpoints[0], TypeId(0)).unwrap();
-        seed.create_node(endpoints[1], TypeId(1)).unwrap();
+        seed.create_node(
+            endpoints[0],
+            graphforge_value::EntityTypeId::ontology(TypeId(0)).unwrap(),
+        )
+        .unwrap();
+        seed.create_node(
+            endpoints[1],
+            graphforge_value::EntityTypeId::ontology(TypeId(1)).unwrap(),
+        )
+        .unwrap();
         seed.flush().unwrap();
         let mut catalog = RuntimeCatalog::new();
         assert_eq!(catalog.intern_label("Ghost").unwrap().get(), 0);

@@ -299,8 +299,13 @@ fn facade_rejects_ambiguity_without_publishing_runtime_observations() {
         .runtime_catalog()
         .lock()
         .expect("catalog")
-        .intern_label("after_failed_bind")?;
-    assert_eq!(first.0, 0, "failed bind published a catalog observation");
+        .intern_label("after_failed_bind")
+        .unwrap();
+    assert_eq!(
+        first.get(),
+        0,
+        "failed bind published a catalog observation"
+    );
 }
 
 #[test]
@@ -329,10 +334,10 @@ fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
     let left = graphforge_core::uuid::new_v7();
     let right = graphforge_core::uuid::new_v7();
     writer
-        .create_node(left, graphforge_core::TypeId(0))
+        .create_node(left, graphforge_value::EntityTypeId::decode(0).unwrap())
         .unwrap();
     writer
-        .create_node(right, graphforge_core::TypeId(0))
+        .create_node(right, graphforge_value::EntityTypeId::decode(0).unwrap())
         .unwrap();
     writer
         .create_edge(graphforge_core::uuid::new_v7(), "KNOWS", &left, &right)

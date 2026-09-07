@@ -2452,7 +2452,13 @@ mod tests {
                 .with_semantic_composition_fingerprint(Some(old.fingerprint.clone()));
         let node = graphforge_core::uuid::new_v7();
         writer
-            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                node,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -2608,7 +2614,10 @@ mod tests {
         writer
             .create_node(
                 graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(entity.storage_id),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();
@@ -2743,10 +2752,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(1))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(1))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer
@@ -2775,10 +2790,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(1))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(1))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer
@@ -2822,11 +2843,14 @@ mod tests {
             writer
                 .create_node(
                     graphforge_core::uuid::new_v7(),
-                    graphforge_core::TypeId(if generation == 16 {
-                        entity.storage_id
-                    } else {
-                        999
-                    }),
+                    graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                        if generation == 16 {
+                            entity.storage_id
+                        } else {
+                            999
+                        },
+                    ))
+                    .unwrap(),
                 )
                 .unwrap();
             writer.flush().unwrap();
@@ -2884,7 +2908,11 @@ mod tests {
                     .unwrap();
             for _ in 0..rows {
                 writer
-                    .create_node(graphforge_core::uuid::new_v7(), graphforge_core::TypeId(0))
+                    .create_node(
+                        graphforge_core::uuid::new_v7(),
+                        graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0))
+                            .unwrap(),
+                    )
                     .unwrap();
             }
             writer.flush().unwrap();
@@ -2957,7 +2985,10 @@ mod tests {
             crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
                 .unwrap();
         writer
-            .create_node(graphforge_core::uuid::new_v7(), graphforge_core::TypeId(1))
+            .create_node(
+                graphforge_core::uuid::new_v7(),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
             .unwrap();
         writer.flush().unwrap();
         let path = crate::catalog::topology_node_files(dir.path())
@@ -2989,10 +3020,16 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(0))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0)).unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(0))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(0)).unwrap(),
+            )
             .unwrap();
         let edge = graphforge_core::uuid::new_v7();
         writer.create_edge(edge, "KNOWS", &left, &right).unwrap();
@@ -3048,10 +3085,22 @@ mod tests {
         let left = graphforge_core::uuid::new_v7();
         let right = graphforge_core::uuid::new_v7();
         writer
-            .create_node(left, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                left,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
-            .create_node(right, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                right,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(
@@ -3111,7 +3160,10 @@ mod tests {
         writer
             .create_node(
                 graphforge_core::uuid::new_v7(),
-                graphforge_core::TypeId(entity.storage_id),
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
             )
             .unwrap();
         writer.flush().unwrap();
@@ -3182,7 +3234,13 @@ mod tests {
                 .with_semantic_composition_fingerprint(Some(composition.fingerprint.clone()));
         let node = graphforge_core::uuid::new_v7();
         writer
-            .create_node(node, graphforge_core::TypeId(entity.storage_id))
+            .create_node(
+                node,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(
+                    entity.storage_id,
+                ))
+                .unwrap(),
+            )
             .unwrap();
         writer
             .set_properties(

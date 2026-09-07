@@ -875,7 +875,11 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|id| graphforge_ir::is_runtime_entity_type_id(graphforge_core::TypeId(*id))),
+                .any(|id| graphforge_value::EntityTypeId::decode(*id)
+                    .unwrap()
+                    .tagged()
+                    .runtime_entity_id()
+                    .is_some()),
             "Ghost must remain tagged, got {labels:?}"
         );
     }

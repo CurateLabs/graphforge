@@ -5790,7 +5790,7 @@ relation_types:
         );
         let reference = ResolvedNodeSpec {
             var: 1,
-            label_ids: vec![7],
+            label_ids: vec![EntityTypeId::decode(7).unwrap()],
             label_names: vec!["Existing".into()],
             properties: vec![("ignored".into(), IrLiteral::Int(1))],
             computed_properties: vec![],
@@ -5798,7 +5798,10 @@ relation_types:
         };
         let minted = ResolvedNodeSpec {
             var: 2,
-            label_ids: vec![8, 9],
+            label_ids: vec![
+                EntityTypeId::decode(8).unwrap(),
+                EntityTypeId::decode(9).unwrap(),
+            ],
             label_names: vec!["New".into(), "Tagged".into()],
             properties: vec![("active".into(), IrLiteral::Bool(true))],
             computed_properties: vec![("copied_seed".into(), col("seed") + lit(1_i64))],

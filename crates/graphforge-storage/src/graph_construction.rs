@@ -9670,8 +9670,10 @@ mod tests {
         let project = TempDir::new().unwrap();
         std::fs::create_dir_all(project.path().join("topology")).unwrap();
         let mut parent = RuntimeCatalog::new();
-        parent.intern_label_at("BaseOnly", 11);
-        parent.intern_property_at("legacy", Some("BaseOnly"), 11);
+        parent.intern_label_at("BaseOnly", 11).unwrap();
+        parent
+            .intern_property_at("legacy", Some("BaseOnly"), 11)
+            .unwrap();
         let parent_path = project.path().join("topology/runtime_catalog.parquet");
         let parent_batch = parent.to_record_batch();
         let mut parent_writer = ArrowWriter::try_new(
@@ -10047,7 +10049,9 @@ mod tests {
             .unwrap();
         let mut source = RuntimeCatalog::new();
         for index in 0..5_000 {
-            source.intern_label_at(&format!("Label{index:05}"), 42);
+            source
+                .intern_label_at(&format!("Label{index:05}"), 42)
+                .unwrap();
         }
         let mut evidence = GraphConstructionEvidence::default();
         write_parquet(

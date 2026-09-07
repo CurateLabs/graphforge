@@ -16,10 +16,10 @@ use arrow::array::{
     Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, ListArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-#[cfg(test)]
-use graphforge_core::TypeId;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::{Direction, IrLiteral};
+#[cfg(test)]
+use graphforge_value::EntityTypeId;
 use sha2::{Digest, Sha256};
 
 use crate::adjacency::AdjacencyProvider;
@@ -1345,16 +1345,22 @@ mod tests {
         let uuids = [new_v7(), new_v7(), new_v7(), new_v7()];
         let ids = [
             writer
-                .create_node_with_labels(uuids[0], &[TypeId(1)])
+                .create_node_with_labels(uuids[0], &[EntityTypeId::decode(1).unwrap()])
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[1], &[TypeId(1), TypeId(2)])
+                .create_node_with_labels(
+                    uuids[1],
+                    &[
+                        EntityTypeId::decode(1).unwrap(),
+                        EntityTypeId::decode(2).unwrap(),
+                    ],
+                )
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[2], &[TypeId(2)])
+                .create_node_with_labels(uuids[2], &[EntityTypeId::decode(2).unwrap()])
                 .unwrap(),
             writer
-                .create_node_with_labels(uuids[3], &[TypeId(1)])
+                .create_node_with_labels(uuids[3], &[EntityTypeId::decode(1).unwrap()])
                 .unwrap(),
         ];
         let edges = [new_v7(), new_v7(), new_v7(), new_v7()];
@@ -1705,7 +1711,7 @@ mod tests {
             fixture.dir.path(),
             OntologyMode::Strict,
             AdjacencySelection {
-                label: Some(TypeId(1)),
+                label: EntityTypeSelection::Known(EntityTypeId::decode(1).unwrap()),
                 ..selection(Direction::Out)
             },
         )
@@ -1995,7 +2001,7 @@ mod tests {
     #[test]
     fn graph_native_partition_property_loads_without_knowledge_storage() {
         let fixture = fixture();
-        let graph = export_node_selection(fixture.dir.path(), None).unwrap();
+        let graph = export_node_selection(fixture.dir.path(), EntityTypeSelection::All).unwrap();
         let mapping = load_node_partition_property(&graph, fixture.dir.path(), "side").unwrap();
         assert_eq!(mapping.iter().count(), fixture.uuids.len());
         assert_eq!(

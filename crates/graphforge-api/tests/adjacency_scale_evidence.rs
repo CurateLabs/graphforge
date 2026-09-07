@@ -295,7 +295,7 @@ fn write_workspace(workspace: &Path, node_count: u64, edge_count: u64) {
     for index in 0..node_count {
         let uuid = uuidv7(u128::from(index) + 1);
         let id = writer
-            .create_node(uuid, graphforge_core::TypeId(0))
+            .create_node(uuid, graphforge_value::EntityTypeId::decode(0).unwrap())
             .unwrap_or_else(|e| panic!("create_node {index}: {e}"));
         node_uuids.push(uuid);
         node_ids.push(id);

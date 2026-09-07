@@ -39,19 +39,23 @@ use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::SessionContext;
 use tempfile::TempDir;
 
+use graphforge_core::OntologyMode;
 use graphforge_core::uuid::{Uuid, new_v7};
-use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::Direction;
 use graphforge_plan::{VarLenExpandNode, var_len_edge_list_field};
 use graphforge_storage::adjacency::build_adjacency_index;
 use graphforge_storage::{GraphWriter, TOPOLOGY_NODES_SCHEMA, io_stats};
+use graphforge_value::EntityTypeId;
 
 use graphforge_exec::{
     AdjacencyProvider, PersistentAdjacencyProvider, ScanBuildAdjacencyProvider, VarLenExpandExec,
 };
 
 const TS: i64 = 1_700_000_000_000_000;
-const PERSON: TypeId = TypeId(0);
+const PERSON: EntityTypeId = match EntityTypeId::decode(0) {
+    Ok(id) => id,
+    Err(_) => panic!("valid person fixture identity"),
+};
 
 /// Serializes the process-global [`io_stats`] counters across parallel tests.
 static GUARD: Mutex<()> = Mutex::new(());
@@ -157,7 +161,7 @@ fn make_node(dir: &Path, min_hops: u16, max_hops: Option<u16>) -> VarLenExpandNo
         dst_var,
         edge_var,
         Direction::Out,
-        Some(0),
+        Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
         dir.to_path_buf(),
         OntologyMode::Strict,
         dst_fields,

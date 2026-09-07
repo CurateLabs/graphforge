@@ -2308,7 +2308,7 @@ pub(crate) fn embedding_algorithm_with_controls(
         graph,
         invocation,
         EmbeddingProjectionSelector {
-            label: EntityTypeSelection::All,
+            label: None,
             via: invocation.via.clone(),
             directed: invocation.directed,
             weight: invocation.weight.clone(),
@@ -3334,7 +3334,7 @@ mod tests {
             &provider,
             project.path(),
             OntologyMode::Exploratory,
-            None,
+            EntityTypeSelection::All,
             &invocation,
         )
         .unwrap();
@@ -4408,7 +4408,7 @@ mod tests {
                 &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                None,
+                EntityTypeSelection::All,
                 &AnalyzeOptions {
                     by: AnalyzeAlgorithm::Conductance,
                     directed: true,
@@ -4435,7 +4435,7 @@ mod tests {
             &first_provider,
             dir.path(),
             OntologyMode::Strict,
-            None,
+            EntityTypeSelection::All,
             &options,
         )
         .unwrap();
@@ -4446,7 +4446,7 @@ mod tests {
             &reopened_provider,
             dir.path(),
             OntologyMode::Strict,
-            None,
+            EntityTypeSelection::All,
             &options,
         )
         .unwrap();
@@ -4464,7 +4464,7 @@ mod tests {
                 &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                None,
+                EntityTypeSelection::All,
                 &AnalyzeOptions {
                     by: AnalyzeAlgorithm::Modularity,
                     directed: true,
@@ -4674,7 +4674,7 @@ mod tests {
                 &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                None,
+                EntityTypeSelection::All,
                 &AnalyzeOptions {
                     by: AnalyzeAlgorithm::MaxCardinalityMatching,
                     directed: true,
@@ -4749,7 +4749,7 @@ mod tests {
                 &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                None,
+                EntityTypeSelection::All,
                 &AnalyzeOptions {
                     by: AnalyzeAlgorithm::MaxWeightMatching,
                     directed: true,
@@ -4872,7 +4872,7 @@ mod tests {
                 &provider,
                 dir.path(),
                 OntologyMode::Strict,
-                None,
+                EntityTypeSelection::All,
                 &AnalyzeOptions {
                     by: AnalyzeAlgorithm::MaxBipartiteMatching,
                     directed: true,
@@ -6809,7 +6809,7 @@ mod tests {
                     &provider,
                     dir.path(),
                     OntologyMode::Strict,
-                    None,
+                    EntityTypeSelection::All,
                     &options
                 ),
                 Err(GfError::Validation(message)) if message == expected

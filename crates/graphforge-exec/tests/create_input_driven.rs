@@ -25,7 +25,10 @@ use graphforge_plan::{GraphCreateNode, ResolvedEdgeSpec, ResolvedNodeSpec};
 use graphforge_storage::GraphWriter;
 
 const TS: i64 = 1_700_000_000_000_000;
-const PERSON: graphforge_core::TypeId = graphforge_core::TypeId(0);
+const PERSON: graphforge_value::EntityTypeId = match graphforge_value::EntityTypeId::decode(0) {
+    Ok(id) => id,
+    Err(_) => panic!("valid person fixture identity"),
+};
 
 /// Write `count` standalone Person nodes; return their (uuid, node_id) pairs.
 fn write_persons(dir: &Path, count: usize) -> Vec<(Uuid, u64)> {
@@ -106,7 +109,7 @@ async fn create_per_matched_row_references_and_mints() {
             // var 0: the MATCH-bound `a` — referenced, not minted.
             ResolvedNodeSpec {
                 var: 0,
-                label_ids: vec![0],
+                label_ids: vec![PERSON],
                 label_names: vec!["Person".to_owned()],
                 properties: vec![],
                 computed_properties: vec![],
@@ -115,7 +118,7 @@ async fn create_per_matched_row_references_and_mints() {
             // var 1: the new `b` — minted per row.
             ResolvedNodeSpec {
                 var: 1,
-                label_ids: vec![0],
+                label_ids: vec![PERSON],
                 label_names: vec!["Person".to_owned()],
                 properties: vec![],
                 computed_properties: vec![],
@@ -126,7 +129,7 @@ async fn create_per_matched_row_references_and_mints() {
             var: 2,
             src: 0,
             dst: 1,
-            rel_type_id: Some(0),
+            rel_type_id: Some(graphforge_value::RelationTypeId::decode(0).unwrap()),
             rel_type_name: Some("KNOWS".to_owned()),
             direction: Direction::Out,
             properties: vec![],
@@ -156,7 +159,7 @@ async fn create_over_empty_match_creates_nothing() {
         Arc::new(ref_input_plan()),
         vec![ResolvedNodeSpec {
             var: 1,
-            label_ids: vec![0],
+            label_ids: vec![PERSON],
             label_names: vec!["Person".to_owned()],
             properties: vec![],
             computed_properties: vec![],
@@ -184,7 +187,7 @@ async fn standalone_create_over_unit_row_creates_once() {
         Arc::new(unit),
         vec![ResolvedNodeSpec {
             var: 0,
-            label_ids: vec![0],
+            label_ids: vec![PERSON],
             label_names: vec!["Person".to_owned()],
             properties: vec![],
             computed_properties: vec![],
@@ -217,7 +220,7 @@ async fn null_referenced_node_uuid_errors() {
         Arc::new(ref_input_plan()),
         vec![ResolvedNodeSpec {
             var: 0,
-            label_ids: vec![0],
+            label_ids: vec![PERSON],
             label_names: vec!["Person".to_owned()],
             properties: vec![],
             computed_properties: vec![],
@@ -270,7 +273,7 @@ async fn create_accumulates_across_multiple_input_batches() {
         // no reference, so it doesn't read the input columns).
         vec![ResolvedNodeSpec {
             var: 1,
-            label_ids: vec![0],
+            label_ids: vec![PERSON],
             label_names: vec!["Person".to_owned()],
             properties: vec![],
             computed_properties: vec![],

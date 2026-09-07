@@ -294,7 +294,7 @@ fn advisory_unknown_entity_label_does_not_collide_with_ontology_type_id() {
             guard
                 .entity_type_names_with_ids()
                 .find(|(_, name)| *name == "Ghost")
-                .map(|(id, _)| id.0),
+                .map(|(id, _)| id.get()),
             Some(0),
             "first advisory label still uses catalog-local id 0"
         );

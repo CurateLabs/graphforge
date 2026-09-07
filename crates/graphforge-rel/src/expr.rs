@@ -3220,12 +3220,16 @@ impl<'a> ExprLowerer<'a> {
                 fields.push(f.as_ref().clone().with_nullable(true));
             }
         }
-        let mut labels_by_type: Vec<(u32, String)> = self
+        let mut labels_by_type: Vec<(graphforge_value::EntityTypeId, String)> = self
             .type_id_to_entity_name
             .iter()
-            .map(|(id, name)| (id.encode(), name.clone()))
+            .map(|(id, name)| (*id, name.clone()))
             .collect();
-        labels_by_type.sort();
+        labels_by_type.sort_by(|(left, left_name), (right, right_name)| {
+            left.encode()
+                .cmp(&right.encode())
+                .then_with(|| left_name.cmp(right_name))
+        });
         Some(PathNodeHydration {
             dir: dir.clone(),
             labels_by_type,
@@ -12103,7 +12107,7 @@ struct PathNodeHydration {
     /// The project directory the invoke reads node/property files from.
     dir: std::path::PathBuf,
     /// `type_id → label` (ontology + runtime catalog), sorted by id.
-    labels_by_type: Vec<(u32, String)>,
+    labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
     /// The `properties/<stem>.parquet` stems whose fields form the union,
     /// sorted — the invoke coalesces each node's values across them.
     prop_stems: Vec<String>,
@@ -12348,7 +12352,9 @@ fn gather_path_node_labels(
     h: &PathNodeHydration,
     unique: &[[u8; 16]],
     batch_size: usize,
-) -> datafusion::error::Result<std::collections::HashMap<[u8; 16], Vec<u32>>> {
+) -> datafusion::error::Result<
+    std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
+> {
     use datafusion::arrow::array::{Array, ListArray, UInt32Array};
     use datafusion::error::DataFusionError;
     use std::collections::{HashMap, HashSet};
@@ -12358,7 +12364,8 @@ fn gather_path_node_labels(
         return Ok(HashMap::new());
     }
     let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
-    let mut label_ids_of: HashMap<[u8; 16], Vec<u32>> = HashMap::with_capacity(unique.len());
+    let mut label_ids_of: HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>> =
+        HashMap::with_capacity(unique.len());
 
     graphforge_storage::visit_nodes_batched(&h.dir, batch_size, |b| {
         check_path_hydration_cancel()?;
@@ -12390,7 +12397,15 @@ fn gather_path_node_labels(
             let mut ids = Vec::with_capacity(values.len());
             for i in 0..values.len() {
                 if !values.is_null(i) {
-                    ids.push(values.value(i));
+                    ids.push(
+                        graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
+                            |error| {
+                                exec_err(format!(
+                                    "cypher_path_nodes: invalid membership identity: {error}"
+                                ))
+                            },
+                        )?,
+                    );
                 }
             }
             label_ids_of.insert(u, ids);
@@ -12410,7 +12425,7 @@ fn gather_path_node_labels(
 fn expand_path_node_labels(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
-    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<u32>>,
+    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>>,
 ) -> datafusion::arrow::array::ArrayRef {
     use datafusion::arrow::array::{ListBuilder, StringBuilder};
 
@@ -12418,7 +12433,10 @@ fn expand_path_node_labels(
     for u in flat {
         if let Some(ids) = label_ids_of.get(u) {
             for id in ids {
-                if let Ok(i) = h.labels_by_type.binary_search_by_key(id, |(tid, _)| *tid) {
+                if let Ok(i) = h
+                    .labels_by_type
+                    .binary_search_by_key(&id.encode(), |(tid, _)| tid.encode())
+                {
                     labels_b.values().append_value(&h.labels_by_type[i].1);
                 }
             }
@@ -13888,7 +13906,10 @@ mod tests {
         // (#1024) — the shape `render_node_struct` and `x.<prop>` need.
         let hydrated = CypherPathNodes::with_hydration(PathNodeHydration {
             dir: std::path::PathBuf::from("/nonexistent"),
-            labels_by_type: vec![(0, "A".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(0).unwrap(),
+                "A".to_owned(),
+            )],
             prop_stems: vec!["_untyped".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -13921,12 +13942,15 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropertyId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "__gf_elem");
         let mut prop_names = HashMap::new();
-        prop_names.insert(0u32, "a".to_owned());
+        prop_names.insert(
+            PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
+            "a".to_owned(),
+        );
 
         // Without the marker: node-property dotted-column form — a QUALIFIED
         // column `__gf_elem.a` (relation `__gf_elem`, column `a`), which is
@@ -13975,12 +13999,15 @@ mod tests {
         let base = arena.push(IrExpr::VarRef(VarId(0)));
         let access = arena.push(IrExpr::PropertyAccess {
             base,
-            prop: PropertyId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let mut vm = VarMap::new();
         vm.insert(VarId(0), "input");
         let mut prop_names = HashMap::new();
-        prop_names.insert(0u32, "list".to_owned());
+        prop_names.insert(
+            PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
+            "list".to_owned(),
+        );
 
         let out = ExprLowerer::with_prop_names(&arena, &vm, prop_names)
             .with_input_schema(df_schema)
@@ -15539,9 +15566,18 @@ mod tests {
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
             labels_by_type: vec![
-                (1, "Person".to_owned()),
-                (2, "Company".to_owned()),
-                (3, "Employee".to_owned()),
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(3).unwrap(),
+                    "Employee".to_owned(),
+                ),
             ],
             prop_stems: vec![],
             fields: vec![
@@ -15620,9 +15656,18 @@ mod tests {
         let hydrate2 = PathNodeHydration {
             dir: dir.path().to_path_buf(),
             labels_by_type: vec![
-                (1, "Person".to_owned()),
-                (2, "Company".to_owned()),
-                (3, "Employee".to_owned()),
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(3).unwrap(),
+                    "Employee".to_owned(),
+                ),
             ],
             prop_stems: vec![],
             fields: vec![
@@ -15725,7 +15770,10 @@ mod tests {
         let b = to_bytes(&keep_b);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+                "Person".to_owned(),
+            )],
             prop_stems: vec!["_untyped".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -15904,7 +15952,16 @@ mod tests {
         let bytes = to_bytes(&keep);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned()), (2, "Company".to_owned())],
+            labels_by_type: vec![
+                (
+                    graphforge_value::EntityTypeId::decode(1).unwrap(),
+                    "Person".to_owned(),
+                ),
+                (
+                    graphforge_value::EntityTypeId::decode(2).unwrap(),
+                    "Company".to_owned(),
+                ),
+            ],
             prop_stems: vec!["Company".to_owned(), "Person".to_owned()],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -16028,7 +16085,10 @@ mod tests {
         let bytes = to_bytes(&u);
         let hydrate = PathNodeHydration {
             dir: dir.path().to_path_buf(),
-            labels_by_type: vec![(1, "Person".to_owned())],
+            labels_by_type: vec![(
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+                "Person".to_owned(),
+            )],
             prop_stems: vec![],
             fields: vec![
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -16128,7 +16188,7 @@ mod tests {
         let var = arena.push(IrExpr::VarRef(VarId(0)));
         let age = arena.push(IrExpr::PropertyAccess {
             base: var,
-            prop: PropertyId(0),
+            prop: PropertyId::runtime(graphforge_value::RuntimePropId::new(0).unwrap()),
         });
         let one = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
         let id = arena.push(IrExpr::ListLiteral(vec![age, one]));
