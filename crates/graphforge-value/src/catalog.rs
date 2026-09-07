@@ -708,4 +708,122 @@ mod tests {
             assert_eq!(existing.to_record_batch(), next.to_record_batch());
         }
     }
+
+    fn intern_kind(
+        catalog: &mut RuntimeCatalogData,
+        kind: EntryKind,
+        name: &str,
+    ) -> Result<(), GfError> {
+        match kind {
+            EntryKind::EntityType => catalog.intern_label_at(name, 9).map(|_| ()),
+            EntryKind::RelationType => catalog.intern_relation_type_at(name, 9).map(|_| ()),
+            EntryKind::Property => catalog
+                .intern_property_at(name, Some("Person"), 9)
+                .map(|_| ()),
+        }
+    }
+
+    #[test]
+    fn duplicate_names_fail_without_changing_existing_authority() {
+        for kind in [EntryKind::RelationType, EntryKind::Property] {
+            let mut existing = RuntimeCatalogData::new();
+            intern_kind(&mut existing, kind, "first").unwrap();
+            let before = existing.to_record_batch();
+            let mut next = existing.clone();
+            intern_kind(&mut next, kind, "second").unwrap();
+            let valid = next.to_record_batch().slice(1, 1);
+            let mut columns = valid.columns().to_vec();
+            columns[1] = Arc::new(StringArray::from(vec!["first"]));
+            let duplicate = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+            let expected = match kind {
+                EntryKind::RelationType => "runtime_catalog contains duplicate relation type",
+                EntryKind::Property => "runtime_catalog contains duplicate property",
+                EntryKind::EntityType => unreachable!(),
+            };
+            assert!(matches!(
+                RuntimeCatalogData::from_record_batches([&before, &duplicate]),
+                Err(GfError::Storage(message)) if message == expected
+            ));
+            assert!(matches!(
+                existing.extend_from_record_batch(&duplicate),
+                Err(GfError::Storage(message))
+                    if message == "runtime_catalog contains a duplicate persisted entry"
+            ));
+            assert_eq!(existing.to_record_batch(), before);
+            existing.extend_from_record_batch(&valid).unwrap();
+            assert_eq!(existing.to_record_batch(), next.to_record_batch());
+        }
+    }
+
+    #[test]
+    fn observation_overflow_preserves_counts_timestamps_and_identity() {
+        for kind in [
+            EntryKind::EntityType,
+            EntryKind::RelationType,
+            EntryKind::Property,
+        ] {
+            let mut seed = RuntimeCatalogData::new();
+            intern_kind(&mut seed, kind, "first").unwrap();
+            let batch = seed.to_record_batch();
+            let mut columns = batch.columns().to_vec();
+            columns[3] = Arc::new(UInt64Array::from(vec![u64::MAX]));
+            let persisted = RecordBatch::try_new(RUNTIME_CATALOG_SCHEMA.clone(), columns).unwrap();
+            let mut restored = RuntimeCatalogData::from_record_batch(&persisted).unwrap();
+            let result = match kind {
+                EntryKind::EntityType => restored.intern_label_at("first", 10).map(|_| ()),
+                EntryKind::RelationType => {
+                    restored.intern_relation_type_at("first", 10).map(|_| ())
+                }
+                EntryKind::Property => restored
+                    .intern_property_at("first", Some("Person"), 10)
+                    .map(|_| ()),
+            };
+            assert!(matches!(result, Err(GfError::Storage(message))
+                if message == "runtime_catalog observation count overflow"));
+            assert_eq!(restored.to_record_batch(), persisted);
+            assert_eq!(restored.next_type_id, seed.next_type_id);
+            assert_eq!(restored.next_prop_id, seed.next_prop_id);
+            intern_kind(&mut restored, kind, "second").unwrap();
+            assert_eq!(restored.entries[1].identity.get(), 1);
+        }
+    }
+
+    #[test]
+    fn final_valid_allocation_is_followed_by_atomic_exhaustion() {
+        for kind in [
+            EntryKind::EntityType,
+            EntryKind::RelationType,
+            EntryKind::Property,
+        ] {
+            let mut catalog = RuntimeCatalogData::new();
+            // Reach the allocator boundary without allocating billions of entries.
+            let limit = match kind {
+                EntryKind::EntityType | EntryKind::RelationType => 1_u32 << 30,
+                EntryKind::Property => u32::MAX,
+            };
+            match kind {
+                EntryKind::EntityType | EntryKind::RelationType => catalog.next_type_id = limit - 1,
+                EntryKind::Property => catalog.next_prop_id = limit - 1,
+            }
+            intern_kind(&mut catalog, kind, "last").unwrap();
+            assert_eq!(catalog.entries[0].identity.get(), limit - 1);
+            let before = catalog.to_record_batch();
+            let counters = (catalog.next_type_id, catalog.next_prop_id);
+            assert!(matches!(intern_kind(&mut catalog, kind, "overflow"),
+                Err(GfError::Storage(message))
+                    if message.starts_with("runtime_catalog exhausted ID range:")));
+            assert_eq!(catalog.to_record_batch(), before);
+            assert_eq!((catalog.next_type_id, catalog.next_prop_id), counters);
+            assert!(!catalog.entity_types.contains_key("overflow"));
+            assert!(!catalog.relation_types.contains_key("overflow"));
+            assert!(
+                !catalog
+                    .properties
+                    .contains_key(&("overflow".to_owned(), Some("Person".to_owned())))
+            );
+            intern_kind(&mut catalog, kind, "last").unwrap();
+            assert_eq!(catalog.entries[0].identity.get(), limit - 1);
+            assert_eq!(catalog.entries[0].observation_count, 2);
+        }
+    }
 }
