@@ -145,14 +145,13 @@ pub(crate) fn bind(
                 match &hydration {
                     Some(resource) => resource.bind(expr),
                     None => graphforge_rel::expr::rewrite_embedded_expressions(expr, &mut |expr| {
-                        if let datafusion::logical_expr::Expr::ScalarFunction(call) = &expr {
-                            if graphforge_rel::expr::path_node_hydration_descriptor(&call.func)
+                        if let datafusion::logical_expr::Expr::ScalarFunction(call) = &expr
+                            && graphforge_rel::expr::path_node_hydration_descriptor(&call.func)
                                 .is_some()
-                            {
-                                return Err(DataFusionError::Plan(
-                                    "GF_READ_RESOURCE_MISSING: path hydration".into(),
-                                ));
-                            }
+                        {
+                            return Err(DataFusionError::Plan(
+                                "GF_READ_RESOURCE_MISSING: path hydration".into(),
+                            ));
                         }
                         Ok(expr)
                     }),

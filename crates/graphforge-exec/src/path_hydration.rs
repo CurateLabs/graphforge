@@ -64,6 +64,10 @@ impl HydrationResource {
         })
     }
     fn check(&self) -> Result<()> {
+        self.graph
+            .health
+            .check()
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         if self.cancelled.load(Ordering::Acquire) {
             return Err(DataFusionError::ResourcesExhausted(
                 "cypher_path_nodes: hydration cancelled".into(),
@@ -88,73 +92,66 @@ impl HydrationResource {
     }
     pub(crate) fn bind(self: &Arc<Self>, expr: Expr) -> Result<Expr> {
         graphforge_rel::expr::rewrite_embedded_expressions(expr, &mut |mut expr| {
-            if let Expr::ScalarFunction(call) = &mut expr {
-                if let Some(descriptor) =
+            if let Expr::ScalarFunction(call) = &mut expr
+                && let Some(descriptor) =
                     graphforge_rel::expr::path_node_hydration_descriptor(&call.func)
-                {
-                    let snapshot = self
-                        .graph
-                        .catalog
-                        .lowering_snapshot(Some(&self.graph.dir))
-                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                    let mut fields = vec![
-                        arrow::datatypes::Field::new(
-                            "node_uuid",
-                            DataType::FixedSizeBinary(16),
-                            false,
-                        ),
-                        arrow::datatypes::Field::new(
-                            "labels",
-                            DataType::new_list(DataType::Utf8, true),
-                            true,
-                        ),
-                    ];
-                    let mut seen = fields
-                        .iter()
-                        .map(|f| f.name().clone())
-                        .collect::<std::collections::HashSet<_>>();
-                    for stem in &snapshot.node_property_stems {
-                        let schema = snapshot.node_properties.get(stem).ok_or_else(|| {
-                            DataFusionError::Plan(
-                                "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema".into(),
-                            )
-                        })?;
-                        for field in schema.fields() {
-                            if seen.insert(field.name().clone()) {
-                                fields.push(field.as_ref().clone().with_nullable(true));
-                            }
+            {
+                let snapshot = self
+                    .graph
+                    .catalog
+                    .lowering_snapshot(Some(&self.graph.dir))
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                let mut fields = vec![
+                    arrow::datatypes::Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                    arrow::datatypes::Field::new(
+                        "labels",
+                        DataType::new_list(DataType::Utf8, true),
+                        true,
+                    ),
+                ];
+                let mut seen = fields
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect::<std::collections::HashSet<_>>();
+                for stem in &snapshot.node_property_stems {
+                    let schema = snapshot.node_properties.get(stem).ok_or_else(|| {
+                        DataFusionError::Plan(
+                            "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema".into(),
+                        )
+                    })?;
+                    for field in schema.fields() {
+                        if seen.insert(field.name().clone()) {
+                            fields.push(field.as_ref().clone().with_nullable(true));
                         }
                     }
-                    let mut labels = graphforge_rel::GraphPlanLowerer::new(
-                        Some(&snapshot),
-                        self.graph.ontology.as_ref(),
-                    )
-                    .map_err(|error| DataFusionError::Plan(error.to_string()))?
-                    .read_contract()
-                    .labels;
-                    labels.sort_by(|a, b| {
-                        a.0.encode().cmp(&b.0.encode()).then_with(|| a.1.cmp(&b.1))
-                    });
-                    if descriptor.prop_stems != snapshot.node_property_stems
-                        || descriptor.fields != fields.into()
-                        || descriptor.labels_by_type != labels
-                    {
-                        return Err(DataFusionError::Plan(
-                            "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema or labels".into(),
-                        ));
-                    }
-                    self.used.store(true, Ordering::Release);
-                    call.func = Arc::new(ScalarUDF::new_from_impl(HydratedPathNodes {
-                        signature: Signature::any(2, Volatility::Volatile),
-                        tables: descriptor
-                            .prop_stems
-                            .iter()
-                            .map(|stem| self.graph.catalog.property_table(&self.graph.dir, stem))
-                            .collect(),
-                        descriptor: descriptor.clone(),
-                        resource: Arc::clone(self),
-                    }));
                 }
+                let mut labels = graphforge_rel::GraphPlanLowerer::new(
+                    Some(&snapshot),
+                    self.graph.ontology.as_ref(),
+                )
+                .map_err(|error| DataFusionError::Plan(error.to_string()))?
+                .read_contract()
+                .labels;
+                labels.sort_by(|a, b| a.0.encode().cmp(&b.0.encode()).then_with(|| a.1.cmp(&b.1)));
+                if descriptor.prop_stems != snapshot.node_property_stems
+                    || descriptor.fields != fields.into()
+                    || descriptor.labels_by_type != labels
+                {
+                    return Err(DataFusionError::Plan(
+                        "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema or labels".into(),
+                    ));
+                }
+                self.used.store(true, Ordering::Release);
+                call.func = Arc::new(ScalarUDF::new_from_impl(HydratedPathNodes {
+                    signature: Signature::any(2, Volatility::Volatile),
+                    tables: descriptor
+                        .prop_stems
+                        .iter()
+                        .map(|stem| self.graph.catalog.property_table(&self.graph.dir, stem))
+                        .collect(),
+                    descriptor: descriptor.clone(),
+                    resource: Arc::clone(self),
+                }));
             }
             Ok(expr)
         })
@@ -204,7 +201,7 @@ impl ScalarUDFImpl for HydratedPathNodes {
             ),
         };
         graphforge_rel::expr::evaluate_path_nodes(
-            args,
+            &args,
             self.descriptor.fields.clone(),
             |flat, batch_size| hydrate_path_node_children(&invocation, flat, batch_size),
         )

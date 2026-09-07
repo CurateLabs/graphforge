@@ -37,6 +37,7 @@ fn test_udf(hydrate: TestHydration) -> HydratedPathNodes {
         .map(|stem| catalog.property_table(&dir, stem))
         .collect();
     let graph = Arc::new(crate::read_resource::GraphReadContext {
+        health: crate::mutation::MutationHealth::default(),
         dir,
         catalog,
         mode: graphforge_core::OntologyMode::Exploratory,
@@ -196,12 +197,17 @@ fn invoke_hydrated_path_nodes_with_batch_size(
     rels: datafusion::arrow::array::ArrayRef,
     batch_size: usize,
 ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
-    use std::sync::Arc;
+    invoke_udf(&test_udf(hydrate), seed, rels, batch_size)
+}
 
+fn invoke_udf(
+    udf: &HydratedPathNodes,
+    seed: arrow::array::ArrayRef,
+    rels: arrow::array::ArrayRef,
+    batch_size: usize,
+) -> Result<arrow::array::ArrayRef> {
     use datafusion::arrow::datatypes::Field;
     use datafusion::config::ConfigOptions;
-
-    let udf = test_udf(hydrate);
     let n = seed.len();
     let mut config = ConfigOptions::default();
     config.execution.batch_size = batch_size.max(1);
@@ -1243,4 +1249,26 @@ fn selected_rows_across_many_stems_release_unretained_batch_reservations() {
         .unwrap();
     assert_eq!(value.value(0), "selected");
     LAST_RESOURCE.with_borrow(|resource| assert_eq!(resource.as_ref().unwrap().pool.reserved(), 0));
+}
+
+#[test]
+fn hydration_retains_selected_recovery_health_and_typed_failure() {
+    let _guard = PathHydrationTestGuard::arm();
+    let (_dir, descriptor) = minimal_fixture();
+    let udf = test_udf(descriptor);
+    udf.resource
+        .graph
+        .health
+        .fail(&graphforge_core::GfError::Storage(
+            "injected restoration failure".into(),
+        ));
+    let error = invoke_udf(&udf, seed_uuids(&[Some(1)]), edge_list(&[Some(&[])]), 8).unwrap_err();
+    let DataFusionError::External(error) = error else {
+        panic!("typed recovery error expected: {error:?}")
+    };
+    assert!(
+        matches!(error.downcast_ref::<graphforge_core::GfError>(), Some(graphforge_core::GfError::Storage(message)) if message.contains("injected restoration failure"))
+    );
+    assert_eq!(udf.resource.counters["node_batches"].value(), 0);
+    assert_eq!(udf.resource.pool.reserved(), 0);
 }

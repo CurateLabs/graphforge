@@ -12075,14 +12075,14 @@ impl ScalarUDFImpl for CypherPathNodes {
                 "GF_READ_RESOURCE_MISSING: path hydration".into(),
             ));
         }
-        evaluate_path_nodes(args, self.element_fields(), |_, _| Ok(Vec::new()))
+        evaluate_path_nodes(&args, self.element_fields(), |_, _| Ok(Vec::new()))
     }
 }
 
 /// Assemble path-node lists while an execution-owned callback supplies children.
 /// This function performs no storage reads and preserves expression-local evaluation.
 pub fn evaluate_path_nodes(
-    args: ScalarFunctionArgs,
+    args: &ScalarFunctionArgs,
     element_fields: datafusion::arrow::datatypes::Fields,
     mut hydrate: impl FnMut(
         &[[u8; 16]],

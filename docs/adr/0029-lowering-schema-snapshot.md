@@ -41,10 +41,12 @@ memory pool as its execution task. Per-invocation fallible reservations cover
 retained UUID indexes, label vectors, property-row locations and gathered Arrow
 batches; they release on success or error. This follows ordinary DataFusion
 operator accounting, not process-RSS or output-lifetime accounting. Hydration
-reads remain bounded by requested UUIDs and stop once the selected rows are
-found. Query-local metrics expose examined rows, gathered rows and peak gathered
-entries. A transparent physical wrapper preserves child properties and
-partitions and exposes only its own hydration metrics.
+retains only requested UUIDs; batch visitors stop once the selected rows are
+found. Missing or late rows can require scanning more input. The read-query demand snapshot includes examined rows, gathered rows and
+peak gathered entries from the physical wrapper. Direct write-phase expression
+resources use the same pool and cancellation checks; existing write APIs do not
+publish a read-query demand snapshot. A transparent physical wrapper preserves
+child properties and partitions and exposes only its own hydration metrics.
 
 Whole-query stream and eager-collection owners cancel hydration on completion
 or drop. Completing one partition does not cancel sibling partitions. Direct

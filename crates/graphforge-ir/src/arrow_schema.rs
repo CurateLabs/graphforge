@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock};
 pub const INTERNAL_SURROGATE_META_KEY: &str = "graphforge.internal_surrogate";
 
 /// UUID column: `FixedSizeBinary(16)`, not nullable.
+#[must_use]
 pub fn uuid_field(name: &str) -> Field {
     Field::new(name, DataType::FixedSizeBinary(16), false)
 }
@@ -16,6 +17,7 @@ pub fn uuid_field(name: &str) -> Field {
 /// Surrogate ID column: `UInt64`, not nullable, stamped with
 /// [`INTERNAL_SURROGATE_META_KEY`] so public shaping can distinguish it from a
 /// legal user alias of the same name (#703).
+#[must_use]
 pub fn id_field(name: &str) -> Field {
     Field::new(name, DataType::UInt64, false).with_metadata(
         [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
@@ -244,6 +246,7 @@ pub static EDGE_PROPERTY_BASE_SCHEMA: LazyLock<SchemaRef> =
     LazyLock::new(|| Arc::new(Schema::new(vec![uuid_field("edge_uuid")])));
 
 /// Timestamp column: `Timestamp(Microsecond, UTC)`, not nullable.
+#[must_use]
 pub fn ts_field(name: &str) -> Field {
     Field::new(
         name,

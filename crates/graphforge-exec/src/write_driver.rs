@@ -4149,6 +4149,7 @@ mod tests {
             type_map: HashMap::new(),
             hydration: crate::path_hydration::HydrationResource::new(
                 std::sync::Arc::new(crate::read_resource::GraphReadContext {
+                    health: crate::mutation::MutationHealth::default(),
                     dir: dir.to_path_buf(),
                     mode: OntologyMode::Exploratory,
                     ontology: None,
