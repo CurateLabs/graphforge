@@ -13,9 +13,9 @@
   },
   "devDependencies": {
     "@cucumber/cucumber": "^12.9.0",
-    "@types/node": "^26.4.0",
+    "@types/node": "^26.4.1",
     "apache-arrow": "^21.2.0",
-    "tsx": "^4.20.0",
+    "tsx": "^4.23.13",
     "typescript": "5.9.3"
   }
 }
