@@ -30,13 +30,22 @@ pub fn type_error(env: Env, message: impl Into<String>) -> NodeError {
 fn error_code(err: &GfError) -> &'static str {
     match err {
         GfError::Parse { .. } | GfError::Bind { .. } => "ParseError",
+        GfError::LoweringExecution(_) => "ExecutionError",
+        GfError::Lowering(graphforge_api::LoweringError::InvalidType(_)) => "ValidationError",
+        GfError::Lowering(_) => "PlanError",
+        GfError::Algorithm(
+            graphforge_api::AlgorithmError::Unavailable { .. }
+            | graphforge_api::AlgorithmError::DuplicateCapability { .. },
+        ) => "ValidationError",
+        GfError::Algorithm(_) => "ExecutionError",
+        GfError::BindPlan { .. } => "PlanError",
         GfError::Plan(_) => "PlanError",
         GfError::Execution(_) | GfError::Provider { .. } => "ExecutionError",
         GfError::Storage(_) => "GF_IO",
         GfError::Project { code, .. } => code.as_str(),
         GfError::Api { code, .. } => code.as_str(),
         GfError::Lifecycle(_) => "LifecycleError",
-        GfError::Validation(message)
+        GfError::Validation(message) | GfError::BindValidation { msg: message, .. }
             if is_uuid_parameter_validation(message)
                 || is_bulk_validation(message)
                 || is_ontology_lifecycle_validation(message)
@@ -44,7 +53,7 @@ fn error_code(err: &GfError) -> &'static str {
         {
             "GF_VALIDATION"
         }
-        GfError::Validation(_) => "ValidationError",
+        GfError::Validation(_) | GfError::BindValidation { .. } => "ValidationError",
         GfError::Ontology(_) => "OntologyError",
         GfError::NotImplemented(_) => "NotImplementedError",
     }
@@ -99,12 +108,15 @@ fn matches_named_template(message: &str, prefix: &str, suffix: &str) -> bool {
 /// recover the source span (napi cannot attach a structured `span` property).
 pub fn to_napi_err(err: &GfError) -> NodeError {
     let message = match err {
-        GfError::Parse { msg, span } | GfError::Bind { msg, span } => format!(
+        GfError::Parse { msg, span, .. } | GfError::Bind { msg, span, .. } => format!(
             "[span:{}:{}] {}",
             span.start,
             span.end.saturating_sub(span.start),
             msg
         ),
+        GfError::Lowering(error) | GfError::LoweringExecution(error) => error.to_string(),
+        GfError::Algorithm(error) => error.to_string(),
+        GfError::BindValidation { msg, .. } | GfError::BindPlan { msg, .. } => msg.clone(),
         GfError::Plan(m)
         | GfError::Execution(m)
         | GfError::Storage(m)
@@ -130,6 +142,45 @@ mod tests {
     #[test]
     fn maps_each_variant_to_its_code() {
         let cases: Vec<(GfError, &str)> = vec![
+            (
+                GfError::Lowering(graphforge_api::LoweringError::InvalidType("type".into())),
+                "ValidationError",
+            ),
+            (
+                GfError::Lowering(graphforge_api::LoweringError::UnknownFunction("fn".into())),
+                "PlanError",
+            ),
+            (
+                GfError::LoweringExecution(graphforge_api::LoweringError::UnsupportedExpr(
+                    "runtime".into(),
+                )),
+                "ExecutionError",
+            ),
+            (
+                GfError::Algorithm(graphforge_api::AlgorithmError::Unavailable {
+                    algorithm: "rank.future".into(),
+                }),
+                "ValidationError",
+            ),
+            (
+                GfError::Algorithm(graphforge_api::AlgorithmError::Cancelled),
+                "ExecutionError",
+            ),
+            (
+                GfError::BindPlan {
+                    msg: "bind errors: missing".into(),
+                    diagnostics: Vec::new(),
+                },
+                "PlanError",
+            ),
+            (
+                GfError::BindValidation {
+                    msg: "typed UUID parameter `$id` is only supported as a direct node_uuid or edge_uuid identity equality predicate".into(),
+                    diagnostics: Vec::new(),
+                },
+                "GF_VALIDATION",
+            ),
+            (GfError::BindValidation { msg: "ordinary validation".into(), diagnostics: Vec::new() }, "ValidationError"),
             (GfError::Plan("p".into()), "PlanError"),
             (GfError::Execution("e".into()), "ExecutionError"),
             (
@@ -244,6 +295,7 @@ mod tests {
     #[test]
     fn parse_error_encodes_span_offset_and_length() {
         let mapped = to_napi_err(&GfError::Parse {
+            diagnostic: None,
             msg: "unexpected token".into(),
             span: Span { start: 4, end: 9 },
         });
@@ -255,6 +307,7 @@ mod tests {
     #[test]
     fn bind_error_shares_parse_domain_and_encodes_span() {
         let mapped = to_napi_err(&GfError::Bind {
+            diagnostics: Vec::new(),
             msg: "bind error: variable not in scope".into(),
             span: Span { start: 7, end: 8 },
         });

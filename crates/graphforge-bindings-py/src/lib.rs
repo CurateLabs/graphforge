@@ -110,13 +110,29 @@ create_exception!(
 /// contract. Binder failures share the public `ParseError` / `GF_PARSE` domain.
 pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
     let error = match err {
-        GfError::Parse { msg, span } | GfError::Bind { msg, span } => {
+        GfError::Parse { msg, span, .. } | GfError::Bind { msg, span, .. } => {
             let e = PyErr::new::<ParseError, _>(msg.clone());
             let _ = e
                 .value(py)
                 .setattr("span", (span.start, span.end.saturating_sub(span.start)));
             e
         }
+        GfError::LoweringExecution(error) => PyErr::new::<ExecutionError, _>(error.to_string()),
+        GfError::Lowering(error) => match error {
+            graphforge_api::LoweringError::InvalidType(_) => {
+                PyErr::new::<ValidationError, _>(error.to_string())
+            }
+            _ => PyErr::new::<PlanError, _>(error.to_string()),
+        },
+        GfError::BindValidation { msg, .. } => PyErr::new::<ValidationError, _>(msg.clone()),
+        GfError::Algorithm(error) => match error {
+            graphforge_api::AlgorithmError::Unavailable { .. }
+            | graphforge_api::AlgorithmError::DuplicateCapability { .. } => {
+                PyErr::new::<ValidationError, _>(error.to_string())
+            }
+            _ => PyErr::new::<ExecutionError, _>(error.to_string()),
+        },
+        GfError::BindPlan { msg, .. } => PyErr::new::<PlanError, _>(msg.clone()),
         GfError::Plan(m) => PyErr::new::<PlanError, _>(m.clone()),
         GfError::Execution(m) => PyErr::new::<ExecutionError, _>(m.clone()),
         GfError::Provider {

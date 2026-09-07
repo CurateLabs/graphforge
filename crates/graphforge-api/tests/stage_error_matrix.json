@@ -1,0 +1,94 @@
+[
+  {
+    "id": "parse_eof",
+    "query": "RETURN (",
+    "kind": "UnexpectedEof",
+    "rust": "GF_PARSE",
+    "python": "ParseError",
+    "node": "ParseError",
+    "span": [
+      8,
+      0
+    ],
+    "message": "expected expression, found end of input",
+    "explain_message": "unexpected end of input at 8..8"
+  },
+  {
+    "id": "bind_variable",
+    "query": "RETURN missingVar",
+    "kind": "UndeclaredVariable",
+    "rust": "GF_PARSE",
+    "python": "ParseError",
+    "node": "ParseError",
+    "span": [
+      7,
+      10
+    ],
+    "message": "variable `missingVar` used before it was introduced"
+  },
+  {
+    "id": "invalid_property_type",
+    "query": "RETURN 1.foo",
+    "kind": "InvalidType",
+    "rust": "GF_VALIDATION",
+    "python": "ValidationError",
+    "node": "ValidationError",
+    "message": "invalid argument type: property access `foo` requires a map or graph element"
+  },
+  {
+    "id": "invalid_type_user_text_collision",
+    "query": "RETURN 1.`Cannot coerce`",
+    "kind": "InvalidType",
+    "rust": "GF_VALIDATION",
+    "python": "ValidationError",
+    "node": "ValidationError",
+    "message": "invalid argument type: property access `Cannot coerce` requires a map or graph element"
+  },
+  {
+    "id": "invalid_quantifier_type",
+    "query": "RETURN all(x IN ['text'] WHERE x % 2 = 0)",
+    "kind": "InvalidType",
+    "rust": "GF_VALIDATION",
+    "python": "ValidationError",
+    "node": "ValidationError",
+    "message": "invalid argument type: quantifier predicate cannot apply to the list's element type (All)"
+  },
+  {
+    "id": "coercion_compatibility",
+    "query": "RETURN 1 + 'text'",
+    "kind": "UnsupportedExpr",
+    "rust": "GF_EXECUTION",
+    "python": "ExecutionError",
+    "node": "ExecutionError",
+    "explain_rust": "GF_PLAN",
+    "explain_python": "PlanError",
+    "explain_node": "PlanError",
+    "message": "unsupported expression: Error during planning: Cannot coerce arithmetic expression Int64 + Utf8 to valid types",
+    "stream_rust": "GF_PLAN",
+    "stream_python": "PlanError"
+  },
+  {
+    "id": "missing_parameter",
+    "query": "RETURN $missing",
+    "kind": "Foreign",
+    "rust": "GF_EXECUTION",
+    "python": "ExecutionError",
+    "node": "ExecutionError",
+    "explain_rust": "GF_PLAN",
+    "explain_python": "PlanError",
+    "explain_node": "PlanError",
+    "message": "Error during planning: No value found for placeholder with name $missing",
+    "stream_rust": "GF_PLAN",
+    "stream_python": "PlanError"
+  },
+  {
+    "id": "algorithm_undefined_euler",
+    "operation": "analyze",
+    "query": "CREATE (:Vertex)-[:LINK]->(:Vertex)",
+    "kind": "UndefinedEulerCircuit",
+    "rust": "GF_EXECUTION",
+    "python": "ExecutionError",
+    "node": "ExecutionError",
+    "message": "Euler circuit is undefined for the selected graph"
+  }
+]

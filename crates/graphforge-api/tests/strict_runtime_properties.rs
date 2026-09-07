@@ -162,7 +162,7 @@ fn strict_runtime_properties_are_owner_validated_atomic_and_reopen_stable() {
     let error = graph
         .execute(invalid_query)
         .expect_err("relation-owned property must fail on a Host before mutation");
-    let GfError::Bind { msg, span } = error else {
+    let GfError::Bind { msg, span, .. } = error else {
         panic!("expected a span-rich bind error, got {error:?}");
     };
     assert!(msg.contains("property `weight` is not declared for entity `Host`"));

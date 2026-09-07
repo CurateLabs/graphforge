@@ -39,6 +39,8 @@ pub struct GraphForgeWorld {
     pub last_error: Option<String>,
     /// Stable public code for the last typed Rust facade error.
     pub last_error_code: Option<&'static str>,
+    /// Typed planning InvalidType rejection; its public code is GF_VALIDATION.
+    pub last_compile_type_error: bool,
     /// Last metadata collection returned by labels or relationship_types.
     pub last_names: Option<Vec<String>>,
     /// Last scalar returned by node_count.

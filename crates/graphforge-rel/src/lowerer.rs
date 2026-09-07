@@ -527,7 +527,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let mut var_map = VarMap::new();
         self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map)
             .and_then(|plan| self.attach_graph_contract(plan))
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// The semantic assumptions for rebinding this query's current graph.
@@ -643,7 +643,7 @@ impl<'a> GraphPlanLowerer<'a> {
         *self.node_shapes.write().expect("node shapes lock poisoned") = self.build_node_shapes(ops);
         self.lower_pipeline(ops, exprs, var_map)
             .and_then(|plan| self.attach_graph_contract(plan))
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// Lower a terminal read suffix over an already-materialized input schema.
@@ -662,7 +662,7 @@ impl<'a> GraphPlanLowerer<'a> {
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, None)
             .and_then(|plan| self.attach_graph_contract(plan))
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// Lower a statement-local relational segment with buffered node topology
@@ -681,7 +681,7 @@ impl<'a> GraphPlanLowerer<'a> {
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, Some(pending_nodes))
             .and_then(|plan| self.attach_graph_contract(plan))
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// Resolve a `CREATE` pattern to its executable node/edge specs (label and
@@ -701,7 +701,7 @@ impl<'a> GraphPlanLowerer<'a> {
         input_schema: &datafusion::common::DFSchemaRef,
     ) -> Result<(Vec<ResolvedNodeSpec>, Vec<ResolvedEdgeSpec>), GfError> {
         self.create_specs(pattern, exprs, var_map, Some(input_schema))
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// Register freshly-created node shapes in the write driver so a
@@ -744,7 +744,7 @@ impl<'a> GraphPlanLowerer<'a> {
     ) -> Result<DfExpr, GfError> {
         self.expr_lowerer(exprs, var_map)
             .lower(id)
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// Lower one IR value expression against `var_map` and an existing input
@@ -764,7 +764,7 @@ impl<'a> GraphPlanLowerer<'a> {
         self.expr_lowerer(exprs, var_map)
             .with_input_schema(input_schema)
             .lower(id)
-            .map_err(|e| GfError::Plan(e.to_string()))
+            .map_err(GfError::from)
     }
 
     /// The `TypeId.0 → entity name` map (from the ontology), for per-row

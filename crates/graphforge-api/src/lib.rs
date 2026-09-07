@@ -200,10 +200,10 @@ pub use graphforge_core::embedding_options::{
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
 pub use graphforge_core::uuid::hub_clone_operation;
 pub use graphforge_core::{
-    AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError, NodeHandle,
-    NodeSelector, OntologyFormat, OntologyMode, PathsOptions, ProjectErrorCode, PropValue,
-    RankOptions, SimilarOptions, Span, SpatialCoordinates, SpatialCrs, SpatialGeometryType,
-    SpatialType, SpatialValue, TemporalValue,
+    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError,
+    LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode, ParseErrorKind,
+    PathsOptions, ProjectErrorCode, PropValue, RankOptions, SimilarOptions, Span,
+    SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue, TemporalValue,
 };
 pub use import_session::{
     GraphImportSession, ImportConstructionEvidence, ImportPhase, ImportProgress,
@@ -969,10 +969,7 @@ impl GraphForge {
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
-        let ast = graphforge_cypher::parse(cypher).map_err(|e| GfError::Parse {
-            msg: e.message,
-            span: e.span,
-        })?;
+        let ast = graphforge_cypher::parse(cypher).map_err(GfError::from)?;
         if ast.clauses.is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -1175,10 +1172,7 @@ impl GraphForge {
             return Err(GfError::Validation("empty query".into()));
         }
 
-        let ast = graphforge_cypher::parse(cypher).map_err(|e| GfError::Parse {
-            msg: e.message,
-            span: e.span,
-        })?;
+        let ast = graphforge_cypher::parse(cypher).map_err(GfError::from)?;
         // A query that strips to zero clauses (e.g. comment-only or block-comment
         // -only) is empty even though its raw text is not blank, so the
         // `trim().is_empty()` guard above misses it. Reject it here rather than
@@ -1755,10 +1749,7 @@ impl GraphForge {
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
-        let ast = graphforge_cypher::parse(cypher).map_err(|e| GfError::Parse {
-            msg: e.message,
-            span: e.span,
-        })?;
+        let ast = graphforge_cypher::parse(cypher).map_err(GfError::from)?;
         // See `execute_with_params`: a comment-only query strips to zero clauses.
         if ast.clauses.is_empty() {
             return Err(GfError::Validation("empty query".into()));
@@ -3259,10 +3250,7 @@ impl GraphForge {
     /// bind/serialisation failure, or a storage/execution error if the physical
     /// plan cannot be built.
     pub fn explain(&self, cypher: &str) -> Result<String, GfError> {
-        let ast = graphforge_cypher::parse(cypher).map_err(|e| GfError::Parse {
-            msg: e.to_string(),
-            span: e.span,
-        })?;
+        let ast = graphforge_cypher::parse(cypher).map_err(GfError::from_parse_display)?;
 
         // Bind against a clone of the runtime catalog so EXPLAIN never mutates
         // shared state; the snapshot still backs the catalog the physical plan
@@ -3618,6 +3606,13 @@ fn row_count_param_value(
 /// errors: unbound query parameters and arithmetic/type coercion mismatches.
 fn publicize_query_error(err: GfError) -> GfError {
     match err {
+        // Preserve the established foreign-DataFusion coercion/placeholder
+        // classification without discarding the lowering diagnostic (#1018).
+        GfError::Lowering(error @ LoweringError::UnsupportedExpr(_))
+            if is_public_execution_plan_failure(&error.to_string()) =>
+        {
+            GfError::LoweringExecution(error)
+        }
         GfError::Plan(msg) if is_public_execution_plan_failure(&msg) => {
             let msg = msg
                 .strip_prefix("Execution error: ")
@@ -3643,25 +3638,7 @@ fn is_public_execution_plan_failure(msg: &str) -> bool {
 /// them all; `span` carries the *first* error's location so callers (and the
 /// Python/Node bindings) can point at the offending token.
 fn bind_errors_to_gferror(errs: &[BindError]) -> GfError {
-    if let Some(error) = errs
-        .iter()
-        .filter(|error| {
-            error.kind == graphforge_ir::BindErrorKind::InvalidArgument
-                && error.message.starts_with("typed UUID parameter `$")
-        })
-        .min_by_key(|error| (error.span.start, error.message.as_str()))
-    {
-        return GfError::Validation(error.message.clone());
-    }
-    let span = errs.first().map_or(Span::default(), |e| e.span);
-    let msg = errs
-        .iter()
-        .map(|e| e.message.as_str())
-        .collect::<Vec<_>>()
-        .join("; ");
-    // `GfError::Bind`'s Display already prefixes "bind error at <span>: ", so
-    // `msg` carries only the joined binder messages.
-    GfError::Bind { msg, span }
+    GfError::from_bind_errors(errs)
 }
 
 fn validate_typed_parameter_binding(
@@ -3711,6 +3688,7 @@ fn validate_call_params(
                     && !params.contains_key(name)
                 {
                     return Err(GfError::Bind {
+                        diagnostics: Vec::new(),
                         msg: format!("MissingParameter: no value supplied for `${name}`"),
                         span: Span::default(),
                     });
@@ -8115,6 +8093,16 @@ mod tests {
         }
     }
 
+    fn expect_algorithm_execution(error: GfError) -> AlgorithmError {
+        assert_eq!(error.code(), "GF_EXECUTION");
+        let display = error.to_string();
+        let GfError::Algorithm(diagnostic) = error else {
+            panic!("expected typed algorithm diagnostic, got {error:?}");
+        };
+        assert_eq!(display, format!("execution error: {diagnostic}"));
+        diagnostic
+    }
+
     #[test]
     fn properties_rejects_invalid_literal_inputs() {
         let gf = GraphForge::new(None).unwrap();
@@ -8124,9 +8112,10 @@ mod tests {
             "RETURN properties([true, false])",
         ] {
             let err = gf.execute(query).expect_err(query);
+            assert_eq!(err.code(), "GF_VALIDATION");
             assert!(
-                matches!(err, GfError::Plan(_)),
-                "expected InvalidArgumentType-style plan error for {query}, got {err:?}"
+                matches!(err, GfError::Lowering(LoweringError::InvalidType(_))),
+                "expected typed InvalidType validation error for {query}, got {err:?}"
             );
         }
     }
@@ -12817,7 +12806,7 @@ mod tests {
             graph.execute(query).unwrap();
             assert!(matches!(
                 graph.cluster("Point", options()),
-                Err(GfError::Validation(_) | GfError::Execution(_))
+                Err(GfError::Validation(_) | GfError::Algorithm(AlgorithmError::Execution { .. }))
             ));
         }
     }
@@ -14725,8 +14714,13 @@ mod tests {
             Err(GfError::Validation(message)) if message.contains("target selector")
         ));
         assert!(matches!(
-            graph.paths(&source, None, random_walk_options(101, 100, 42)),
-            Err(GfError::Execution(message)) if message.contains("iteration limit")
+            graph
+                .paths(&source, None, random_walk_options(101, 100, 42))
+                .map_err(expect_algorithm_execution),
+            Err(diagnostic @ AlgorithmError::IterationLimit {
+                observed: 10_100,
+                limit: 10_000
+            }) if diagnostic.to_string() == "algorithm iteration limit exceeded: observed 10100, limit 10000"
         ));
     }
 
@@ -14947,8 +14941,8 @@ mod tests {
                 &source,
                 Some(&source),
                 max_flow_options(PathAlgorithm::MaxFlowEdges, Some("capacity")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("distinct endpoints")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("distinct endpoints")
         ));
 
         let invalid = GraphForge::new(None).unwrap();
@@ -14964,8 +14958,8 @@ mod tests {
                 &NodeSelector::Handle(invalid_nodes[0].clone()),
                 Some(&NodeSelector::Handle(invalid_nodes[1].clone())),
                 max_flow_options(PathAlgorithm::MaxFlow, Some("capacity")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("nonnegative")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("nonnegative")
         ));
     }
 
@@ -15166,8 +15160,8 @@ mod tests {
                 &source,
                 Some(&source),
                 min_cost_flow_options(PathAlgorithm::MinCostMaxFlow, true),
-            ),
-            Err(GfError::Execution(message)) if message.contains("distinct endpoints")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("distinct endpoints")
         ));
     }
 
@@ -15209,8 +15203,8 @@ mod tests {
                 &NodeSelector::Handle(bad[0].clone()),
                 Some(&NodeSelector::Handle(bad[1].clone())),
                 min_cost_flow_options(PathAlgorithm::MinCostMaxFlow, true),
-            ),
-            Err(GfError::Execution(message)) if message.contains("nonnegative")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("nonnegative")
         ));
 
         let cycle = GraphForge::new(None).unwrap();
@@ -15230,8 +15224,8 @@ mod tests {
                 &NodeSelector::Handle(cycle_nodes[0].clone()),
                 Some(&NodeSelector::Handle(cycle_nodes[3].clone())),
                 min_cost_flow_options(PathAlgorithm::MinCostMaxFlow, true),
-            ),
-            Err(GfError::Execution(message)) if message.contains("negative-cost residual cycle")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("negative-cost residual cycle")
         ));
     }
 
@@ -15445,8 +15439,8 @@ mod tests {
                 &left,
                 Some(&left),
                 min_cut_options(PathAlgorithm::MinCutEdges, true, Some("capacity")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("distinct endpoints")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("distinct endpoints")
         ));
 
         let invalid = GraphForge::new(None).unwrap();
@@ -15462,8 +15456,8 @@ mod tests {
                 &NodeSelector::Handle(invalid_nodes[0].clone()),
                 Some(&NodeSelector::Handle(invalid_nodes[1].clone())),
                 min_cut_options(PathAlgorithm::MinCut, true, Some("capacity")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("nonnegative")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("nonnegative")
         ));
     }
 
@@ -15931,7 +15925,7 @@ mod tests {
                 None,
                 dijkstra_all_pairs_options(true, Some("ROAD"), Some("bad"))
             ),
-            Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+            Err(GfError::Validation(_)) | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
         ));
         assert!(matches!(
             graph.paths(
@@ -15939,7 +15933,7 @@ mod tests {
                 None,
                 dijkstra_all_pairs_options(true, Some("ROAD"), Some("missing"))
             ),
-            Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+            Err(GfError::Validation(_)) | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
         ));
     }
     #[test]
@@ -15981,7 +15975,8 @@ mod tests {
         ] {
             assert!(matches!(
                 graph.paths(&source, Some(&target), options),
-                Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+                Err(GfError::Validation(_))
+                    | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
             ));
         }
     }
@@ -16142,8 +16137,8 @@ mod tests {
                 &NodeSelector::Handle(source),
                 Some(&NodeSelector::Handle(target)),
                 bellman_ford_options(true, Some("ROAD"), Some("cost")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("negative cycle")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("negative cycle")
         ));
 
         let unreachable = GraphForge::new(None).unwrap();
@@ -16388,8 +16383,8 @@ mod tests {
                 &source,
                 None,
                 floyd_warshall_options(true, Some("CYCLE"), Some("cost"))
-            ),
-            Err(GfError::Execution(message)) if message.contains("negative cycle")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("negative cycle")
         ));
         for options in [
             PathsOptions {
@@ -16600,8 +16595,8 @@ mod tests {
                 &source,
                 Some(&target),
                 delta_stepping_options(true, Some("ROAD"), Some("negative")),
-            ),
-            Err(GfError::Execution(message))
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("requires finite non-negative edge weights")
         ));
         assert!(matches!(
@@ -16835,8 +16830,8 @@ mod tests {
                 &source,
                 Some(&target),
                 yens_options(true, 2, Some("ROAD"), Some("cost"))
-            ),
-            Err(GfError::Execution(message))
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("finite non-negative edge weights")
         ));
     }
@@ -17003,7 +16998,8 @@ mod tests {
         ] {
             assert!(matches!(
                 graph.paths(&source, Some(&target), options),
-                Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+                Err(GfError::Validation(_))
+                    | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
             ));
         }
         assert!(matches!(
@@ -17026,8 +17022,8 @@ mod tests {
                 &NodeSelector::Handle(source),
                 Some(&NodeSelector::Handle(target)),
                 astar_options(true, None, None, Some("heuristic")),
-            ),
-            Err(GfError::Execution(message)) if message.contains("target heuristic")
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message }) if message.contains("target heuristic")
         ));
 
         for invalid in [
@@ -17046,7 +17042,8 @@ mod tests {
                     Some(&NodeSelector::Handle(target)),
                     astar_options(true, None, None, Some("heuristic")),
                 ),
-                Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+                Err(GfError::Validation(_))
+                    | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
             ));
         }
 
@@ -17068,7 +17065,7 @@ mod tests {
                 Some(&NodeSelector::Handle(target)),
                 astar_options(true, Some("ROAD"), Some("cost"), Some("heuristic")),
             ),
-            Err(GfError::Validation(_)) | Err(GfError::Execution(_))
+            Err(GfError::Validation(_)) | Err(GfError::Algorithm(AlgorithmError::Execution { .. }))
         ));
     }
 
@@ -17718,12 +17715,10 @@ mod tests {
             add_person(&overflow, &format!("isolated-{index}"));
         }
         assert!(matches!(
-            overflow.analyze(
-                Some("Person"),
-                count_automorphisms_options(false, None)
-            ),
-            Err(GfError::Execution(message))
-                if message.contains("automorphism count exceeds UInt64 range")
+            overflow
+                .analyze(Some("Person"), count_automorphisms_options(false, None))
+                .map_err(expect_algorithm_execution),
+            Err(diagnostic @ AlgorithmError::AutomorphismCountOverflow) if diagnostic.to_string() == "automorphism count exceeds UInt64 range"
         ));
     }
 
@@ -18516,8 +18511,8 @@ mod tests {
             .execute("MATCH (n:Person {name:'Looped'}) CREATE (n)-[:ROAD]->(n)")
             .unwrap();
         assert!(matches!(
-            looped.analyze(Some("Person"), k1_coloring_options(Some("ROAD"))),
-            Err(GfError::Execution(message))
+            looped.analyze(Some("Person"), k1_coloring_options(Some("ROAD"))).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("k1_coloring cannot color a graph containing a self-loop")
         ));
 
@@ -18655,8 +18650,8 @@ mod tests {
             .execute("MATCH (a:Person {name:'Alice'}) CREATE (a)-[:ROAD]->(a)")
             .unwrap();
         assert!(matches!(
-            looped.analyze(None, chromatic_number_options(Some("ROAD"))),
-            Err(GfError::Execution(message))
+            looped.analyze(None, chromatic_number_options(Some("ROAD"))).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("undefined for a graph containing a self-loop")
         ));
 
@@ -19278,12 +19273,13 @@ mod tests {
             .execute("CREATE (:Person)-[:TRAIL]->(:Person)")
             .unwrap();
         assert!(matches!(
-            circuit_undefined.analyze(
-                Some("Person"),
-                euler_options(AnalyzeAlgorithm::EulerCircuit, false, Some("TRAIL")),
-            ),
-            Err(GfError::Execution(message))
-                if message == "Euler circuit is undefined for the selected graph"
+            circuit_undefined
+                .analyze(
+                    Some("Person"),
+                    euler_options(AnalyzeAlgorithm::EulerCircuit, false, Some("TRAIL")),
+                )
+                .map_err(expect_algorithm_execution),
+            Err(diagnostic @ AlgorithmError::UndefinedEulerCircuit) if diagnostic.to_string() == "Euler circuit is undefined for the selected graph"
         ));
 
         let path_undefined = GraphForge::new(None).unwrap();
@@ -19294,12 +19290,13 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            path_undefined.analyze(
-                Some("Person"),
-                euler_options(AnalyzeAlgorithm::EulerPath, false, Some("TRAIL")),
-            ),
-            Err(GfError::Execution(message))
-                if message == "Euler path is undefined for the selected graph"
+            path_undefined
+                .analyze(
+                    Some("Person"),
+                    euler_options(AnalyzeAlgorithm::EulerPath, false, Some("TRAIL")),
+                )
+                .map_err(expect_algorithm_execution),
+            Err(diagnostic @ AlgorithmError::UndefinedEulerPath) if diagnostic.to_string() == "Euler path is undefined for the selected graph"
         ));
     }
 
@@ -19540,9 +19537,9 @@ mod tests {
             &[0, 1, 2, 3, 4, 5]
         );
         assert!(matches!(
-            graph.analyze(None, topological_sort_options(true, None)),
-            Err(GfError::Execution(message))
-                if message == "Rust algorithm execution failed: selected graph contains a cycle"
+            graph.analyze(None, topological_sort_options(true, None)).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
+                if message == "selected graph contains a cycle"
         ));
     }
 
@@ -19572,9 +19569,9 @@ mod tests {
             .execute("MATCH (a:Person {name:'Alice'}) CREATE (a)-[:KNOWS]->(a)")
             .unwrap();
         assert!(matches!(
-            looped.analyze(None, topological_sort_options(true, None)),
-            Err(GfError::Execution(message))
-                if message == "Rust algorithm execution failed: selected graph contains a cycle"
+            looped.analyze(None, topological_sort_options(true, None)).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
+                if message == "selected graph contains a cycle"
         ));
 
         assert!(matches!(
@@ -19716,8 +19713,8 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            cyclic.analyze(None, dag_longest_path_options(true, None)),
-            Err(GfError::Execution(message))
+            cyclic.analyze(None, dag_longest_path_options(true, None)).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("dag_longest_path requires a directed acyclic graph")
         ));
         assert!(matches!(
@@ -19852,8 +19849,8 @@ mod tests {
             cyclic.analyze(
                 None,
                 weighted_dag_longest_path_options(true, Some("ROAD"), Some("cost"))
-            ),
-            Err(GfError::Execution(message))
+            ).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("requires a directed acyclic graph")
         ));
         for options in [
@@ -19958,8 +19955,8 @@ mod tests {
             .execute("MATCH (a:Person {name:'Alice'}) CREATE (a)-[:KNOWS]->(a)")
             .unwrap();
         assert!(matches!(
-            looped.analyze(None, edge_coloring_options(Some("KNOWS"))),
-            Err(GfError::Execution(message))
+            looped.analyze(None, edge_coloring_options(Some("KNOWS"))).map_err(expect_algorithm_execution),
+            Err(AlgorithmError::Execution { message })
                 if message.contains("edge_coloring cannot color a graph containing a self-loop")
         ));
 
