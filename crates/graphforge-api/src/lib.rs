@@ -88,6 +88,7 @@ mod embedding_publication;
 mod embedding_refresh;
 mod embedding_spaces;
 mod epistemic_snapshot;
+mod explanation;
 mod find_execution;
 mod generation_diff;
 mod graph_inspection;
@@ -203,9 +204,9 @@ pub use graphforge_core::embedding_options::{
 pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifest};
 pub use graphforge_core::uuid::hub_clone_operation;
 pub use graphforge_core::{
-    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError,
-    LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode, ParseErrorKind,
-    PathsOptions, ProjectErrorCode, PropValue, RankOptions, SimilarOptions, Span,
+    AlgorithmError, AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, ExplainStage,
+    FindOptions, GfError, LoweringError, NodeHandle, NodeSelector, OntologyFormat, OntologyMode,
+    ParseErrorKind, PathsOptions, ProjectErrorCode, PropValue, RankOptions, SimilarOptions, Span,
     SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue, TemporalValue,
 };
 pub use import_session::{
@@ -1119,12 +1120,49 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         publish: bool,
     ) -> Result<ExecutionResult, GfError> {
-        let composition = self
-            .default_composition_context
+        self.run_query_with_optional_composition(
+            cypher,
+            params,
+            self.default_composition_snapshot(),
+            publish,
+        )
+    }
+
+    fn default_composition_snapshot(&self) -> Option<Arc<CompositionBindingContext>> {
+        self.default_composition_context
             .lock()
             .expect("default composition context lock poisoned")
-            .clone();
-        self.run_query_with_optional_composition(cypher, params, composition, publish)
+            .clone()
+    }
+
+    fn composition_execution_mode(context: &CompositionBindingContext) -> OntologyMode {
+        // The binder owns fallback policy; resolved generation symbols retain
+        // their typed storage route even under an exploratory profile.
+        match context.composition().profile_default {
+            graphforge_ontology::ActivationMode::Exploratory
+            | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
+            graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
+        }
+    }
+
+    fn open_query_catalog(
+        &self,
+        runtime_catalog: &Arc<Mutex<RuntimeCatalog>>,
+        candidate: Option<&graphforge_storage::SemanticStorageBindings>,
+    ) -> Result<GraphCatalog, GfError> {
+        let runtime = runtime_catalog.lock().expect("runtime catalog poisoned");
+        let installed = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned");
+        GraphCatalog::open_authenticated_with_semantic_bindings(
+            &self.dir,
+            self.ontology.as_ref(),
+            &runtime,
+            candidate.or(installed.as_ref()),
+            self.property_inventory_for_session(),
+        )
+        .map_err(|error| GfError::Storage(error.to_string()))
     }
 
     /// Install the exact compiled context reconstructed from the persisted
@@ -1243,18 +1281,9 @@ impl GraphForge {
 
         let candidate = composition.as_ref().map(|(_, candidate, _)| candidate);
         let legacy_route_moves = composition.as_ref().map(|(_, _, moves)| moves.as_slice());
-        let composition_mode = composition.as_ref().map(|(context, _, _)| {
-            match context.composition().profile_default {
-                // Composition fallback policy is enforced by the binder. Once a
-                // symbol resolved to authenticated generation storage, the writer
-                // must retain that typed route even under an exploratory profile;
-                // advisory mode still permits binder-approved runtime fallbacks
-                // without collapsing resolved ontology data into `_untyped`.
-                graphforge_ontology::ActivationMode::Exploratory
-                | graphforge_ontology::ActivationMode::Advisory => OntologyMode::Advisory,
-                graphforge_ontology::ActivationMode::Strict => OntologyMode::Strict,
-            }
-        });
+        let composition_mode = composition
+            .as_ref()
+            .map(|(context, _, _)| Self::composition_execution_mode(context));
         let result = self.run_plan_with_publish_and_bindings(
             &plan,
             params,
@@ -1418,21 +1447,7 @@ impl GraphForge {
 
         // Open a catalog snapshot reflecting the freshly-bound runtime catalog so
         // read scans resolve property names interned during bind.
-        let catalog = {
-            let rc = working_catalog.lock().expect("runtime catalog poisoned");
-            let installed = self
-                .semantic_storage_bindings
-                .lock()
-                .expect("semantic storage binding lock poisoned");
-            GraphCatalog::open_authenticated_with_semantic_bindings(
-                &self.dir,
-                self.ontology.as_ref(),
-                &rc,
-                candidate_bindings.or(installed.as_ref()),
-                self.property_inventory_for_session(),
-            )
-            .map_err(|e| GfError::Storage(e.to_string()))?
-        };
+        let catalog = self.open_query_catalog(&working_catalog, candidate_bindings)?;
         // A compiled composition is explicit typed authority even when the
         // legacy workspace ontology profile remains exploratory. Its writes
         // must never fall back to `_untyped` host routing.
@@ -1792,6 +1807,11 @@ impl GraphForge {
         use graphforge_exec::ExecutionSession;
 
         let admission = self.admit_heavy_query_owned()?;
+        let _read_visibility = self.graph_visibility.read()?;
+        let composition = self
+            .default_composition_snapshot()
+            .map(|context| self.bind_generation_storage(&context))
+            .transpose()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -1809,12 +1829,15 @@ impl GraphForge {
             self.procedure_snapshot(),
         )?;
         let plan = {
-            let binder = Binder::new(
+            let mut binder = Binder::new(
                 self.ontology.clone(),
                 self.runtime_catalog.clone(),
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
+            if let Some((context, _, _)) = &composition {
+                binder = binder.with_composition(Arc::clone(context));
+            }
             binder
                 .bind(&ast)
                 .map_err(|errs| bind_errors_to_gferror(&errs))?
@@ -1842,26 +1865,34 @@ impl GraphForge {
         // property inventory and ordinal identity authority as one publication
         // transition; opening them without this guard could otherwise combine
         // participants from adjacent generations.
-        let _read_visibility = self.graph_visibility.read()?;
-        let catalog = {
-            let rc = self
-                .runtime_catalog
-                .lock()
-                .expect("runtime catalog poisoned");
-            GraphCatalog::open_authenticated(
-                &self.dir,
-                self.ontology.as_ref(),
-                &rc,
-                self.property_inventory_for_session(),
-            )
-            .map_err(|e| GfError::Storage(e.to_string()))?
+        if composition
+            .as_ref()
+            .is_some_and(|(_, _, moves)| !moves.is_empty())
+        {
+            return Err(GfError::Validation(
+                "GF_SEMANTIC_LEGACY_MIGRATION_REQUIRED: run a publishing write to migrate the unambiguous legacy generation".into(),
+            ));
+        }
+        let catalog = self.open_query_catalog(
+            &self.runtime_catalog,
+            composition.as_ref().map(|(_, candidate, _)| candidate),
+        )?;
+        let execution_mode = composition
+            .as_ref()
+            .map_or(self.ontology_mode, |(context, _, _)| {
+                Self::composition_execution_mode(context)
+            });
+        let adjacency_provider = if execution_mode == self.ontology_mode {
+            Arc::clone(&self.adjacency_provider)
+        } else {
+            Arc::new(adjacency_provider_for_graph(&self.dir, execution_mode)?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
-            self.ontology_mode,
-            Arc::clone(&self.adjacency_provider),
+            execution_mode,
+            adjacency_provider,
             Some(Arc::clone(&self.ordinal_identities)),
             &self.session_resource_config(),
         )?;
@@ -3288,120 +3319,6 @@ impl GraphForge {
     /// graph generation cannot be inspected.
     pub fn node_count(&self, label: &str) -> Result<u64, GfError> {
         Ok(self.inspect_graph()?.node_count(label))
-    }
-
-    /// Return a human-readable explanation of every compiler stage for `cypher`:
-    /// `AST` → `GraphIR` → `LogicalPlan` → `PhysicalPlan`.
-    ///
-    /// The query is bound once with this instance's ontology and mode, against a
-    /// **snapshot** of the runtime catalog — so `explain` is side-effect-free
-    /// (unlike `execute`, it does not grow the shared catalog) while still
-    /// reflecting the types this query would intern.
-    ///
-    /// # Errors
-    /// Returns [`GfError::Parse`] for a syntax error, [`GfError::Plan`] for a
-    /// bind/serialisation failure, or a storage/execution error if the physical
-    /// plan cannot be built.
-    pub fn explain(&self, cypher: &str) -> Result<String, GfError> {
-        let ast = graphforge_cypher::parse(cypher).map_err(GfError::from_parse_display)?;
-
-        // Bind against a clone of the runtime catalog so EXPLAIN never mutates
-        // shared state; the snapshot still backs the catalog the physical plan
-        // is built over, so types interned during this bind resolve.
-        let snapshot = Arc::new(Mutex::new(
-            self.runtime_catalog
-                .lock()
-                .expect("runtime catalog poisoned")
-                .clone(),
-        ));
-        let plan = {
-            let binder = Binder::new(
-                self.ontology.clone(),
-                Arc::clone(&snapshot),
-                self.ontology_mode,
-            )
-            .with_procedures(self.procedure_snapshot());
-            binder
-                .bind(&ast)
-                .map_err(|errors| bind_errors_to_gferror(&errors))?
-        };
-
-        let ast_json =
-            serde_json::to_string_pretty(&ast).map_err(|e| GfError::Plan(e.to_string()))?;
-        let graph_ir =
-            serde_json::to_string_pretty(&plan).map_err(|e| GfError::Plan(e.to_string()))?;
-
-        // EXPLAIN constructs a real physical session. Pin all of its
-        // generation-coupled authorities against same-instance publication,
-        // just like query execution does.
-        let _read_visibility = self.graph_visibility.read()?;
-        // Open the catalog from the same snapshot so the logical and physical
-        // stages resolve property names interned during this bind (a None
-        // catalog would render them as `prop_<id>` and fail to lower).
-        let catalog = {
-            let rc = snapshot.lock().expect("runtime catalog poisoned");
-            GraphCatalog::open_authenticated(
-                &self.dir,
-                self.ontology.as_ref(),
-                &rc,
-                self.property_inventory_for_session(),
-            )
-            .map_err(|e| GfError::Storage(e.to_string()))?
-        };
-        // Best-effort: some operators (notably variable-length expand) only
-        // lower in the dir-backed physical stage, so the dir-less logical
-        // renderer errors on them. Don't fail the whole EXPLAIN — the physical
-        // section still shows the plan, including the inference rule_id (#605).
-        // Write terminals need `new_for_writes` so CREATE/MERGE/DELETE/SET/
-        // REMOVE render instead of failing as "requires a write target".
-        let logical = {
-            let needs_writes = plan.ops.iter().any(|op| {
-                matches!(
-                    op,
-                    GraphOp::Create { .. }
-                        | GraphOp::Merge { .. }
-                        | GraphOp::Delete { .. }
-                        | GraphOp::Set { .. }
-                        | GraphOp::Remove { .. }
-                )
-            });
-            let explained = if needs_writes {
-                graphforge_rel::explain_logical_for_writes(
-                    &plan,
-                    &catalog.lowering_snapshot(Some(&self.dir))?,
-                    self.ontology.as_ref(),
-                    self.ontology_mode,
-                )
-            } else {
-                graphforge_rel::explain_logical_with_catalog(
-                    &plan,
-                    Some(&catalog.lowering_snapshot(None)?),
-                    self.ontology.as_ref(),
-                )
-            };
-            explained.unwrap_or_else(|e| format!("(logical plan unavailable: {e})"))
-        };
-
-        let session =
-            graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
-                catalog,
-                self.ontology.clone(),
-                self.dir.clone(),
-                self.ontology_mode,
-                Arc::clone(&self.adjacency_provider),
-                Some(Arc::clone(&self.ordinal_identities)),
-                &self.session_resource_config(),
-            )?;
-        // This private session only renders a plan into text. No executable plan or
-        // write capability escapes this side-effect-free explanation boundary.
-        let physical = self.block_on(async move { session.explain_physical(&plan).await })?;
-
-        Ok(format!(
-            "AST\n---\n{ast_json}\n\n\
-             GraphIR\n-------\n{graph_ir}\n\n\
-             LogicalPlan\n-----------\n{logical}\n\n\
-             PhysicalPlan\n------------\n{physical}"
-        ))
     }
 
     /// Load and compile an ontology from `path` (YAML or JSON, dispatched by
@@ -4930,6 +4847,26 @@ mod tests {
             ("MATCH (n:Person) DELETE n", "GraphDeleteExec"),
         ] {
             assert!(view.explain(query).unwrap().contains(operator));
+            for stage in [
+                ExplainStage::Ast,
+                ExplainStage::GraphIr,
+                ExplainStage::LogicalPlan,
+            ] {
+                assert!(!view.explain_stage(query, stage).unwrap().is_empty());
+            }
+            assert!(
+                view.explain_stage(query, ExplainStage::PhysicalPlan)
+                    .unwrap()
+                    .contains(operator)
+            );
+        }
+        for stage in [
+            ExplainStage::GraphIr,
+            ExplainStage::LogicalPlan,
+            ExplainStage::PhysicalPlan,
+        ] {
+            view.explain_stage("CREATE (:NewStageLabel {stageFresh:1})", stage)
+                .unwrap();
         }
         assert_eq!(
             view.runtime_catalog.lock().unwrap().to_record_batch(),
@@ -7710,6 +7647,25 @@ mod tests {
             matches!(err, GfError::Bind { .. }),
             "expected a bind error (#606), got: {err:?}"
         );
+        for stage in [
+            ExplainStage::GraphIr,
+            ExplainStage::LogicalPlan,
+            ExplainStage::PhysicalPlan,
+        ] {
+            let error = gf
+                .explain_stage("MATCH (n:NoSuchLabel) RETURN n.node_uuid AS u", stage)
+                .unwrap_err();
+            assert_eq!(error.code(), err.code());
+            assert_eq!(error.to_string(), err.to_string());
+            let GfError::Bind { diagnostics, .. } = error else {
+                panic!("strict binder diagnostic lost")
+            };
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|error| error.kind == graphforge_core::BindErrorKind::UnknownLabel)
+            );
+        }
     }
 
     /// A small fixture (5 Person + 4 KNOWS + 1 LIKES) created in one statement
@@ -8223,6 +8179,21 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .expect("integer output");
         assert_eq!(values.values(), &[4]);
+        let query = "CALL test.double(2) YIELD out AS value RETURN value";
+        for stage in [
+            ExplainStage::GraphIr,
+            ExplainStage::LogicalPlan,
+            ExplainStage::PhysicalPlan,
+        ] {
+            assert!(!gf.explain_stage(query, stage).unwrap().is_empty());
+        }
+        assert!(gf.explain(query).unwrap().contains("PhysicalPlan"));
+        let other = GraphForge::new(None).unwrap();
+        let error = other
+            .explain_stage(query, ExplainStage::GraphIr)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_PARSE");
+        assert!(matches!(error, GfError::Bind { .. }));
     }
 
     #[test]

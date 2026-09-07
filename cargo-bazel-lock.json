@@ -1,5 +1,5 @@
 {
-  "checksum": "fca1c5d99fa96c8dd9e2ea21abcf55911bedd45e0ac258d58762e06915d0db0f",
+  "checksum": "a3bfb96f87e7b527bdd568053012b8c6339eaab8c486b53ce519735ff5e61279",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13072,25 +13072,16 @@
         "compile_data_glob": [
           "**"
         ],
-        "deps": {
-          "common": [
-            {
-              "id": "serde_json 1.0.151",
-              "target": "serde_json"
-            },
-            {
-              "id": "thiserror 2.0.20",
-              "target": "thiserror"
-            }
-          ],
-          "selects": {}
-        },
         "deps_dev": {
           "common": [
             {
               "id": "codspeed-divan-compat 5.0.1",
               "target": "codspeed_divan_compat",
               "alias": "divan"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
             }
           ],
           "selects": {}

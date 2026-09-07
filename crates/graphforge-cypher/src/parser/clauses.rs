@@ -245,18 +245,18 @@ fn parse_create_clause(ts: &mut TokenStream) -> Result<CreateClause, ParseError>
     // here, where the CREATE context is known.
     for pat in &patterns {
         for elem in &pat.elements {
-            if let PathElement::Rel(rel) = elem {
-                if rel.types.len() > 1 {
-                    return Err(ts.err_at(
-                        rel.span,
-                        ParseErrorKind::UnexpectedToken {
-                            found: "|".to_string(),
-                            expected: vec!["a single relationship type".to_string()],
-                        },
-                        "a CREATE relationship must have exactly one type; \
+            if let PathElement::Rel(rel) = elem
+                && rel.types.len() > 1
+            {
+                return Err(ts.err_at(
+                    rel.span,
+                    ParseErrorKind::UnexpectedToken {
+                        found: "|".to_string(),
+                        expected: vec!["a single relationship type".to_string()],
+                    },
+                    "a CREATE relationship must have exactly one type; \
                          a type disjunction `:A|B` is only valid in MATCH",
-                    ));
-                }
+                ));
             }
         }
     }
@@ -679,11 +679,11 @@ fn parse_sort_item(ts: &mut TokenStream) -> Result<SortItem, ParseError> {
     let start = ts.current_pos();
     let expr = parse_expr(ts, 0)?;
     let order = match ts.peek() {
-        Some(Tok::Asc) | Some(Tok::Ascending) => {
+        Some(Tok::Asc | Tok::Ascending) => {
             ts.advance();
             SortOrder::Ascending
         }
-        Some(Tok::Desc) | Some(Tok::Descending) => {
+        Some(Tok::Desc | Tok::Descending) => {
             ts.advance();
             SortOrder::Descending
         }

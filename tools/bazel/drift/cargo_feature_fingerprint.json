@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "35f02a029250265fa879e86bfb53fa2a5ab6f2bd7c887ebde5f80119942d7e65",
+  "sha256": "ffeb854d7d3ab6a9d5d3308da5bceb1a6b28ecbf0cf5fb832a4aece1b6efa3e0",
   "entries": [
     {
       "name": "graphforge-api",
@@ -819,16 +819,7 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": null,
-          "target": null
-        },
-        {
-          "name": "graphforge-rel",
-          "req": "^0.5.2",
-          "features": [],
-          "optional": false,
-          "uses_default_features": true,
-          "kind": null,
+          "kind": "dev",
           "target": null
         },
         {
@@ -837,16 +828,7 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
-          "kind": null,
-          "target": null
-        },
-        {
-          "name": "thiserror",
-          "req": "^2",
-          "features": [],
-          "optional": false,
-          "uses_default_features": true,
-          "kind": null,
+          "kind": "dev",
           "target": null
         }
       ]

@@ -1351,7 +1351,12 @@ async fn when_explain(world: &mut GraphForgeWorld, query: String) {
     world.last_names = None;
     world.last_count = None;
     world.last_explanation = None;
-    match graphforge_cypher::explain(&query) {
+    match world
+        .forge
+        .as_ref()
+        .expect("a graph must exist before explain")
+        .explain(&query)
+    {
         Ok(s) => {
             world.last_explanation = Some(s);
         }

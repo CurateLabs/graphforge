@@ -16,8 +16,6 @@ gf_rust_library(
     deps = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-rel:graphforge_rel",
     ],
 )
 
@@ -25,7 +23,6 @@ _CYPHER_DEPS = [
     "//crates/graphforge-ast:graphforge_ast",
     "//crates/graphforge-core:graphforge_core",
     "//crates/graphforge-ir:graphforge_ir",
-    "//crates/graphforge-rel:graphforge_rel",
 ]
 
 gf_rust_test(

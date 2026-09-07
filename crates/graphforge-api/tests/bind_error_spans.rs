@@ -191,26 +191,90 @@ fn multiple_real_binder_diagnostics_keep_each_kind_and_span() {
 }
 
 #[test]
-fn legacy_cypher_explain_keeps_public_contract_and_typed_binder_source() {
-    use graphforge_cypher::ExplainStage;
-    let query = "RETURN missingVar";
-    let error = graphforge_cypher::explain_stage(query, ExplainStage::LogicalPlan).unwrap_err();
-    assert_eq!(error.code(), "GF_PLAN");
-    assert_eq!(
-        error.to_string(),
-        "plan error: bind errors: variable `missingVar` used before it was introduced"
-    );
-    let GfError::BindPlan { diagnostics, .. } = error else {
-        panic!("legacy binder source lost")
+fn explanation_stages_share_binder_codes_payloads_and_all_spans() {
+    use graphforge_api::ExplainStage;
+    let gf = GraphForge::new(None).unwrap();
+    let query = "RETURN firstMissing, secondMissing";
+    let expected = binder_signature(gf.execute(query).unwrap_err());
+    let params = std::collections::HashMap::new();
+    for error in [
+        gf.execute_with_params(query, &params).err().unwrap(),
+        gf.execute_stream(query).err().unwrap(),
+        gf.execute_stream_with_params(query, &params).err().unwrap(),
+        gf.explain(query).unwrap_err(),
+        gf.explain_stage(query, ExplainStage::GraphIr).unwrap_err(),
+        gf.explain_stage(query, ExplainStage::LogicalPlan)
+            .unwrap_err(),
+        gf.explain_stage(query, ExplainStage::PhysicalPlan)
+            .unwrap_err(),
+    ] {
+        assert_eq!(binder_signature(error), expected);
+    }
+    // AST inspection is deliberately syntax-only; it does not run the binder.
+    let ast = gf.explain_stage(query, ExplainStage::Ast).unwrap();
+    let ast: serde_json::Value = serde_json::from_str(&ast).unwrap();
+    assert!(ast.get("clauses").is_some());
+    assert!(matches!(
+        gf.explain_stage(query, ExplainStage::BoundAst),
+        Err(GfError::NotImplemented(_))
+    ));
+}
+
+fn binder_signature(
+    error: GfError,
+) -> (
+    String,
+    graphforge_core::Span,
+    Vec<graphforge_core::BindError>,
+) {
+    assert_eq!(error.code(), "GF_PARSE");
+    let GfError::Bind {
+        msg,
+        span,
+        diagnostics,
+    } = error
+    else {
+        panic!("binder rejection lost its typed facade diagnostic")
     };
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(
-        diagnostics[0].kind,
-        graphforge_core::BindErrorKind::UndeclaredVariable
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(span, graphforge_core::Span::new(7, 19));
+    assert_eq!(diagnostics[1].span, graphforge_core::Span::new(21, 34));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|error| error.kind == graphforge_core::BindErrorKind::UndeclaredVariable)
     );
-    assert_eq!(diagnostics[0].span, graphforge_core::Span::new(7, 17));
-    // The successful diagnostic JSON contract remains owned by #1007.
-    let graph_ir = graphforge_cypher::explain_stage(query, ExplainStage::GraphIr).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&graph_ir).unwrap();
-    assert_eq!(json["bind_errors"][0], diagnostics[0].message);
+    (msg, span, diagnostics)
+}
+
+#[test]
+fn explanation_stage_selection_keeps_typed_parameter_and_lowering_boundaries() {
+    use graphforge_api::{ExplainStage, LoweringError};
+    let gf = GraphForge::new(None).unwrap();
+    for query in ["RETURN $missing", "RETURN 1.foo"] {
+        gf.explain_stage(query, ExplainStage::Ast).unwrap();
+        gf.explain_stage(query, ExplainStage::GraphIr).unwrap();
+        let expected = gf.explain(query).unwrap_err();
+        if query == "RETURN $missing" {
+            // Logical planning can retain an unresolved placeholder; physical
+            // planning requires its value, just like the full explanation.
+            let logical = gf.explain_stage(query, ExplainStage::LogicalPlan).unwrap();
+            assert!(logical.contains("$missing"));
+            let error = gf
+                .explain_stage(query, ExplainStage::PhysicalPlan)
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_PLAN");
+            assert_eq!(error.to_string(), expected.to_string());
+        } else {
+            for stage in [ExplainStage::LogicalPlan, ExplainStage::PhysicalPlan] {
+                let error = gf.explain_stage(query, stage).unwrap_err();
+                assert_eq!(error.code(), "GF_VALIDATION");
+                assert_eq!(error.to_string(), expected.to_string());
+                assert!(matches!(
+                    error,
+                    GfError::Lowering(LoweringError::InvalidType(_))
+                ));
+            }
+        }
+    }
 }

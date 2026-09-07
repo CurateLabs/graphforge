@@ -10,12 +10,10 @@ repository.workspace = true
 [dependencies]
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
 graphforge-ast = { version = "0.5.2", path = "../graphforge-ast" }
-graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
-graphforge-rel = { version = "0.5.2", path = "../graphforge-rel" }
-thiserror = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
+graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
+serde_json = { workspace = true }
 divan = { workspace = true }
 
 # Cypher front-end (lex → parse → bind) benchmarks (CodSpeed, simulation mode).

@@ -44,21 +44,25 @@ impl<'input> TokenStream<'input> {
     // -----------------------------------------------------------------------
 
     /// Peek at the current token without consuming it.
+    #[must_use]
     pub fn peek(&self) -> Option<&Tok> {
         self.tokens.get(self.pos).map(|(_, tok, _)| tok)
     }
 
     /// Peek `n` positions ahead (0 == current).
+    #[must_use]
     pub fn peek_n(&self, n: usize) -> Option<&Tok> {
         self.tokens.get(self.pos + n).map(|(_, tok, _)| tok)
     }
 
     /// Return `true` if the current token is `expected`.
+    #[must_use]
     pub fn at(&self, expected: &Tok) -> bool {
         self.peek() == Some(expected)
     }
 
     /// Return `true` if there are no more tokens.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pos >= self.tokens.len()
     }
@@ -121,20 +125,22 @@ impl<'input> TokenStream<'input> {
     // -----------------------------------------------------------------------
 
     /// Byte offset of the start of the current token (or end-of-input).
+    #[must_use]
     pub fn current_pos(&self) -> usize {
         self.tokens
             .get(self.pos)
-            .map(|(l, _, _)| *l)
-            .unwrap_or(self.input.len())
+            .map_or(self.input.len(), |(l, _, _)| *l)
     }
 
     /// Span covering a single point at `current_pos`.
+    #[must_use]
     pub fn current_span(&self) -> Span {
         let p = self.current_pos();
         Span::new(p, p)
     }
 
     /// Span from `start` byte offset to `current_pos`.
+    #[must_use]
     pub fn span_from(&self, start: usize) -> Span {
         Span::new(start, self.current_pos())
     }
@@ -142,6 +148,7 @@ impl<'input> TokenStream<'input> {
     /// The source text covered by `span` (byte offsets into the original input).
     /// Used to capture an un-aliased projection item's verbatim text for its
     /// default column name (openCypher names columns by the expression as written).
+    #[must_use]
     pub fn text(&self, span: Span) -> &'input str {
         self.input.get(span.start..span.end).unwrap_or("")
     }

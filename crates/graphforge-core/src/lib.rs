@@ -1000,12 +1000,10 @@ impl Default for SimilarOptions {
 // ExplainStage
 // ---------------------------------------------------------------------------
 
-/// Which compiler stage to inspect with `graphforge_cypher::explain_stage`.
+/// Which compiler stage to inspect through `graphforge_api::GraphForge::explain_stage`.
 ///
-/// Use `graphforge_cypher::explain_stage(cypher, stage)` directly.
-///
-/// `GraphForge::explain` is a stub that returns [`GfError::NotImplemented`] —
-/// the implementation lives in `graphforge_cypher` to avoid circular crate dependencies.
+/// The API facade owns parsing, binding, and planning orchestration. This neutral
+/// selector does not make the parser depend on later compiler stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExplainStage {
     /// Pretty-printed JSON of the parsed [`graphforge_ast::AstQuery`].
@@ -1018,12 +1016,12 @@ pub enum ExplainStage {
     BoundAst,
     /// Serialised [`graphforge_ir::GraphPlan`] produced by the binder.
     ///
-    /// Runs in [`graphforge_ir::OntologyMode::Exploratory`]; all unknown labels and
-    /// relation types are auto-interned by the [`graphforge_ir::RuntimeCatalog`].
+    /// Uses the facade's ontology, mode, procedures, and a private runtime-catalog
+    /// snapshot, without publishing any newly interned identities.
     GraphIr,
-    /// DataFusion logical plan (not yet implemented).
+    /// DataFusion logical plan.
     LogicalPlan,
-    /// DataFusion physical plan (not yet implemented).
+    /// DataFusion physical plan, rendered without executing the query.
     PhysicalPlan,
 }
 

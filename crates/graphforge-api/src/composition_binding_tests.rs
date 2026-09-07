@@ -897,3 +897,134 @@ fn semantic_post_current_failure_reconciles_new_bindings_on_existing_owner() {
         .unwrap();
     assert!(status.success(), "semantic post-CURRENT helper: {status}");
 }
+
+#[test]
+fn default_composition_explanations_preserve_binding_context_and_authority() {
+    use crate::ExplainStage;
+    use futures::TryStreamExt;
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("project");
+    let bootstrap = GraphForge::new(path.to_str()).unwrap();
+    let (context, _, _) = composed_fixture(ActivationMode::Exploratory);
+    install_composition_authority(&bootstrap, &context);
+    drop(bootstrap);
+    let forge = GraphForge::new(path.to_str()).unwrap();
+    forge
+        .execute("CREATE (n:`research:Person` {name:'Ada'})")
+        .unwrap();
+    let query = "MATCH (n:`research:Person`) RETURN n.name";
+    assert_eq!(forge.execute(query).unwrap().stats.rows_produced, 1);
+    let uuid_params = std::collections::HashMap::from([(
+        "id".to_string(),
+        graphforge_ir::IrLiteral::Uuid([0; 16]),
+    )]);
+    assert_eq!(
+        forge
+            .execute_with_params(query, &uuid_params)
+            .unwrap()
+            .stats
+            .rows_produced,
+        1
+    );
+    let stream = forge
+        .execute_stream_with_params(query, &uuid_params)
+        .unwrap();
+    let uuid_batches: Vec<arrow::record_batch::RecordBatch> = forge
+        .block_on(async {
+            stream
+                .try_collect()
+                .await
+                .map_err(|error| crate::GfError::Execution(error.to_string()))
+        })
+        .unwrap();
+    assert_eq!(
+        uuid_batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    let catalog_before = forge.runtime_catalog.lock().unwrap().to_record_batch();
+    let bindings_before = forge.semantic_storage_bindings.lock().unwrap().clone();
+    let generation_before = forge.generation_for_read().unwrap().generation_uuid();
+
+    let invalid = "MATCH (n:`missing:Person`) RETURN n";
+    let expected = forge.execute(invalid).unwrap_err();
+    assert_eq!(expected.code(), "GF_PARSE");
+    assert!(expected.to_string().contains("invalid_qualifier"));
+    for result in [
+        forge.execute_stream(invalid),
+        forge.execute_stream_with_params(invalid, &std::collections::HashMap::new()),
+    ] {
+        let error = result
+            .err()
+            .expect("invalid qualifier must fail during binding");
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+    let stream = forge.execute_stream(query).unwrap();
+    let batches: Vec<arrow::record_batch::RecordBatch> = forge
+        .block_on(async {
+            stream
+                .try_collect()
+                .await
+                .map_err(|error| crate::GfError::Execution(error.to_string()))
+        })
+        .unwrap();
+    assert_eq!(
+        batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+
+    for stage in [
+        ExplainStage::GraphIr,
+        ExplainStage::LogicalPlan,
+        ExplainStage::PhysicalPlan,
+    ] {
+        let error = forge.explain_stage(invalid, stage).unwrap_err();
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+    assert_eq!(
+        forge.explain(invalid).unwrap_err().to_string(),
+        expected.to_string()
+    );
+    let ir: graphforge_ir::GraphPlan =
+        serde_json::from_str(&forge.explain_stage(query, ExplainStage::GraphIr).unwrap()).unwrap();
+    assert_eq!(
+        ir.composition_fingerprint.as_deref(),
+        Some(context.fingerprint())
+    );
+    assert!(!ir.binding_receipts.is_empty());
+    assert!(
+        ir.binding_receipts
+            .iter()
+            .all(|receipt| receipt.composition_fingerprint == context.fingerprint())
+    );
+    for stage in [ExplainStage::LogicalPlan, ExplainStage::PhysicalPlan] {
+        assert!(!forge.explain_stage(query, stage).unwrap().is_empty());
+        assert!(
+            !forge
+                .explain_stage("CREATE (n:`research:Person` {name:'Unexecuted'})", stage)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(!forge.explain(query).unwrap().is_empty());
+    assert_eq!(
+        forge.runtime_catalog.lock().unwrap().to_record_batch(),
+        catalog_before
+    );
+    assert_eq!(
+        *forge.semantic_storage_bindings.lock().unwrap(),
+        bindings_before
+    );
+    assert_eq!(
+        forge.generation_for_read().unwrap().generation_uuid(),
+        generation_before
+    );
+    assert_eq!(forge.execute(query).unwrap().stats.rows_produced, 1);
+}
