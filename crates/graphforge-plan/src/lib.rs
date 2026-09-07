@@ -24,21 +24,19 @@
 // the literal values.
 #![allow(clippy::unnecessary_literal_bound)]
 
+mod literal_key;
 pub mod read_resource;
 pub use read_resource::{GraphReadContract, GraphReadSource, GraphReadTable};
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DfResult, TableReference};
 use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
 
-use graphforge_core::OntologyMode;
 use graphforge_ir::{Direction, IrLiteral};
 use graphforge_value::{EntityTypeId, RelationTypeId};
 
@@ -879,7 +877,7 @@ impl UserDefinedLogicalNodeCore for GraphMergeNode {
 /// label IDs are paired with their resolved names and property maps are
 /// evaluated to literal key/value pairs, so the execution layer needs no
 /// access to the IR arena or ontology.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ResolvedNodeSpec {
     /// Pattern variable id (`VarId.0`).
     pub var: u32,
@@ -902,7 +900,7 @@ pub struct ResolvedNodeSpec {
 }
 
 /// An edge to create, fully resolved.  See [`ResolvedNodeSpec`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ResolvedEdgeSpec {
     /// Pattern variable id of the edge.
     pub var: u32,
@@ -929,12 +927,48 @@ pub struct ResolvedEdgeSpec {
     pub computed_properties: Vec<(String, Expr)>,
 }
 
+// Both mutation specification keys use the same literal policy; extension
+// nodes derive their equality and hashing from these semantic components.
+macro_rules! impl_spec_key {
+    ($name:ident, $($field:ident),+ $(,)?) => {
+        impl $name {
+            fn semantic_key(&self) -> impl Eq + Hash + '_ {
+                ($(&self.$field,)+ literal_key::Properties(&self.properties))
+            }
+        }
+        impl PartialEq for $name {
+            fn eq(&self, other: &Self) -> bool { self.semantic_key() == other.semantic_key() }
+        }
+        impl Eq for $name {}
+        impl Hash for $name {
+            fn hash<H: Hasher>(&self, state: &mut H) { self.semantic_key().hash(state); }
+        }
+    };
+}
+impl_spec_key!(
+    ResolvedNodeSpec,
+    var,
+    label_ids,
+    label_names,
+    computed_properties,
+    is_reference
+);
+impl_spec_key!(
+    ResolvedEdgeSpec,
+    var,
+    src,
+    dst,
+    rel_type_id,
+    rel_type_name,
+    direction,
+    computed_properties
+);
+
 /// Logical node for `CREATE`: a write specification driven by an input plan.
 ///
-/// Carries the resolved node/edge specs plus the project directory and ontology
-/// mode needed to drive a writer.  The directory is baked in at lowering time
-/// because the physical-planning layer (an `ExtensionPlanner`) only sees the
-/// DataFusion session state, not the GraphForge project path.
+/// Carries resolved node/edge specifications and semantic binding assumptions.
+/// The physical planner obtains the destination and write policy from its
+/// explicit execution context.
 ///
 /// # Input
 ///
@@ -947,7 +981,7 @@ pub struct ResolvedEdgeSpec {
 ///
 /// Output schema is a one-row write summary: `nodes_created` / `edges_created`
 /// (`UInt64`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GraphCreateNode {
     /// Input plan whose rows drive the writes (the implicit unit row for a
     /// standalone CREATE; the MATCH results for a mixed pipeline).
@@ -956,14 +990,11 @@ pub struct GraphCreateNode {
     pub nodes: Vec<ResolvedNodeSpec>,
     /// Edges to create, in pattern order.
     pub edges: Vec<ResolvedEdgeSpec>,
-    /// Target project directory.
-    pub dir: PathBuf,
-    /// Ontology mode (drives writer edge / property routing).
-    pub mode: OntologyMode,
     /// Exact composition fingerprint authenticating opaque storage routes.
     pub semantic_composition_fingerprint: Option<String>,
-    /// Output schema: the one-row write summary in summary mode, or the
-    /// created-entity row schema in emit-rows mode (#814).
+    /// Semantic identities required by the write binding.
+    pub write_contract: Option<GraphReadContract>,
+    /// One-row summary or created-entity rows in emit-rows mode (#814).
     schema: DFSchemaRef,
     /// `true` when the node emits created-entity rows (write-result RETURN);
     /// `false` for the terminal one-row summary.
@@ -971,6 +1002,13 @@ pub struct GraphCreateNode {
 }
 
 impl GraphCreateNode {
+    /// Attach logical binding assumptions, never executable authority.
+    #[must_use]
+    pub fn with_write_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.write_contract = contract;
+        self
+    }
+
     /// Build the write-summary Arrow schema
     /// (`nodes_created`, `edges_created`, `properties_set`, `labels_added`).
     #[must_use]
@@ -990,19 +1028,16 @@ impl GraphCreateNode {
         input: Arc<LogicalPlan>,
         nodes: Vec<ResolvedNodeSpec>,
         edges: Vec<ResolvedEdgeSpec>,
-        dir: PathBuf,
-        mode: OntologyMode,
     ) -> Self {
         let schema = Arc::new(
             DFSchema::try_from(Self::summary_schema())
                 .expect("write-summary schema is always valid"),
         );
         Self {
+            write_contract: None,
             input,
             nodes,
             edges,
-            dir,
-            mode,
             semantic_composition_fingerprint: None,
             schema,
             emit_rows: false,
@@ -1020,16 +1055,13 @@ impl GraphCreateNode {
         input: Arc<LogicalPlan>,
         nodes: Vec<ResolvedNodeSpec>,
         edges: Vec<ResolvedEdgeSpec>,
-        dir: PathBuf,
-        mode: OntologyMode,
         output_schema: DFSchemaRef,
     ) -> Self {
         Self {
+            write_contract: None,
             input,
             nodes,
             edges,
-            dir,
-            mode,
             semantic_composition_fingerprint: None,
             schema: output_schema,
             emit_rows: true,
@@ -1052,231 +1084,6 @@ impl GraphCreateNode {
 }
 
 impl_partial_ord!(GraphCreateNode);
-
-// `IrLiteral` is `PartialEq` (so we derive `PartialEq`) but not `Eq`/`Hash`
-// (it carries `f64`).  `UserDefinedLogicalNodeCore` requires `Eq + Hash`, so we
-// provide them by hand: `Eq` is the empty marker (literal property values are
-// never NaN-reflexivity-sensitive in practice — matching DataFusion's own
-// float-bearing nodes), and `Hash` normalises each literal (floats via
-// `to_bits`).  `schema` is excluded from both (it is derived from the rest).
-impl PartialEq for GraphCreateNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.nodes == other.nodes
-            && self.edges == other.edges
-            && self.dir == other.dir
-            && self.mode == other.mode
-            && self.semantic_composition_fingerprint == other.semantic_composition_fingerprint
-            && self.emit_rows == other.emit_rows
-    }
-}
-
-impl Eq for GraphCreateNode {}
-
-fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
-    match lit {
-        IrLiteral::Null => 0u8.hash(state),
-        IrLiteral::Bool(b) => {
-            1u8.hash(state);
-            b.hash(state);
-        }
-        IrLiteral::Int(i) => {
-            2u8.hash(state);
-            i.hash(state);
-        }
-        IrLiteral::Float(f) => {
-            3u8.hash(state);
-            f.to_bits().hash(state);
-        }
-        IrLiteral::Str(s) => {
-            4u8.hash(state);
-            s.hash(state);
-        }
-        IrLiteral::Uuid(uuid) => {
-            14u8.hash(state);
-            uuid.hash(state);
-        }
-        IrLiteral::Duration {
-            months,
-            days,
-            seconds,
-            nanos,
-        } => {
-            5u8.hash(state);
-            months.hash(state);
-            days.hash(state);
-            seconds.hash(state);
-            nanos.hash(state);
-        }
-        IrLiteral::DateTime(t) => {
-            6u8.hash(state);
-            t.hash(state);
-        }
-        IrLiteral::Date(d) => {
-            7u8.hash(state);
-            d.hash(state);
-        }
-        IrLiteral::LocalDateTime { days, nanos } => {
-            8u8.hash(state);
-            days.hash(state);
-            nanos.hash(state);
-        }
-        IrLiteral::Time(n) => {
-            9u8.hash(state);
-            n.hash(state);
-        }
-        IrLiteral::ZonedTime { nanos, offset } => {
-            10u8.hash(state);
-            nanos.hash(state);
-            offset.hash(state);
-        }
-        IrLiteral::ZonedDateTime {
-            days,
-            nanos,
-            offset,
-            zone,
-        } => {
-            11u8.hash(state);
-            days.hash(state);
-            nanos.hash(state);
-            offset.hash(state);
-            zone.hash(state);
-        }
-        IrLiteral::Spatial(value) => {
-            15u8.hash(state);
-            value.spatial_type.hash(state);
-            value.extension_name.hash(state);
-            value.extension_metadata.hash(state);
-            hash_spatial_coordinates(&value.coordinates, state);
-        }
-        IrLiteral::List(items) => {
-            12u8.hash(state);
-            items.len().hash(state);
-            for it in items {
-                hash_literal(it, state);
-            }
-        }
-        IrLiteral::Map(entries) => {
-            13u8.hash(state);
-            entries.len().hash(state);
-            for (key, value) in entries {
-                key.hash(state);
-                hash_literal(value, state);
-            }
-        }
-    }
-}
-
-fn hash_spatial_coordinates<H: Hasher>(
-    coordinates: &graphforge_core::SpatialCoordinates,
-    state: &mut H,
-) {
-    use graphforge_core::SpatialCoordinates;
-    fn point<H: Hasher>(value: &[f64; 2], state: &mut H) {
-        value[0].to_bits().hash(state);
-        value[1].to_bits().hash(state);
-    }
-    match coordinates {
-        SpatialCoordinates::Point(value) => {
-            0u8.hash(state);
-            point(value, state);
-        }
-        SpatialCoordinates::LineString(values) => {
-            1u8.hash(state);
-            values.len().hash(state);
-            for value in values {
-                point(value, state);
-            }
-        }
-        SpatialCoordinates::Polygon(rings) => {
-            2u8.hash(state);
-            rings.len().hash(state);
-            for ring in rings {
-                ring.len().hash(state);
-                for value in ring {
-                    point(value, state);
-                }
-            }
-        }
-        SpatialCoordinates::MultiPoint(values) => {
-            3u8.hash(state);
-            values.len().hash(state);
-            for value in values {
-                point(value, state);
-            }
-        }
-        SpatialCoordinates::MultiLineString(lines) => {
-            4u8.hash(state);
-            lines.len().hash(state);
-            for line in lines {
-                line.len().hash(state);
-                for value in line {
-                    point(value, state);
-                }
-            }
-        }
-        SpatialCoordinates::MultiPolygon(polygons) => {
-            5u8.hash(state);
-            polygons.len().hash(state);
-            for polygon in polygons {
-                polygon.len().hash(state);
-                for ring in polygon {
-                    ring.len().hash(state);
-                    for value in ring {
-                        point(value, state);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn hash_props<H: Hasher>(props: &[(String, IrLiteral)], state: &mut H) {
-    props.len().hash(state);
-    for (k, v) in props {
-        k.hash(state);
-        hash_literal(v, state);
-    }
-}
-
-// Computed-property values are `Expr` (not `Hash`); hash the count and keys and
-// let `PartialEq` disambiguate the exprs (matching `GraphSetNode::hash`).
-fn hash_computed<H: Hasher>(props: &[(String, Expr)], state: &mut H) {
-    props.len().hash(state);
-    for (k, _) in props {
-        k.hash(state);
-    }
-}
-
-impl Hash for GraphCreateNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.input.hash(state);
-        self.nodes.len().hash(state);
-        for n in &self.nodes {
-            n.var.hash(state);
-            n.label_ids.hash(state);
-            n.label_names.hash(state);
-            n.is_reference.hash(state);
-            hash_props(&n.properties, state);
-            hash_computed(&n.computed_properties, state);
-        }
-        self.edges.len().hash(state);
-        for e in &self.edges {
-            e.var.hash(state);
-            e.src.hash(state);
-            e.dst.hash(state);
-            e.rel_type_id.hash(state);
-            e.rel_type_name.hash(state);
-            e.direction.hash(state);
-            hash_props(&e.properties, state);
-            hash_computed(&e.computed_properties, state);
-        }
-        self.dir.hash(state);
-        self.mode.hash(state);
-        self.semantic_composition_fingerprint.hash(state);
-        self.emit_rows.hash(state);
-    }
-}
 
 impl UserDefinedLogicalNodeCore for GraphCreateNode {
     fn name(&self) -> &str {
@@ -1345,20 +1152,11 @@ impl UserDefinedLogicalNodeCore for GraphCreateNode {
                 }
             }
         }
-        // Preserve emit-rows mode + its output schema (a plain `new` would reset
-        // to summary mode and drop the created-rows schema).
-        if self.emit_rows {
-            Ok(Self::new_emitting(
-                input,
-                nodes,
-                edges,
-                self.dir.clone(),
-                self.mode,
-                self.schema.clone(),
-            ))
-        } else {
-            Ok(Self::new(input, nodes, edges, self.dir.clone(), self.mode))
-        }
+        let mut node = self.clone();
+        node.input = input;
+        node.nodes = nodes;
+        node.edges = edges;
+        Ok(node)
     }
 }
 
@@ -1384,11 +1182,10 @@ pub struct DeleteTarget {
 /// Logical node for `DELETE` / `DETACH DELETE` (#740): a delete specification
 /// driven by an input plan (the preceding `MATCH`).
 ///
-/// Like [`GraphCreateNode`], the project directory and ontology mode are baked
-/// in at lowering time (the `ExtensionPlanner` sees only the DataFusion session
-/// state). The input rows supply the identities of the entities to delete; the
+/// Like [`GraphCreateNode`], execution requires an explicit write binding.
+/// The input rows supply the identities of the entities to delete; the
 /// node emits a one-row write summary `nodes_deleted` / `edges_deleted`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GraphDeleteNode {
     /// Input plan whose rows carry the matched entities' identities.
     pub input: Arc<LogicalPlan>,
@@ -1396,14 +1193,19 @@ pub struct GraphDeleteNode {
     pub targets: Vec<DeleteTarget>,
     /// `true` for `DETACH DELETE` (also remove a node's incident edges).
     pub detach: bool,
-    /// Target project directory.
-    pub dir: PathBuf,
-    /// Ontology mode (drives writer edge / property routing).
-    pub mode: OntologyMode,
+    /// Semantic identities required by the write binding.
+    pub write_contract: Option<GraphReadContract>,
     schema: DFSchemaRef,
 }
 
 impl GraphDeleteNode {
+    /// Attach logical binding assumptions, never executable authority.
+    #[must_use]
+    pub fn with_write_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.write_contract = contract;
+        self
+    }
+
     /// Build the write-summary Arrow schema (`nodes_deleted`, `edges_deleted`).
     #[must_use]
     pub fn summary_schema() -> Arc<Schema> {
@@ -1415,53 +1217,22 @@ impl GraphDeleteNode {
 
     /// Create a new graph-delete node over `input`.
     #[must_use]
-    pub fn new(
-        input: Arc<LogicalPlan>,
-        targets: Vec<DeleteTarget>,
-        detach: bool,
-        dir: PathBuf,
-        mode: OntologyMode,
-    ) -> Self {
+    pub fn new(input: Arc<LogicalPlan>, targets: Vec<DeleteTarget>, detach: bool) -> Self {
         let schema = Arc::new(
             DFSchema::try_from(Self::summary_schema())
                 .expect("write-summary schema is always valid"),
         );
         Self {
+            write_contract: None,
             input,
             targets,
             detach,
-            dir,
-            mode,
             schema,
         }
     }
 }
 
 impl_partial_ord!(GraphDeleteNode);
-
-// `schema` is derived from the rest, so it is excluded from `PartialEq`/`Hash`
-// (it is not part of the node's logical identity).
-impl PartialEq for GraphDeleteNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.targets == other.targets
-            && self.detach == other.detach
-            && self.dir == other.dir
-            && self.mode == other.mode
-    }
-}
-
-impl Eq for GraphDeleteNode {}
-
-impl Hash for GraphDeleteNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.input.hash(state);
-        self.targets.hash(state);
-        self.detach.hash(state);
-        self.dir.hash(state);
-        self.mode.hash(state);
-    }
-}
 
 impl UserDefinedLogicalNodeCore for GraphDeleteNode {
     fn name(&self) -> &str {
@@ -1496,13 +1267,9 @@ impl UserDefinedLogicalNodeCore for GraphDeleteNode {
                 .next()
                 .unwrap_or_else(|| (*self.input).clone()),
         );
-        Ok(Self::new(
-            input,
-            self.targets.clone(),
-            self.detach,
-            self.dir.clone(),
-            self.mode,
-        ))
+        let mut node = self.clone();
+        node.input = input;
+        Ok(node)
     }
 }
 
@@ -1519,10 +1286,10 @@ impl UserDefinedLogicalNodeCore for GraphDeleteNode {
 ///
 /// The property-file **stem** is resolved per row in the exec layer, not baked
 /// here: a node uses its `type_id` (→ `_untyped` in Exploratory mode, else the
-/// entity name from [`GraphSetNode::type_id_to_entity_name`]); an edge uses its
+/// entity name from the admitted execution context); an edge uses its
 /// `rel_type_name` column (edge property files are keyed by relation name in
 /// every mode).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SetTarget {
     /// Pattern variable id (`VarId.0`).
     pub var: u32,
@@ -1550,30 +1317,30 @@ pub struct RemoveTarget {
 /// Logical node for `SET <prop> = <expr>` (#791): a property-write driven by an
 /// input plan (the preceding `MATCH`).
 ///
-/// Mirrors [`GraphDeleteNode`] — project directory and ontology mode are baked
-/// in at lowering time. Each target's value expression is evaluated per matched
-/// row by the physical layer, the resulting per-row literal written to the
-/// entity's property file. Node-target file stems are resolved per row from the
-/// row's `type_id` via [`type_id_to_entity_name`](Self::type_id_to_entity_name)
-/// (handles an untyped `MATCH (n)` whose rows span several entity types). The
+/// Each target's value expression is evaluated per matched row by the physical
+/// layer. Property routes are resolved from the admitted execution context and
+/// each row's checked identity, including an untyped `MATCH (n)` whose rows span
+/// several entity types. The
 /// node emits a one-row summary `properties_set`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GraphSetNode {
     /// Input plan whose rows carry the matched entities' identities + columns.
     pub input: Arc<LogicalPlan>,
     /// The property assignments, with resolved node/edge kind + value expr.
     pub targets: Vec<SetTarget>,
-    /// Maps a node `type_id` to its property-file entity stem, for per-row node
-    /// stem resolution (an empty map / missing id falls back to `_untyped`).
-    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
-    /// Target project directory.
-    pub dir: PathBuf,
-    /// Ontology mode (drives node property-file routing).
-    pub mode: OntologyMode,
+    /// Semantic identities required by the write binding.
+    pub write_contract: Option<GraphReadContract>,
     schema: DFSchemaRef,
 }
 
 impl GraphSetNode {
+    /// Attach logical binding assumptions, never executable authority.
+    #[must_use]
+    pub fn with_write_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.write_contract = contract;
+        self
+    }
+
     /// Build the write-summary Arrow schema (`properties_set`).
     #[must_use]
     pub fn summary_schema() -> Arc<Schema> {
@@ -1586,60 +1353,21 @@ impl GraphSetNode {
 
     /// Create a new graph-set node over `input`.
     #[must_use]
-    pub fn new(
-        input: Arc<LogicalPlan>,
-        targets: Vec<SetTarget>,
-        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
-        dir: PathBuf,
-        mode: OntologyMode,
-    ) -> Self {
+    pub fn new(input: Arc<LogicalPlan>, targets: Vec<SetTarget>) -> Self {
         let schema = Arc::new(
             DFSchema::try_from(Self::summary_schema())
                 .expect("write-summary schema is always valid"),
         );
         Self {
+            write_contract: None,
             input,
             targets,
-            type_id_to_entity_name,
-            dir,
-            mode,
             schema,
         }
     }
 }
 
 impl_partial_ord!(GraphSetNode);
-
-// `schema` is derived; excluded from `PartialEq`/`Hash` (not part of logical
-// identity). The value exprs ARE part of identity, so they are included.
-impl PartialEq for GraphSetNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.targets == other.targets
-            && self.dir == other.dir
-            && self.mode == other.mode
-            && self.type_id_to_entity_name == other.type_id_to_entity_name
-    }
-}
-
-impl Eq for GraphSetNode {}
-
-impl Hash for GraphSetNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.input.hash(state);
-        // `SetTarget` is not `Hash` (it holds an `Expr`, which is not `Hash`);
-        // hash the stable scalar fields and let `PartialEq` disambiguate the
-        // value exprs. Plan-node hashing only needs to be consistent with `Eq`
-        // for buckets, not collision-free.
-        for t in &self.targets {
-            t.var.hash(state);
-            t.is_edge.hash(state);
-            t.prop_name.hash(state);
-        }
-        self.dir.hash(state);
-        self.mode.hash(state);
-    }
-}
 
 impl UserDefinedLogicalNodeCore for GraphSetNode {
     fn name(&self) -> &str {
@@ -1679,35 +1407,34 @@ impl UserDefinedLogicalNodeCore for GraphSetNode {
                 t.value = e;
             }
         }
-        Ok(Self::new(
-            input,
-            targets,
-            self.type_id_to_entity_name.clone(),
-            self.dir.clone(),
-            self.mode,
-        ))
+        let mut node = self.clone();
+        node.input = input;
+        node.targets = targets;
+        Ok(node)
     }
 }
 
 /// Logical node for `REMOVE <prop>` (#791): the value-less dual of
 /// [`GraphSetNode`]. Emits a one-row summary `properties_removed`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GraphRemoveNode {
     /// Input plan whose rows carry the matched entities' identities + columns.
     pub input: Arc<LogicalPlan>,
     /// The properties to remove, with resolved node/edge kind.
     pub targets: Vec<RemoveTarget>,
-    /// Maps a node `type_id` to its property-file entity stem (see
-    /// [`GraphSetNode::type_id_to_entity_name`]).
-    pub type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
-    /// Target project directory.
-    pub dir: PathBuf,
-    /// Ontology mode (drives node property-file routing).
-    pub mode: OntologyMode,
+    /// Semantic identities required by the write binding.
+    pub write_contract: Option<GraphReadContract>,
     schema: DFSchemaRef,
 }
 
 impl GraphRemoveNode {
+    /// Attach logical binding assumptions, never executable authority.
+    #[must_use]
+    pub fn with_write_contract(mut self, contract: Option<GraphReadContract>) -> Self {
+        self.write_contract = contract;
+        self
+    }
+
     /// Build the write-summary Arrow schema (`properties_removed`).
     #[must_use]
     pub fn summary_schema() -> Arc<Schema> {
@@ -1720,50 +1447,21 @@ impl GraphRemoveNode {
 
     /// Create a new graph-remove node over `input`.
     #[must_use]
-    pub fn new(
-        input: Arc<LogicalPlan>,
-        targets: Vec<RemoveTarget>,
-        type_id_to_entity_name: HashMap<graphforge_value::EntityTypeId, String>,
-        dir: PathBuf,
-        mode: OntologyMode,
-    ) -> Self {
+    pub fn new(input: Arc<LogicalPlan>, targets: Vec<RemoveTarget>) -> Self {
         let schema = Arc::new(
             DFSchema::try_from(Self::summary_schema())
                 .expect("write-summary schema is always valid"),
         );
         Self {
+            write_contract: None,
             input,
             targets,
-            type_id_to_entity_name,
-            dir,
-            mode,
             schema,
         }
     }
 }
 
 impl_partial_ord!(GraphRemoveNode);
-
-impl PartialEq for GraphRemoveNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.targets == other.targets
-            && self.dir == other.dir
-            && self.mode == other.mode
-            && self.type_id_to_entity_name == other.type_id_to_entity_name
-    }
-}
-
-impl Eq for GraphRemoveNode {}
-
-impl Hash for GraphRemoveNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.input.hash(state);
-        self.targets.hash(state);
-        self.dir.hash(state);
-        self.mode.hash(state);
-    }
-}
 
 impl UserDefinedLogicalNodeCore for GraphRemoveNode {
     fn name(&self) -> &str {
@@ -1793,13 +1491,9 @@ impl UserDefinedLogicalNodeCore for GraphRemoveNode {
                 .next()
                 .unwrap_or_else(|| (*self.input).clone()),
         );
-        Ok(Self::new(
-            input,
-            self.targets.clone(),
-            self.type_id_to_entity_name.clone(),
-            self.dir.clone(),
-            self.mode,
-        ))
+        let mut node = self.clone();
+        node.input = input;
+        Ok(node)
     }
 }
 
@@ -2189,8 +1883,6 @@ mod tests {
                 is_reference: false,
             }],
             vec![],
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
         );
         assert_eq!(UserDefinedLogicalNodeCore::name(&node), "GraphCreate");
         // Input-driven now (one CREATE per input row).
@@ -2217,8 +1909,6 @@ mod tests {
                     is_reference: false,
                 }],
                 vec![],
-                PathBuf::from("/tmp/gf"),
-                OntologyMode::Exploratory,
             )
         };
         let (a, b) = (mk(), mk());
@@ -2228,6 +1918,111 @@ mod tests {
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn mutation_literal_keys_are_reflexive_and_hash_consistent() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+        use std::collections::hash_map::DefaultHasher;
+        fn make(value: IrLiteral) -> GraphCreateNode {
+            GraphCreateNode::new(
+                empty_plan(),
+                vec![ResolvedNodeSpec {
+                    var: 0,
+                    label_ids: vec![],
+                    label_names: vec!["Place".into()],
+                    properties: vec![("value".into(), value)],
+                    computed_properties: vec![],
+                    is_reference: false,
+                }],
+                vec![],
+            )
+        }
+        fn hash(node: &GraphCreateNode) -> u64 {
+            let mut hash = DefaultHasher::new();
+            node.hash(&mut hash);
+            hash.finish()
+        }
+        let spatial = |value| {
+            IrLiteral::Spatial(SpatialValue {
+                spatial_type: SpatialType {
+                    geometry: SpatialGeometryType::Point,
+                    crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+                },
+                coordinates: SpatialCoordinates::Point([value, 0.0]),
+                extension_name: Some("geoarrow.point".into()),
+                extension_metadata: None,
+            })
+        };
+        for wrap in [
+            |value| IrLiteral::Float(value),
+            |value| {
+                IrLiteral::List(vec![IrLiteral::Map(vec![(
+                    "x".into(),
+                    IrLiteral::Float(value),
+                )])])
+            },
+        ] {
+            let positive = make(wrap(0.0));
+            let negative = make(wrap(-0.0));
+            assert_eq!(positive, negative);
+            assert_eq!(hash(&positive), hash(&negative));
+            let nan = make(wrap(f64::from_bits(0x7ff8_0000_0000_0001)));
+            assert_eq!(nan, nan.clone());
+            assert_eq!(hash(&nan), hash(&nan.clone()));
+            assert_ne!(nan, make(wrap(f64::from_bits(0x7ff8_0000_0000_0002))));
+        }
+        assert_eq!(make(spatial(0.0)), make(spatial(-0.0)));
+        assert_eq!(hash(&make(spatial(0.0))), hash(&make(spatial(-0.0))));
+        let nan = make(spatial(f64::NAN));
+        assert_eq!(nan, nan.clone());
+        assert_eq!(hash(&nan), hash(&nan.clone()));
+        assert_ne!(
+            make(IrLiteral::Map(vec![
+                ("a".into(), IrLiteral::Int(1)),
+                ("b".into(), IrLiteral::Int(2))
+            ])),
+            make(IrLiteral::Map(vec![
+                ("b".into(), IrLiteral::Int(2)),
+                ("a".into(), IrLiteral::Int(1))
+            ]))
+        );
+        let original = make(IrLiteral::Int(1));
+        let mut computed = original.clone();
+        computed.nodes[0]
+            .computed_properties
+            .push(("extra".into(), datafusion::logical_expr::lit(1)));
+        assert_ne!(original, computed);
+        for value in [0.0, -0.0, f64::NAN] {
+            let mut node = original.clone();
+            node.nodes[0]
+                .computed_properties
+                .push(("computed".into(), datafusion::logical_expr::lit(value)));
+            assert_eq!(node, node.clone());
+            assert_eq!(hash(&node), hash(&node.clone()));
+        }
+        let emitting = GraphCreateNode::new_emitting(
+            original.input.clone(),
+            original.nodes.clone(),
+            original.edges.clone(),
+            original.schema.clone(),
+        );
+        assert_ne!(
+            original, emitting,
+            "output mode remains semantic even with the same schema"
+        );
+        let mut composition = original.clone();
+        composition.semantic_composition_fingerprint = Some("semantic-contract".into());
+        assert_ne!(original, composition);
+        let rebuilt = composition
+            .with_exprs_and_inputs(
+                composition.expressions(),
+                vec![(*composition.input).clone()],
+            )
+            .unwrap();
+        assert_eq!(composition, rebuilt);
     }
 
     #[test]
@@ -2260,8 +2055,6 @@ mod tests {
                     is_reference: false,
                 }],
                 vec![],
-                PathBuf::from("/tmp/gf"),
-                OntologyMode::Exploratory,
             );
             let mut hasher = DefaultHasher::new();
             node.hash(&mut hasher);
@@ -2325,8 +2118,6 @@ mod tests {
                     is_reference: false,
                 }],
                 vec![],
-                PathBuf::from("/tmp/gf"),
-                OntologyMode::Strict,
             )
         };
         let (first, second) = (make(), make());
@@ -2347,9 +2138,6 @@ mod tests {
                 prop_name: "age".to_owned(),
                 value,
             }],
-            HashMap::new(),
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Exploratory,
         )
     }
 
@@ -2361,9 +2149,6 @@ mod tests {
                 is_edge: false,
                 prop_name: "age".to_owned(),
             }],
-            HashMap::new(),
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Exploratory,
         )
     }
 
@@ -2450,8 +2235,6 @@ mod tests {
                 properties: vec![],
                 computed_properties: vec![("weight".into(), lit(2_i64))],
             }],
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
             output_schema.clone(),
         );
         assert!(node.emits_rows());
@@ -2486,8 +2269,6 @@ mod tests {
                 is_edge: false,
             }],
             true,
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Exploratory,
         );
         assert_eq!(UserDefinedLogicalNodeCore::name(&node), "GraphDelete");
         assert_eq!(UserDefinedLogicalNodeCore::inputs(&node).len(), 1);
@@ -2503,13 +2284,7 @@ mod tests {
         assert_eq!(node, rebuilt);
         assert_ne!(
             node,
-            GraphDeleteNode::new(
-                empty_plan(),
-                node.targets.clone(),
-                false,
-                node.dir.clone(),
-                node.mode,
-            )
+            GraphDeleteNode::new(empty_plan(), node.targets.clone(), false)
         );
         let mut first = DefaultHasher::new();
         let mut second = DefaultHasher::new();
@@ -2524,20 +2299,8 @@ mod tests {
 
         let set = set_node(lit(1_i64));
         let remove = remove_node();
-        let create = GraphCreateNode::new(
-            empty_plan(),
-            vec![],
-            vec![],
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
-        );
-        let delete = GraphDeleteNode::new(
-            empty_plan(),
-            vec![],
-            false,
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
-        );
+        let create = GraphCreateNode::new(empty_plan(), vec![], vec![]);
+        let delete = GraphDeleteNode::new(empty_plan(), vec![], false);
 
         assert_eq!(create.partial_cmp(&create), None);
         assert_eq!(delete.partial_cmp(&delete), None);
@@ -2658,20 +2421,8 @@ mod tests {
             "GraphMerge"
         );
 
-        let create = GraphCreateNode::new(
-            empty_plan(),
-            vec![],
-            vec![],
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
-        );
-        let delete = GraphDeleteNode::new(
-            empty_plan(),
-            vec![],
-            true,
-            PathBuf::from("/tmp/gf"),
-            OntologyMode::Strict,
-        );
+        let create = GraphCreateNode::new(empty_plan(), vec![], vec![]);
+        let delete = GraphDeleteNode::new(empty_plan(), vec![], true);
         let set = set_node(lit(1_i64));
         let remove = remove_node();
         for rendered in [

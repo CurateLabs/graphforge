@@ -62,6 +62,7 @@ pub(crate) mod algorithm_embedding_hashgnn;
 mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
 pub mod read_resource;
+pub mod write_resource;
 pub use algorithm_embedding_options::validate_embedding_options;
 pub use algorithm_graph::AlgorithmProjectionFingerprint;
 pub(crate) mod algorithm_arrow_sink;
@@ -549,8 +550,16 @@ fn dynamic_struct_contains_node(fields: &arrow::datatypes::Fields) -> bool {
 impl GraphCreateExec {
     /// Build a physical CREATE node from its logical counterpart and planned
     /// input.
-    #[must_use]
-    pub fn new(node: &GraphCreateNode, input: Arc<dyn ExecutionPlan>) -> Self {
+    ///
+    /// # Errors
+    /// Rejects a write resource incompatible with the logical binding contract.
+    pub fn new(
+        node: &GraphCreateNode,
+        input: Arc<dyn ExecutionPlan>,
+        resource: &write_resource::BoundWriteResource,
+    ) -> Result<Self, DataFusionError> {
+        resource.validate(node.write_contract.as_ref())?;
+        resource.validate_composition(node.semantic_composition_fingerprint.as_deref())?;
         let emit_rows = node.emits_rows();
         // Summary mode → the fixed write-summary schema; emit-rows mode → the
         // created-entity row schema the logical node declares.
@@ -586,20 +595,20 @@ impl GraphCreateExec {
                 })
             })
             .collect();
-        Self {
+        Ok(Self {
             input,
             nodes: node.nodes.clone(),
             edges: node.edges.clone(),
             ref_cols,
             in_df_schema: in_schema.clone(),
-            dir: node.dir.clone(),
-            mode: node.mode,
+            dir: resource.dir.clone(),
+            mode: resource.mode,
             semantic_composition_fingerprint: node.semantic_composition_fingerprint.clone(),
             schema,
             emit_rows,
             effects: Arc::new(std::sync::Mutex::new(CreateTally::default())),
             props,
-        }
+        })
     }
 
     /// Read back the accumulated side-effect tally (emit-rows mode), for
@@ -1385,8 +1394,15 @@ pub struct GraphDeleteExec {
 
 impl GraphDeleteExec {
     /// Build the physical DELETE node from its logical counterpart and input.
-    #[must_use]
-    pub fn new(node: &GraphDeleteNode, input: Arc<dyn ExecutionPlan>) -> Self {
+    ///
+    /// # Errors
+    /// Rejects a write resource incompatible with the logical binding contract.
+    pub fn new(
+        node: &GraphDeleteNode,
+        input: Arc<dyn ExecutionPlan>,
+        resource: &write_resource::BoundWriteResource,
+    ) -> Result<Self, DataFusionError> {
+        resource.validate(node.write_contract.as_ref())?;
         let schema = GraphDeleteNode::summary_schema();
         let props = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -1410,14 +1426,14 @@ impl GraphDeleteExec {
                 })
             })
             .collect();
-        Self {
+        Ok(Self {
             input,
             cols,
             detach: node.detach,
-            dir: node.dir.clone(),
+            dir: resource.dir.clone(),
             schema,
             props,
-        }
+        })
     }
 }
 
@@ -1958,8 +1974,15 @@ pub struct GraphSetExec {
 
 impl GraphSetExec {
     /// Build the physical SET node from its logical counterpart and input.
-    #[must_use]
-    pub fn new(node: &GraphSetNode, input: Arc<dyn ExecutionPlan>) -> Self {
+    ///
+    /// # Errors
+    /// Rejects a write resource incompatible with the logical binding contract.
+    pub fn new(
+        node: &GraphSetNode,
+        input: Arc<dyn ExecutionPlan>,
+        resource: &write_resource::BoundWriteResource,
+    ) -> Result<Self, DataFusionError> {
+        resource.validate(node.write_contract.as_ref())?;
         let schema = GraphSetNode::summary_schema();
         let props = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -1976,16 +1999,16 @@ impl GraphSetExec {
                 Some((col, t.value.clone()))
             })
             .collect();
-        Self {
+        Ok(Self {
             input,
             targets,
-            type_id_to_entity_name: node.type_id_to_entity_name.clone(),
-            mode: node.mode,
-            dir: node.dir.clone(),
+            type_id_to_entity_name: resource.type_map.clone(),
+            mode: resource.mode,
+            dir: resource.dir.clone(),
             in_df_schema,
             schema,
             props,
-        }
+        })
     }
 }
 
@@ -2099,8 +2122,15 @@ pub struct GraphRemoveExec {
 
 impl GraphRemoveExec {
     /// Build the physical REMOVE node from its logical counterpart and input.
-    #[must_use]
-    pub fn new(node: &GraphRemoveNode, input: Arc<dyn ExecutionPlan>) -> Self {
+    ///
+    /// # Errors
+    /// Rejects a write resource incompatible with the logical binding contract.
+    pub fn new(
+        node: &GraphRemoveNode,
+        input: Arc<dyn ExecutionPlan>,
+        resource: &write_resource::BoundWriteResource,
+    ) -> Result<Self, DataFusionError> {
+        resource.validate(node.write_contract.as_ref())?;
         let schema = GraphRemoveNode::summary_schema();
         let props = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -2116,15 +2146,15 @@ impl GraphRemoveExec {
                 WriteCol::resolve(in_df_schema, t.var, t.is_edge, &t.prop_name)
             })
             .collect();
-        Self {
+        Ok(Self {
             input,
             targets,
-            type_id_to_entity_name: node.type_id_to_entity_name.clone(),
-            mode: node.mode,
-            dir: node.dir.clone(),
+            type_id_to_entity_name: resource.type_map.clone(),
+            mode: resource.mode,
+            dir: resource.dir.clone(),
             schema,
             props,
-        }
+        })
     }
 }
 
@@ -4735,25 +4765,36 @@ impl ExtensionPlanner for GraphForgeExtensionPlanner {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphCreate requires one physical input".into())
             })?;
-            return Ok(Some(Arc::new(GraphCreateExec::new(create, input))));
+            let resource = write_resource::required(session_state, create.write_contract.as_ref())?;
+            resource.validate_composition(create.semantic_composition_fingerprint.as_deref())?;
+            return Ok(Some(Arc::new(GraphCreateExec::new(
+                create, input, &resource,
+            )?)));
         }
         if let Some(delete) = node.as_any().downcast_ref::<GraphDeleteNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphDelete requires one physical input".into())
             })?;
-            return Ok(Some(Arc::new(GraphDeleteExec::new(delete, input))));
+            let resource = write_resource::required(session_state, delete.write_contract.as_ref())?;
+            return Ok(Some(Arc::new(GraphDeleteExec::new(
+                delete, input, &resource,
+            )?)));
         }
         if let Some(set) = node.as_any().downcast_ref::<GraphSetNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphSet requires one physical input".into())
             })?;
-            return Ok(Some(Arc::new(GraphSetExec::new(set, input))));
+            let resource = write_resource::required(session_state, set.write_contract.as_ref())?;
+            return Ok(Some(Arc::new(GraphSetExec::new(set, input, &resource)?)));
         }
         if let Some(remove) = node.as_any().downcast_ref::<GraphRemoveNode>() {
             let input = physical_inputs.first().cloned().ok_or_else(|| {
                 DataFusionError::Internal("GraphRemove requires one physical input".into())
             })?;
-            return Ok(Some(Arc::new(GraphRemoveExec::new(remove, input))));
+            let resource = write_resource::required(session_state, remove.write_contract.as_ref())?;
+            return Ok(Some(Arc::new(GraphRemoveExec::new(
+                remove, input, &resource,
+            )?)));
         }
         if let Some(expand) = node.as_any().downcast_ref::<graphforge_plan::ExpandNode>() {
             return plan_expand_extension(expand, physical_inputs, session_state).map(Some);
@@ -4967,6 +5008,33 @@ struct OrdinalIdentityConfig {
 }
 
 impl ExecutionSession {
+    /// Remove mutation permission while retaining this session's read authority.
+    #[must_use]
+    pub fn restrict_to_reads(mut self) -> Self {
+        let mut state = self.ctx.state();
+        if let Some(resource) = state
+            .config()
+            .get_extension::<read_resource::GraphReadContext>()
+        {
+            state
+                .config_mut()
+                .set_extension(Arc::new(write_resource::GraphWriteContext {
+                    resource,
+                    writable: false,
+                }));
+        }
+        self.ctx = SessionContext::new_with_state(state);
+        self
+    }
+
+    /// Obtain the explicit admitted write target for physical operator construction.
+    ///
+    /// # Errors
+    /// Returns a typed error for missing or read-only mutation authority.
+    pub fn write_resource(&self) -> Result<write_resource::BoundWriteResource, GfError> {
+        write_resource::required(&self.ctx.state(), None).map_err(GfError::from_plan_error)
+    }
+
     /// Create a read/query session.
     ///
     /// Write execution (`CREATE`) requires a project directory — use
@@ -5111,19 +5179,26 @@ impl ExecutionSession {
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
         let catalog = Arc::new(catalog);
+        let read_resource = Arc::new(read_resource::GraphReadContext {
+            dir: dir.clone(),
+            mode,
+            catalog: catalog.clone(),
+            ontology: ontology.clone(),
+        });
         let mut config = datafusion::prelude::SessionConfig::new()
-            .with_extension(Arc::new(read_resource::GraphReadContext {
-                dir: dir.clone(),
-                mode,
-                catalog: catalog.clone(),
-                ontology: ontology.clone(),
-            }))
+            .with_extension(read_resource.clone())
             .with_extension(Arc::new(AdjacencyProviderExt(provider)))
             .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt::new(
                 resources.io_concurrency,
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
+        if !dir.as_os_str().is_empty() {
+            config.set_extension(Arc::new(write_resource::GraphWriteContext {
+                resource: read_resource,
+                writable: true,
+            }));
+        }
         if identity.session.is_some() || identity.required {
             config = config.with_extension(Arc::new(OrdinalIdentityResolverExt(identity.session)));
         }
@@ -5222,12 +5297,10 @@ impl ExecutionSession {
         {
             return self.execute_write_statement_with_params(plan, params).await;
         }
-        if self.dir.as_os_str().is_empty() {
-            return Err(GfError::Execution(
-                "execute_create requires a write target; build the session with new_with_target"
-                    .into(),
-            ));
-        }
+        let resource = self.write_resource()?;
+        resource
+            .validate_composition(plan.composition_fingerprint.as_deref())
+            .map_err(GfError::from_plan_error)?;
 
         // Pass the catalog: although CREATE has no scans, the lowerer resolves
         // each edge's relation-type name from it (the ontology map alone is
@@ -5237,8 +5310,8 @@ impl ExecutionSession {
         let lowerer = GraphPlanLowerer::new_for_writes(
             Some(&self.catalog),
             self.ontology.as_ref(),
-            &self.dir,
-            self.mode,
+            &resource.dir,
+            resource.mode,
         )?;
         let logical = bind_query_params(lowerer.lower_plan(plan)?, params)?;
 
@@ -5382,18 +5455,16 @@ impl ExecutionSession {
         plan: &GraphPlan,
         params: &HashMap<String, graphforge_ir::IrLiteral>,
     ) -> Result<ExecutionResult, GfError> {
-        if self.dir.as_os_str().is_empty() {
-            return Err(GfError::Execution(
-                "write statements require a write target; build the session with new_with_target"
-                    .into(),
-            ));
-        }
+        let resource = self.write_resource()?;
+        resource
+            .validate_composition(plan.composition_fingerprint.as_deref())
+            .map_err(GfError::from_plan_error)?;
         let split = write_driver::split_write_plan(&plan.ops)?;
         let lowerer = GraphPlanLowerer::new_for_writes(
             Some(&self.catalog),
             self.ontology.as_ref(),
-            &self.dir,
-            self.mode,
+            &resource.dir,
+            resource.mode,
         )?;
 
         // Run the read prefix once, keeping the variable registrations the
@@ -5418,12 +5489,12 @@ impl ExecutionSession {
         let env = write_driver::PhaseEnv {
             lowerer: &lowerer,
             exprs: &plan.exprs,
-            dir: &self.dir,
-            mode: self.mode,
+            dir: &resource.dir,
+            mode: resource.mode,
             params,
             type_map: lowerer.entity_name_map(),
         };
-        let mut wctx = write_driver::StatementWriteContext::new(&self.dir, self.mode)?
+        let mut wctx = write_driver::StatementWriteContext::new(&resource.dir, resource.mode)?
             .with_semantic_composition_fingerprint(self.semantic_composition_fingerprint.clone());
         let create_retention =
             write_driver::create_retention_by_write(&plan.ops, &plan.exprs, &split);
@@ -5477,9 +5548,9 @@ impl ExecutionSession {
             }
             None => None,
         };
-        write_driver::commit_statement(&mut wctx, &self.dir)?;
+        write_driver::commit_statement(&mut wctx, &resource.dir)?;
         self.catalog
-            .refresh_property_inventory(&self.dir)
+            .refresh_property_inventory(&resource.dir)
             .map_err(GfError::from_execution_error)?;
         self.adjacency_provider.invalidate();
 
@@ -6666,11 +6737,11 @@ mod tests {
                     is_reference: false,
                 }],
                 vec![],
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
                 Arc::new(DFSchema::try_from(output_schema.as_ref().clone()).unwrap()),
             );
-            let exec = Arc::new(GraphCreateExec::new(&node, physical));
+            let exec = Arc::new(
+                GraphCreateExec::new(&node, physical, &test_write_resource(dir.path())).unwrap(),
+            );
             assert!(exec.emits_rows());
             let batches = collect(exec.clone(), SessionContext::new().task_ctx())
                 .await
@@ -6701,12 +6772,84 @@ mod tests {
         );
     }
 
+    fn test_write_resource(dir: &std::path::Path) -> write_resource::BoundWriteResource {
+        let catalog = GraphCatalog::open(dir, None, &RuntimeCatalog::new()).unwrap();
+        ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.to_path_buf(),
+            OntologyMode::Exploratory,
+        )
+        .unwrap()
+        .write_resource()
+        .unwrap()
+    }
+
     fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {
         let logical = Arc::new(LogicalPlanBuilder::empty(false).build().unwrap());
         let physical: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(
             logical.schema().as_arrow().clone(),
         )));
         (logical, physical)
+    }
+
+    #[test]
+    fn direct_write_constructors_reject_incompatible_logical_contracts() {
+        let dir = TempDir::new().unwrap();
+        let mut runtime = RuntimeCatalog::new();
+        runtime.intern_label("DestinationMeaning").unwrap();
+        let catalog = GraphCatalog::open(dir.path(), None, &runtime).unwrap();
+        let mut contract = GraphPlanLowerer::new(Some(&catalog), None)
+            .unwrap()
+            .read_contract();
+        assert_eq!(contract.labels.len(), 1);
+        contract.labels[0].1 = "DifferentMeaning".into();
+        let contract = Some(contract);
+        let session = ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+        )
+        .unwrap();
+        let resource = session.write_resource().unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        let (input, physical) = empty_write_input();
+        let errors = [
+            GraphCreateExec::new(
+                &GraphCreateNode::new(input.clone(), vec![], vec![])
+                    .with_write_contract(contract.clone()),
+                physical.clone(),
+                &resource,
+            )
+            .unwrap_err(),
+            GraphDeleteExec::new(
+                &GraphDeleteNode::new(input.clone(), vec![], false)
+                    .with_write_contract(contract.clone()),
+                physical.clone(),
+                &resource,
+            )
+            .unwrap_err(),
+            GraphSetExec::new(
+                &GraphSetNode::new(input.clone(), vec![]).with_write_contract(contract.clone()),
+                physical.clone(),
+                &resource,
+            )
+            .unwrap_err(),
+            GraphRemoveExec::new(
+                &GraphRemoveNode::new(input, vec![]).with_write_contract(contract),
+                physical,
+                &resource,
+            )
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                error.to_string().contains("GF_WRITE_RESOURCE_INCOMPATIBLE"),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
     }
 
     #[test]
@@ -7209,58 +7352,60 @@ mod tests {
     fn write_execs_expose_stable_plan_contracts_and_reject_invalid_shape() {
         let dir = TempDir::new().unwrap();
         let (logical, physical) = empty_write_input();
-        let create: Arc<dyn ExecutionPlan> = Arc::new(GraphCreateExec::new(
-            &GraphCreateNode::new(
-                logical.clone(),
-                vec![],
-                vec![],
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            ),
-            physical.clone(),
-        ));
-        let delete: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec::new(
-            &GraphDeleteNode::new(
-                logical.clone(),
-                vec![DeleteTarget {
-                    var: 0,
-                    is_edge: false,
-                }],
-                true,
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            ),
-            physical.clone(),
-        ));
-        let set: Arc<dyn ExecutionPlan> = Arc::new(GraphSetExec::new(
-            &GraphSetNode::new(
-                logical.clone(),
-                vec![SetTarget {
-                    var: 0,
-                    is_edge: false,
-                    prop_name: "score".into(),
-                    value: lit(1_i64),
-                }],
-                HashMap::new(),
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            ),
-            physical.clone(),
-        ));
-        let remove: Arc<dyn ExecutionPlan> = Arc::new(GraphRemoveExec::new(
-            &GraphRemoveNode::new(
-                logical,
-                vec![RemoveTarget {
-                    var: 0,
-                    is_edge: false,
-                    prop_name: "score".into(),
-                }],
-                HashMap::new(),
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            ),
-            physical,
-        ));
+        let create: Arc<dyn ExecutionPlan> = Arc::new(
+            GraphCreateExec::new(
+                &GraphCreateNode::new(logical.clone(), vec![], vec![]),
+                physical.clone(),
+                &test_write_resource(dir.path()),
+            )
+            .unwrap(),
+        );
+        let delete: Arc<dyn ExecutionPlan> = Arc::new(
+            GraphDeleteExec::new(
+                &GraphDeleteNode::new(
+                    logical.clone(),
+                    vec![DeleteTarget {
+                        var: 0,
+                        is_edge: false,
+                    }],
+                    true,
+                ),
+                physical.clone(),
+                &test_write_resource(dir.path()),
+            )
+            .unwrap(),
+        );
+        let set: Arc<dyn ExecutionPlan> = Arc::new(
+            GraphSetExec::new(
+                &GraphSetNode::new(
+                    logical.clone(),
+                    vec![SetTarget {
+                        var: 0,
+                        is_edge: false,
+                        prop_name: "score".into(),
+                        value: lit(1_i64),
+                    }],
+                ),
+                physical.clone(),
+                &test_write_resource(dir.path()),
+            )
+            .unwrap(),
+        );
+        let remove: Arc<dyn ExecutionPlan> = Arc::new(
+            GraphRemoveExec::new(
+                &GraphRemoveNode::new(
+                    logical,
+                    vec![RemoveTarget {
+                        var: 0,
+                        is_edge: false,
+                        prop_name: "score".into(),
+                    }],
+                ),
+                physical,
+                &test_write_resource(dir.path()),
+            )
+            .unwrap(),
+        );
 
         for (plan, expected_name) in [
             (create, "GraphCreateExec"),
@@ -7303,46 +7448,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (logical, physical) = empty_write_input();
         let plans: Vec<Arc<dyn ExecutionPlan>> = vec![
-            Arc::new(GraphCreateExec::new(
-                &GraphCreateNode::new(
-                    logical.clone(),
-                    vec![],
-                    vec![],
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                ),
-                physical.clone(),
-            )),
-            Arc::new(GraphDeleteExec::new(
-                &GraphDeleteNode::new(
-                    logical.clone(),
-                    vec![],
-                    false,
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                ),
-                physical.clone(),
-            )),
-            Arc::new(GraphSetExec::new(
-                &GraphSetNode::new(
-                    logical.clone(),
-                    vec![],
-                    HashMap::new(),
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                ),
-                physical.clone(),
-            )),
-            Arc::new(GraphRemoveExec::new(
-                &GraphRemoveNode::new(
-                    logical,
-                    vec![],
-                    HashMap::new(),
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                ),
-                physical,
-            )),
+            Arc::new(
+                GraphCreateExec::new(
+                    &GraphCreateNode::new(logical.clone(), vec![], vec![]),
+                    physical.clone(),
+                    &test_write_resource(dir.path()),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                GraphDeleteExec::new(
+                    &GraphDeleteNode::new(logical.clone(), vec![], false),
+                    physical.clone(),
+                    &test_write_resource(dir.path()),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                GraphSetExec::new(
+                    &GraphSetNode::new(logical.clone(), vec![]),
+                    physical.clone(),
+                    &test_write_resource(dir.path()),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                GraphRemoveExec::new(
+                    &GraphRemoveNode::new(logical, vec![]),
+                    physical,
+                    &test_write_resource(dir.path()),
+                )
+                .unwrap(),
+            ),
         ];
 
         for plan in plans {
@@ -7466,48 +7603,33 @@ mod tests {
         let (input, _) = empty_write_input();
         let logical_nodes: Vec<(Arc<dyn UserDefinedLogicalNode>, &str)> = vec![
             (
-                Arc::new(GraphCreateNode::new(
-                    input.clone(),
-                    vec![],
-                    vec![],
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                )),
+                Arc::new(GraphCreateNode::new(input.clone(), vec![], vec![])),
                 "GraphCreateExec",
             ),
             (
-                Arc::new(GraphDeleteNode::new(
-                    input.clone(),
-                    vec![],
-                    false,
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                )),
+                Arc::new(GraphDeleteNode::new(input.clone(), vec![], false)),
                 "GraphDeleteExec",
             ),
             (
-                Arc::new(GraphSetNode::new(
-                    input.clone(),
-                    vec![],
-                    HashMap::new(),
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                )),
+                Arc::new(GraphSetNode::new(input.clone(), vec![])),
                 "GraphSetExec",
             ),
             (
-                Arc::new(GraphRemoveNode::new(
-                    input,
-                    vec![],
-                    HashMap::new(),
-                    dir.path().to_path_buf(),
-                    OntologyMode::Exploratory,
-                )),
+                Arc::new(GraphRemoveNode::new(input, vec![])),
                 "GraphRemoveExec",
             ),
         ];
-        let context = SessionContext::new();
-        let state = context.state();
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        let session = ExecutionSession::new_with_target(
+            catalog,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+        )
+        .unwrap();
+        let state = session.context().state();
+        let missing = SessionContext::new().state();
+        let readonly = session.restrict_to_reads().context().state();
         let planner = GraphForgeQueryPlanner;
 
         for (node, expected_name) in logical_nodes {
@@ -7517,42 +7639,27 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(physical.name(), expected_name);
+            for (state, code) in [
+                (&missing, "GF_WRITE_RESOURCE_MISSING"),
+                (&readonly, "GF_WRITE_RESOURCE_READ_ONLY"),
+            ] {
+                let error = planner
+                    .create_physical_plan(&logical, state)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(code), "{error}");
+            }
         }
     }
 
     #[tokio::test]
     async fn extension_planner_rejects_missing_write_inputs_and_declines_unknown_nodes() {
-        let dir = TempDir::new().unwrap();
         let (input, _) = empty_write_input();
         let nodes: Vec<Arc<dyn UserDefinedLogicalNode>> = vec![
-            Arc::new(GraphCreateNode::new(
-                input.clone(),
-                vec![],
-                vec![],
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            )),
-            Arc::new(GraphDeleteNode::new(
-                input.clone(),
-                vec![],
-                false,
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            )),
-            Arc::new(GraphSetNode::new(
-                input.clone(),
-                vec![],
-                HashMap::new(),
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            )),
-            Arc::new(GraphRemoveNode::new(
-                input,
-                vec![],
-                HashMap::new(),
-                dir.path().to_path_buf(),
-                OntologyMode::Exploratory,
-            )),
+            Arc::new(GraphCreateNode::new(input.clone(), vec![], vec![])),
+            Arc::new(GraphDeleteNode::new(input.clone(), vec![], false)),
+            Arc::new(GraphSetNode::new(input.clone(), vec![])),
+            Arc::new(GraphRemoveNode::new(input, vec![])),
         ];
         let state = SessionContext::new().state();
         let physical_planner = DefaultPhysicalPlanner::default();

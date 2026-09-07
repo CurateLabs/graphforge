@@ -526,7 +526,7 @@ impl<'a> GraphPlanLowerer<'a> {
             self.build_node_shapes(&plan.ops);
         let mut var_map = VarMap::new();
         self.lower_pipeline(&plan.ops, &plan.exprs, &mut var_map)
-            .and_then(|plan| self.attach_read_contract(plan))
+            .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -561,7 +561,7 @@ impl<'a> GraphPlanLowerer<'a> {
         }
     }
 
-    fn attach_read_contract(&self, plan: LogicalPlan) -> Result<LogicalPlan, LoweringError> {
+    fn attach_graph_contract(&self, plan: LogicalPlan) -> Result<LogicalPlan, LoweringError> {
         use datafusion::common::tree_node::Transformed;
         let contract = self.read_contract();
         plan.transform_up_with_subqueries(|mut plan| {
@@ -577,6 +577,22 @@ impl<'a> GraphPlanLowerer<'a> {
                     }
                 }
                 LogicalPlan::Extension(extension) => {
+                    if let Some(node) = extension.node.as_any().downcast_ref::<GraphCreateNode>() {
+                        extension.node =
+                            Arc::new(node.clone().with_write_contract(Some(contract.clone())));
+                    }
+                    if let Some(node) = extension.node.as_any().downcast_ref::<GraphDeleteNode>() {
+                        extension.node =
+                            Arc::new(node.clone().with_write_contract(Some(contract.clone())));
+                    }
+                    if let Some(node) = extension.node.as_any().downcast_ref::<GraphSetNode>() {
+                        extension.node =
+                            Arc::new(node.clone().with_write_contract(Some(contract.clone())));
+                    }
+                    if let Some(node) = extension.node.as_any().downcast_ref::<GraphRemoveNode>() {
+                        extension.node =
+                            Arc::new(node.clone().with_write_contract(Some(contract.clone())));
+                    }
                     if let Some(node) = extension
                         .node
                         .as_any()
@@ -626,7 +642,7 @@ impl<'a> GraphPlanLowerer<'a> {
     ) -> Result<LogicalPlan, GfError> {
         *self.node_shapes.write().expect("node shapes lock poisoned") = self.build_node_shapes(ops);
         self.lower_pipeline(ops, exprs, var_map)
-            .and_then(|plan| self.attach_read_contract(plan))
+            .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -645,7 +661,7 @@ impl<'a> GraphPlanLowerer<'a> {
             schema: input_schema,
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, None)
-            .and_then(|plan| self.attach_read_contract(plan))
+            .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -664,7 +680,7 @@ impl<'a> GraphPlanLowerer<'a> {
             schema: input_schema,
         });
         self.lower_pipeline_from(ops, exprs, var_map, input, Some(pending_nodes))
-            .and_then(|plan| self.attach_read_contract(plan))
+            .and_then(|plan| self.attach_graph_contract(plan))
             .map_err(|e| GfError::Plan(e.to_string()))
     }
 
@@ -2142,7 +2158,7 @@ impl<'a> GraphPlanLowerer<'a> {
         var_map: &mut VarMap,
         feeds_read: bool,
     ) -> Result<LogicalPlan, LoweringError> {
-        let (dir, mode) = self.write_target.ok_or_else(|| {
+        let (_dir, _mode) = self.write_target.ok_or_else(|| {
             LoweringError::UnsupportedExpr(
                 "CREATE requires a write target; lower via new_for_writes".into(),
             )
@@ -2169,24 +2185,17 @@ impl<'a> GraphPlanLowerer<'a> {
                 let v = VarId(spec.var);
                 var_map.insert(v, var_alias(v));
             }
-            let node = GraphCreateNode::new_emitting(
-                Arc::new(input),
-                nodes,
-                edges,
-                dir.to_path_buf(),
-                mode,
-                out_schema,
-            )
-            .with_semantic_composition_fingerprint(
-                self.catalog
-                    .and_then(GraphCatalog::semantic_composition_fingerprint),
-            );
+            let node = GraphCreateNode::new_emitting(Arc::new(input), nodes, edges, out_schema)
+                .with_semantic_composition_fingerprint(
+                    self.catalog
+                        .and_then(GraphCatalog::semantic_composition_fingerprint),
+                );
             return Ok(LogicalPlan::Extension(Extension {
                 node: Arc::new(node),
             }));
         }
 
-        let node = GraphCreateNode::new(Arc::new(input), nodes, edges, dir.to_path_buf(), mode)
+        let node = GraphCreateNode::new(Arc::new(input), nodes, edges)
             .with_semantic_composition_fingerprint(
                 self.catalog
                     .and_then(GraphCatalog::semantic_composition_fingerprint),
@@ -2334,7 +2343,7 @@ impl<'a> GraphPlanLowerer<'a> {
     ) -> Result<LogicalPlan, LoweringError> {
         use datafusion::common::TableReference;
 
-        let (dir, mode) = self.write_target.ok_or_else(|| {
+        let (_dir, _mode) = self.write_target.ok_or_else(|| {
             LoweringError::UnsupportedExpr(
                 "DELETE requires a write target; lower via new_for_writes".into(),
             )
@@ -2369,7 +2378,7 @@ impl<'a> GraphPlanLowerer<'a> {
             })
             .collect::<Result<_, LoweringError>>()?;
 
-        let node = GraphDeleteNode::new(Arc::new(input), targets, detach, dir.to_path_buf(), mode);
+        let node = GraphDeleteNode::new(Arc::new(input), targets, detach);
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         }))
@@ -2435,7 +2444,7 @@ impl<'a> GraphPlanLowerer<'a> {
         exprs: &ExprArena,
         var_map: &VarMap,
     ) -> Result<LogicalPlan, LoweringError> {
-        let (dir, mode) = self.write_target.ok_or_else(|| {
+        let (_dir, _mode) = self.write_target.ok_or_else(|| {
             LoweringError::UnsupportedExpr(
                 "SET requires a write target; lower via new_for_writes".into(),
             )
@@ -2459,13 +2468,7 @@ impl<'a> GraphPlanLowerer<'a> {
             })
             .collect::<Result<_, LoweringError>>()?;
 
-        let node = GraphSetNode::new(
-            Arc::new(input),
-            targets,
-            self.type_id_to_entity_name.clone(),
-            dir.to_path_buf(),
-            mode,
-        );
+        let node = GraphSetNode::new(Arc::new(input), targets);
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         }))
@@ -2478,7 +2481,7 @@ impl<'a> GraphPlanLowerer<'a> {
         items: &[RemovePropItem],
         input: LogicalPlan,
     ) -> Result<LogicalPlan, LoweringError> {
-        let (dir, mode) = self.write_target.ok_or_else(|| {
+        let (_dir, _mode) = self.write_target.ok_or_else(|| {
             LoweringError::UnsupportedExpr(
                 "REMOVE requires a write target; lower via new_for_writes".into(),
             )
@@ -2497,13 +2500,7 @@ impl<'a> GraphPlanLowerer<'a> {
             })
             .collect::<Result<_, LoweringError>>()?;
 
-        let node = GraphRemoveNode::new(
-            Arc::new(input),
-            targets,
-            self.type_id_to_entity_name.clone(),
-            dir.to_path_buf(),
-            mode,
-        );
+        let node = GraphRemoveNode::new(Arc::new(input), targets);
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(node),
         }))

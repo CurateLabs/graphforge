@@ -1403,6 +1403,11 @@ impl GraphForge {
             Some(Arc::clone(&self.ordinal_identities)),
             &self.session_resource_config(),
         )?;
+        let session = if self.read_only {
+            session.restrict_to_reads()
+        } else {
+            session
+        };
 
         let result = self.block_on(async {
             if is_write {
@@ -1823,6 +1828,11 @@ impl GraphForge {
             Some(Arc::clone(&self.ordinal_identities)),
             &self.session_resource_config(),
         )?;
+        let session = if self.read_only {
+            session.restrict_to_reads()
+        } else {
+            session
+        };
 
         // Build the stream on the instance's long-lived runtime so the tasks it
         // spawns (repartition/coalesce) outlive this call — they are dropped
@@ -3342,6 +3352,8 @@ impl GraphForge {
                 Some(Arc::clone(&self.ordinal_identities)),
                 &self.session_resource_config(),
             )?;
+        // This private session only renders a plan into text. No executable plan or
+        // write capability escapes this side-effect-free explanation boundary.
         let physical = self.block_on(async move { session.explain_physical(&plan).await })?;
 
         Ok(format!(
@@ -4832,6 +4844,94 @@ mod tests {
         uuid::Uuid::parse_str(generation).unwrap_or_else(|error| {
             panic!("absent-target child={child_id} invalid generation={generation:?}: {error}")
         })
+    }
+
+    #[test]
+    fn read_only_write_explanations_preserve_catalog_and_generation() {
+        fn files(root: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            fn visit(
+                root: &std::path::Path,
+                dir: &std::path::Path,
+                out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+            ) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        visit(root, &path, out);
+                    } else {
+                        out.insert(
+                            path.strip_prefix(root).unwrap().to_path_buf(),
+                            std::fs::read(path).unwrap(),
+                        );
+                    }
+                }
+            }
+            let mut out = std::collections::BTreeMap::new();
+            visit(root, root, &mut out);
+            out
+        }
+        let project = tempfile::TempDir::new().unwrap();
+        let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+        graph.execute("CREATE (:Person {name:'original'})").unwrap();
+        let resolved = graph.generation_for_read().unwrap();
+        let view = GraphForge::open_resolved_with_lifecycle_mode(
+            resolved.container_root().to_path_buf(),
+            resolved,
+            true,
+            graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
+        )
+        .unwrap();
+        let before_catalog = view.runtime_catalog.lock().unwrap().to_record_batch();
+        let before_generation = view.generation_for_read().unwrap().generation_uuid();
+        let before_files = files(&view.dir);
+        assert!(
+            view.explain("CREATE (:NewLabel {fresh:1})")
+                .unwrap()
+                .contains("GraphCreateExec")
+        );
+        assert_eq!(
+            view.runtime_catalog.lock().unwrap().to_record_batch(),
+            before_catalog
+        );
+        for (query, operator) in [
+            ("CREATE (:Person {name:'new'})", "GraphCreateExec"),
+            ("MATCH (n:Person) SET n.name = 'changed'", "GraphSetExec"),
+            ("MATCH (n:Person) REMOVE n.name", "GraphRemoveExec"),
+            ("MATCH (n:Person) DELETE n", "GraphDeleteExec"),
+        ] {
+            assert!(view.explain(query).unwrap().contains(operator));
+        }
+        assert_eq!(
+            view.runtime_catalog.lock().unwrap().to_record_batch(),
+            before_catalog
+        );
+        assert_eq!(
+            view.generation_for_read().unwrap().generation_uuid(),
+            before_generation
+        );
+        assert_eq!(files(&view.dir), before_files);
+        // Execution binding observes runtime names, unlike snapshot-only EXPLAIN.
+        // Rejection must nevertheless preserve canonical data and authority.
+        for query in [
+            "CREATE (:Person {name:'new'})",
+            "MATCH (n:Person) SET n.name='changed'",
+            "MATCH (n:Person) REMOVE n.name",
+            "MATCH (n:Person) DELETE n",
+        ] {
+            assert!(view.execute(query).is_err());
+        }
+        assert_eq!(files(&view.dir), before_files);
+        assert_eq!(
+            view.generation_for_read().unwrap().generation_uuid(),
+            before_generation
+        );
+        assert_eq!(
+            view.execute_read_only("MATCH (n:Person) RETURN n.name")
+                .unwrap()
+                .batches[0]
+                .num_rows(),
+            1
+        );
     }
 
     #[test]
