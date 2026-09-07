@@ -113,8 +113,18 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 }
 
 fn current_parent_generation_authority(project_dir: &Path) -> Result<(Uuid, String), GfError> {
+    current_parent_generation(project_dir).map(|(uuid, digest, _)| (uuid, digest))
+}
+
+fn current_parent_generation(
+    project_dir: &Path,
+) -> Result<(Uuid, String, Option<crate::ResolvedProjectGeneration>), GfError> {
     match crate::resolve_project_generation(project_dir) {
-        Ok(parent) => Ok((parent.generation_uuid(), hex(&parent.manifest_sha256()))),
+        Ok(parent) => Ok((
+            parent.generation_uuid(),
+            hex(&parent.manifest_sha256()),
+            Some(parent),
+        )),
         Err(error) => {
             #[cfg(test)]
             {
@@ -132,7 +142,7 @@ fn current_parent_generation_authority(project_dir: &Path) -> Result<(Uuid, Stri
                 let mut uuid_bytes = [0_u8; 16];
                 uuid_bytes.copy_from_slice(&bytes[..16]);
                 uuid_bytes[0] |= 1;
-                return Ok((Uuid::from_bytes(uuid_bytes), hex(&bytes)));
+                return Ok((Uuid::from_bytes(uuid_bytes), hex(&bytes), None));
             }
             #[cfg(not(test))]
             return Err(storage(format!(
@@ -140,6 +150,126 @@ fn current_parent_generation_authority(project_dir: &Path) -> Result<(Uuid, Stri
             )));
         }
     }
+}
+
+/// Authenticate the exact ordinal overlay before CAS publication. Only prior
+/// descriptor paths superseded by the new manifest are removed from this generation.
+fn ordinal_publication_tombstones(
+    parent: &crate::ResolvedProjectGeneration,
+    state: &crate::graph_object_store::GraphManifestState,
+    graph: &StableDirectory,
+    encoding: &GraphConstructionEncoding,
+) -> Result<(Vec<String>, crate::GraphObjectIoTotals), GfError> {
+    const MANIFEST: &str = "topology/uuid-membership/ordinal-v4-manifest.json";
+    let mut io = crate::GraphObjectIoTotals::default();
+    let prior = parent.authenticated_v4_ordinal_manifest(&mut io)?;
+    let Some(expected) = encoding
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == MANIFEST)
+    else {
+        if prior.is_some() {
+            return Err(storage(
+                "construction append omitted selected ordinal authority",
+            ));
+        }
+        return Ok((Vec::new(), io));
+    };
+    if expected.bytes > crate::ordinal_identity_v4::MAX_MANIFEST_BYTES {
+        return Err(storage("ordinal publication manifest exceeds bound"));
+    }
+    let index = graph
+        .open_child_directory(OsStr::new("topology"))
+        .and_then(|topology| topology.open_child_directory(OsStr::new("uuid-membership")))
+        .map_err(storage)?;
+    let mut file = index
+        .open_child_file(OsStr::new("ordinal-v4-manifest.json"))
+        .map_err(storage)?;
+    let mut bytes = Vec::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(storage)?;
+        if count == 0 {
+            break;
+        }
+        io.read_bytes = io
+            .read_bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| storage("ordinal read bytes overflow"))?;
+        io.read_calls = io
+            .read_calls
+            .checked_add(1)
+            .ok_or_else(|| storage("ordinal read calls overflow"))?;
+        if (bytes.len() as u64)
+            .checked_add(count as u64)
+            .is_none_or(|size| size > expected.bytes)
+        {
+            return Err(storage("ordinal publication manifest changed length"));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    if bytes.len() as u64 != expected.bytes || hex(&Sha256::digest(&bytes)) != expected.sha256 {
+        return Err(storage(
+            "ordinal publication manifest differs from encoding receipt",
+        ));
+    }
+    let manifest = crate::ordinal_identity_v4::decode_construction_ordinal_manifest(
+        &bytes,
+        encoding.generation,
+    )
+    .map_err(storage)?;
+    let old = prior.as_ref().map_or_else(BTreeMap::new, |(_, manifest)| {
+        ordinal_manifest_descriptors(manifest)
+    });
+    for (path, (bytes, digest)) in &old {
+        if !state
+            .entry(path.as_str())
+            .is_some_and(|entry| entry.byte_length == *bytes && entry.content_sha256 == *digest)
+        {
+            return Err(storage(
+                "selected ordinal artifact differs from parent inventory",
+            ));
+        }
+    }
+    let new = ordinal_manifest_descriptors(&manifest);
+    for (path, (bytes, digest)) in &new {
+        let owned = encoding
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.path == *path);
+        if let Some(owned) = owned {
+            if owned.bytes != *bytes || owned.sha256 != *digest {
+                return Err(storage("encoded ordinal artifact differs from manifest"));
+            }
+        } else if old.get(path) != Some(&(*bytes, digest.clone())) {
+            return Err(storage(
+                "ordinal manifest references an unauthenticated retained artifact",
+            ));
+        }
+    }
+    Ok((
+        old.into_keys()
+            .filter(|path| !new.contains_key(path))
+            .collect(),
+        io,
+    ))
+}
+
+fn ordinal_manifest_descriptors(
+    manifest: &crate::V4OrdinalIdentityManifest,
+) -> BTreeMap<String, (u64, String)> {
+    manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+        .map(|artifact| {
+            (
+                format!("topology/uuid-membership/{}", artifact.name),
+                (artifact.bytes, artifact.sha256.clone()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
 }
 
 fn compact_parent_inventory(
@@ -1262,12 +1392,19 @@ impl GraphConstructionSession {
         if self.checkpoint.shape_authority_sha256.as_deref() != Some(&shape_authority) {
             return Err(storage("encoder shape authority differs from checkpoint"));
         }
+        let (parent_uuid, parent_digest, parent) = current_parent_generation(&self.project_path)?;
+        if parent_uuid != self.checkpoint.parent_generation_uuid
+            || parent_digest != self.checkpoint.parent_generation_manifest_sha256
+        {
+            return Err(storage("construction ordinal parent is no longer CURRENT"));
+        }
         let encoded = crate::graph_construction_encoding::encode(
             &self.root,
             shape,
             generation,
             self.checkpoint.ontology_mode,
             self.base_snapshot.as_ref(),
+            parent.as_ref(),
             self.semantic_authority.as_ref(),
             &shape_outputs,
             &shape_authority,
@@ -1481,13 +1618,29 @@ impl GraphConstructionSession {
                 },
             )
             .collect::<Vec<_>>();
+        let (ordinal_tombstones, ordinal_io) =
+            ordinal_publication_tombstones(&parent, &manifest_state, &encoded_directory, encoding)?;
+        self.checkpoint.evidence.publication_application_read_bytes = self
+            .checkpoint
+            .evidence
+            .publication_application_read_bytes
+            .checked_add(ordinal_io.read_bytes)
+            .ok_or_else(|| storage("ordinal publication read bytes overflow"))?;
+        self.checkpoint
+            .evidence
+            .publication_application_read_operations = self
+            .checkpoint
+            .evidence
+            .publication_application_read_operations
+            .checked_add(ordinal_io.read_calls)
+            .ok_or_else(|| storage("ordinal publication read calls overflow"))?;
         let (graph_root, cas_evidence) =
             crate::graph_object_store::append_authenticated_graph_files_v2(
                 &lease,
                 &workspace,
                 &mut manifest_state,
                 &sealed_files,
-                &[],
+                &ordinal_tombstones,
             )?;
         self.checkpoint.evidence.cas_application_read_bytes = self
             .checkpoint
@@ -12580,6 +12733,295 @@ mod tests {
                 .contains("published construction belongs to generation recovery")
         );
         assert!(private_root.exists());
+    }
+
+    fn ordinal_append_session(
+        root: &TempDir,
+        generation: u64,
+        first: u128,
+        rows: usize,
+    ) -> (TempDir, GraphConstructionSession, ConstructionShape) {
+        let source = TempDir::new().unwrap();
+        let source_graph = source.path().join("graph");
+        std::fs::create_dir(&source_graph).unwrap();
+        if let Some(inventory) = crate::resolve_project_generation(root.path())
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+        {
+            crate::materialize_graph_objects(root.path(), &inventory, &source_graph).unwrap();
+        }
+        let mut session = GraphConstructionSession::open_with_mode_and_lifecycle_from_graph(
+            root.path(),
+            &source_graph,
+            Uuid::new_v4(),
+            generation - 1,
+            graphforge_core::OntologyMode::Exploratory,
+            GraphConstructionBudgets::default(),
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        )
+        .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_batch(first, rows),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        (source, session, shape)
+    }
+
+    #[test]
+    fn construction_append_publishes_current_complete_ordinal_authority() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut retained = Vec::new();
+        for generation in 1..=8_u64 {
+            let total = 255 + generation;
+            let (_source, mut session, shape) = ordinal_append_session(
+                &root,
+                generation,
+                if generation == 1 {
+                    1
+                } else {
+                    u128::from(total)
+                },
+                if generation == 1 { 256 } else { 1 },
+            );
+            let pins = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let recorded = pins.clone();
+            crate::uuid_membership::set_construction_ordinal_hook(Some(Box::new(
+                move |phase, generation| {
+                    if phase == "pin" {
+                        recorded.borrow_mut().push(generation);
+                    }
+                },
+            )));
+            let encoding = session.encode_canonical(&shape, generation);
+            crate::uuid_membership::set_construction_ordinal_hook(None);
+            let encoding = encoding.unwrap();
+            assert!(
+                pins.borrow().iter().all(|generation| *generation > 1),
+                "the base must never be reread by ordinal compaction"
+            );
+            if generation <= 2 {
+                assert!(pins.borrow().is_empty());
+            }
+            if generation == 3 {
+                assert!(
+                    !pins.borrow().is_empty(),
+                    "the fixture must cross an actual carry"
+                );
+            }
+            assert_eq!(encoding.evidence.prior_topology_rows_decoded, 0);
+            assert_eq!(encoding.evidence.retained_topology_bytes_copied, 0);
+            session
+                .publish_canonical(
+                    &encoding,
+                    Uuid::from_u128(98_100 + u128::from(generation)),
+                    Uuid::from_u128(98_200 + u128::from(generation)),
+                )
+                .unwrap();
+            drop(session);
+            let selected = crate::resolve_project_generation(root.path()).unwrap();
+            let authority = selected
+                .authenticated_v4_ordinal_authority()
+                .unwrap()
+                .unwrap();
+            let inventory = selected.graph_files_inventory().unwrap().unwrap();
+            let materialized = TempDir::new().unwrap();
+            let graph = materialized.path().join("graph");
+            std::fs::create_dir(&graph).unwrap();
+            crate::materialize_graph_objects(root.path(), &inventory, &graph).unwrap();
+            let crate::V4OrdinalIdentityOpen::Ready(mut handle) = authority
+                .open(&graph, crate::V4OrdinalIdentityLimits::default())
+                .unwrap()
+            else {
+                panic!("published construction must retain complete v4 authority");
+            };
+            let (_, manifest) = selected
+                .authenticated_v4_ordinal_manifest(&mut crate::GraphObjectIoTotals::default())
+                .unwrap()
+                .unwrap();
+            assert!(manifest.forward_identities.len() <= 1 + generation.ilog2() as usize);
+            let declared = manifest
+                .forward_identities
+                .iter()
+                .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+                .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+                .map(|artifact| artifact.name.clone())
+                .collect::<BTreeSet<_>>();
+            let installed = inventory
+                .files
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.relative_path.rsplit('/').next().unwrap();
+                    (name.contains("-v4-") && name.ends_with(".uuidx")).then(|| name.to_owned())
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                installed, declared,
+                "superseded ordinal paths must leave the selected inventory"
+            );
+            assert_eq!(handle.topology_generation(), generation);
+            let ids = (1..=total).collect::<Vec<_>>();
+            assert_eq!(
+                handle.lookup_node_uuids(&ids).unwrap().values,
+                ids.iter()
+                    .map(|id| Some(Uuid::from_u128(u128::from(*id))))
+                    .collect::<Vec<_>>()
+            );
+            let mut membership = crate::UuidMembershipIndex::open(&graph).unwrap();
+            let uuids = ids
+                .iter()
+                .map(|id| Uuid::from_u128(u128::from(*id)))
+                .collect::<Vec<_>>();
+            assert_eq!(membership.count(crate::UuidIndexKind::Node), total);
+            assert_eq!(
+                membership.lookup_node_surrogates(&uuids).unwrap().0,
+                ids.iter().copied().map(Some).collect::<Vec<_>>()
+            );
+            retained.push((selected, materialized, handle, total));
+        }
+        for (selected, _materialized, mut handle, total) in retained {
+            selected
+                .authenticated_v4_ordinal_authority()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                handle.lookup_node_uuids(&[1, total]).unwrap().values,
+                [
+                    Some(Uuid::from_u128(1)),
+                    Some(Uuid::from_u128(u128::from(total)))
+                ]
+            );
+        }
+    }
+
+    fn publish_ordinal_fixture(root: &TempDir, generation: u64) {
+        let (_source, mut session, shape) =
+            ordinal_append_session(root, generation, u128::from(generation), 1);
+        let encoding = session.encode_canonical(&shape, generation).unwrap();
+        session
+            .publish_canonical(&encoding, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+    }
+
+    #[test]
+    fn construction_ordinal_cancellation_cleans_owned_outputs_and_retries() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        publish_ordinal_fixture(&root, 1);
+        publish_ordinal_fixture(&root, 2);
+        let current = std::fs::read(root.path().join("CURRENT")).unwrap();
+        let (_source, mut session, shape) = ordinal_append_session(&root, 3, 3, 4096);
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        let signal = cancelled.clone();
+        crate::uuid_membership::set_construction_ordinal_hook(Some(Box::new(move |phase, _| {
+            if phase == "forward" {
+                signal.set(true);
+            }
+        })));
+        let result = session.encode_canonical_with_cancellation(&shape, 3, || cancelled.get());
+        crate::uuid_membership::set_construction_ordinal_hook(None);
+        assert!(
+            cancelled.get(),
+            "cancel only after actual compaction output"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ordinal compaction cancelled")
+        );
+        assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
+        let index = session
+            .root
+            .path()
+            .join("encoded-v1/graph/topology/uuid-membership");
+        let residual = std::fs::read_dir(&index)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("v4") || name.contains("compact"))
+            .collect::<Vec<_>>();
+        assert!(
+            residual.is_empty(),
+            "owned ordinal outputs left after cancellation: {residual:?}"
+        );
+        let encoding = session.encode_canonical(&shape, 3).unwrap();
+        session
+            .publish_canonical(&encoding, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        let selected = crate::resolve_project_generation(root.path()).unwrap();
+        let authority = selected
+            .authenticated_v4_ordinal_authority()
+            .unwrap()
+            .unwrap();
+        let inventory = selected.graph_files_inventory().unwrap().unwrap();
+        let materialized = TempDir::new().unwrap();
+        let graph = materialized.path().join("graph");
+        std::fs::create_dir(&graph).unwrap();
+        crate::materialize_graph_objects(root.path(), &inventory, &graph).unwrap();
+        let crate::V4OrdinalIdentityOpen::Ready(mut handle) = authority
+            .open(&graph, crate::V4OrdinalIdentityLimits::default())
+            .unwrap()
+        else {
+            panic!("v4 required")
+        };
+        assert_eq!(
+            handle.lookup_node_uuids(&[1, 2, 3, 4098]).unwrap().values,
+            [1_u128, 2, 3, 4098].map(|id| Some(Uuid::from_u128(id)))
+        );
+    }
+
+    #[test]
+    fn construction_ordinal_parent_corruption_fails_before_publication() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        publish_ordinal_fixture(&root, 1);
+        let (_source, mut session, shape) = ordinal_append_session(&root, 2, 2, 1);
+        let selected = crate::resolve_project_generation(root.path()).unwrap();
+        let inventory = selected.graph_files_inventory().unwrap().unwrap();
+        let manifest = inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path.ends_with("ordinal-v4-manifest.json"))
+            .unwrap();
+        let path = crate::graph_object_path(root.path(), &manifest.content_sha256).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut writable = permissions.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            writable.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&path, writable).unwrap();
+        let mut damaged = original.clone();
+        damaged[0] ^= 1;
+        std::fs::write(&path, damaged).unwrap();
+        std::fs::set_permissions(&path, permissions.clone()).unwrap();
+        let current = std::fs::read(root.path().join("CURRENT")).unwrap();
+        let result = session.encode_canonical(&shape, 2);
+        assert!(result.unwrap_err().to_string().contains("digest"));
+        assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
+        // Restore fixture authority so its cleanup never leaves damaged CAS objects.
+        let mut writable = permissions.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            writable.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&path, writable).unwrap();
+        std::fs::write(&path, original).unwrap();
+        std::fs::set_permissions(&path, permissions).unwrap();
+        session.encode_canonical(&shape, 2).unwrap();
     }
 
     #[test]

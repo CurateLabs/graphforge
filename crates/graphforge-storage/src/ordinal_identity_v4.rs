@@ -222,16 +222,32 @@ impl crate::ResolvedProjectGeneration {
     pub fn authenticated_v4_ordinal_authority(
         &self,
     ) -> Result<Option<AuthenticatedV4OrdinalIdentityAuthority>, graphforge_core::GfError> {
+        self.authenticated_v4_ordinal_manifest(&mut crate::GraphObjectIoTotals::default())
+            .map(|value| value.map(|(authority, _)| authority))
+    }
+
+    pub(crate) fn authenticated_v4_ordinal_manifest(
+        &self,
+        io: &mut crate::GraphObjectIoTotals,
+    ) -> Result<
+        Option<(
+            AuthenticatedV4OrdinalIdentityAuthority,
+            V4OrdinalIdentityManifest,
+        )>,
+        graphforge_core::GfError,
+    > {
         let mut targeted_state = crate::graph_manifest::GraphManifestTargetedState::default();
-        let receipt = self.authenticated_graph_file_bytes_with_state(
+        let receipt = self.authenticated_graph_file_bytes_counted(
             RECEIPT_NAME,
             MAX_MANIFEST_BYTES,
             Some(&mut targeted_state),
+            io,
         )?;
-        let manifest = self.authenticated_graph_file_bytes_with_state(
+        let manifest = self.authenticated_graph_file_bytes_counted(
             ORDINAL_IDENTITY_MANIFEST,
             MAX_MANIFEST_BYTES,
             Some(&mut targeted_state),
+            io,
         )?;
         match (receipt, manifest) {
             (None, None) => Ok(None),
@@ -246,10 +262,11 @@ impl crate::ResolvedProjectGeneration {
                         )
                     })?;
                 let generation = self
-                    .authenticated_graph_file_bytes_with_state(
+                    .authenticated_graph_file_bytes_counted(
                         GENERATION_NAME,
                         MAX_MANIFEST_BYTES,
                         Some(&mut targeted_state),
+                        io,
                     )?
                     .ok_or_else(|| {
                         graphforge_core::GfError::Validation(
@@ -287,12 +304,31 @@ impl crate::ResolvedProjectGeneration {
                         "selected ordinal receipt does not authenticate its manifest".into(),
                     ));
                 }
-                Ok(Some(AuthenticatedV4OrdinalIdentityAuthority {
-                    authority: V4OrdinalIdentityAuthority {
-                        topology_generation: selected_generation,
-                        manifest_sha256: manifest_digest,
+                let parsed = parse_manifest(&manifest_bytes, selected_generation)
+                    .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?
+                    .ok_or_else(|| {
+                        graphforge_core::GfError::Validation(
+                            "selected v4 manifest is legacy".into(),
+                        )
+                    })?;
+                validate_manifest(&parsed, selected_generation)
+                    .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+                initial_admission_metrics(
+                    &parsed,
+                    manifest_bytes.len(),
+                    manifest_bytes.capacity(),
+                    V4OrdinalIdentityLimits::default(),
+                )
+                .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+                Ok(Some((
+                    AuthenticatedV4OrdinalIdentityAuthority {
+                        authority: V4OrdinalIdentityAuthority {
+                            topology_generation: selected_generation,
+                            manifest_sha256: manifest_digest,
+                        },
                     },
-                }))
+                    parsed,
+                )))
             }
         }
     }
@@ -965,6 +1001,28 @@ impl V4OrdinalIdentityHandle {
     }
 }
 
+pub(crate) fn decode_construction_ordinal_manifest(
+    bytes: &[u8],
+    generation: u64,
+) -> Result<V4OrdinalIdentityManifest, V4OrdinalIdentityError> {
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(V4OrdinalIdentityError::InvalidDescriptor(
+            "manifest exceeds admission bound",
+        ));
+    }
+    let manifest = parse_manifest(bytes, generation)?.ok_or(
+        V4OrdinalIdentityError::InvalidDescriptor("construction ordinal manifest is legacy"),
+    )?;
+    validate_manifest(&manifest, generation)?;
+    initial_admission_metrics(
+        &manifest,
+        bytes.len(),
+        bytes.len(),
+        V4OrdinalIdentityLimits::default(),
+    )?;
+    Ok(manifest)
+}
+
 fn authenticate_manifest_authority(
     body: &[u8],
     authority: &V4OrdinalIdentityAuthority,
@@ -1080,6 +1138,19 @@ fn validate_manifest(
             expected: expected_generation,
             found: manifest.topology_generation,
         });
+    }
+    let mut names = BTreeSet::new();
+    for artifact in manifest
+        .forward_identities
+        .iter()
+        .chain(manifest.ordinal_ranges.iter().map(|range| &range.artifact))
+        .chain(manifest.tombstones.iter().map(|run| &run.artifact))
+    {
+        if !names.insert(artifact.name.as_str()) {
+            return Err(V4OrdinalIdentityError::InvalidDescriptor(
+                "artifact filename is reused",
+            ));
+        }
     }
     if manifest.forward_identities.is_empty() {
         return Err(V4OrdinalIdentityError::InvalidDescriptor(
@@ -2742,6 +2813,22 @@ mod tests {
                 "descriptor metadata exceeds admission bound"
             ))
         ));
+    }
+
+    #[test]
+    fn construction_metadata_rejects_disjoint_ranges_reusing_one_artifact() {
+        let fixture = Fixture::new(&[1], &[]);
+        let mut manifest = fixture.manifest.clone();
+        let mut duplicate = manifest.ordinal_ranges[0].clone();
+        duplicate.first_node_id = 2;
+        manifest.ordinal_ranges.push(duplicate);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let error =
+            decode_construction_ordinal_manifest(&bytes, manifest.topology_generation).unwrap_err();
+        assert_eq!(
+            error,
+            V4OrdinalIdentityError::InvalidDescriptor("artifact filename is reused")
+        );
     }
 
     #[test]

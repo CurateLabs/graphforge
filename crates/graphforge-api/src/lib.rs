@@ -82,6 +82,8 @@ mod construction;
 #[cfg(test)]
 mod construction_concurrency_tests;
 #[cfg(test)]
+mod construction_ordinal_tests;
+#[cfg(test)]
 mod durability_certification_tests;
 mod embedding_freshness;
 mod embedding_publication;

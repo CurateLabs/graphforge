@@ -544,6 +544,7 @@ pub(crate) fn encode(
     generation: u64,
     ontology_mode: OntologyMode,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+    parent_generation: Option<&crate::ResolvedProjectGeneration>,
     semantic_authority: Option<&ConstructionSemanticAuthority>,
     shape_outputs: &[ArtifactReceipt],
     shape_authority_sha256: &str,
@@ -677,6 +678,31 @@ pub(crate) fn encode(
         )?;
     }
 
+    let mut ordinal_control_io = crate::GraphObjectIoTotals::default();
+    let parent_ordinal = if shape.parent_topology_generation != 0 {
+        parent_generation
+            .map(|parent| parent.authenticated_v4_ordinal_manifest(&mut ordinal_control_io))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if parent_ordinal.as_ref().is_some_and(|(_, manifest)| {
+        manifest.topology_generation != shape.parent_topology_generation
+    }) {
+        return Err(storage("construction ordinal parent differs from shape"));
+    }
+    add_evidence_counter(
+        &mut evidence.input_read_bytes,
+        ordinal_control_io.read_bytes,
+        "ordinal control reads",
+    )?;
+    add_evidence_counter(
+        &mut evidence.input_read_operations,
+        ordinal_control_io.read_calls,
+        "ordinal control calls",
+    )?;
+
     let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
     let mut index = crate::uuid_membership::encode_construction_index(
         source,
@@ -702,14 +728,18 @@ pub(crate) fn encode(
         semantic_authority.map(|authority| &authority.bindings),
         budgets,
         generation,
-        shape.parent_topology_generation == 0,
+        shape.parent_topology_generation == 0 || parent_ordinal.is_some(),
         cancelled,
         &mut artifacts,
         &mut evidence,
     )?;
     if let Some(bundle) = v4 {
         let metrics = &bundle.metrics;
-        if metrics.input_records != shape.node_count {
+        let expected_delta_nodes = shape
+            .node_count
+            .checked_sub(parent_index.map_or(0, |parent| parent.count(crate::UuidIndexKind::Node)))
+            .ok_or_else(|| storage("shaped node count is smaller than parent"))?;
+        if metrics.input_records != expected_delta_nodes {
             return Err(storage("v4 construction count differs from shaped nodes"));
         }
         evidence.ordinal_records = metrics.input_records;
@@ -725,7 +755,24 @@ pub(crate) fn encode(
                 bundle,
                 generation,
                 identities_sha256,
+                parent_ordinal
+                    .as_ref()
+                    .and_then(|(_, manifest)| parent_generation.map(|parent| (parent, manifest))),
+                cancelled,
             )?;
+        add_evidence_counter(
+            &mut evidence.input_read_bytes,
+            publication.read_bytes,
+            "ordinal compaction reads",
+        )?;
+        add_evidence_counter(
+            &mut evidence.input_read_operations,
+            publication.read_operations,
+            "ordinal compaction calls",
+        )?;
+        evidence.ordinal_artifact_write_bytes = metrics.artifact_bytes;
+        evidence.ordinal_artifact_write_operations = metrics.write_blocks;
+        evidence.ordinal_peak_buffer_bytes = metrics.peak_buffer_bytes as u64;
         evidence.ordinal_publication_write_bytes = publication.write_bytes;
         evidence.ordinal_publication_write_operations = publication.write_operations;
         evidence.ordinal_fsync_operations = metrics
