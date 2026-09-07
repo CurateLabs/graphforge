@@ -5467,3 +5467,93 @@ fn shared_value_codec_keeps_ordinary_property_names_deletable() {
         0
     );
 }
+
+fn assert_endpoint_marks(result: &ExecutionResult, ids: &[[u8; 16]], marks: [Option<i64>; 2]) {
+    assert_eq!(result.stats.rows_produced, 1);
+    assert_eq!(
+        node_uuid_seq(&result.batches[0], "ns", 0),
+        Some(ids.to_vec())
+    );
+    let values = result.batches[0]
+        .column_by_name("ns")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    let nodes = values.as_any().downcast_ref::<StructArray>().unwrap();
+    let actual = nodes
+        .column_by_name("mark")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(actual.iter().collect::<Vec<_>>(), marks);
+}
+
+#[test]
+fn fixed_hop_new_endpoint_property_survives_write_and_reopen() {
+    for (target, marks) in [("a", [Some(1), None]), ("b", [None, Some(1)])] {
+        let dir = tempfile::tempdir().unwrap();
+        let gf = GraphForge::new(dir.path().to_str()).unwrap();
+        gf.execute("CREATE (a:Person {name:'a'}), (b:Person {name:'b'}), (a)-[:KNOWS]->(b)")
+            .unwrap();
+        let ids = vec![person_uuid(&gf, "a"), person_uuid(&gf, "b")];
+        let topology_query = "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.node_uuid AS a, r.edge_uuid AS r, b.node_uuid AS b";
+        let topology = gf.execute(topology_query).unwrap().batches[0]
+            .columns()
+            .to_vec();
+        let result = gf
+            .execute(&format!(
+                "MATCH p=(a:Person)-[:KNOWS]->(b:Person) SET {target}.mark=1 RETURN nodes(p) AS ns"
+            ))
+            .unwrap();
+        assert_endpoint_marks(&result, &ids, marks);
+        assert_eq!(
+            result.side_effects.as_ref().unwrap(),
+            &graphforge_exec::SideEffects {
+                properties_set: 1,
+                ..Default::default()
+            }
+        );
+        let effects = &result.mutation_receipt.as_ref().unwrap().effects;
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].kind, graphforge_exec::MutationKind::SetProperty);
+        assert_eq!(
+            effects[0].outputs,
+            vec![graphforge_exec::MutationSubject {
+                uuid: ids[usize::from(target == "b")],
+                kind: graphforge_exec::MutationSubjectKind::Node
+            }]
+        );
+        let fixed = "MATCH p=(a:Person)-[:KNOWS]->(b:Person) RETURN nodes(p) AS ns";
+        let variable = "MATCH p=(a:Person)-[:KNOWS*1..1]->(b:Person) RETURN nodes(p) AS ns";
+        for query in [fixed, variable] {
+            assert_endpoint_marks(&gf.execute(query).unwrap(), &ids, marks);
+        }
+        assert_eq!(
+            gf.execute(topology_query).unwrap().batches[0].columns(),
+            &topology
+        );
+        drop(gf);
+        let reopened = GraphForge::new(dir.path().to_str()).unwrap();
+        for query in [fixed, variable] {
+            assert_endpoint_marks(&reopened.execute(query).unwrap(), &ids, marks);
+        }
+        assert_eq!(
+            reopened.execute(topology_query).unwrap().batches[0].columns(),
+            &topology
+        );
+        let existing = reopened
+            .execute(&format!(
+                "MATCH p=(a:Person)-[:KNOWS]->(b:Person) SET {target}.mark=2 RETURN nodes(p) AS ns"
+            ))
+            .unwrap();
+        let changed = marks.map(|value| value.map(|_| 2));
+        assert_endpoint_marks(&existing, &ids, changed);
+        assert_eq!(existing.side_effects.as_ref().unwrap().properties_set, 1);
+        for query in [fixed, variable] {
+            assert_endpoint_marks(&reopened.execute(query).unwrap(), &ids, changed);
+        }
+    }
+}

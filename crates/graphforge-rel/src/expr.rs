@@ -2304,15 +2304,26 @@ impl<'a> ExprLowerer<'a> {
         let nodes = node_vars
             .iter()
             .map(|var| {
+                use datafusion::functions::core::expr_fn::named_struct;
                 let base = self
                     .var_map
                     .get(*var)
                     .ok_or(LoweringError::UnboundVar(var.0))?;
-                Ok(node_value_struct(
-                    base,
-                    None,
-                    &self.type_id_to_entity_name,
-                    &prop_names,
+                let mut fields = vec![
+                    lit("node_uuid"),
+                    qualified_col(base, "node_uuid"),
+                    lit("labels"),
+                    node_labels_list(base, None, &self.type_id_to_entity_name),
+                ];
+                for name in &prop_names {
+                    fields.extend([
+                        lit(name.as_str()),
+                        self.path_node_property(base, name, &node_vars)?,
+                    ]);
+                }
+                Ok(null_unless(
+                    qualified_col(base, "node_uuid").is_not_null(),
+                    named_struct(fields),
                 ))
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
@@ -2323,6 +2334,42 @@ impl<'a> ExprLowerer<'a> {
             )
         })?;
         Ok(null_unless(present, make_array(nodes)))
+    }
+
+    /// Fixed-hop nodes share a property shape, but SET can add a column to only
+    /// one endpoint. Preserve available values and type missing values from the
+    /// other endpoint rather than referencing a nonexistent qualified column.
+    fn path_node_property(
+        &self,
+        base: &str,
+        name: &str,
+        nodes: &[VarId],
+    ) -> Result<DfExpr, LoweringError> {
+        let value = qualified_col(base, name);
+        let Some(schema) = &self.input_schema else {
+            return Ok(value);
+        };
+        let qualifier = datafusion::common::TableReference::bare(base);
+        if schema
+            .index_of_column_by_name(Some(&qualifier), name)
+            .is_some()
+        {
+            return Ok(value);
+        }
+        let data_type = nodes
+            .iter()
+            .find_map(|other| {
+                let other_base = self.var_map.get(*other)?;
+                self.expr_data_type(&qualified_col(other_base, name))
+            })
+            .ok_or_else(|| {
+                LoweringError::UnsupportedExpr(format!(
+                    "path node property `{name}` has no available column"
+                ))
+            })?;
+        let null = ScalarValue::try_from(&data_type)
+            .map_err(|error| LoweringError::UnsupportedExpr(error.to_string()))?;
+        Ok(lit(null))
     }
 
     fn lower_rel_struct(&self, args: &[ExprId]) -> Result<DfExpr, LoweringError> {
