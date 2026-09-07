@@ -29,6 +29,7 @@ async fn given_any_graph(world: &mut GraphForgeWorld) {
     crate::fixture::replace_with_fresh(&mut world.forge);
     world.nodes.clear();
     world.last_error = None;
+    world.last_compile_type_error = false;
     world.last_names = None;
     world.last_count = None;
     world.last_explanation = None;
@@ -51,6 +52,7 @@ fn seed_graph(world: &mut GraphForgeWorld, create: &str) {
     world.forge = Some(forge);
     world.nodes.clear();
     world.last_error = None;
+    world.last_compile_type_error = false;
     world.last_names = None;
     world.last_count = None;
     world.last_explanation = None;
@@ -224,8 +226,13 @@ fn run_docstring_query(world: &mut GraphForgeWorld, step: &Step, label: &str) {
         Ok(result) => {
             world.last_exec = Some(result);
             world.last_error = None;
+            world.last_compile_type_error = false;
         }
         Err(e) => {
+            world.last_compile_type_error = matches!(
+                &e,
+                graphforge_api::GfError::Lowering(graphforge_api::LoweringError::InvalidType(_))
+            );
             world.last_error = Some(e.to_string());
             world.last_exec = None;
         }
@@ -491,6 +498,9 @@ async fn then_side_effects(world: &mut GraphForgeWorld, step: &Step) {
 ///   compile-time `SyntaxError` deliberately spans both true syntax errors AND
 ///   bind-time semantic ones (undefined/duplicate variable, type conflict),
 ///   which GraphForge surfaces as `Parse`, `Bind`, and `Plan` respectively.
+/// - A typed planning `InvalidType` remains compile-time despite its corrected
+///   public `GF_VALIDATION` classification (#1018); other validation errors do
+///   not become compile-time failures.
 /// - **runtime** → an `execution error` / `storage error`.
 /// - **any time** → any genuine error.
 ///
@@ -534,7 +544,8 @@ async fn then_error_raised(world: &mut GraphForgeWorld, error_type: String, phas
     );
     let is_compile = err.starts_with("parse error")
         || err.starts_with("bind error")
-        || err.starts_with("plan error");
+        || err.starts_with("plan error")
+        || world.last_compile_type_error;
     let is_runtime = err.starts_with("execution error") || err.starts_with("storage error");
     match phase.as_str() {
         "compile time" => assert!(

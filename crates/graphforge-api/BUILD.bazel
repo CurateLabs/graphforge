@@ -102,6 +102,7 @@ gf_rust_integration_test(
 
 gf_rust_integration_test(
     name = "bind_error_spans",
+    compile_data = ["tests/stage_error_matrix.json"],
     srcs = ["tests/bind_error_spans.rs"],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,

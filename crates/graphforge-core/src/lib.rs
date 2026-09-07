@@ -7,6 +7,15 @@
 //! classify errors for the facade and bindings.
 #![forbid(unsafe_code)]
 
+mod algorithm_error;
+mod bind_error;
+mod lowering_error;
+mod parse_error;
+pub use algorithm_error::AlgorithmError;
+pub use bind_error::{BindError, BindErrorKind};
+pub use lowering_error::LoweringError;
+pub use parse_error::{ParseError, ParseErrorKind};
+
 pub mod algorithms;
 pub mod canonical;
 pub mod embedding_options;
@@ -110,6 +119,8 @@ pub enum GfError {
     /// The Cypher parser rejected the input.
     #[error("parse error at {span}: {msg}")]
     Parse {
+        /// Original typed parser diagnostic, when supplied by the parser.
+        diagnostic: Option<Box<ParseError>>,
         /// Human-readable description of the parse failure.
         msg: String,
         /// Location of the bad token in the source.
@@ -124,11 +135,44 @@ pub enum GfError {
     /// — semantic query-structure failures share the parse fault domain.
     #[error("bind error at {span}: {msg}")]
     Bind {
+        /// All original binder diagnostics, in their reported order.
+        diagnostics: Vec<BindError>,
         /// Human-readable description (all binder errors, joined with `; `).
         msg: String,
         /// Source location of the first offending token.
         span: Span,
     },
+
+    /// A lowering failure with its original kind and payload.
+    #[error("{domain} error: {0}", domain = .0.fault_domain())]
+    Lowering(#[source] LoweringError),
+
+    /// A lowering diagnostic discovered at an execution boundary.
+    /// Keeps the established runtime fault domain rather than reclassifying it.
+    #[error("execution error: {0}")]
+    LoweringExecution(#[source] LoweringError),
+
+    /// A legacy EXPLAIN binder rejection in the established planning domain.
+    #[error("plan error: {msg}")]
+    BindPlan {
+        /// Existing public diagnostic.
+        msg: String,
+        /// Complete original binder diagnostics.
+        diagnostics: Vec<BindError>,
+    },
+
+    /// A binder rejection in the established validation fault domain.
+    #[error("validation error: {msg}")]
+    BindValidation {
+        /// Existing public diagnostic.
+        msg: String,
+        /// Complete original binder diagnostics.
+        diagnostics: Vec<BindError>,
+    },
+
+    /// An algorithm failure retaining its original kind and payload.
+    #[error("{domain} error: {0}", domain = .0.fault_domain())]
+    Algorithm(#[source] AlgorithmError),
 
     /// The binder or query planner could not produce a valid plan.
     #[error("plan error: {0}")]
@@ -191,15 +235,23 @@ impl GfError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::Lowering(LoweringError::InvalidType(_))
+            | Self::BindValidation { .. }
+            | Self::Validation(_)
+            | Self::Algorithm(
+                AlgorithmError::Unavailable { .. } | AlgorithmError::DuplicateCapability { .. },
+            ) => "GF_VALIDATION",
+            Self::Lowering(_) | Self::BindPlan { .. } | Self::Plan(_) => "GF_PLAN",
+            Self::Algorithm(_)
+            | Self::LoweringExecution(_)
+            | Self::Execution(_)
+            | Self::Provider { .. } => "GF_EXECUTION",
             Self::NotImplemented(_) => "GF_NOT_IMPLEMENTED",
             Self::Parse { .. } | Self::Bind { .. } => "GF_PARSE",
-            Self::Plan(_) => "GF_PLAN",
-            Self::Execution(_) | Self::Provider { .. } => "GF_EXECUTION",
             Self::Storage(_) => "GF_IO",
             Self::Project { code, .. } => code.as_str(),
             Self::Api { code, .. } => code.as_str(),
             Self::Lifecycle(_) => "GF_LIFECYCLE",
-            Self::Validation(_) => "GF_VALIDATION",
             Self::Ontology(_) => "GF_ONTOLOGY",
         }
     }
@@ -1167,6 +1219,7 @@ mod tests {
             (GfError::NotImplemented("x"), "GF_NOT_IMPLEMENTED"),
             (
                 GfError::Parse {
+                    diagnostic: None,
                     msg: "x".into(),
                     span,
                 },
@@ -1174,6 +1227,7 @@ mod tests {
             ),
             (
                 GfError::Bind {
+                    diagnostics: Vec::new(),
                     msg: "x".into(),
                     span,
                 },

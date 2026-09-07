@@ -163,10 +163,17 @@ fn modularity_rejects_invalid_options_partitions_weights_and_zero_volume() {
         "CREATE (a:Person {side:'alpha'}), (b:Person {side:'beta'}), \
          (a)-[:LINK {weight:-1}]->(b)",
     );
+    let error = negative
+        .analyze(Some("Person"), options("side", Some("weight")))
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_EXECUTION");
+    assert_eq!(
+        error.to_string(),
+        "execution error: Rust algorithm execution failed: modularity weights must be finite and nonnegative"
+    );
     assert!(matches!(
-        negative.analyze(Some("Person"), options("side", Some("weight"))),
-        Err(GfError::Execution(message))
-            if message
-                == "Rust algorithm execution failed: modularity weights must be finite and nonnegative"
+        error,
+        GfError::Algorithm(graphforge_core::AlgorithmError::Execution { message })
+            if message == "modularity weights must be finite and nonnegative"
     ));
 }

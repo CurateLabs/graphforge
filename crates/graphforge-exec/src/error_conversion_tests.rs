@@ -30,6 +30,11 @@ use super::ExecutionSession;
 #[test]
 fn datafusion_error_source_preserves_binder_span_through_shared_context() {
     let original = GfError::Bind {
+        diagnostics: vec![graphforge_core::BindError::new(
+            graphforge_core::BindErrorKind::UndeclaredVariable,
+            Span::new(7, 14),
+            "original binder detail",
+        )],
         msg: "undeclared variable".into(),
         span: Span { start: 7, end: 14 },
     };
@@ -42,9 +47,20 @@ fn datafusion_error_source_preserves_binder_span_through_shared_context() {
         let recovered = GfError::from_plan_error(DataFusionError::Shared(Arc::clone(&wrapped)));
         assert_eq!(recovered.code(), "GF_PARSE");
         assert_eq!(recovered.to_string(), original.to_string());
-        let GfError::Bind { msg, span } = recovered else {
+        let GfError::Bind {
+            msg,
+            span,
+            diagnostics,
+        } = recovered
+        else {
             panic!("binder variant was lost");
         };
+        assert_eq!(
+            diagnostics[0].kind,
+            graphforge_core::BindErrorKind::UndeclaredVariable
+        );
+        assert_eq!(diagnostics[0].span, Span::new(7, 14));
+        assert_eq!(diagnostics[0].message, "original binder detail");
         assert_eq!(msg, "undeclared variable");
         assert_eq!(span, Span { start: 7, end: 14 });
     }
@@ -204,6 +220,7 @@ async fn datafusion_error_source_survives_session_stream_poll() {
 #[tokio::test]
 async fn datafusion_error_source_survives_session_planning_for_collect_and_stream() {
     let original = GfError::Bind {
+        diagnostics: Vec::new(),
         msg: "physical planner preserved source".into(),
         span: Span { start: 3, end: 9 },
     };
@@ -326,4 +343,36 @@ fn datafusion_collection_preserves_only_the_primary_source() {
     let expected = foreign_primary.to_string();
     let recovered = GfError::from_plan_error(foreign_primary);
     assert!(matches!(recovered, GfError::Plan(message) if message == expected));
+}
+
+#[test]
+fn datafusion_error_source_preserves_typed_lowering_and_algorithm_payloads() {
+    use graphforge_core::{AlgorithmError, LoweringError};
+    let cases = [
+        GfError::from(LoweringError::InvalidType(
+            "predicate must be boolean".into(),
+        )),
+        GfError::from(AlgorithmError::NodeLimit {
+            observed: 27,
+            limit: 26,
+        }),
+    ];
+    for original in cases {
+        let expected = format!("{original:?}");
+        let code = original.code();
+        let display = original.to_string();
+        let wrapped = DataFusionError::Context(
+            "physical operator".into(),
+            Box::new(DataFusionError::External(Box::new(original))),
+        );
+        let shared = Arc::new(wrapped);
+        for recovered in [
+            GfError::from_plan_error(DataFusionError::Shared(Arc::clone(&shared))),
+            GfError::from_execution_error(DataFusionError::Shared(shared)),
+        ] {
+            assert_eq!(recovered.code(), code);
+            assert_eq!(recovered.to_string(), display);
+            assert_eq!(format!("{recovered:?}"), expected);
+        }
+    }
 }

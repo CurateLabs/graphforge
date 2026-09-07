@@ -415,8 +415,17 @@ fn api_outcome(error: &GfError) -> EmbeddingRefreshOutcomeStatus {
         GfError::Storage(_) | GfError::Project { .. } => EmbeddingRefreshFailureClass::Storage,
         GfError::Lifecycle(_) => EmbeddingRefreshFailureClass::ConcurrentMutation,
         GfError::NotImplemented(_) => EmbeddingRefreshFailureClass::Unavailable,
-        GfError::Execution(_) | GfError::Provider { .. } => EmbeddingRefreshFailureClass::Provider,
-        GfError::Parse { .. }
+        GfError::Execution(_) | GfError::LoweringExecution(_) | GfError::Provider { .. } => {
+            EmbeddingRefreshFailureClass::Provider
+        }
+        GfError::Algorithm(error) if error.fault_domain() == "execution" => {
+            EmbeddingRefreshFailureClass::Provider
+        }
+        GfError::Algorithm(_)
+        | GfError::Lowering(_)
+        | GfError::BindValidation { .. }
+        | GfError::BindPlan { .. }
+        | GfError::Parse { .. }
         | GfError::Bind { .. }
         | GfError::Plan(_)
         | GfError::Api { .. }

@@ -110,14 +110,33 @@ create_exception!(
 /// contract. Binder failures share the public `ParseError` / `GF_PARSE` domain.
 pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
     let error = match err {
-        GfError::Parse { msg, span } | GfError::Bind { msg, span } => {
+        GfError::Parse { msg, span, .. } | GfError::Bind { msg, span, .. } => {
             let e = PyErr::new::<ParseError, _>(msg.clone());
             let _ = e
                 .value(py)
                 .setattr("span", (span.start, span.end.saturating_sub(span.start)));
             e
         }
-        GfError::Plan(m) => PyErr::new::<PlanError, _>(m.clone()),
+        GfError::LoweringExecution(error) => PyErr::new::<ExecutionError, _>(error.to_string()),
+        GfError::Lowering(error) => match error {
+            graphforge_api::LoweringError::InvalidType(_) => {
+                PyErr::new::<ValidationError, _>(error.to_string())
+            }
+            _ => PyErr::new::<PlanError, _>(error.to_string()),
+        },
+        GfError::BindValidation { msg, .. } | GfError::Validation(msg) => {
+            PyErr::new::<ValidationError, _>(msg.clone())
+        }
+        GfError::Algorithm(error) => match error {
+            graphforge_api::AlgorithmError::Unavailable { .. }
+            | graphforge_api::AlgorithmError::DuplicateCapability { .. } => {
+                PyErr::new::<ValidationError, _>(error.to_string())
+            }
+            _ => PyErr::new::<ExecutionError, _>(error.to_string()),
+        },
+        GfError::BindPlan { msg, .. } | GfError::Plan(msg) => {
+            PyErr::new::<PlanError, _>(msg.clone())
+        }
         GfError::Execution(m) => PyErr::new::<ExecutionError, _>(m.clone()),
         GfError::Provider {
             class,
@@ -137,7 +156,6 @@ pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
         GfError::Project { message, .. } => PyErr::new::<StorageError, _>(message.clone()),
         GfError::Api { message, .. } => PyErr::new::<ValidationError, _>(message.clone()),
         GfError::Lifecycle(m) => PyErr::new::<LifecycleError, _>(m.clone()),
-        GfError::Validation(m) => PyErr::new::<ValidationError, _>(m.clone()),
         GfError::Ontology(m) => PyErr::new::<OntologyError, _>(m.clone()),
         GfError::NotImplemented(name) => PyErr::new::<PyNotImplementedError, _>((*name).to_owned()),
     };

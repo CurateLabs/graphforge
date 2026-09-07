@@ -3619,32 +3619,46 @@ mod tests {
                     nodes: 2,
                     ..AlgorithmLimits::default()
                 },
-                "node limit",
+                AlgorithmError::NodeLimit {
+                    observed: 3,
+                    limit: 2,
+                },
             ),
             (
                 AlgorithmLimits {
                     output_rows: 2,
                     ..AlgorithmLimits::default()
                 },
-                "output row limit",
-            ),
-            (
-                AlgorithmLimits {
-                    iterations: 0,
-                    ..AlgorithmLimits::default()
+                AlgorithmError::OutputLimit {
+                    observed: 3,
+                    limit: 2,
                 },
-                "iteration limit",
             ),
         ] {
-            assert!(matches!(
-                execute(
-                    limits,
-                    AlgorithmCancellation::default(),
-                    EmbeddingResourceLimits::default()
-                ),
-                Err(GfError::Execution(message)) if message.contains(expected)
-            ));
+            let error = execute(
+                limits,
+                AlgorithmCancellation::default(),
+                EmbeddingResourceLimits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code(), "GF_EXECUTION");
+            assert_eq!(error.to_string(), format!("execution error: {expected}"));
+            assert!(matches!(error, GfError::Algorithm(actual) if actual == expected));
         }
+        let iteration_error = execute(
+            AlgorithmLimits {
+                iterations: 0,
+                ..AlgorithmLimits::default()
+            },
+            AlgorithmCancellation::default(),
+            EmbeddingResourceLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(iteration_error.code(), "GF_EXECUTION");
+        assert!(matches!(
+            iteration_error,
+            GfError::Execution(message) if message.contains("iteration limit")
+        ));
         let memory_error = execute(
             AlgorithmLimits::default(),
             AlgorithmCancellation::default(),

@@ -69,30 +69,7 @@ impl VarMap {
     }
 }
 
-/// Errors that can occur when lowering an IR expression to DataFusion.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum LoweringError {
-    /// A [`FunctionCall`](graphforge_ir::expr::IrExpr::FunctionCall) name has no
-    /// DataFusion built-in equivalent.
-    #[error("unknown built-in function: {0}")]
-    UnknownFunction(String),
-
-    /// An [`IrExpr`] variant cannot be lowered yet (e.g. `MapLiteral`).
-    #[error("unsupported expression: {0}")]
-    UnsupportedExpr(String),
-
-    /// A [`VarId`] referenced by a `VarRef` or `PropertyAccess` is not in the
-    /// [`VarMap`].
-    #[error("unbound variable: VarId({0})")]
-    UnboundVar(u32),
-
-    /// A genuine Cypher type error caught at planning — e.g. a quantifier
-    /// predicate that cannot apply to the list's element type (`x % 2` over a
-    /// string list). A deliberate validation rejection (openCypher
-    /// `InvalidArgumentType`), distinct from a capability gap. (#955)
-    #[error("invalid argument type: {0}")]
-    InvalidType(String),
-}
+pub use graphforge_core::LoweringError;
 
 /// The shape of a node value materialized for a bare `RETURN n` (#785): the
 /// node's resolved label (if known at lowering) and the persisted property
