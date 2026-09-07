@@ -55,6 +55,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 
 | Package | Target | Class | Source | Bazel label | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
+| `graphforge-api` | `discovery_portable_v2` | `integration-test` | `crates/graphforge-api/tests/discovery_portable_v2.rs` | `//crates/graphforge-api:discovery_portable_v2` | `mapped` | #909; #1015 discovery reference to facade verifier boundary |
 | `graphforge-api` | `graphforge_api` | `lib` | `crates/graphforge-api/src/lib.rs` | `//crates/graphforge-api:graphforge_api` | `mapped` | #9; unit tests `//crates/graphforge-api:graphforge_api_test` |
 | `graphforge-api` | `atomic_recovery_workflow` | `example` | `crates/graphforge-api/examples/atomic_recovery_workflow.rs` | `//crates/graphforge-api:atomic_recovery_workflow` | `mapped` | #6 |
 | `graphforge-api` | `correction_churn_workflow` | `example` | `crates/graphforge-api/examples/correction_churn_workflow.rs` | `//crates/graphforge-api:correction_churn_workflow` | `mapped` | #6 |
@@ -163,7 +164,6 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-storage` | `m6_storage` | `bench` | `crates/graphforge-storage/benches/m6_storage.rs` | — | `exception` | RT-codspeed-bench; #782 diagnostic simulation/hardware evidence |
 | `graphforge-storage` | `m6_storage_io` | `bench` | `crates/graphforge-storage/benches/m6_storage_io.rs` | — | `exception` | RT-codspeed-bench; #782 stable-runner walltime evidence |
 | `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | `//crates/graphforge-storage:adjacency_delta_write` | `mapped` | #8 |
-| `graphforge-storage` | `discovery_portable_v2` | `integration-test` | `crates/graphforge-storage/tests/discovery_portable_v2.rs` | `//crates/graphforge-storage:discovery_portable_v2` | `mapped` | #909; discovery reference to storage verifier boundary |
 | `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | `//crates/graphforge-storage:filtered_read` | `mapped` | #8 |
 | `graphforge-storage` | `graph_delta_journal` | `integration-test` | `crates/graphforge-storage/tests/graph_delta_journal.rs` | `//crates/graphforge-storage:graph_delta_journal` | `mapped` | #8 / #752 |
 | `graphforge-storage` | `graph_delta_compaction` | `integration-test` | `crates/graphforge-storage/tests/graph_delta_compaction.rs` | `//crates/graphforge-storage:graph_delta_compaction` | `mapped` | #8 / #753 |
