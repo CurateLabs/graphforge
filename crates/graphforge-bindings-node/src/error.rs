@@ -30,17 +30,6 @@ pub fn type_error(env: Env, message: impl Into<String>) -> NodeError {
 fn error_code(err: &GfError) -> &'static str {
     match err {
         GfError::Parse { .. } | GfError::Bind { .. } => "ParseError",
-        GfError::LoweringExecution(_) => "ExecutionError",
-        GfError::Lowering(graphforge_api::LoweringError::InvalidType(_)) => "ValidationError",
-        GfError::Lowering(_) => "PlanError",
-        GfError::Algorithm(
-            graphforge_api::AlgorithmError::Unavailable { .. }
-            | graphforge_api::AlgorithmError::DuplicateCapability { .. },
-        ) => "ValidationError",
-        GfError::Algorithm(_) => "ExecutionError",
-        GfError::BindPlan { .. } => "PlanError",
-        GfError::Plan(_) => "PlanError",
-        GfError::Execution(_) | GfError::Provider { .. } => "ExecutionError",
         GfError::Storage(_) => "GF_IO",
         GfError::Project { code, .. } => code.as_str(),
         GfError::Api { code, .. } => code.as_str(),
@@ -53,7 +42,18 @@ fn error_code(err: &GfError) -> &'static str {
         {
             "GF_VALIDATION"
         }
-        GfError::Validation(_) | GfError::BindValidation { .. } => "ValidationError",
+        GfError::Validation(_)
+        | GfError::BindValidation { .. }
+        | GfError::Lowering(graphforge_api::LoweringError::InvalidType(_))
+        | GfError::Algorithm(
+            graphforge_api::AlgorithmError::Unavailable { .. }
+            | graphforge_api::AlgorithmError::DuplicateCapability { .. },
+        ) => "ValidationError",
+        GfError::Lowering(_) | GfError::BindPlan { .. } | GfError::Plan(_) => "PlanError",
+        GfError::LoweringExecution(_)
+        | GfError::Algorithm(_)
+        | GfError::Execution(_)
+        | GfError::Provider { .. } => "ExecutionError",
         GfError::Ontology(_) => "OntologyError",
         GfError::NotImplemented(_) => "NotImplementedError",
     }

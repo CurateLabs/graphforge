@@ -237,20 +237,21 @@ impl GfError {
         match self {
             Self::Lowering(LoweringError::InvalidType(_))
             | Self::BindValidation { .. }
+            | Self::Validation(_)
             | Self::Algorithm(
                 AlgorithmError::Unavailable { .. } | AlgorithmError::DuplicateCapability { .. },
             ) => "GF_VALIDATION",
-            Self::Lowering(_) | Self::BindPlan { .. } => "GF_PLAN",
-            Self::Algorithm(_) | Self::LoweringExecution(_) => "GF_EXECUTION",
+            Self::Lowering(_) | Self::BindPlan { .. } | Self::Plan(_) => "GF_PLAN",
+            Self::Algorithm(_)
+            | Self::LoweringExecution(_)
+            | Self::Execution(_)
+            | Self::Provider { .. } => "GF_EXECUTION",
             Self::NotImplemented(_) => "GF_NOT_IMPLEMENTED",
             Self::Parse { .. } | Self::Bind { .. } => "GF_PARSE",
-            Self::Plan(_) => "GF_PLAN",
-            Self::Execution(_) | Self::Provider { .. } => "GF_EXECUTION",
             Self::Storage(_) => "GF_IO",
             Self::Project { code, .. } => code.as_str(),
             Self::Api { code, .. } => code.as_str(),
             Self::Lifecycle(_) => "GF_LIFECYCLE",
-            Self::Validation(_) => "GF_VALIDATION",
             Self::Ontology(_) => "GF_ONTOLOGY",
         }
     }

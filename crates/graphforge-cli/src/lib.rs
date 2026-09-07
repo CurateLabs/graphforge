@@ -1622,19 +1622,20 @@ const fn runtime_error_kind(error: &graphforge_api::GfError) -> &'static str {
         graphforge_api::GfError::NotImplemented(_) => "not_implemented",
         graphforge_api::GfError::Parse { .. } => "parse",
         graphforge_api::GfError::Bind { .. } => "bind",
-        graphforge_api::GfError::LoweringExecution(_) => "execution",
+        graphforge_api::GfError::LoweringExecution(_) | graphforge_api::GfError::Execution(_) => {
+            "execution"
+        }
         graphforge_api::GfError::Lowering(error) => error.fault_domain(),
         graphforge_api::GfError::Algorithm(error) => error.fault_domain(),
-        graphforge_api::GfError::BindValidation { .. } => "validation",
-        graphforge_api::GfError::BindPlan { .. } => "plan",
-        graphforge_api::GfError::Plan(_) => "plan",
-        graphforge_api::GfError::Execution(_) => "execution",
+        graphforge_api::GfError::BindValidation { .. } | graphforge_api::GfError::Validation(_) => {
+            "validation"
+        }
+        graphforge_api::GfError::BindPlan { .. } | graphforge_api::GfError::Plan(_) => "plan",
         graphforge_api::GfError::Provider { .. } => "provider",
         graphforge_api::GfError::Storage(_) => "storage",
         graphforge_api::GfError::Project { .. } => "project",
         graphforge_api::GfError::Api { .. } => "api",
         graphforge_api::GfError::Lifecycle(_) => "lifecycle",
-        graphforge_api::GfError::Validation(_) => "validation",
         graphforge_api::GfError::Ontology(_) => "ontology",
     }
 }

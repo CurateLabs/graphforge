@@ -124,7 +124,9 @@ pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
             }
             _ => PyErr::new::<PlanError, _>(error.to_string()),
         },
-        GfError::BindValidation { msg, .. } => PyErr::new::<ValidationError, _>(msg.clone()),
+        GfError::BindValidation { msg, .. } | GfError::Validation(msg) => {
+            PyErr::new::<ValidationError, _>(msg.clone())
+        }
         GfError::Algorithm(error) => match error {
             graphforge_api::AlgorithmError::Unavailable { .. }
             | graphforge_api::AlgorithmError::DuplicateCapability { .. } => {
@@ -132,8 +134,9 @@ pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
             }
             _ => PyErr::new::<ExecutionError, _>(error.to_string()),
         },
-        GfError::BindPlan { msg, .. } => PyErr::new::<PlanError, _>(msg.clone()),
-        GfError::Plan(m) => PyErr::new::<PlanError, _>(m.clone()),
+        GfError::BindPlan { msg, .. } | GfError::Plan(msg) => {
+            PyErr::new::<PlanError, _>(msg.clone())
+        }
         GfError::Execution(m) => PyErr::new::<ExecutionError, _>(m.clone()),
         GfError::Provider {
             class,
@@ -153,7 +156,6 @@ pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
         GfError::Project { message, .. } => PyErr::new::<StorageError, _>(message.clone()),
         GfError::Api { message, .. } => PyErr::new::<ValidationError, _>(message.clone()),
         GfError::Lifecycle(m) => PyErr::new::<LifecycleError, _>(m.clone()),
-        GfError::Validation(m) => PyErr::new::<ValidationError, _>(m.clone()),
         GfError::Ontology(m) => PyErr::new::<OntologyError, _>(m.clone()),
         GfError::NotImplemented(name) => PyErr::new::<PyNotImplementedError, _>((*name).to_owned()),
     };
