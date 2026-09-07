@@ -144,6 +144,7 @@ const PAGES = [
   'adr/0023-composable-multi-ontology.md',
   'adr/0024-storage-format-exceptions.md',
   'adr/0025-storage-value-contract.md',
+  'adr/0026-read-plan-resources.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

@@ -3231,7 +3231,7 @@ impl<'a> ExprLowerer<'a> {
                 .then_with(|| left_name.cmp(right_name))
         });
         Some(PathNodeHydration {
-            dir: dir.clone(),
+            dir: None,
             labels_by_type,
             prop_stems: stems,
             fields: fields.into(),
@@ -12105,7 +12105,7 @@ fn path_node_struct_fields() -> datafusion::arrow::datatypes::Fields {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct PathNodeHydration {
     /// The project directory the invoke reads node/property files from.
-    dir: std::path::PathBuf,
+    dir: Option<std::path::PathBuf>,
     /// `type_id → label` (ontology + runtime catalog), sorted by id.
     labels_by_type: Vec<(graphforge_value::EntityTypeId, String)>,
     /// The `properties/<stem>.parquet` stems whose fields form the union,
@@ -12119,6 +12119,82 @@ struct PathNodeHydration {
 struct CypherPathNodes {
     signature: Signature,
     hydrate: Option<PathNodeHydration>,
+}
+
+/// Bind graph-reading expressions to an execution-owned resource. Lowering
+/// leaves hydration unbound; only physical planning supplies the directory.
+pub fn bind_graph_read_expression(
+    expr: DfExpr,
+    dir: Option<&std::path::Path>,
+    labels: Option<&[(graphforge_value::EntityTypeId, String)]>,
+) -> datafusion::common::Result<DfExpr> {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+    expr.transform_up(|mut expr| {
+        if let DfExpr::ScalarFunction(call) = &mut expr {
+            if let Some(nodes) = call.func.inner().downcast_ref::<CypherPathNodes>() {
+                if let Some(hydrate) = &nodes.hydrate {
+                    let dir = dir.ok_or_else(|| {
+                        datafusion::common::DataFusionError::Plan(
+                            "GF_READ_RESOURCE_MISSING: path hydration".into(),
+                        )
+                    })?;
+                    let stems = graphforge_storage::list_property_stems(dir);
+                    let mut fields = vec![
+                        Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                        Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+                    ];
+                    let mut seen: std::collections::HashSet<String> =
+                        fields.iter().map(|f| f.name().clone()).collect();
+                    for stem in &stems {
+                        let table = graphforge_storage::PropertyTable::open_discovered(dir, stem);
+                        for field in table.schema_ref().fields() {
+                            if seen.insert(field.name().clone()) {
+                                fields.push(field.as_ref().clone().with_nullable(true));
+                            }
+                        }
+                    }
+                    if hydrate.prop_stems != stems
+                        || hydrate.fields != fields.into()
+                        || labels != Some(hydrate.labels_by_type.as_slice())
+                    {
+                        return Err(datafusion::common::DataFusionError::Plan(
+                            "GF_READ_RESOURCE_INCOMPATIBLE: path hydration schema or labels".into(),
+                        ));
+                    }
+                    let mut hydrate = hydrate.clone();
+                    hydrate.dir = Some(dir.to_path_buf());
+                    call.func = Arc::new(ScalarUDF::new_from_impl(
+                        CypherPathNodes::with_hydration(hydrate),
+                    ));
+                    return Ok(Transformed::yes(expr));
+                }
+            } else if let Some(quantifier) = call.func.inner().downcast_ref::<CypherQuantifier>() {
+                call.func = Arc::new(ScalarUDF::new_from_impl(CypherQuantifier::new(
+                    quantifier.kind,
+                    bind_graph_read_expression(quantifier.predicate.clone(), dir, labels)?,
+                    quantifier.elem_name.clone(),
+                    quantifier.outer_names.clone(),
+                )));
+                return Ok(Transformed::yes(expr));
+            } else if let Some(comp) = call.func.inner().downcast_ref::<CypherListComp>() {
+                call.func = Arc::new(ScalarUDF::new_from_impl(CypherListComp::new(
+                    comp.filter
+                        .clone()
+                        .map(|e| bind_graph_read_expression(e, dir, labels))
+                        .transpose()?,
+                    comp.projection
+                        .clone()
+                        .map(|e| bind_graph_read_expression(e, dir, labels))
+                        .transpose()?,
+                    comp.elem_name.clone(),
+                    comp.outer_names.clone(),
+                )));
+                return Ok(Transformed::yes(expr));
+            }
+        }
+        Ok(Transformed::no(expr))
+    })
+    .map(|result| result.data)
 }
 
 impl CypherPathNodes {
@@ -12367,56 +12443,62 @@ fn gather_path_node_labels(
     let mut label_ids_of: HashMap<[u8; 16], Vec<graphforge_value::EntityTypeId>> =
         HashMap::with_capacity(unique.len());
 
-    graphforge_storage::visit_nodes_batched(&h.dir, batch_size, |b| {
-        check_path_hydration_cancel()?;
-        path_hydration_stats::record_node_batch(b.num_rows() as u64);
-        if remaining.is_empty() {
-            return Ok(false);
-        }
-        let uuids = hydration_fsb16(b, "node_uuid")?;
-        let type_ids = b
-            .column_by_name("type_ids")
-            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
-        for r in 0..b.num_rows() {
-            if uuids.is_null(r) || type_ids.is_null(r) {
-                continue;
+    graphforge_storage::visit_nodes_batched(
+        h.dir.as_deref().ok_or_else(|| {
+            DataFusionError::Plan("GF_READ_RESOURCE_MISSING: path hydration".into())
+        })?,
+        batch_size,
+        |b| {
+            check_path_hydration_cancel()?;
+            path_hydration_stats::record_node_batch(b.num_rows() as u64);
+            if remaining.is_empty() {
+                return Ok(false);
             }
-            let mut u = [0u8; 16];
-            u.copy_from_slice(uuids.value(r));
-            if !remaining.remove(&u) {
-                continue;
-            }
-            let values = type_ids.value(r);
-            let values = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| {
-                    exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
-                })?;
-            let mut ids = Vec::with_capacity(values.len());
-            for i in 0..values.len() {
-                if !values.is_null(i) {
-                    ids.push(
-                        graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
-                            |error| {
-                                exec_err(format!(
-                                    "cypher_path_nodes: invalid membership identity: {error}"
-                                ))
-                            },
-                        )?,
-                    );
+            let uuids = hydration_fsb16(b, "node_uuid")?;
+            let type_ids = b
+                .column_by_name("type_ids")
+                .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+                .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
+            for r in 0..b.num_rows() {
+                if uuids.is_null(r) || type_ids.is_null(r) {
+                    continue;
+                }
+                let mut u = [0u8; 16];
+                u.copy_from_slice(uuids.value(r));
+                if !remaining.remove(&u) {
+                    continue;
+                }
+                let values = type_ids.value(r);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .ok_or_else(|| {
+                        exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
+                    })?;
+                let mut ids = Vec::with_capacity(values.len());
+                for i in 0..values.len() {
+                    if !values.is_null(i) {
+                        ids.push(
+                            graphforge_value::EntityTypeId::decode(values.value(i)).map_err(
+                                |error| {
+                                    exec_err(format!(
+                                        "cypher_path_nodes: invalid membership identity: {error}"
+                                    ))
+                                },
+                            )?,
+                        );
+                    }
+                }
+                label_ids_of.insert(u, ids);
+                path_hydration_stats::record_node_gathered(1);
+                path_hydration_stats::record_peak_gathered(label_ids_of.len() as u64);
+                if remaining.is_empty() {
+                    break;
                 }
             }
-            label_ids_of.insert(u, ids);
-            path_hydration_stats::record_node_gathered(1);
-            path_hydration_stats::record_peak_gathered(label_ids_of.len() as u64);
-            if remaining.is_empty() {
-                break;
-            }
-        }
-        Ok(!remaining.is_empty())
-    })?;
+            Ok(!remaining.is_empty())
+        },
+    )?;
     path_hydration_stats::record_resolved(label_ids_of.len() as u64);
     Ok(label_ids_of)
 }
@@ -12490,53 +12572,60 @@ fn gather_path_node_props(
         path_hydration_stats::record_stem_opened();
         let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
         let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
-        graphforge_storage::visit_properties_batched(&h.dir, stem, batch_size, |b| {
-            check_path_hydration_cancel()?;
-            path_hydration_stats::record_property_batch(b.num_rows() as u64);
-            if remaining.is_empty() {
-                return Ok(false);
-            }
-            let key = hydration_fsb16(b, "node_uuid")?;
-            let mut take_rows: Vec<u32> = Vec::new();
-            let mut take_uuids: Vec<[u8; 16]> = Vec::new();
-            for r in 0..key.len() {
-                if key.is_null(r) {
-                    continue;
+        graphforge_storage::visit_properties_batched(
+            h.dir.as_deref().ok_or_else(|| {
+                DataFusionError::Plan("GF_READ_RESOURCE_MISSING: path hydration".into())
+            })?,
+            stem,
+            batch_size,
+            |b| {
+                check_path_hydration_cancel()?;
+                path_hydration_stats::record_property_batch(b.num_rows() as u64);
+                if remaining.is_empty() {
+                    return Ok(false);
                 }
-                let mut u = [0u8; 16];
-                u.copy_from_slice(key.value(r));
-                if !remaining.contains(&u) {
-                    continue;
+                let key = hydration_fsb16(b, "node_uuid")?;
+                let mut take_rows: Vec<u32> = Vec::new();
+                let mut take_uuids: Vec<[u8; 16]> = Vec::new();
+                for r in 0..key.len() {
+                    if key.is_null(r) {
+                        continue;
+                    }
+                    let mut u = [0u8; 16];
+                    u.copy_from_slice(key.value(r));
+                    if !remaining.contains(&u) {
+                        continue;
+                    }
+                    take_rows.push(
+                        u32::try_from(r)
+                            .map_err(|_| exec_err(format!("property row {r} exceeds u32")))?,
+                    );
+                    take_uuids.push(u);
                 }
-                take_rows.push(
-                    u32::try_from(r)
-                        .map_err(|_| exec_err(format!("property row {r} exceeds u32")))?,
-                );
-                take_uuids.push(u);
-            }
-            if take_rows.is_empty() {
-                return Ok(true);
-            }
-            let indices = UInt32Array::from(take_rows);
-            let filtered = take_record_batch_rows(b, &indices)?;
-            let batch_idx = kept.len();
-            for (local_row, u) in take_uuids.into_iter().enumerate() {
-                if remaining.remove(&u) {
-                    let row = u32::try_from(local_row).map_err(|_| {
-                        exec_err(format!("gathered property row {local_row} exceeds u32"))
-                    })?;
-                    uuid_to_loc.entry(u).or_default().push(PropRowLoc {
-                        stem: si,
-                        batch: batch_idx,
-                        row,
-                    });
-                    path_hydration_stats::record_property_gathered(1);
+                if take_rows.is_empty() {
+                    return Ok(true);
                 }
-            }
-            path_hydration_stats::record_peak_gathered(uuid_to_loc.len() as u64);
-            kept.push(filtered);
-            Ok(!remaining.is_empty())
-        })?;
+                let indices = UInt32Array::from(take_rows);
+                let filtered = take_record_batch_rows(b, &indices)?;
+                let batch_idx = kept.len();
+                for (local_row, u) in take_uuids.into_iter().enumerate() {
+                    if remaining.remove(&u) {
+                        let row = u32::try_from(local_row).map_err(|_| {
+                            exec_err(format!("gathered property row {local_row} exceeds u32"))
+                        })?;
+                        uuid_to_loc.entry(u).or_default().push(PropRowLoc {
+                            stem: si,
+                            batch: batch_idx,
+                            row,
+                        });
+                        path_hydration_stats::record_property_gathered(1);
+                    }
+                }
+                path_hydration_stats::record_peak_gathered(uuid_to_loc.len() as u64);
+                kept.push(filtered);
+                Ok(!remaining.is_empty())
+            },
+        )?;
         kept_by_stem.push(kept);
     }
     Ok((kept_by_stem, uuid_to_loc))
@@ -13905,7 +13994,7 @@ mod tests {
         // With hydration: node_uuid, labels, then the baked property union
         // (#1024) — the shape `render_node_struct` and `x.<prop>` need.
         let hydrated = CypherPathNodes::with_hydration(PathNodeHydration {
-            dir: std::path::PathBuf::from("/nonexistent"),
+            dir: Some(std::path::PathBuf::from("/nonexistent")),
             labels_by_type: vec![(
                 graphforge_value::EntityTypeId::decode(0).unwrap(),
                 "A".to_owned(),
@@ -15564,7 +15653,7 @@ mod tests {
         let missing_bytes = [0xABu8; 16];
 
         let hydrate = PathNodeHydration {
-            dir: dir.path().to_path_buf(),
+            dir: Some(dir.path().to_path_buf()),
             labels_by_type: vec![
                 (
                     graphforge_value::EntityTypeId::decode(1).unwrap(),
@@ -15654,7 +15743,7 @@ mod tests {
         let loop_rels = std::sync::Arc::new(b.finish()) as datafusion::arrow::array::ArrayRef;
 
         let hydrate2 = PathNodeHydration {
-            dir: dir.path().to_path_buf(),
+            dir: Some(dir.path().to_path_buf()),
             labels_by_type: vec![
                 (
                     graphforge_value::EntityTypeId::decode(1).unwrap(),
@@ -15769,7 +15858,7 @@ mod tests {
         let a = to_bytes(&keep_a);
         let b = to_bytes(&keep_b);
         let hydrate = PathNodeHydration {
-            dir: dir.path().to_path_buf(),
+            dir: Some(dir.path().to_path_buf()),
             labels_by_type: vec![(
                 graphforge_value::EntityTypeId::decode(1).unwrap(),
                 "Person".to_owned(),
@@ -15951,7 +16040,7 @@ mod tests {
 
         let bytes = to_bytes(&keep);
         let hydrate = PathNodeHydration {
-            dir: dir.path().to_path_buf(),
+            dir: Some(dir.path().to_path_buf()),
             labels_by_type: vec![
                 (
                     graphforge_value::EntityTypeId::decode(1).unwrap(),
@@ -16084,7 +16173,7 @@ mod tests {
         w.flush().unwrap();
         let bytes = to_bytes(&u);
         let hydrate = PathNodeHydration {
-            dir: dir.path().to_path_buf(),
+            dir: Some(dir.path().to_path_buf()),
             labels_by_type: vec![(
                 graphforge_value::EntityTypeId::decode(1).unwrap(),
                 "Person".to_owned(),

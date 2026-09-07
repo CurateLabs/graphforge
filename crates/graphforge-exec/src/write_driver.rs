@@ -1356,6 +1356,17 @@ pub(crate) struct PhaseEnv<'a> {
     pub type_map: HashMap<graphforge_value::EntityTypeId, String>,
 }
 
+impl PhaseEnv<'_> {
+    fn bind_read_expression(&self, expr: DfExpr) -> Result<DfExpr, GfError> {
+        graphforge_rel::expr::bind_graph_read_expression(
+            expr,
+            Some(self.dir),
+            Some(&self.lowerer.read_contract().labels),
+        )
+        .map_err(GfError::from_plan_error)
+    }
+}
+
 fn bind_expr_params(
     expr: DfExpr,
     params: &HashMap<String, graphforge_ir::IrLiteral>,
@@ -1779,7 +1790,7 @@ fn resolve_merge_node_properties_by_row(
 ) -> Result<Vec<ResolvedNodeSpec>, GfError> {
     let mut physical = Vec::with_capacity(spec.computed_properties.len());
     for (name, expr) in &spec.computed_properties {
-        let expr = bind_expr_params(expr.clone(), env.params)?;
+        let expr = env.bind_read_expression(bind_expr_params(expr.clone(), env.params)?)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
         let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
             .map_err(GfError::from_plan_error)?;
@@ -2123,7 +2134,7 @@ fn resolve_merge_edge_properties_by_row(
 ) -> Result<Vec<ResolvedEdgeSpec>, GfError> {
     let mut physical = Vec::with_capacity(spec.computed_properties.len());
     for (name, expr) in &spec.computed_properties {
-        let expr = bind_expr_params(expr.clone(), env.params)?;
+        let expr = env.bind_read_expression(bind_expr_params(expr.clone(), env.params)?)?;
         let (expr, eval_schema) = positional_eval_expr(expr, &frontier.df_schema)?;
         let expr = create_physical_expr(&expr, &eval_schema, &ExecutionProps::new())
             .map_err(GfError::from_plan_error)?;
@@ -2410,7 +2421,7 @@ fn collect_delete_expr_targets(
             Arc::new(frontier.df_schema.clone()),
         )?;
         let physical = create_physical_expr(
-            &bind_expr_params(df_expr, env.params)?,
+            &env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?,
             &frontier.df_schema,
             &ExecutionProps::new(),
         )
@@ -2800,7 +2811,7 @@ fn run_set_phase_masked(
             env.lowerer
                 .lower_value_expr(env.exprs, var_map, item.value)?
         };
-        let df_expr = bind_expr_params(df_expr, env.params)?;
+        let df_expr = env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
         let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
             .map_err(GfError::from_plan_error)?;
@@ -2987,7 +2998,7 @@ fn run_set_map_phase_with_input(
         } else {
             env.lowerer.lower_value_expr(env.exprs, var_map, item.map)?
         };
-        let df_expr = bind_expr_params(df_expr, env.params)?;
+        let df_expr = env.bind_read_expression(bind_expr_params(df_expr, env.params)?)?;
         let (df_expr, eval_schema) = positional_eval_expr(df_expr, &frontier.df_schema)?;
         let phys = create_physical_expr(&df_expr, &eval_schema, &ExecutionProps::new())
             .map_err(GfError::from_plan_error)?;
