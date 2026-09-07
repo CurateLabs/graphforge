@@ -111,7 +111,18 @@ fn render_lowered(query: &str) -> String {
     // the explain output, so a throwaway temp dir keeps snapshots deterministic.
     let dir = tempfile::tempdir().expect("tempdir");
     let lowered = graphforge_rel::GraphPlanLowerer::new_for_reads(
-        &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+        &graphforge_storage::lowering_snapshot(
+            Some(
+                &graphforge_storage::GraphCatalog::open(
+                    dir.path(),
+                    None,
+                    &graphforge_ir::RuntimeCatalog::new(),
+                )
+                .unwrap(),
+            ),
+            Some(dir.path()),
+        )
+        .unwrap(),
         Some(&handle),
         OntologyMode::Advisory,
     )

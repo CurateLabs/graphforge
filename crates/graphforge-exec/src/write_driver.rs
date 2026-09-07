@@ -4219,7 +4219,18 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer = GraphPlanLowerer::new_for_writes(
-                &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+                &graphforge_storage::lowering_snapshot(
+                    Some(
+                        &graphforge_storage::GraphCatalog::open(
+                            dir.path(),
+                            None,
+                            &graphforge_ir::RuntimeCatalog::new(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some(dir.path()),
+                )
+                .unwrap(),
                 None,
                 OntologyMode::Exploratory,
             )
@@ -4269,7 +4280,18 @@ mod tests {
         for is_edge in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let lowerer = GraphPlanLowerer::new_for_writes(
-                &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+                &graphforge_storage::lowering_snapshot(
+                    Some(
+                        &graphforge_storage::GraphCatalog::open(
+                            dir.path(),
+                            None,
+                            &graphforge_ir::RuntimeCatalog::new(),
+                        )
+                        .unwrap(),
+                    ),
+                    Some(dir.path()),
+                )
+                .unwrap(),
                 None,
                 OntologyMode::Exploratory,
             )
@@ -4318,7 +4340,18 @@ mod tests {
     fn set_and_remove_reject_malformed_identity_and_edge_routing_columns() {
         let dir = tempfile::tempdir().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             OntologyMode::Exploratory,
         )
@@ -4472,7 +4505,18 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             OntologyMode::Exploratory,
         )

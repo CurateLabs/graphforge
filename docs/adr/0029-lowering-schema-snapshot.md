@@ -29,7 +29,12 @@ and physical/public schemas retain their existing semantics.
 
 ## Remaining parent work
 
-Runtime path hydration remains in rel for this slice. Its execution binding may
+Runtime path hydration remains in rel for this slice. Specifically,
+`expr::bind_graph_read_expression` revalidates property schemas at physical
+binding; `gather_path_node_labels` and `gather_path_node_props` still invoke
+storage visitors at execution. Rel also imports shared storage schema constants.
+The unused `StorageProvider` stubs live in `graphforge-storage/src/lib.rs`, not
+in rel. Its execution binding may
 validate stored schema facts and its visitors still perform runtime reads. The
 next #1006 slice moves that implementation behind ordinary execution demand,
 cancellation and accounting. Shared schema definitions and the unused
@@ -44,3 +49,9 @@ unavailable during lowering, and then independently bind complete plans to two
 schema-equivalent graphs with different cardinalities. Existing fixed/variable
 traversal, wildcard properties, path hydration, write visibility, read-only
 explanation and incompatible-resource tests remain parity gates.
+
+Dataset snapshot construction requires a catalog's retained authenticated
+property inventory. It does not re-admit routes through discovery helpers that
+hash graph data. A catalog admitted for an absent standalone write target can
+supply its empty schema without creating that target; a missing inventory for
+an existing target is rejected. No-catalog callers are schema-only.

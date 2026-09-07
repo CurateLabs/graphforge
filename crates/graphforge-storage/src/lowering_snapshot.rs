@@ -33,6 +33,22 @@ impl GraphCatalog {
         }
         if let Some(dir) = dir {
             let inventory = self.lowering_property_inventory();
+            if inventory.is_none() && !dir.exists() {
+                // A standalone writer may target a directory that it will create
+                // only at execution. Capture the empty schema without creating it.
+                snapshot.node_schema = Some(
+                    crate::TopologyNodeTable::open_project(dir)
+                        .map_err(GfError::from_plan_error)?
+                        .schema(),
+                );
+                return Ok(snapshot);
+            }
+            let inventory = inventory.ok_or_else(|| {
+                GfError::Validation(
+                    "dataset lowering snapshot requires a retained authenticated catalog inventory"
+                        .into(),
+                )
+            })?;
             snapshot.node_schema = Some(
                 crate::TopologyNodeTable::open_project(dir)
                     .map_err(GfError::from_plan_error)?
@@ -45,7 +61,7 @@ impl GraphCatalog {
             nodes.extend(snapshot.semantic_labels.values().cloned());
             let mut edges: std::collections::BTreeSet<String> =
                 snapshot.edge_property_stems.iter().cloned().collect();
-            if let Some(inventory) = &inventory {
+            {
                 nodes.extend(
                     inventory
                         .routes(crate::PropertyRouteKind::Node)
@@ -60,37 +76,23 @@ impl GraphCatalog {
             for stem in nodes {
                 snapshot.node_properties.insert(
                     stem.clone(),
-                    inventory
-                        .as_ref()
-                        .map_or_else(
-                            || crate::PropertyTable::open_discovered(dir, &stem),
-                            |inventory| {
-                                crate::PropertyTable::open_authenticated(
-                                    dir,
-                                    &stem,
-                                    std::sync::Arc::clone(inventory),
-                                )
-                            },
-                        )
-                        .schema(),
+                    crate::PropertyTable::open_authenticated(
+                        dir,
+                        &stem,
+                        std::sync::Arc::clone(&inventory),
+                    )
+                    .schema(),
                 );
             }
             for stem in edges {
                 snapshot.edge_properties.insert(
                     stem.clone(),
-                    inventory
-                        .as_ref()
-                        .map_or_else(
-                            || crate::EdgePropertyTable::open_discovered(dir, &stem),
-                            |inventory| {
-                                crate::EdgePropertyTable::open_authenticated(
-                                    dir,
-                                    &stem,
-                                    std::sync::Arc::clone(inventory),
-                                )
-                            },
-                        )
-                        .schema(),
+                    crate::EdgePropertyTable::open_authenticated(
+                        dir,
+                        &stem,
+                        std::sync::Arc::clone(&inventory),
+                    )
+                    .schema(),
                 );
             }
         }
@@ -106,29 +108,12 @@ pub fn lowering_snapshot(
     if let Some(catalog) = catalog {
         return catalog.lowering_snapshot(dir);
     }
-    let mut snapshot = LoweringSnapshot::default();
-    if let Some(dir) = dir {
-        snapshot.node_schema = Some(
-            crate::TopologyNodeTable::open_project(dir)
-                .map_err(GfError::from_plan_error)?
-                .schema(),
-        );
-        snapshot.node_property_stems = crate::list_property_stems(dir);
-        snapshot.edge_property_stems = crate::list_edge_property_stems(dir);
-        for stem in &snapshot.node_property_stems {
-            snapshot.node_properties.insert(
-                stem.clone(),
-                crate::PropertyTable::open_discovered(dir, &stem).schema(),
-            );
-        }
-        for stem in &snapshot.edge_property_stems {
-            snapshot.edge_properties.insert(
-                stem.clone(),
-                crate::EdgePropertyTable::open_discovered(dir, &stem).schema(),
-            );
-        }
+    if dir.is_some() {
+        return Err(GfError::Validation(
+            "dataset lowering snapshot requires an admitted catalog".into(),
+        ));
     }
-    Ok(snapshot)
+    Ok(LoweringSnapshot::default())
 }
 
 #[cfg(test)]
@@ -139,6 +124,29 @@ mod tests {
     use graphforge_ontology::{OntologyModuleId, QualifiedSymbol, SymbolKind};
     use graphforge_value::EntityTypeId;
     use std::collections::HashMap;
+
+    #[test]
+    fn dataset_snapshot_requires_admission_but_preserves_absent_write_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("not-created");
+        let catalog = GraphCatalog::open(&target, None, &RuntimeCatalog::new()).unwrap();
+        let empty = catalog.lowering_snapshot(Some(&target)).unwrap();
+        assert!(empty.node_schema.is_some());
+        assert!(empty.node_properties.is_empty());
+        assert!(!target.exists());
+        assert!(
+            matches!(lowering_snapshot(None, Some(&target)), Err(GfError::Validation(message))
+            if message == "dataset lowering snapshot requires an admitted catalog")
+        );
+        // Malformed data must not be opened or authenticated by a fallback.
+        // The retained catalog has no inventory; rejection precedes discovery.
+        std::fs::create_dir_all(target.join("properties")).unwrap();
+        std::fs::write(target.join("properties/Person.parquet"), b"not parquet").unwrap();
+        assert!(
+            matches!(catalog.lowering_snapshot(Some(&target)), Err(GfError::Validation(message))
+            if message == "dataset lowering snapshot requires a retained authenticated catalog inventory")
+        );
+    }
 
     #[test]
     fn selected_semantic_schema_survives_absent_discovery_without_expanding_unions() {

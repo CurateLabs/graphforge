@@ -5078,7 +5078,18 @@ relation_types:
 
         let dir = tempfile::tempdir().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             graphforge_core::OntologyMode::Exploratory,
         )
@@ -5776,7 +5787,18 @@ relation_types:
     fn create_lowers_to_extension_with_write_target() {
         let dir = tempfile::TempDir::new().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             graphforge_core::OntologyMode::Exploratory,
         )
@@ -5796,7 +5818,18 @@ relation_types:
 
         let dir = tempfile::TempDir::new().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             graphforge_core::OntologyMode::Exploratory,
         )
@@ -5863,7 +5896,18 @@ relation_types:
         // authorizes CREATE.
         let dir = tempfile::TempDir::new().unwrap();
         let lowerer = GraphPlanLowerer::new_for_reads(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             graphforge_core::OntologyMode::Exploratory,
         )
@@ -5880,7 +5924,18 @@ relation_types:
         use graphforge_ir::{CreateNodeSpec, CreatePattern};
         let dir = tempfile::TempDir::new().unwrap();
         let lowerer = GraphPlanLowerer::new_for_writes(
-            &graphforge_storage::lowering_snapshot(None, Some(dir.path())).unwrap(),
+            &graphforge_storage::lowering_snapshot(
+                Some(
+                    &graphforge_storage::GraphCatalog::open(
+                        dir.path(),
+                        None,
+                        &graphforge_ir::RuntimeCatalog::new(),
+                    )
+                    .unwrap(),
+                ),
+                Some(dir.path()),
+            )
+            .unwrap(),
             None,
             graphforge_core::OntologyMode::Exploratory,
         )
