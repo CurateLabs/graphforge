@@ -545,6 +545,9 @@ pub struct GraphConstructionEvidence {
     /// Bounded artifact reads used by interrupted-append recovery.
     #[serde(default)]
     pub recovery_application_read_operations: u64,
+    /// Synchronization barriers for checkpointing newly observed resume reads.
+    #[serde(default)]
+    pub recovery_checkpoint_fsync_operations: u64,
     /// New canonical graph payload bytes emitted by encoding.
     #[serde(default)]
     pub canonical_output_bytes: u64,
@@ -2187,10 +2190,27 @@ impl GraphConstructionSession {
             let graph_source = StableDirectory::open(graph_source_dir).map_err(storage)?;
             load_parent_runtime_catalog(&graph_source, parent_topology_generation, budgets)?
         };
+        let resumed_parent_work = if recovered_checkpoint.is_some() && !publication_replay {
+            ReadWork {
+                bytes: base_work
+                    .authentication_bytes
+                    .checked_add(parent_catalog_work.bytes)
+                    .ok_or_else(|| storage("resumed parent read bytes overflow"))?,
+                operations: base_work
+                    .authentication_blocks
+                    .checked_add(parent_catalog_work.operations)
+                    .ok_or_else(|| storage("resumed parent read operations overflow"))?,
+                ..ReadWork::default()
+            }
+        } else {
+            ReadWork::default()
+        };
         let checkpoint = if let Some(checkpoint) = recovered_checkpoint {
             checkpoint
         } else {
             let evidence = GraphConstructionEvidence {
+                seal_application_read_bytes: base_work.authentication_bytes,
+                shape_application_read_bytes: parent_catalog_work.bytes,
                 authentication_read_bytes: base_work.authentication_bytes,
                 authentication_read_operations: base_work.authentication_blocks,
                 parent_catalog_read_bytes: parent_catalog_work.bytes,
@@ -2314,6 +2334,37 @@ impl GraphConstructionSession {
                 });
         }
         session.revalidate_authority()?;
+        let repaired_parent_phases = repair_unshaped_parent_phase_bytes(&mut session.checkpoint)?;
+        if repaired_parent_phases
+            || resumed_parent_work.bytes != 0
+            || resumed_parent_work.operations != 0
+        {
+            session.checkpoint.evidence.recovery_application_read_bytes = session
+                .checkpoint
+                .evidence
+                .recovery_application_read_bytes
+                .checked_add(resumed_parent_work.bytes)
+                .ok_or_else(|| storage("recovery read bytes overflow"))?;
+            session
+                .checkpoint
+                .evidence
+                .recovery_application_read_operations = session
+                .checkpoint
+                .evidence
+                .recovery_application_read_operations
+                .checked_add(resumed_parent_work.operations)
+                .ok_or_else(|| storage("recovery read operations overflow"))?;
+            session
+                .checkpoint
+                .evidence
+                .recovery_checkpoint_fsync_operations = session
+                .checkpoint
+                .evidence
+                .recovery_checkpoint_fsync_operations
+                .checked_add(3)
+                .ok_or_else(|| storage("recovery checkpoint sync count overflow"))?;
+            replace_checkpoint_control(&session.root, &session.checkpoint)?;
+        }
         if session.checkpoint.next_sequence != 0
             && session.checkpoint.evidence.immutable_artifacts == 0
         {
@@ -4373,6 +4424,58 @@ fn recover_shape_intent(
     unlink_named(root, SHAPE_INTENT)
 }
 
+/// Restore only the known omitted parent contribution before shape authority
+/// exists. Authenticated shaped evidence is never rewritten during recovery.
+fn repair_unshaped_parent_phase_bytes(checkpoint: &mut Checkpoint) -> Result<bool, GfError> {
+    let evidence = &mut checkpoint.evidence;
+    let missing_seal = evidence.seal_application_read_bytes != evidence.authentication_read_bytes;
+    let shape_contributors = [
+        evidence.shape_input_validation_read_bytes,
+        evidence.merge_read_bytes,
+        evidence.parquet_read_bytes,
+        evidence.shaped_output_authentication_bytes,
+        evidence.retained_probe_read_bytes,
+    ];
+    let expected_shape = checked_evidence_sum(
+        "parent shape phase bytes",
+        evidence.parent_catalog_read_bytes,
+        &shape_contributors,
+    )?;
+    let missing_shape = evidence.shape_application_read_bytes != expected_shape;
+    if !missing_seal && !missing_shape {
+        return Ok(false);
+    }
+    if checkpoint.shape_authority_sha256.is_some() || checkpoint.encoding_inventory_sha256.is_some()
+    {
+        return Err(storage(
+            "legacy construction parent phase attribution is bound to shape authority",
+        ));
+    }
+    if missing_seal
+        && evidence
+            .seal_application_read_bytes
+            .checked_add(checkpoint.base_work.authentication_bytes)
+            != Some(evidence.authentication_read_bytes)
+    {
+        return Err(storage(
+            "construction parent authentication phase bytes disagree",
+        ));
+    }
+    if missing_shape
+        && (evidence.shape_application_read_bytes != 0
+            || shape_contributors.iter().any(|value| *value != 0))
+    {
+        return Err(storage("construction parent catalog phase bytes disagree"));
+    }
+    if missing_seal {
+        evidence.seal_application_read_bytes = evidence.authentication_read_bytes;
+    }
+    if missing_shape {
+        evidence.shape_application_read_bytes = evidence.parent_catalog_read_bytes;
+    }
+    Ok(true)
+}
+
 fn recover_final_shape_evidence(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
@@ -4409,6 +4512,9 @@ fn persisted_evidence_equivalent(
 }
 
 fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphConstructionEvidence) {
+    target.recovery_application_read_bytes = source.recovery_application_read_bytes;
+    target.recovery_application_read_operations = source.recovery_application_read_operations;
+    target.recovery_checkpoint_fsync_operations = source.recovery_checkpoint_fsync_operations;
     target.storage_current = source.storage_current.clone();
     target.storage_receipt_category_authorities =
         source.storage_receipt_category_authorities.clone();
@@ -12498,6 +12604,144 @@ mod tests {
         }
         let opened = crate::UuidMembershipIndex::open(&assembled).unwrap();
         assert_eq!(opened.count(crate::UuidIndexKind::Node), 4);
+    }
+
+    #[test]
+    fn legacy_unshaped_parent_phase_checkpoint_repairs_only_exact_omission() {
+        let project = nonempty_project_generation_two();
+        let operation = Uuid::from_u128(1157);
+        let open = || {
+            GraphConstructionSession::open_with_mode(
+                project.path(),
+                operation,
+                2,
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap()
+        };
+        let mut session = open();
+        let bytes = session.evidence().authentication_read_bytes;
+        assert!(bytes > 0);
+        session.checkpoint.evidence.seal_application_read_bytes = 0;
+        replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+        drop(session);
+        let session = open();
+        assert_eq!(session.evidence().seal_application_read_bytes, bytes);
+        let mut malformed = session.checkpoint.clone();
+        malformed.evidence.seal_application_read_bytes = bytes + 1;
+        assert!(repair_unshaped_parent_phase_bytes(&mut malformed).is_err());
+        let mut wrong_shape = session.checkpoint.clone();
+        wrong_shape.evidence.shape_application_read_bytes =
+            wrong_shape.evidence.parent_catalog_read_bytes + 1;
+        assert!(repair_unshaped_parent_phase_bytes(&mut wrong_shape).is_err());
+        let mut bound = session.checkpoint.clone();
+        bound.evidence.seal_application_read_bytes = 0;
+        bound.shape_authority_sha256 = Some("0".repeat(64));
+        assert!(repair_unshaped_parent_phase_bytes(&mut bound).is_err());
+        assert_eq!(bound.evidence.seal_application_read_bytes, 0);
+    }
+
+    #[test]
+    fn parent_phase_observations_survive_staging_sealed_and_shaped_resumes() {
+        let project = nonempty_project_generation_two();
+        let mut catalog = RuntimeCatalog::new();
+        catalog.intern_label_at("Person", 1).unwrap();
+        let batch = catalog.to_record_batch();
+        let mut writer = ArrowWriter::try_new(
+            File::create(project.path().join("topology/runtime_catalog.parquet")).unwrap(),
+            batch.schema(),
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let operation = Uuid::from_u128(1156);
+        let open = || {
+            GraphConstructionSession::open_with_mode(
+                project.path(),
+                operation,
+                2,
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap()
+        };
+        let mut session = open();
+        let initial = session.evidence().clone();
+        assert!(initial.authentication_read_bytes > 0);
+        assert!(initial.parent_catalog_read_bytes > 0);
+        assert_eq!(
+            initial.seal_application_read_bytes,
+            initial.authentication_read_bytes
+        );
+        assert_eq!(
+            initial.shape_application_read_bytes,
+            initial.parent_catalog_read_bytes
+        );
+        let parent_bytes = initial.authentication_read_bytes + initial.parent_catalog_read_bytes;
+        let parent_calls =
+            initial.authentication_read_operations + initial.parent_catalog_read_operations;
+        session
+            .append(ConstructionChunkKind::Node, "delta", &node_batch(4, 1))
+            .unwrap();
+        for stage in 0..3 {
+            if stage == 1 {
+                session.seal().unwrap();
+            }
+            if stage == 2 {
+                session.shape_canonical_with_cancellation(|| false).unwrap();
+            }
+            for _ in 0..2 {
+                let before = session.evidence().clone();
+                drop(session);
+                session = open();
+                let after = session.evidence();
+                assert_eq!(
+                    after.authentication_read_bytes,
+                    before.authentication_read_bytes
+                );
+                assert_eq!(
+                    after.authentication_read_operations,
+                    before.authentication_read_operations
+                );
+                assert_eq!(
+                    after.parent_catalog_read_bytes,
+                    initial.parent_catalog_read_bytes
+                );
+                assert_eq!(
+                    after.parent_catalog_read_operations,
+                    initial.parent_catalog_read_operations
+                );
+                assert_eq!(
+                    after.seal_application_read_bytes,
+                    before.seal_application_read_bytes
+                );
+                assert_eq!(
+                    after.shape_application_read_bytes,
+                    before.shape_application_read_bytes
+                );
+                assert_eq!(
+                    after.recovery_application_read_bytes - before.recovery_application_read_bytes,
+                    parent_bytes
+                );
+                assert_eq!(
+                    after.recovery_application_read_operations
+                        - before.recovery_application_read_operations,
+                    parent_calls
+                );
+                assert_eq!(
+                    after.recovery_checkpoint_fsync_operations
+                        - before.recovery_checkpoint_fsync_operations,
+                    3
+                );
+                assert_eq!(after.fsync_operations, before.fsync_operations);
+                crate::ConstructionPhaseAttribution::from_construction(after)
+                    .unwrap()
+                    .validate_for_qualification()
+                    .unwrap();
+            }
+        }
     }
 
     #[test]

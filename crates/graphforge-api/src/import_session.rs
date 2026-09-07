@@ -178,7 +178,8 @@ pub struct ImportConstructionEvidence {
     pub write_bytes: u64,
     /// Application write submissions by construction artifact writers.
     pub write_operations: u64,
-    /// File and directory durability barriers completed by construction.
+    /// Durability barriers for accepted construction artifacts. Full phase
+    /// synchronization, including recovery checkpoints, is in `application_io`.
     pub fsync_operations: u64,
     /// Successful file-level page-cache release boundaries.
     #[serde(default)]
@@ -1384,6 +1385,89 @@ mod tests {
             0
         );
         assert_eq!(portable.node_count("Person").unwrap(), 2);
+    }
+
+    #[test]
+    fn ordinary_reopened_append_reconciles_preseal_progress() {
+        check_reopened_append_progress(false);
+    }
+
+    #[test]
+    fn resumed_reopened_append_reconciles_preseal_progress() {
+        check_reopened_append_progress(true);
+    }
+
+    fn check_reopened_append_progress(resume: bool) {
+        let (_directory, project, graph) = fixture();
+        let ids = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
+        let mut initial = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        initial
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids[..2])])
+            .unwrap();
+        initial
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edges(Uuid::now_v7(), ids[0], ids[1])],
+            )
+            .unwrap();
+        initial.validate(&graph).unwrap();
+        initial.commit(&graph, None).unwrap();
+        drop(initial);
+        drop(graph);
+        let graph = GraphForge::new(project.to_str()).unwrap();
+        let mut append = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        append
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids[2..])])
+            .unwrap();
+        append
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edges(Uuid::now_v7(), ids[1], ids[2])],
+            )
+            .unwrap();
+        let progress = append.validate(&graph).unwrap();
+        assert_eq!(progress.rows_accepted, 2);
+        let phases = &progress.construction.as_ref().unwrap().application_io;
+        phases.validate_for_qualification().unwrap();
+        for phase in [
+            graphforge_storage::StorageIoPhase::SealAuthentication,
+            graphforge_storage::StorageIoPhase::ShapeConsumeReauthentication,
+        ] {
+            assert!(phases.phases[&phase].read_bytes > 0);
+            assert!(phases.phases[&phase].read_calls > 0);
+        }
+        if resume {
+            append.checkpoint().unwrap();
+            let id = append.session_uuid();
+            drop(append);
+            append = graph.resume_import_session(id).unwrap();
+            let resumed = append.validate(&graph).unwrap();
+            resumed
+                .construction
+                .as_ref()
+                .unwrap()
+                .application_io
+                .validate_for_qualification()
+                .unwrap();
+            assert_eq!(resumed.rows_accepted, 2);
+        }
+        append.commit(&graph, None).unwrap();
+        drop(append);
+        drop(graph);
+        let graph = GraphForge::new(project.to_str()).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 3);
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .stats
+                .rows_produced,
+            2
+        );
     }
 
     #[test]
