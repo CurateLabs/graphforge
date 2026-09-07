@@ -91,16 +91,21 @@ fn read_encoding_version(dir: &Path) -> Option<u32> {
 pub fn write_runtime_entity_label_encoding_marker(dir: &Path) -> Result<(), GfError> {
     let topology = dir.join("topology");
     std::fs::create_dir_all(&topology).map_err(|e| storage_err(e.to_string()))?;
-    let marker = EncodingMarker {
-        format: "graphforge-runtime-entity-label-encoding".into(),
-        version: RUNTIME_ENTITY_LABEL_ENCODING_VERSION,
-    };
-    let bytes = serde_json::to_vec_pretty(&marker).map_err(|e| storage_err(e.to_string()))?;
+    let bytes = runtime_entity_label_encoding_bytes()?;
     let path = encoding_path(dir);
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes).map_err(|e| storage_err(e.to_string()))?;
     std::fs::rename(&tmp, &path).map_err(|e| storage_err(e.to_string()))?;
     Ok(())
+}
+
+/// Shared marker bytes for reconciliation and authenticated construction artifacts.
+pub(crate) fn runtime_entity_label_encoding_bytes() -> Result<Vec<u8>, GfError> {
+    let marker = EncodingMarker {
+        format: "graphforge-runtime-entity-label-encoding".into(),
+        version: RUNTIME_ENTITY_LABEL_ENCODING_VERSION,
+    };
+    serde_json::to_vec_pretty(&marker).map_err(|e| storage_err(e.to_string()))
 }
 
 fn ontology_entity_ids(ontology: Option<&OntologyHandle>) -> HashSet<u32> {

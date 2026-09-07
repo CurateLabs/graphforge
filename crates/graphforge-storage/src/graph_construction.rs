@@ -1973,6 +1973,19 @@ impl GraphConstructionSession {
                     .base_work,
             )
         } else if parent_topology_generation == 0 {
+            // A missing generation counter is not proof that a legacy parent
+            // is empty. Initial construction cannot retain uncertified labels.
+            for path in crate::mutator::node_parquet_files(graph_source_dir)? {
+                let reader = ParquetRecordBatchReaderBuilder::try_new(
+                    File::open(&path).map_err(|error| storage(error.to_string()))?,
+                )
+                .map_err(|error| storage(error.to_string()))?;
+                if reader.metadata().file_metadata().num_rows() != 0 {
+                    return Err(storage(
+                        "generation-zero construction parent contains existing node rows",
+                    ));
+                }
+            }
             (None, UuidConstructionSnapshotWork::default())
         } else {
             let mut snapshot = if let Some(inventory) = &compact_inventory {
@@ -9212,6 +9225,53 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn generation_zero_accepts_empty_node_parquet() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("topology")).unwrap();
+        ArrowWriter::try_new(
+            File::create(root.path().join("topology/nodes.parquet")).unwrap(),
+            crate::schemas::TOPOLOGY_NODES_SCHEMA.clone(),
+            None,
+        )
+        .unwrap()
+        .close()
+        .unwrap();
+        let _session = open(&root, 9876);
+    }
+
+    #[test]
+    fn generation_zero_rejects_unmarked_nonempty_legacy_parent() {
+        let root = TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(root.path(), graphforge_core::OntologyMode::Exploratory, 1)
+                .unwrap();
+        writer
+            .create_node(Uuid::now_v7(), graphforge_core::TypeId(0))
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        std::fs::remove_file(root.path().join("topology/generation.json")).unwrap();
+        assert_eq!(crate::read_topology_generation(root.path()).unwrap(), 0);
+        let error = GraphConstructionSession::open(
+            root.path(),
+            Uuid::now_v7(),
+            0,
+            GraphConstructionBudgets::default(),
+        )
+        .err()
+        .expect("nonempty legacy parent cannot be initial construction");
+        assert!(
+            error
+                .to_string()
+                .contains("generation-zero construction parent contains existing node rows"),
+            "{error}"
+        );
+        assert!(!crate::has_runtime_entity_label_encoding_marker(
+            root.path()
+        ));
+    }
+
     fn nonempty_project() -> TempDir {
         nonempty_project_with_nodes(2)
     }
@@ -11366,6 +11426,26 @@ mod tests {
             .join("graph");
         let nodes = crate::read_nodes(&graph).unwrap();
         assert_eq!(nodes.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert!(crate::has_runtime_entity_label_encoding_marker(&graph));
+        let person_id = authority
+            .bindings
+            .bindings
+            .iter()
+            .find(|binding| {
+                binding.route_kind == crate::SemanticRouteKind::Entity
+                    && binding.symbol.local_id == "Person"
+            })
+            .unwrap()
+            .storage_id;
+        for batch in &nodes {
+            let ids = batch
+                .column_by_name("type_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::UInt32Array>()
+                .unwrap();
+            assert!(ids.values().iter().all(|id| *id == person_id));
+        }
         let edges = crate::read_edges(
             &graph,
             &relation_route,
@@ -12203,6 +12283,9 @@ mod tests {
     #[test]
     fn generation_two_parent_index_is_structurally_referenced_without_payload_copy() {
         let project = nonempty_project_generation_two();
+        assert!(!crate::has_runtime_entity_label_encoding_marker(
+            project.path()
+        ));
         let operation = Uuid::from_u128(9_340);
         let mut session = GraphConstructionSession::open_with_mode(
             project.path(),
@@ -12218,6 +12301,13 @@ mod tests {
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoded = session.encode_canonical(&shape, 3).unwrap();
+        assert!(
+            encoded
+                .artifacts
+                .iter()
+                .all(|artifact| artifact.path != "topology/runtime_entity_label_encoding.json"),
+            "an append cannot certify the label encoding of an unmarked legacy parent"
+        );
         assert_eq!(encoded.evidence.retained_index_payload_bytes, 0);
         assert_eq!(encoded.evidence.retained_topology_bytes_copied, 0);
         assert_eq!(encoded.evidence.prior_topology_rows_decoded, 0);

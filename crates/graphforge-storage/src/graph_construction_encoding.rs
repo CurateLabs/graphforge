@@ -661,6 +661,21 @@ pub(crate) fn encode(
     let semantic_context = semantic_authority
         .map(ConstructionSemanticAuthority::context)
         .transpose()?;
+    if shape.parent_topology_generation == 0 {
+        // Initial construction owns every node label: encode_nodes uses tagged
+        // runtime IDs or the exact semantic storage authority. Publish that
+        // guarantee with the graph so reopen does not rescan all nodes for a
+        // legacy migration. An append must not certify an unmarked old parent.
+        copy_artifact(
+            std::io::Cursor::new(
+                crate::runtime_entity_labels::runtime_entity_label_encoding_bytes()?,
+            ),
+            &output,
+            "topology/runtime_entity_label_encoding.json",
+            &mut artifacts,
+            &mut evidence,
+        )?;
+    }
 
     let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
     let mut index = crate::uuid_membership::encode_construction_index(

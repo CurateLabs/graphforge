@@ -695,6 +695,19 @@ mod tests {
             child_receipt.generation_uuid
         );
         let child_inventory = resolved_child.graph_files_inventory().unwrap().unwrap();
+        let marker_path = "topology/runtime_entity_label_encoding.json";
+        let parent_marker = first_inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == marker_path)
+            .unwrap();
+        let child_marker = child_inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == marker_path)
+            .unwrap();
+        assert_eq!(parent_marker.content_sha256, child_marker.content_sha256);
+        assert_eq!(parent_marker.byte_length, child_marker.byte_length);
         assert!(first_inventory.files.iter().any(|parent_entry| {
             child_inventory.files.iter().any(|child_entry| {
                 parent_entry.content_sha256 == child_entry.content_sha256

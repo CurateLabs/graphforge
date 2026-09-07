@@ -134,6 +134,15 @@ fn persisted_public_rank_is_exact_after_repeat_and_reopen_and_unavailable_is_sta
     graph
         .execute("CREATE (:Person {name:'a'})-[:KNOWS]->(:Person {name:'b'})")
         .unwrap();
+    graph
+        .index_search(
+            "Person",
+            graphforge_api::SearchIndexOptions::Text {
+                properties: Some(vec!["name".into()]),
+                rebuild: false,
+            },
+        )
+        .unwrap();
 
     let options = RankOptions {
         by: RankAlgorithm::Degree,
@@ -144,6 +153,12 @@ fn persisted_public_rank_is_exact_after_repeat_and_reopen_and_unavailable_is_sta
     let first = graph.rank("Person", options.clone()).unwrap();
     let repeated = graph.rank("Person", options.clone()).unwrap();
     assert_eq!(first, repeated);
+    // Inspection opens a read-only generation and traverses relationships.
+    // Repeating it must not discover an adjacency cache written into that
+    // generation by the preceding read.
+    assert_eq!(graph.labels().unwrap(), ["Person"]);
+    assert_eq!(graph.relationship_types().unwrap(), ["KNOWS"]);
+    assert_eq!(graph.schema().unwrap().num_rows(), 2);
     assert_eq!(
         first
             .schema()
@@ -172,6 +187,33 @@ fn persisted_public_rank_is_exact_after_repeat_and_reopen_and_unavailable_is_sta
     assert!((scores.value(0) - 1.0).abs() < f64::EPSILON);
     assert!(scores.value(1).abs() < f64::EPSILON);
 
+    graph
+        .checkpoint(graphforge_api::CheckpointRequest {
+            name: "rank-source".into(),
+            description: None,
+            idempotency_key: graphforge_api::OperationId(uuid::Uuid::from_u128(1094)),
+            actor_uuid: None,
+        })
+        .unwrap();
+    {
+        let view = graph.open_checkpoint("rank-source").unwrap();
+        assert_eq!(
+            view.inspect_adjacency().unwrap().state,
+            graphforge_storage::adjacency::AdjacencyFreshnessState::Missing
+        );
+        assert_eq!(view.rank("Person", options.clone()).unwrap(), first);
+        assert_eq!(graph.labels().unwrap(), ["Person"]);
+        assert_eq!(graph.schema().unwrap().num_rows(), 2);
+        assert_eq!(
+            graph
+                .open_checkpoint("rank-source")
+                .unwrap()
+                .rank("Person", options.clone())
+                .unwrap(),
+            first
+        );
+    }
+
     let unavailable = || {
         graph
             .analyze(
@@ -190,4 +232,6 @@ fn persisted_public_rank_is_exact_after_repeat_and_reopen_and_unavailable_is_sta
 
     let reopened = GraphForge::new(Some(path)).unwrap();
     assert_eq!(reopened.rank("Person", options).unwrap(), first);
+    assert_eq!(reopened.labels().unwrap(), ["Person"]);
+    assert_eq!(reopened.schema().unwrap().num_rows(), 2);
 }
