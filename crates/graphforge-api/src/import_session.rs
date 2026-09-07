@@ -1288,6 +1288,105 @@ mod tests {
     }
 
     #[test]
+    fn initial_import_publishes_label_encoding_and_reopen_avoids_legacy_scan() {
+        const CHILD: &str = "GF_TEST_IMPORT_ENCODING_REOPEN";
+        if std::env::var_os(CHILD).is_none() {
+            // Storage read counters are process-global: isolate this admission
+            // measurement from unrelated API tests running concurrently.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "import_session::tests::initial_import_publishes_label_encoding_and_reopen_avoids_legacy_scan",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (directory, project, graph) = fixture();
+        let initial_nodes = [Uuid::now_v7(), Uuid::now_v7()];
+        let mut session = graph
+            .begin_import_session(OperationId(Uuid::now_v7()), ImportSessionLimits::default())
+            .unwrap();
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&initial_nodes)])
+            .unwrap();
+        session
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edges(Uuid::now_v7(), initial_nodes[0], initial_nodes[1])],
+            )
+            .unwrap();
+        session.validate(&graph).unwrap();
+        session.commit(&graph, None).unwrap();
+        let inventory = graphforge_storage::resolve_project_generation(&project)
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+            .unwrap();
+        let marked = inventory
+            .files
+            .iter()
+            .any(|entry| entry.relative_path == "topology/runtime_entity_label_encoding.json");
+        drop(graph);
+        let before = graphforge_storage::io_stats::snapshot();
+        let reopened = GraphForge::new(project.to_str()).unwrap();
+        let reads = graphforge_storage::io_stats::snapshot();
+        assert_eq!(
+            reads.node_full_reads - before.node_full_reads,
+            0,
+            "committed encoding marker={marked}; reopen decoded {} node rows for legacy reconciliation",
+            reads.node_full_rows
+        );
+        assert!(
+            marked,
+            "the encoding guarantee must be part of committed authority"
+        );
+        assert_eq!(reopened.node_count("Person").unwrap(), 2);
+        let appended = reopened;
+        let package = directory.path().join("marked.gfpb");
+        appended
+            .export_portable_v2(
+                &crate::PortableV2ExportRequest {
+                    selection: crate::PortableSelection::Current,
+                    output_path: package.clone(),
+                    representation: graphforge_storage::PortableV2Output::Bundle,
+                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits: graphforge_storage::PortableV2Limits::default(),
+                },
+                None,
+                |_| {},
+            )
+            .unwrap();
+        let imported = directory.path().join("imported");
+        GraphForge::import_portable_v2(
+            &imported,
+            &crate::PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(Uuid::now_v7()),
+                limits: graphforge_storage::PortableV2Limits::default(),
+            },
+            None,
+        )
+        .unwrap();
+        let before = graphforge_storage::io_stats::snapshot();
+        let portable = GraphForge::new(imported.to_str()).unwrap();
+        assert_eq!(
+            graphforge_storage::io_stats::snapshot().node_full_reads - before.node_full_reads,
+            0
+        );
+        assert_eq!(portable.node_count("Person").unwrap(), 2);
+    }
+
+    #[test]
     fn arrow_session_resumes_stages_and_publishes_one_generation() {
         let (_directory, project, graph) = fixture();
         let node_ids = [Uuid::now_v7(), Uuid::now_v7()];

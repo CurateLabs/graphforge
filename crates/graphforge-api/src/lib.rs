@@ -1921,53 +1921,56 @@ impl GraphForge {
             ));
         }
 
-        let cleanup_result = (|| -> Result<(), GfError> {
-            let entries = std::fs::read_dir(&self.dir)
-                .map_err(|e| GfError::Storage(format!("failed to read in-memory project: {e}")))?;
-            let mut first_error = None;
+        let cleanup_result = self
+            .adjacency_provider
+            .reset_graph(|| -> Result<(), GfError> {
+                let entries = std::fs::read_dir(&self.dir).map_err(|e| {
+                    GfError::Storage(format!("failed to read in-memory project: {e}"))
+                })?;
+                let mut first_error = None;
 
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(error) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            first_error.get_or_insert_with(|| {
+                                GfError::Storage(format!(
+                                    "failed to inspect in-memory project entry: {error}"
+                                ))
+                            });
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    let file_type = match entry.file_type() {
+                        Ok(file_type) => file_type,
+                        Err(error) => {
+                            first_error.get_or_insert_with(|| {
+                                GfError::Storage(format!(
+                                    "failed to inspect in-memory project entry {}: {error}",
+                                    path.display()
+                                ))
+                            });
+                            continue;
+                        }
+                    };
+                    let result = if file_type.is_dir() && !file_type.is_symlink() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    if let Err(error) = result {
                         first_error.get_or_insert_with(|| {
                             GfError::Storage(format!(
-                                "failed to inspect in-memory project entry: {error}"
-                            ))
-                        });
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(error) => {
-                        first_error.get_or_insert_with(|| {
-                            GfError::Storage(format!(
-                                "failed to inspect in-memory project entry {}: {error}",
+                                "failed to remove in-memory project entry {}: {error}",
                                 path.display()
                             ))
                         });
-                        continue;
                     }
-                };
-                let result = if file_type.is_dir() && !file_type.is_symlink() {
-                    std::fs::remove_dir_all(&path)
-                } else {
-                    std::fs::remove_file(&path)
-                };
-                if let Err(error) = result {
-                    first_error.get_or_insert_with(|| {
-                        GfError::Storage(format!(
-                            "failed to remove in-memory project entry {}: {error}",
-                            path.display()
-                        ))
-                    });
                 }
-            }
 
-            first_error.map_or(Ok(()), Err)
-        })();
+                first_error.map_or(Ok(()), Err)
+            });
 
         // These registries describe the fixture, not only its remaining files.
         // Reset them even when filesystem cleanup is partial so callers never
@@ -7317,6 +7320,52 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let result = GraphForge::new(parent.path().join("missing/project").to_str());
         assert!(matches!(result, Err(GfError::Storage(_))));
+    }
+
+    #[test]
+    fn clear_repopulation_does_not_reuse_private_adjacency_at_same_generation() {
+        use graphforge_exec::AdjacencyProvider;
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute("CREATE (:Person)-[:KNOWS]->(:Person)")
+            .unwrap();
+        let retained = graph
+            .adjacency_provider
+            .adjacency("KNOWS", graphforge_ir::Direction::Out)
+            .unwrap();
+        let generation =
+            graphforge_storage::generation::read_topology_generation(&graph.dir).unwrap();
+        graph.clear().unwrap();
+        graph
+            .execute("CREATE (:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person)")
+            .unwrap();
+        assert_eq!(
+            graphforge_storage::generation::read_topology_generation(&graph.dir).unwrap(),
+            generation
+        );
+        let count = graph
+            .execute("MATCH ()-[r]->() RETURN count(r) AS n")
+            .unwrap();
+        let count = count.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(count.value(0), 2);
+        assert_eq!(
+            graph
+                .execute("MATCH ()-[r:KNOWS]->() RETURN r")
+                .unwrap()
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            2
+        );
+        // The old view has not touched a shard yet. Its first lazy read must
+        // still see the old graph after a different CSR has been published.
+        assert_eq!(retained.neighbors(1).unwrap().len(), 1);
+        assert!(retained.neighbors(2).unwrap().is_empty());
     }
 
     #[cfg(unix)]

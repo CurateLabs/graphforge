@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow::record_batch::RecordBatch;
@@ -839,6 +840,9 @@ pub struct PersistentAdjacencyProvider {
     rebuild_root: Option<Box<dyn AsRef<std::path::Path> + Send + Sync>>,
     /// Serialize initial loads/builds; row reads retain their independent views.
     load_lock: Mutex<()>,
+    /// A graph reset can reuse generation numbers. Reject pre-reset manifests
+    /// until a rebuild succeeds, retaining their shards for outstanding views.
+    reset_pending: AtomicBool,
     /// Scan-build fallback, fed the ORIGINAL relation name so per-row relation
     /// filtering still applies (the union read serves the typed `"*"` wildcard).
     scan: ScanBuildAdjacencyProvider,
@@ -857,6 +861,7 @@ impl PersistentAdjacencyProvider {
             dir,
             rebuild_root: None,
             load_lock: Mutex::new(()),
+            reset_pending: AtomicBool::new(false),
             state: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
         }
@@ -883,14 +888,38 @@ impl PersistentAdjacencyProvider {
     }
 
     fn rebuild(&self, now: i64) -> Result<Vec<AdjacencyManifestRow>, GfError> {
-        csr::build_adjacency_index_into(
+        let rows = csr::build_adjacency_index_into(
             &self.dir,
             self.rebuild_root
                 .as_deref()
                 .map_or(self.dir.as_path(), AsRef::as_ref),
             now,
             || Ok(()),
-        )
+        )?;
+        self.reset_pending.store(false, Ordering::SeqCst);
+        Ok(rows)
+    }
+
+    /// Reset graph contents without admitting indexes from the old graph when
+    /// its generation numbers are reused. Initial loads and repairs cannot run
+    /// during cleanup. Even failed cleanup leaves old indexes inadmissible.
+    /// Existing views keep their immutable shard files until provider drop.
+    ///
+    /// # Errors
+    /// Returns the cleanup error or a poisoned provider load-lock error.
+    pub fn reset_graph(
+        &self,
+        cleanup: impl FnOnce() -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        let _load = self
+            .load_lock
+            .lock()
+            .map_err(|_| GfError::Storage("adjacency load lock poisoned".into()))?;
+        self.reset_pending.store(true, Ordering::SeqCst);
+        self.invalidate();
+        let result = cleanup();
+        self.invalidate();
+        result
     }
 
     /// The CSR file stem serving `rel_type_name`: the reserved
@@ -909,7 +938,13 @@ impl PersistentAdjacencyProvider {
     fn state(&self) -> IndexState {
         let mut guard = self.state.lock().expect("adjacency state lock");
         guard
-            .get_or_insert_with(|| Self::read_state(&self.dir, self.index_root()))
+            .get_or_insert_with(|| {
+                if self.reset_pending.load(Ordering::SeqCst) {
+                    IndexState::Absent
+                } else {
+                    Self::read_state(&self.dir, self.index_root())
+                }
+            })
             .clone()
     }
 
@@ -1885,6 +1920,63 @@ mod tests {
                 "lazy build and corruption repair must not modify the pinned source"
             );
         }
+    }
+
+    #[test]
+    fn failed_reset_and_rebuild_never_read_old_private_index() {
+        let source = TempDir::new().unwrap();
+        let [src, ..] = write_diamond(source.path());
+        let artifacts = TempDir::new().unwrap();
+        let provider =
+            PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
+                .with_rebuild_root(artifacts);
+        let retained = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        let corrupted_path = source.path().join("topology/edges/KNOWS.parquet");
+        let original = std::fs::read(&corrupted_path).ok();
+        assert!(
+            provider
+                .reset_graph(|| {
+                    std::fs::write(
+                        source.path().join("topology/edges/KNOWS.parquet"),
+                        b"partial cleanup",
+                    )
+                    .unwrap();
+                    Err(GfError::Storage("cleanup failed".into()))
+                })
+                .is_err()
+        );
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Building
+        );
+        assert!(provider.edge_cardinality("KNOWS", Direction::Out).is_err());
+        assert!(provider.adjacency("KNOWS", Direction::Out).is_err());
+        provider.revalidate();
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Building
+        );
+        // No earlier row touch: this still needs the retained shard on disk.
+        assert_eq!(retained.neighbors(src).unwrap().len(), 3);
+        if let Some(bytes) = original {
+            std::fs::write(&corrupted_path, bytes).unwrap();
+        } else {
+            std::fs::remove_file(&corrupted_path).unwrap();
+        }
+        assert_eq!(
+            provider
+                .adjacency("KNOWS", Direction::Out)
+                .unwrap()
+                .neighbors(src)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Hit
+        );
+        assert_eq!(retained.neighbors(src).unwrap().len(), 3);
     }
 
     #[test]
