@@ -832,7 +832,7 @@ fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt as _;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     OpenOptions::new()
-        .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?
         .sync_all()
@@ -1348,7 +1348,11 @@ fn prepare_compact_import_graph_with_allocation(
             "cannot publish imported compact graph root",
         )
     })?;
-    let file = fs::File::open(&participant.source).map_err(|_| {
+    #[cfg(not(windows))]
+    let file = fs::File::open(&participant.source);
+    #[cfg(windows)]
+    let file = OpenOptions::new().write(true).open(&participant.source);
+    let file = file.map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
             "cannot reopen imported compact graph root",

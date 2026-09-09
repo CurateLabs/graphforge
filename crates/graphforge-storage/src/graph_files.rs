@@ -1173,6 +1173,17 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
     // bytes remain verified without assembling them into one buffer.
     let copied = fs::copy(source, destination)
         .map_err(|error| storage("copy graph source file", destination, error))?;
+    #[cfg(windows)]
+    {
+        // Copy preserves read-only source attributes. Only the new private
+        // destination needs write access for its durability barrier.
+        let mut permissions = fs::metadata(destination)
+            .map_err(|error| storage("inspect copied graph permissions", destination, error))?
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(destination, permissions)
+            .map_err(|error| storage("make copied graph writable", destination, error))?;
+    }
     let (digest, read_bytes, read_calls) = hash_file_io_counted(destination)?;
     sync_file(destination)?;
     Ok(CopyIoEvidence {
@@ -1263,8 +1274,11 @@ fn hash_reader(file: &mut File, path: &Path) -> Result<([u8; 32], u64), GfError>
 }
 
 fn sync_file(path: &Path) -> Result<(), GfError> {
-    let file =
-        File::open(path).map_err(|error| storage("open graph file for fsync", path, error))?;
+    #[cfg(not(windows))]
+    let file = File::open(path);
+    #[cfg(windows)]
+    let file = fs::OpenOptions::new().write(true).open(path);
+    let file = file.map_err(|error| storage("open graph file for fsync", path, error))?;
     file.sync_all()
         .map_err(|error| storage("fsync graph file", path, error))
 }
@@ -1297,9 +1311,7 @@ fn sync_directory_tree(root: &Path) -> Result<u64, GfError> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), GfError> {
-    let file = File::open(path).map_err(|error| storage("open graph directory", path, error))?;
-    file.sync_all()
-        .map_err(|error| storage("fsync graph directory", path, error))
+    crate::project_publication::sync_directory(path)
 }
 
 fn validate_relative_path(path: &Path) -> Result<(), GfError> {
@@ -1610,6 +1622,34 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn graph_file_copy_readonly_source_preserves_authority_and_barriers() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        fs::write(&source, b"authenticated graph payload").unwrap();
+        let mut permissions = fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source, permissions).unwrap();
+        let output = root.path().join("private");
+        fs::create_dir(&output).unwrap();
+        let nested = output.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let destination = nested.join("payload");
+        let copied = copy_regular_file(&source, &destination).unwrap();
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"authenticated graph payload"
+        );
+        assert_eq!(copied.digest, hash_file(&source).unwrap());
+        assert_eq!(copied.write_bytes, 27);
+        assert_eq!(copied.read_bytes, 27);
+        assert_eq!(copied.fsync_calls, 1);
+        assert!(fs::metadata(&source).unwrap().permissions().readonly());
+        #[cfg(windows)]
+        assert!(!fs::metadata(&destination).unwrap().permissions().readonly());
+        assert_eq!(sync_directory_tree(&output).unwrap(), 2);
+    }
+
     use super::*;
 
     #[test]

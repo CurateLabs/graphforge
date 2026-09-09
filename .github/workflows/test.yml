@@ -1002,6 +1002,7 @@ jobs:
           route_status=0
           cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
@@ -1109,6 +1110,7 @@ jobs:
           route_status=0
           cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
