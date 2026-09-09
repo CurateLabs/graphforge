@@ -1921,3 +1921,7 @@ mod repack_boundary_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "portable_subset_catalog_tests.rs"]
+mod subset_catalog_tests;
