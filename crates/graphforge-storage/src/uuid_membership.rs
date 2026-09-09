@@ -1682,7 +1682,8 @@ pub struct AuthenticatedUuidIndexSnapshot {
     graph_root_identity: graphforge_filesystem::FileIdentity,
     root: graphforge_filesystem::StableDirectory,
     root_identity: graphforge_filesystem::FileIdentity,
-    manifest_file: File,
+    manifest_file: Option<File>,
+    manifest_bytes: u64,
     manifest_identity: graphforge_filesystem::FileIdentity,
     manifest_sha256: String,
     manifest: Manifest,
@@ -2673,10 +2674,7 @@ impl AuthenticatedUuidIndexSnapshot {
     }
 
     fn snapshot_authentication_bytes(&self) -> u64 {
-        let manifest_bytes = self
-            .manifest_file
-            .metadata()
-            .map_or(0, |metadata| metadata.len());
+        let manifest_bytes = self.manifest_bytes;
         self.manifest
             .runs
             .iter()
@@ -2815,7 +2813,8 @@ impl AuthenticatedUuidIndexSnapshot {
             graph_root_identity,
             root,
             root_identity,
-            manifest_file,
+            manifest_bytes: body.len() as u64,
+            manifest_file: Some(manifest_file),
             manifest_identity,
             manifest_sha256,
             manifest,
@@ -2953,7 +2952,8 @@ impl AuthenticatedUuidIndexSnapshot {
             graph_root_identity,
             root,
             root_identity,
-            manifest_file,
+            manifest_bytes: body.len() as u64,
+            manifest_file: Some(manifest_file),
             manifest_identity,
             manifest_sha256,
             manifest,
@@ -3040,10 +3040,13 @@ impl AuthenticatedUuidIndexSnapshot {
         if self.root.identity() != self.root_identity {
             return Err(storage_err("UUID index root identity changed"));
         }
-        if graphforge_filesystem::file_identity(&self.manifest_file).map_err(storage_err)?
+        let manifest_file = self
+            .manifest_file
+            .as_ref()
+            .ok_or_else(|| storage_err("UUID manifest descriptor is suspended for publication"))?;
+        if graphforge_filesystem::file_identity(manifest_file).map_err(storage_err)?
             != self.manifest_identity
-            || graphforge_filesystem::file_link_count(&self.manifest_file).map_err(storage_err)?
-                != 1
+            || graphforge_filesystem::file_link_count(manifest_file).map_err(storage_err)? != 1
             || self.manifest_sha256.len() != 64
         {
             return Err(storage_err("retained UUID manifest identity changed"));
@@ -3077,6 +3080,44 @@ impl AuthenticatedUuidIndexSnapshot {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn suspend_owned_manifest(&mut self) {
+        if self.cas_source_paths.is_none() {
+            self.manifest_file.take();
+        }
+    }
+
+    fn restore_owned_manifest(&mut self) -> Result<(), GfError> {
+        if self.manifest_file.is_some() {
+            return Ok(());
+        }
+        self.root.revalidate_named().map_err(storage_err)?;
+        let mut file = open_uuid_child_file(&self.root, std::ffi::OsStr::new(MANIFEST))?;
+        if graphforge_filesystem::file_identity(&file).map_err(storage_err)?
+            != self.manifest_identity
+            || graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1
+        {
+            return Err(storage_err("suspended UUID manifest identity changed"));
+        }
+        let body = read_bounded(&mut file, MAX_MANIFEST_BYTES)?;
+        if hex_sha256(&body) != self.manifest_sha256
+            || serde_json::from_slice::<Manifest>(&body).map_err(storage_err)? != self.manifest
+        {
+            return Err(storage_err(
+                "suspended UUID manifest authentication changed",
+            ));
+        }
+        self.authenticated_bytes = self
+            .authenticated_bytes
+            .checked_add(body.len() as u64)
+            .ok_or_else(|| storage_err("UUID restoration byte count overflow"))?;
+        self.authenticated_blocks = self
+            .authenticated_blocks
+            .checked_add(1)
+            .ok_or_else(|| storage_err("UUID restoration block count overflow"))?;
+        self.manifest_file = Some(file);
         Ok(())
     }
 
@@ -3125,7 +3166,8 @@ impl AuthenticatedUuidIndexSnapshot {
         self.manifest_identity =
             graphforge_filesystem::file_identity(&manifest_file).map_err(storage_err)?;
         self.manifest_sha256 = hex_sha256(&body);
-        self.manifest_file = manifest_file;
+        self.manifest_bytes = body.len() as u64;
+        self.manifest_file = Some(manifest_file);
         self.manifest = manifest;
         self.runs = next_runs;
         self.authenticated_bytes = 0;
@@ -5474,6 +5516,11 @@ pub(crate) enum CommittedUuidTopologyRewrite {
     },
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_MANIFEST_SUSPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Commit topology and its UUID participant under the one durable rewrite lock.
 #[allow(clippy::too_many_lines)] // One sealed participant lifecycle; order is the invariant.
 pub(crate) fn commit_uuid_topology_rewrite(
@@ -5656,8 +5703,19 @@ pub(crate) fn commit_uuid_topology_rewrite(
                 .as_ref()
                 .map(PreparedV4OrdinalDelta::auxiliary_receipt)
                 .or(receipt);
+            if token.is_some()
+                && let Some(value) = snapshot.as_mut()
+            {
+                value.suspend_owned_manifest();
+            }
             *prepared_from_callback.borrow_mut() = token;
             *prepared_v4_from_callback.borrow_mut() = prepared_ordinal;
+            #[cfg(test)]
+            if FAIL_AFTER_MANIFEST_SUSPEND.replace(false) {
+                return Err(storage_err(
+                    "injected manifest suspension preparation error",
+                ));
+            }
             Ok(receipt)
         });
     let commit =
@@ -5667,24 +5725,55 @@ pub(crate) fn commit_uuid_topology_rewrite(
     let committed = match commit {
         Ok(value) => value,
         Err(error) => {
-            let (Some(token), Some((prior, next))) = (token.as_ref(), generations.get()) else {
-                return Err(error);
-            };
-            let membership_outcome = reconcile_uuid_auxiliary(&root, prior, next, token)?;
-            let outcome = if let Some(v4) = v4_token.as_ref() {
-                let ordinal_outcome = reconcile_v4_ordinal_auxiliary(&root, prior, next, v4)?;
-                if membership_outcome != ordinal_outcome {
-                    return Err(storage_err(
-                        "v3 and v4 auxiliary reconciliation outcomes disagree",
-                    ));
+            let outcome = (|| {
+                let (Some(token), Some((prior, next))) = (token.as_ref(), generations.get()) else {
+                    return Ok(None);
+                };
+                let membership = reconcile_uuid_auxiliary(&root, prior, next, token)?;
+                if let Some(v4) = v4_token.as_ref() {
+                    let ordinal = reconcile_v4_ordinal_auxiliary(&root, prior, next, v4)?;
+                    if membership != ordinal {
+                        return Err(storage_err(
+                            "v3 and v4 auxiliary reconciliation outcomes disagree",
+                        ));
+                    }
                 }
-                ordinal_outcome
-            } else {
-                membership_outcome
-            };
+                Ok(Some((membership, next.topology)))
+            })();
             match outcome {
-                crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed => Some(next.topology),
-                crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted => {
+                Ok(Some((
+                    crate::durable_rewrite::AuxiliaryReconcileOutcome::Committed,
+                    generation,
+                ))) => Some(generation),
+                Ok(Some((crate::durable_rewrite::AuxiliaryReconcileOutcome::NotCommitted, _))) => {
+                    if let Some(value) = snapshot.as_mut()
+                        && let Err(restore) = value.restore_owned_manifest()
+                    {
+                        *snapshot = None;
+                        return Err(storage_err(format!(
+                            "{error}; UUID snapshot restoration failed: {restore}"
+                        )));
+                    }
+                    return Err(error);
+                }
+                Err(reconcile) => {
+                    if snapshot
+                        .as_ref()
+                        .is_some_and(|value| value.manifest_file.is_none())
+                    {
+                        *snapshot = None;
+                    }
+                    return Err(storage_err(format!(
+                        "{error}; UUID reconciliation failed: {reconcile}"
+                    )));
+                }
+                Ok(None) => {
+                    if snapshot
+                        .as_ref()
+                        .is_some_and(|value| value.manifest_file.is_none())
+                    {
+                        *snapshot = None;
+                    }
                     return Err(error);
                 }
             }
@@ -5693,9 +5782,13 @@ pub(crate) fn commit_uuid_topology_rewrite(
     let mut committed_metrics = UuidIndexAppendMetrics::default();
     let committed_v4_metrics = v4_token.as_ref().map(|token| token.metrics().clone());
     if let (Some(generation), Some(token)) = (committed, token.as_ref()) {
-        token.verify_generation(generation)?;
-        if let Some(v4) = v4_token.as_ref() {
-            v4.verify_generation(generation)?;
+        if let Err(error) = token.verify_generation(generation).and_then(|()| {
+            v4_token
+                .as_ref()
+                .map_or(Ok(()), |v4| v4.verify_generation(generation))
+        }) {
+            *snapshot = None;
+            return Err(error);
         }
         committed_metrics = token.metrics().clone();
         let refresh = injected_snapshot_refresh_failure().map_or_else(
@@ -11960,6 +12053,122 @@ pub(crate) mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("authentication failed")
+        );
+    }
+
+    #[test]
+    fn owned_manifest_suspension_restores_exact_authority_and_rejects_tampering() {
+        let (dir, _, _) = fixture();
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        let mut snapshot =
+            AuthenticatedUuidIndexSnapshot::open_at_generation(dir.path(), 0).unwrap();
+        let identity = snapshot.manifest_identity;
+        let path = dir.path().join(INDEX_DIR).join(MANIFEST);
+        let original = fs::read(&path).unwrap();
+        snapshot.suspend_owned_manifest();
+        assert!(snapshot.revalidate().is_err());
+        snapshot.restore_owned_manifest().unwrap();
+        assert_eq!(snapshot.manifest_identity, identity);
+        snapshot.revalidate().unwrap();
+        snapshot.suspend_owned_manifest();
+        fs::write(&path, [original.as_slice(), b"\n"].concat()).unwrap();
+        assert!(snapshot.restore_owned_manifest().is_err());
+        assert!(snapshot.manifest_file.is_none());
+        fs::write(&path, &original).unwrap();
+        snapshot.restore_owned_manifest().unwrap();
+        snapshot.suspend_owned_manifest();
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, original).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(snapshot.restore_owned_manifest().is_err());
+    }
+
+    #[test]
+    fn owned_manifest_returned_error_restores_snapshot_for_same_process_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = None;
+        let make_batch = || {
+            let mut batch = crate::RewriteBatch::new();
+            batch
+                .stage_bytes(&dir.path().join("topology/nodes.parquet"), b"fixture")
+                .unwrap();
+            batch
+        };
+        let first = Uuid::from_u128(201);
+        let second = Uuid::from_u128(202);
+        commit_uuid_topology_rewrite(
+            dir.path(),
+            make_batch(),
+            &UuidTopologyDelta {
+                nodes: vec![(first, 1)],
+                edges: Vec::new(),
+                deleted_nodes: Vec::new(),
+                deleted_edges: Vec::new(),
+            },
+            &mut snapshot,
+        )
+        .unwrap();
+        let old = snapshot.as_ref().unwrap().manifest_identity;
+        FAIL_AFTER_MANIFEST_SUSPEND.set(true);
+        let delta = UuidTopologyDelta {
+            nodes: vec![(second, 2)],
+            edges: Vec::new(),
+            deleted_nodes: Vec::new(),
+            deleted_edges: Vec::new(),
+        };
+        let error = commit_uuid_topology_rewrite(dir.path(), make_batch(), &delta, &mut snapshot)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("injected manifest suspension"));
+        let restored = snapshot.as_ref().unwrap();
+        assert_eq!(restored.manifest_identity, old);
+        restored.revalidate().unwrap();
+        assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 1);
+        commit_uuid_topology_rewrite(dir.path(), make_batch(), &delta, &mut snapshot).unwrap();
+        assert_eq!(
+            snapshot
+                .as_mut()
+                .unwrap()
+                .lookup_node_surrogates(&[first, second])
+                .unwrap()
+                .0,
+            [Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn owned_manifest_same_writer_successive_flushes_preserve_incremental_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Uuid::from_u128(101);
+        let second = Uuid::from_u128(102);
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        writer
+            .create_node(first, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+        let path = dir.path().join(INDEX_DIR).join(MANIFEST);
+        let old = graphforge_filesystem::path_identity(&path).unwrap();
+        writer
+            .create_node(second, graphforge_value::EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_edge(Uuid::from_u128(103), "CON", &first, &second)
+            .unwrap();
+        writer.flush().unwrap();
+        assert_ne!(graphforge_filesystem::path_identity(&path).unwrap(), old);
+        assert_eq!(crate::read_topology_generation(dir.path()).unwrap(), 2);
+        assert_eq!(
+            writer
+                .topology_write_work()
+                .uuid_prior_topology_rows_decoded,
+            0
+        );
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index.lookup_node_surrogates(&[first, second]).unwrap().0,
+            [Some(1), Some(2)]
         );
     }
 
