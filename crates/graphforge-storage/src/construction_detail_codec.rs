@@ -198,7 +198,9 @@ mod tests {
         assert_eq!(DetailCodec::from_version(6).unwrap(), DetailCodec::Legacy);
         assert_eq!(DetailCodec::from_version(7).unwrap(), DetailCodec::Compact);
         assert!(DetailCodec::from_version(5).is_err());
-        assert!(DetailCodec::from_version(9).is_err());
+        assert_eq!(DetailCodec::from_version(8).unwrap(), DetailCodec::Compact);
+        assert_eq!(DetailCodec::from_version(9).unwrap(), DetailCodec::Compact);
+        assert!(DetailCodec::from_version(10).is_err());
     }
 }
 
