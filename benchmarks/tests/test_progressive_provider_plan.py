@@ -14,6 +14,7 @@ from graphforge_bench.progressive_provider_plan import (
     plan_provider_ladder,
     require_execution_authority,
 )
+from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = subprocess.run(
@@ -95,7 +96,8 @@ def storage_attribution(scale: int) -> dict:
             "allocation_physical_objects": 0,
         },
         "lifecycle": {
-            "contract": "graphforge-lifecycle-storage/1",
+            "contract": "graphforge-lifecycle-storage/2",
+            "retained_owners": retained_owners(105, 120, 0),
             "source_project_current_allocated_bytes": 105,
             "retained_storage_bytes": 200,
             "transient_peak_storage_bytes": 300,

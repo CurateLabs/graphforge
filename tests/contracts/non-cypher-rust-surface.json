@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "2e9d24ea3fc8ae0300399f986a947c72a7b5df7cf77e592f54d24237c226c8b2",
+  "public_method_digest": "c07b80a5bb8c6d907d1c02d0862702965c94730e21bd71302e0288ba2c7af4b1",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -20,6 +20,7 @@
       "ProviderEmbeddingExecution": "internal-helper",
       "ProviderFindExecution": "internal-helper",
       "ProviderRerankExecution": "internal-helper",
+      "StorageAllocationDiagnostics": "internal-helper",
       "RuntimeGuard": "internal-helper",
       "CancellationToken": "introspection",
       "FindExecutionResult": "introspection",

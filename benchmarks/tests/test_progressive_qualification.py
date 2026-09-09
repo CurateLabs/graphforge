@@ -18,6 +18,7 @@ from graphforge_bench.progressive_qualification import (
     select_next,
 )
 from jsonschema import Draft202012Validator
+from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPACITY = {
@@ -130,7 +131,13 @@ def storage_attribution(scale: int, multiplier: int) -> dict:
             "allocation_physical_objects": 1,
         },
         "lifecycle": {
-            "contract": "graphforge-lifecycle-storage/1",
+            "contract": "graphforge-lifecycle-storage/2",
+            "retained_owners": retained_owners(
+                450_000 * multiplier,
+                450_000 * multiplier,
+                300_000 * multiplier,
+                120_000 * multiplier,
+            ),
             "source_project_current_allocated_bytes": 450_000 * multiplier,
             "retained_storage_bytes": 1_000_000 * multiplier,
             "transient_peak_storage_bytes": 1_500_000 * multiplier,

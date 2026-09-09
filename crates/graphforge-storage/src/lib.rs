@@ -23,7 +23,16 @@ pub mod filesystem_admission;
 pub mod adjacency;
 pub mod adjacency_delta;
 
+mod allocation_operation;
+mod construction_directory;
+#[doc(hidden)]
+pub use allocation_operation::StorageAllocationOperation;
+mod private_storage_ownership;
 pub mod storage_attribution;
+pub use private_storage_ownership::{
+    PrivateStorageOwner, PrivateStorageOwnership, capture_artifact_storage_ownership,
+    capture_private_storage_ownership, capture_published_storage_ownership,
+};
 pub use storage_attribution::{
     ArtifactCategory, ArtifactCategoryAuthorityContext, ArtifactStorageTotals,
     ConstructionPhaseAttribution, PhaseIoTotals, ProjectStorageIdentityUnion,
@@ -216,13 +225,15 @@ pub use project_portable::{
 pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
-    plan_complete_portable_v2, plan_selected_portable_v2, repack_verified_expanded_portable_v2,
+    export_complete_portable_v2_with_allocation, plan_complete_portable_v2,
+    plan_selected_portable_v2, repack_verified_expanded_portable_v2,
 };
 pub use project_portable_v2_import::{
     PortableV2ImportCleanupReceipt, PortableV2ImportPhase, PortableV2ImportProgress,
     PortableV2ImportReceipt, PortableV2SelectiveCandidate, PortableV2StagedCompositionReceipt,
     consume_selective_portable_v2, import_complete_portable_v2,
-    import_complete_portable_v2_with_progress, load_portable_ontology_staging,
+    import_complete_portable_v2_with_allocation, import_complete_portable_v2_with_progress,
+    load_portable_ontology_staging,
 };
 
 pub mod project_portable_v2;
@@ -445,3 +456,6 @@ pub use graphforge_core::GfError;
 
 mod lowering_snapshot;
 pub use lowering_snapshot::lowering_snapshot;
+
+#[doc(hidden)]
+pub use project_recovery::open_or_initialize_project_with_allocation;

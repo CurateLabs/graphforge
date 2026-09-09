@@ -6,7 +6,7 @@
     "mechanics": "public-certification-v1",
     "phases": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"],
     "evidence_schema": "graphforge-public-certification/1",
-    "storage_receipt": "graphforge-lifecycle-storage/1"
+    "storage_receipt": "graphforge-lifecycle-storage/2"
   },
   "phases": [
     {

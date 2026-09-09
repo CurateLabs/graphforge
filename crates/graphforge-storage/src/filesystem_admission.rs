@@ -607,6 +607,18 @@ impl Drop for LifecycleLock {
     }
 }
 
+pub(crate) fn retained_project_control_paths(
+    root: &Path,
+) -> Result<(PathBuf, PathBuf, String), GfError> {
+    let resolved = resolve_project_path(root)?;
+    let lock_name = lifecycle_lock_name(resolved.parent.path(), &resolved.target_name);
+    Ok((
+        resolved.root,
+        resolved.parent.path().to_path_buf(),
+        lock_name,
+    ))
+}
+
 fn lifecycle_lock_name(parent: &Path, target_name: &std::ffi::OsStr) -> String {
     let mut digest = Sha256::new();
     digest.update(b"graphforge-project-lifecycle-lock/v1\0");

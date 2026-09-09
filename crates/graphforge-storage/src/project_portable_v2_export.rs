@@ -385,9 +385,78 @@ impl Eq for PortableV2ExportReceipt {}
 struct ExportAllocationObserver {
     allocated: BTreeMap<String, u64>,
     logical: BTreeMap<String, u64>,
+    operation: Option<crate::StorageAllocationOperation>,
+    routes: BTreeMap<String, PathBuf>,
+}
+
+// Refresh after a failed write before staging cleanup, preserving the original error.
+fn observed_write_result(
+    result: Result<(), ExportError>,
+    file: &File,
+    allocation: &mut ExportAllocationObserver,
+) -> Result<(), ExportError> {
+    if result.is_err() && allocation.operation.is_some() {
+        let _ = allocation.observe(file);
+    }
+    result
 }
 
 impl ExportAllocationObserver {
+    fn register(&mut self, path: &Path, file: &File) -> Result<(), ExportError> {
+        if self.operation.is_some() {
+            let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
+            let key = crate::storage_attribution::native_identity_key(
+                identity.volume_serial,
+                &identity.file_id,
+            );
+            self.routes.insert(key, path.to_path_buf());
+            self.observe(file)?;
+        }
+        Ok(())
+    }
+
+    fn remove(&self, path: &Path) {
+        remove(path);
+        if let Some(operation) = &self.operation {
+            for route in self.routes.values() {
+                if route.starts_with(path)
+                    && fs::symlink_metadata(route)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    let _ = operation.remove_file_at(route);
+                }
+            }
+        }
+    }
+
+    fn published(&mut self, stage: &Path, destination: &Path) -> Result<(), ExportError> {
+        if let Some(operation) = &self.operation {
+            for (identity, route) in &mut self.routes {
+                let relative = route.strip_prefix(stage).map_err(storage)?;
+                let final_path = if relative.as_os_str().is_empty() {
+                    destination.to_path_buf()
+                } else {
+                    destination.join(relative)
+                };
+                operation
+                    .transition(
+                        &crate::StorageAllocationOperation::file_owner(&final_path)
+                            .map_err(storage)?,
+                        &crate::StorageAllocationTransition {
+                            installed: BTreeMap::from([(
+                                identity.clone(),
+                                self.allocated[identity],
+                            )]),
+                            removed: BTreeSet::default(),
+                        },
+                    )
+                    .map_err(storage)?;
+                operation.remove_file_at(route).map_err(storage)?;
+                *route = final_path;
+            }
+        }
+        Ok(())
+    }
     fn observe(&mut self, file: &File) -> Result<(), ExportError> {
         let identity = graphforge_filesystem::file_identity(file).map_err(storage)?;
         let usage = graphforge_filesystem::file_space_usage(file).map_err(storage)?;
@@ -397,6 +466,13 @@ impl ExportAllocationObserver {
             write!(&mut file_id, "{byte:02x}").expect("writing to String cannot fail");
         }
         let key = format!("{:016x}:{file_id}", identity.volume_serial);
+        if let Some(operation) = &self.operation {
+            let route = self
+                .routes
+                .get(&key)
+                .ok_or_else(|| err("GF_STORAGE_ERROR", "unregistered export allocation route"))?;
+            operation.replace_file_at(route, file).map_err(storage)?;
+        }
         self.allocated.insert(key.clone(), usage.allocated_bytes);
         self.logical.insert(key, usage.logical_bytes);
         Ok(())
@@ -1112,7 +1188,29 @@ pub fn export_complete_portable_v2(
     output: PortableV2Output,
     limits: PortableV2ExportLimits,
     cancelled: &AtomicBool,
+    progress: impl FnMut(PortableV2ExportProgress),
+) -> Result<PortableV2ExportReceipt, ExportError> {
+    export_complete_portable_v2_with_allocation(
+        plan,
+        destination,
+        output,
+        limits,
+        cancelled,
+        progress,
+        None,
+    )
+}
+
+/// Export with an explicit first-party allocation context.
+#[doc(hidden)]
+pub fn export_complete_portable_v2_with_allocation(
+    plan: &PortableV2ExportPlan,
+    destination: impl AsRef<Path>,
+    output: PortableV2Output,
+    limits: PortableV2ExportLimits,
+    cancelled: &AtomicBool,
     mut progress: impl FnMut(PortableV2ExportProgress),
+    operation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<PortableV2ExportReceipt, ExportError> {
     validate_limits(limits)?;
     if output == PortableV2Output::Bundle
@@ -1122,7 +1220,13 @@ pub fn export_complete_portable_v2(
     {
         return Err(limit("bundle entry exceeds ustar size field"));
     }
-    let dst = destination.as_ref();
+    let destination = destination.as_ref();
+    let resolved = if operation.is_some() && destination.is_relative() {
+        Some(std::env::current_dir().map_err(storage)?.join(destination))
+    } else {
+        None
+    };
+    let dst = resolved.as_deref().unwrap_or(destination);
     reject_destination(dst)?;
     let parent = dst
         .parent()
@@ -1133,7 +1237,10 @@ pub fn export_complete_portable_v2(
         .ok_or_else(|| err("GF_INVALID_DESTINATION", "invalid destination name"))?;
     let stage = parent.join(format!(".{name}.{}.partial", Uuid::new_v4()));
     let is_cancelled = || cancelled.load(Ordering::Relaxed);
-    let mut allocation = ExportAllocationObserver::default();
+    let mut allocation = ExportAllocationObserver {
+        operation: operation.cloned(),
+        ..Default::default()
+    };
     let result = match output {
         PortableV2Output::Expanded => expanded(
             plan,
@@ -1155,48 +1262,30 @@ pub fn export_complete_portable_v2(
     let digest = match result {
         Ok(d) => d,
         Err(e) => {
-            remove(&stage);
+            allocation.remove(&stage);
             return Err(e.with_allocation_identities(allocation.allocated));
         }
     };
     let allocation_logical_bytes = allocation.logical.values().copied().sum();
     let allocation_physical_objects = allocation.logical.len() as u64;
-    let staged_allocation = allocation.allocated;
+    let staged_allocation = allocation.allocated.clone();
     if is_cancelled() {
-        remove(&stage);
+        allocation.remove(&stage);
         return Err(err("GF_CANCELLED", "portable export cancelled")
             .with_allocation_identities(staged_allocation));
     }
-    let verified = verify_portable_v2(&stage, PortableV2Mode::Full, limits, Some(cancelled))
-        .map_err(|error| {
-            remove(&stage);
+    let verified =
+        verify_written_export(plan, &stage, digest, limits, cancelled).map_err(|error| {
+            allocation.remove(&stage);
             error.with_allocation_identities(staged_allocation.clone())
         })?;
-    let expected_transport = format!("sha256:{}", hex(digest));
-    if verified.package_class != plan.package_class
-        || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
-    {
-        remove(&stage);
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
-            "writer and verifier semantic receipts disagree",
-        )
-        .with_allocation_identities(staged_allocation.clone()));
-    }
-    if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
-        remove(&stage);
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::DigestMismatch,
-            "writer and verifier transport receipts disagree",
-        )
-        .with_allocation_identities(staged_allocation.clone()));
-    }
     publish_no_replace(&stage, dst).map_err(|error| {
-        remove(&stage);
+        allocation.remove(&stage);
         storage(error).with_allocation_identities(staged_allocation.clone())
     })?;
+    allocation.published(&stage, dst)?;
     if let Err(error) = sync_dir(parent) {
-        remove(dst);
+        allocation.remove(dst);
         return Err(error.with_allocation_identities(staged_allocation));
     }
     Ok(PortableV2ExportReceipt {
@@ -1212,6 +1301,32 @@ pub fn export_complete_portable_v2(
         allocation_logical_bytes,
         allocation_physical_objects,
     })
+}
+
+fn verify_written_export(
+    plan: &PortableV2ExportPlan,
+    stage: &Path,
+    digest: [u8; 32],
+    limits: PortableV2ExportLimits,
+    cancelled: &AtomicBool,
+) -> Result<crate::PortableV2Report, ExportError> {
+    let verified = verify_portable_v2(stage, PortableV2Mode::Full, limits, Some(cancelled))?;
+    let expected_transport = format!("sha256:{}", hex(digest));
+    if verified.package_class != plan.package_class
+        || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "writer and verifier semantic receipts disagree",
+        ));
+    }
+    if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "writer and verifier transport receipts disagree",
+        ));
+    }
+    Ok(verified)
 }
 
 /// Repack a fully verified expanded portable-v2 package into canonical bundle bytes.
@@ -1503,17 +1618,18 @@ fn bundle(
         .write(true)
         .open(stage)
         .map_err(storage)?;
+    allocation.register(stage, &out)?;
     let mut h = Sha256::new();
     let mut done = 0;
     for (i, (path, src)) in items.iter().enumerate() {
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
-        header(&mut out, &mut h, path, src.len())?;
+        observed_write_result(header(&mut out, &mut h, path, src.len()), &out, allocation)?;
         allocation.observe(&out)?;
         match src {
             Src::Bytes(b) => {
-                emit(&mut out, &mut h, b)?;
+                observed_write_result(emit(&mut out, &mut h, b), &out, allocation)?;
                 allocation.observe(&out)?;
             }
             Src::File(f) => stream(
@@ -1534,7 +1650,7 @@ fn bundle(
                 },
             )?,
         }
-        pad(&mut out, &mut h, src.len())?;
+        observed_write_result(pad(&mut out, &mut h, src.len()), &out, allocation)?;
         allocation.observe(&out)?;
         progress(PortableV2ExportProgress {
             entries_completed: i + 1,
@@ -1544,7 +1660,7 @@ fn bundle(
         });
     }
     let end = [0u8; 1024];
-    out.write_all(&end).map_err(storage)?;
+    observed_write_result(out.write_all(&end).map_err(storage), &out, allocation)?;
     allocation.observe(&out)?;
     h.update(end);
     out.sync_all().map_err(storage)?;
@@ -1663,11 +1779,16 @@ fn copy(
         .write(true)
         .open(target)
         .map_err(storage)?;
+    allocation.register(target, &output)?;
     if let PlannedSource::Control(bytes) = &planned.source {
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
-        output.write_all(bytes).map_err(storage)?;
+        observed_write_result(
+            output.write_all(bytes).map_err(storage),
+            &output,
+            allocation,
+        )?;
         allocation.observe(&output)?;
         output.sync_all().map_err(storage)?;
         allocation.observe(&output)?;
@@ -1686,7 +1807,14 @@ fn copy(
         if count == 0 {
             break;
         }
-        output.write_all(&buffer[..count]).map_err(storage)?;
+        observed_write_result(
+            output.write_all(&buffer[..count]).map_err(storage),
+            &output,
+            allocation,
+        )?;
+        if allocation.operation.is_some() {
+            allocation.observe(&output)?;
+        }
         digest.update(&buffer[..count]);
         bytes_read += count as u64;
         tick(count as u64);
@@ -1716,7 +1844,7 @@ fn stream(
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
         }
-        out.write_all(bytes).map_err(storage)?;
+        observed_write_result(out.write_all(bytes).map_err(storage), out, allocation)?;
         allocation.observe(out)?;
         transport.update(bytes);
         tick(bytes.len() as u64);
@@ -1734,7 +1862,14 @@ fn stream(
         if count == 0 {
             break;
         }
-        out.write_all(&buffer[..count]).map_err(storage)?;
+        observed_write_result(
+            out.write_all(&buffer[..count]).map_err(storage),
+            out,
+            allocation,
+        )?;
+        if allocation.operation.is_some() {
+            allocation.observe(out)?;
+        }
         transport.update(&buffer[..count]);
         digest.update(&buffer[..count]);
         bytes_read += count as u64;
@@ -2179,9 +2314,10 @@ fn write_bytes(
     let mut f = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(p)
+        .open(&p)
         .map_err(storage)?;
-    f.write_all(b).map_err(storage)?;
+    allocation.register(&p, &f)?;
+    observed_write_result(f.write_all(b).map_err(storage), &f, allocation)?;
     allocation.observe(&f)?;
     f.sync_all().map_err(storage)?;
     allocation.observe(&f)
@@ -2728,6 +2864,88 @@ mod tests {
         )
         .unwrap();
         (expanded_path, bundle_path)
+    }
+
+    #[test]
+    fn export_failed_partial_write_is_observed_before_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partial");
+        let mut file = File::create(&path).unwrap();
+        let operation = crate::StorageAllocationOperation::default();
+        let mut allocation = ExportAllocationObserver {
+            operation: Some(operation.clone()),
+            ..Default::default()
+        };
+        allocation.register(&path, &file).unwrap();
+        file.write_all(&vec![1_u8; 32768]).unwrap();
+        file.sync_all().unwrap();
+        let actual = graphforge_filesystem::file_space_usage(&file)
+            .unwrap()
+            .allocated_bytes;
+        assert!(actual > 0);
+        let original = err("GF_CANCELLED", "injected error after partial write");
+        let returned = observed_write_result(Err(original), &file, &mut allocation).unwrap_err();
+        assert_eq!(returned.code, PortableV2ErrorCode::Cancelled);
+        assert_eq!(operation.totals().unwrap(), (actual, actual));
+        drop(file);
+        allocation.remove(&path);
+        assert_eq!(operation.totals().unwrap(), (0, actual));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn export_operation_tracks_published_routes_and_cancelled_staging() {
+        let (_project, generation) = graph_generation_with_composition(true);
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        for output in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let root = tempfile::tempdir().unwrap();
+            let retained = root.path().join("retained");
+            fs::write(&retained, vec![1_u8; 8192]).unwrap();
+            let operation =
+                crate::StorageAllocationOperation::from_paths(&[root.path().to_path_buf()])
+                    .unwrap();
+            let baseline = operation.totals().unwrap().0;
+            let destination = root.path().join("package");
+            let cancelled = AtomicBool::new(false);
+            let receipt = export_complete_portable_v2_with_allocation(
+                &plan,
+                &destination,
+                output,
+                limits,
+                &cancelled,
+                |_| {},
+                Some(&operation),
+            )
+            .unwrap();
+            let expected = baseline
+                + receipt
+                    .allocation_identity_allocated_bytes
+                    .values()
+                    .sum::<u64>();
+            assert_eq!(operation.totals().unwrap(), (expected, expected));
+            let actual =
+                crate::StorageAllocationOperation::from_paths(&[root.path().to_path_buf()])
+                    .unwrap();
+            assert_eq!(operation.snapshot().unwrap(), actual.snapshot().unwrap());
+
+            let cancelled_destination = root.path().join("cancelled");
+            let error = export_complete_portable_v2_with_allocation(
+                &plan,
+                &cancelled_destination,
+                output,
+                limits,
+                &cancelled,
+                |_| cancelled.store(true, Ordering::Relaxed),
+                Some(&operation),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
+            assert!(!cancelled_destination.exists());
+            assert_eq!(operation.totals().unwrap().0, expected);
+            assert!(operation.totals().unwrap().1 > expected);
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+        }
     }
 
     #[test]

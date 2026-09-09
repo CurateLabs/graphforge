@@ -238,13 +238,20 @@ rejected as certification evidence.
 
 ### Disk attribution and S26 admission
 
-The versioned `graphforge-g500-ladder-qualification/3` companion document is
+The versioned `graphforge-g500-ladder-qualification/4` companion document is
 produced and validated by
 `graphforge_bench.progressive_storage_qualification`. Every observed
 rung has exactly one row for canonical node topology, canonical edge topology,
 properties, UUID/surrogate indexes, adjacency/CSR, catalogs/manifests,
-construction staging/spill, portable package, and clean import. Native file
-identity deduplicates content-addressed/shared objects. Logical bytes,
+construction staging/spill, portable package, and clean import. Fifteen additional
+closed owner views cover the published and private construction/import/transaction/lock
+files of both projects, generated inputs, query results, and the portable package.
+These raw facts come from the version-2 lifecycle receipt. Its fifteen views
+partition retained file references; physical identities can be shared across
+views. Before emitting the receipt, the certifier requires their deduplicated
+identity/allocation map and reference count to match the current per-file
+inventory, including zero-byte files and aliases. Native file identity
+deduplicates content-addressed/shared objects. Logical bytes,
 filesystem allocation, current retained allocation, and full-lifecycle
 transient peak remain separate quantities.
 

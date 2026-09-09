@@ -13,7 +13,6 @@ use graphforge_ontology::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::project_generation::open_or_initialize_project_admitted;
 use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
 use crate::project_portable_v2::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
@@ -225,7 +224,35 @@ pub fn import_complete_portable_v2_with_progress(
     supported_capabilities: &[ProjectCapability],
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    progress: impl FnMut(PortableV2ImportProgress),
+) -> Result<PortableV2ImportReceipt, PortableV2Error> {
+    import_complete_portable_v2_with_allocation(
+        source,
+        target,
+        transaction_uuid,
+        generation_uuid,
+        supported_capabilities,
+        limits,
+        cancelled,
+        progress,
+        None,
+    )
+}
+
+// Preserve the existing explicit import arguments; diagnostics stays separate
+// from the public request contract and does not use ambient state.
+#[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
+pub fn import_complete_portable_v2_with_allocation(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    supported_capabilities: &[ProjectCapability],
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
     mut progress: impl FnMut(PortableV2ImportProgress),
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     let source = source.as_ref();
     let target = target.as_ref();
@@ -252,6 +279,7 @@ pub fn import_complete_portable_v2_with_progress(
         generation_uuid,
         limits,
         cancelled,
+        allocation,
     )?;
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Materialized,
@@ -270,6 +298,7 @@ pub fn import_complete_portable_v2_with_progress(
         cancelled,
         &report,
         owned_retry,
+        allocation,
     )
     .map(|mut receipt| {
         receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
@@ -283,6 +312,7 @@ pub fn import_complete_portable_v2_with_progress(
             materialized_stage_identity,
             &mut owned_identities,
             entry_count,
+            allocation,
         ) {
             return cleanup_error.with_allocation_identities(owned_identities);
         }
@@ -302,6 +332,7 @@ pub fn import_complete_portable_v2_with_progress(
             materialized_stage_identity,
             &mut receipt,
             entry_count,
+            allocation,
         )?;
         Ok(receipt)
     });
@@ -322,6 +353,7 @@ fn finalize_import_materialization_cleanup(
     materialized_stage_identity: graphforge_filesystem::FileIdentity,
     receipt: &mut PortableV2ImportReceipt,
     entry_count: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), PortableV2Error> {
     // Finalization can atomically replace authenticated staging files. Preserve
     // the pre-finalization identities as removed ownership while separately
@@ -347,6 +379,7 @@ fn finalize_import_materialization_cleanup(
         owner,
         materialized_stage_identity,
         &receipt.materialized_identity_allocated_bytes,
+        allocation,
     )
     .map_err(|error| {
         error.with_allocation_identities(receipt.materialized_identity_allocated_bytes.clone())
@@ -377,6 +410,7 @@ fn materialize_owned_import(
     generation_uuid: Uuid,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<OwnedMaterialization, PortableV2Error> {
     let target_name = target
         .file_name()
@@ -397,16 +431,38 @@ fn materialize_owned_import(
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot open import ownership")
     })?;
     record_import_file_identity(&owner_file, &mut identities)?;
+    if let Some(allocation) = allocation {
+        allocation
+            .replace_file_at(&owner, &owner_file)
+            .map_err(|error| storage(&error))?;
+    }
     let materialized = match crate::project_portable_v2::materialize_verified_portable_v2_observed(
         source,
         &stage,
         limits,
         cancelled,
-        |file| record_import_file_identity(file, &mut identities),
+        |path, file| {
+            if let Some(file) = file {
+                record_import_file_identity(file, &mut identities)?;
+            }
+            if let Some(allocation) = allocation {
+                match file {
+                    Some(file) => allocation.replace_file_at(path, file),
+                    None => allocation.remove_file_at(path),
+                }
+                .map_err(|error| storage(&error))?;
+            }
+            Ok(())
+        },
+        allocation.is_some(),
     ) {
         Ok(materialized) => materialized,
         Err(error) => {
-            let _ = fs::remove_file(&owner);
+            if fs::remove_file(&owner).is_ok()
+                && let Some(allocation) = allocation
+            {
+                let _ = allocation.remove_file_at(&owner);
+            }
             let _ = sync_parent(&owner);
             return Err(error.with_allocation_identities(identities));
         }
@@ -472,9 +528,17 @@ fn cleanup_failed_import_finalization(
     expected_stage_identity: graphforge_filesystem::FileIdentity,
     identities: &mut std::collections::BTreeMap<String, u64>,
     entry_count: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), PortableV2Error> {
     capture_finalized_import_identities(stage, expected_stage_identity, identities, entry_count)?;
-    cleanup_import_materialization(stage, owner, expected_stage_identity, identities).map(|_| ())
+    cleanup_import_materialization(
+        stage,
+        owner,
+        expected_stage_identity,
+        identities,
+        allocation,
+    )
+    .map(|_| ())
 }
 
 fn cleanup_import_materialization(
@@ -482,6 +546,7 @@ fn cleanup_import_materialization(
     owner: &Path,
     expected_stage_identity: graphforge_filesystem::FileIdentity,
     identities: &std::collections::BTreeMap<String, u64>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<PortableV2ImportCleanupReceipt, PortableV2Error> {
     #[cfg(test)]
     if INJECT_IMPORT_CLEANUP_FAILURE.with(std::cell::Cell::get) {
@@ -522,6 +587,7 @@ fn cleanup_import_materialization(
             identities,
             &mut removed_identities,
             &mut cleanup_budget,
+            allocation,
         )?;
         parent
             .remove_child_directory_if_identity(name, directory.identity())
@@ -535,6 +601,19 @@ fn cleanup_import_materialization(
             PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
         })?;
     }
+    cleanup_import_owner(owner, identities, &mut removed_identities, allocation)?;
+    Ok(PortableV2ImportCleanupReceipt {
+        removed_identity_allocated_bytes: removed_identities,
+        parent_sync_confirmed: true,
+    })
+}
+
+fn cleanup_import_owner(
+    owner: &Path,
+    identities: &std::collections::BTreeMap<String, u64>,
+    removed_identities: &mut std::collections::BTreeMap<String, u64>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), PortableV2Error> {
     if owner.exists() {
         let parent = graphforge_filesystem::StableDirectory::open(
             owner.parent().unwrap_or_else(|| Path::new(".")),
@@ -574,14 +653,16 @@ fn cleanup_import_materialization(
                     "cannot remove authenticated import owner",
                 )
             })?;
+        if let Some(allocation) = allocation {
+            allocation
+                .remove_file_at(owner)
+                .map_err(|error| storage(&error))?;
+        }
         parent.sync().map_err(|_| {
             PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import owner parent")
         })?;
     }
-    Ok(PortableV2ImportCleanupReceipt {
-        removed_identity_allocated_bytes: removed_identities,
-        parent_sync_confirmed: true,
-    })
+    Ok(())
 }
 
 fn remove_stable_tree(
@@ -589,6 +670,7 @@ fn remove_stable_tree(
     identities: &std::collections::BTreeMap<String, u64>,
     removed_identities: &mut std::collections::BTreeMap<String, u64>,
     remaining: &mut usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), PortableV2Error> {
     let names = directory.child_names_bounded(*remaining).map_err(|_| {
         PortableV2Error::new(
@@ -599,7 +681,13 @@ fn remove_stable_tree(
     *remaining = (*remaining).saturating_sub(names.len());
     for name in names {
         if let Ok(child) = directory.open_child_directory(&name) {
-            remove_stable_tree(&child, identities, removed_identities, remaining)?;
+            remove_stable_tree(
+                &child,
+                identities,
+                removed_identities,
+                remaining,
+                allocation,
+            )?;
             directory
                 .remove_child_directory_if_identity(&name, child.identity())
                 .map_err(|_| {
@@ -641,6 +729,11 @@ fn remove_stable_tree(
                         "cannot remove authenticated import entry",
                     )
                 })?;
+            if let Some(allocation) = allocation {
+                allocation
+                    .remove_file_at(&directory.path().join(&name))
+                    .map_err(|error| storage(&error))?;
+            }
         }
     }
     directory.sync().map_err(|_| {
@@ -760,6 +853,7 @@ fn import_materialized(
     cancelled: Option<&AtomicBool>,
     report: &PortableV2Report,
     owned_retry: bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     if report.package_class != PortableV2PackageClass::Complete {
         return Err(PortableV2Error::new(
@@ -937,10 +1031,13 @@ fn import_materialized(
     };
     let parent = match existing {
         Some(parent) => parent,
-        None => open_or_initialize_project_admitted(admission.root())
-            .map_err(|error| storage(&error))?,
+        None => crate::project_generation::open_or_initialize_project_admitted_with_allocation(
+            admission.root(),
+            allocation,
+        )
+        .map_err(|error| storage(&error))?,
     };
-    let graph_object_lease = prepare_compact_import_graph(
+    let graph_object_lease = prepare_compact_import_graph_with_allocation(
         admission.root(),
         package_graph_tree.as_deref(),
         &mut participants,
@@ -950,6 +1047,7 @@ fn import_materialized(
                 "import entry count exceeds platform capacity",
             )
         })?,
+        allocation,
     )?;
     let request = ProjectGenerationRequest {
         transaction_uuid,
@@ -972,6 +1070,7 @@ fn import_materialized(
         generation_graph_tree.as_deref(),
         cancelled,
         limits.copy_buffer_bytes,
+        allocation,
     )
     .map_err(|error| storage_or_cancel(&error, cancelled))?
     {
@@ -1156,11 +1255,28 @@ fn validate_import_delta_identities(
     Ok(())
 }
 
+#[cfg(test)]
 fn prepare_compact_import_graph(
     target: &Path,
     package_graph_tree: Option<&Path>,
     participants: &mut [ProjectFileParticipant],
     entry_count: usize,
+) -> Result<Option<crate::GraphObjectPublicationLease>, PortableV2Error> {
+    prepare_compact_import_graph_with_allocation(
+        target,
+        package_graph_tree,
+        participants,
+        entry_count,
+        None,
+    )
+}
+
+fn prepare_compact_import_graph_with_allocation(
+    target: &Path,
+    package_graph_tree: Option<&Path>,
+    participants: &mut [ProjectFileParticipant],
+    entry_count: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<Option<crate::GraphObjectPublicationLease>, PortableV2Error> {
     let Some(graph_tree) = package_graph_tree else {
         return Ok(None);
@@ -1177,7 +1293,9 @@ fn prepare_compact_import_graph(
     if participant.participant.record_version != crate::GRAPH_FILES_V2_RECORD_VERSION {
         return Ok(None);
     }
-    let lease = crate::begin_graph_object_publication(target).map_err(|error| storage(&error))?;
+    let mut lease =
+        crate::begin_graph_object_publication(target).map_err(|error| storage(&error))?;
+    lease.set_allocation_operation(allocation.cloned());
     let directory = graphforge_filesystem::StableDirectory::open(graph_tree).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,

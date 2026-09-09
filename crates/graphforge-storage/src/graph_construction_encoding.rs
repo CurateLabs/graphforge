@@ -14,6 +14,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::RefCell;
 
+use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, ListArray, StringArray,
     TimestampMicrosecondArray, UInt32Array, UInt64Array,
@@ -23,7 +24,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::OntologyMode;
-use graphforge_filesystem::{StableDirectory, file_identity, file_link_count};
+use graphforge_filesystem::{file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, SymbolBinding};
 use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
@@ -705,16 +706,17 @@ pub(crate) fn encode(
 
     let identities_sha256 = shaped_output_sha256(shape_outputs, &shape.identities)?;
     let mut index = crate::uuid_membership::encode_construction_index(
-        source,
+        source.physical(),
         &shape.identities,
         identities_sha256,
-        &output,
+        output.physical(),
         generation,
         shape.parent_topology_generation,
         parent_index,
         shape.node_count,
         shape.edge_count,
         cancelled,
+        output.allocation(),
     )?;
 
     let v4 = encode_nodes(
@@ -751,7 +753,7 @@ pub(crate) fn encode(
             u64::try_from(metrics.peak_buffer_bytes).map_err(storage)?;
         let (v4_artifacts, publication, metrics) =
             crate::uuid_membership::publish_v4_construction_artifacts(
-                &output,
+                output.physical(),
                 bundle,
                 generation,
                 identities_sha256,
@@ -759,6 +761,7 @@ pub(crate) fn encode(
                     .as_ref()
                     .and_then(|(_, manifest)| parent_generation.map(|parent| (parent, manifest))),
                 cancelled,
+                output.allocation(),
             )?;
         add_evidence_counter(
             &mut evidence.input_read_bytes,
@@ -1029,9 +1032,13 @@ fn encode_nodes(
         let index = topology
             .open_child_directory(OsStr::new("uuid-membership"))
             .map_err(storage)?;
-        return crate::uuid_membership::V4OrdinalConstructionWriter::start(generation, &index)?
-            .finish()
-            .map(Some);
+        return crate::uuid_membership::V4OrdinalConstructionWriter::start_with_allocation(
+            generation,
+            index.physical(),
+            index.allocation(),
+        )?
+        .finish()
+        .map(Some);
     }
     let details_name = shape
         .node_details
@@ -1065,8 +1072,9 @@ fn encode_nodes(
         .map(|index| {
             crate::uuid_membership::V4OrdinalConstructionWriter::start_with_cache_window(
                 generation,
-                index,
+                index.physical(),
                 cache_window,
+                index.allocation(),
             )
         })
         .transpose()?;

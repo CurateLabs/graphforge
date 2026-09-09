@@ -57,6 +57,23 @@ STORAGE_CATEGORY_FIELDS = (
     "physical_logical_bytes",
     "allocated_bytes",
 )
+RETAINED_OWNER_NAMES = (
+    "source-project-construction",
+    "source-project-import",
+    "source-project-transactions",
+    "source-project-locks",
+    "source-project-admission_lock",
+    "source-project-published",
+    "imported-project-construction",
+    "imported-project-import",
+    "imported-project-transactions",
+    "imported-project-locks",
+    "imported-project-admission_lock",
+    "imported-project-published",
+    "generated-inputs",
+    "query-results",
+    "portable-package",
+)
 APPLICATION_IO_PHASES = (
     "append_merge",
     "seal_authentication",
@@ -81,6 +98,52 @@ APPLICATION_IO_FIELDS = (
 
 class ControllerError(ValueError):
     """The requested run is unsafe, out of order, or lacks valid evidence."""
+
+
+def validate_lifecycle_storage_receipt(receipt: Mapping[str, Any]) -> None:
+    """Reconcile complete owner views without treating aliases as separate allocation."""
+    fields = (
+        "source_project_current_allocated_bytes",
+        "retained_storage_bytes",
+        "transient_peak_storage_bytes",
+    )
+    if receipt.get("contract") != "graphforge-lifecycle-storage/2":
+        raise ControllerError("lifecycle storage requires complete version-2 owner evidence")
+    for field in fields:
+        value = receipt.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ControllerError(f"lifecycle storage receipt omitted {field}")
+    if set(receipt) != {"contract", "retained_owners", *fields}:
+        raise ControllerError("lifecycle storage fields must be complete and closed")
+    owners = receipt["retained_owners"]
+    if not isinstance(owners, Mapping) or set(owners) != set(RETAINED_OWNER_NAMES):
+        raise ControllerError("lifecycle retained owners must be complete and closed")
+    allocations = []
+    for name, owner in owners.items():
+        if not isinstance(owner, Mapping) or set(owner) != {"totals"}:
+            raise ControllerError(f"lifecycle retained owner is malformed: {name}")
+        totals = owner["totals"]
+        if not isinstance(totals, Mapping) or set(totals) != set(STORAGE_CATEGORY_FIELDS):
+            raise ControllerError(f"lifecycle retained owner totals are malformed: {name}")
+        if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in totals.values()):
+            raise ControllerError(f"lifecycle retained owner totals are not exact integers: {name}")
+        if (
+            totals["physical_objects"] > totals["logical_references"]
+            or totals["physical_logical_bytes"] > totals["logical_bytes"]
+            or (totals["physical_objects"] == 0 and any(totals.values()))
+        ):
+            raise ControllerError(f"lifecycle retained owner alias facts contradict: {name}")
+        allocations.append(totals["allocated_bytes"])
+    retained = receipt["retained_storage_bytes"]
+    if not max(allocations) <= retained <= sum(allocations):
+        raise ControllerError("lifecycle retained union is inconsistent with owner views")
+    if receipt["transient_peak_storage_bytes"] < retained:
+        raise ControllerError("lifecycle peak is below current retained allocation")
+    if (
+        receipt["source_project_current_allocated_bytes"]
+        != owners["source-project-published"]["totals"]["allocated_bytes"]
+    ):
+        raise ControllerError("published source denominator disagrees with its owner union")
 
 
 class BenchExecRunError(ControllerError):
@@ -976,7 +1039,7 @@ def assemble_rung_evidence(
     source_storage = _storage_receipt(graphforge, "reopen")
     imported_storage = _storage_receipt(graphforge, "reopen_proof")
     lifecycle_storage = _phase_bound_receipt(
-        graphforge, "reopen_proof", "graphforge-lifecycle-storage/1"
+        graphforge, "reopen_proof", "graphforge-lifecycle-storage/2"
     )
     construction, application_io, construction_staging, staging_peak = _construction_metrics(
         committed_import
@@ -1007,13 +1070,7 @@ def assemble_rung_evidence(
     ):
         raise ControllerError("source/imported query evidence contradicts the selected rung")
     lifecycle_names = ("retained_storage_bytes", "transient_peak_storage_bytes")
-    for name in ("source_project_current_allocated_bytes", *lifecycle_names):
-        if (
-            isinstance(lifecycle_storage.get(name), bool)
-            or not isinstance(lifecycle_storage.get(name), int)
-            or lifecycle_storage[name] < 0
-        ):
-            raise ControllerError(f"lifecycle storage receipt omitted {name}")
+    validate_lifecycle_storage_receipt(lifecycle_storage)
     authority = benchexec.get("authority")
     if not isinstance(authority, Mapping):
         raise ControllerError("BenchExec authority is missing")

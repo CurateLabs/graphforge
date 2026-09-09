@@ -173,9 +173,21 @@ pub fn verify_portable_v2(
             )
         })?;
         if metadata.is_dir() {
-            materialize_expanded(source, staging.path(), limits, cancelled, &mut |_| Ok(()))?;
+            materialize_expanded(
+                source,
+                staging.path(),
+                limits,
+                cancelled,
+                &mut |_, _| Ok(()),
+            )?;
         } else {
-            materialize_bundle(source, staging.path(), limits, cancelled, &mut |_| Ok(()))?;
+            materialize_bundle(
+                source,
+                staging.path(),
+                limits,
+                cancelled,
+                &mut |_, _| Ok(()),
+            )?;
         }
         validate_materialized_ontology_composition(staging.path(), &report, limits, cancelled)?;
     }
@@ -627,8 +639,15 @@ pub fn materialize_verified_portable_v2(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableV2Report, PortableV2Error> {
-    materialize_verified_portable_v2_observed(source, destination, limits, cancelled, |_| Ok(()))
-        .map(|materialized| materialized.report)
+    materialize_verified_portable_v2_observed(
+        source,
+        destination,
+        limits,
+        cancelled,
+        |_, _| Ok(()),
+        false,
+    )
+    .map(|materialized| materialized.report)
 }
 
 pub(crate) struct VerifiedMaterialization {
@@ -642,7 +661,8 @@ pub(crate) fn materialize_verified_portable_v2_observed(
     destination: impl AsRef<Path>,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
-    mut observed: impl FnMut(&File) -> Result<(), PortableV2Error>,
+    mut observed: impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
+    track_removals: bool,
 ) -> Result<VerifiedMaterialization, PortableV2Error> {
     let source = source.as_ref();
     let destination = destination.as_ref();
@@ -658,59 +678,64 @@ pub(crate) fn materialize_verified_portable_v2_observed(
     fs::create_dir(destination).map_err(|_| {
         PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create materialization")
     })?;
-    let result = if before.is_dir() {
-        materialize_expanded(source, destination, limits, cancelled, &mut observed)
-    } else {
-        materialize_bundle(source, destination, limits, cancelled, &mut observed)
-    };
-    let (application_read_bytes, application_read_operations) = match result {
-        Ok(stats) => stats,
-        Err(error) => {
-            let _ = fs::remove_dir_all(destination);
-            return Err(error);
-        }
-    };
-    let after = fs::metadata(source).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::ConcurrentMutation,
-            "source disappeared",
-        )
-    })?;
-    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-        let _ = fs::remove_dir_all(destination);
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::ConcurrentMutation,
-            "source changed after verification",
-        ));
-    }
-    let after_report =
-        verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled).map_err(|_| {
+    let mut routes = std::collections::BTreeSet::new();
+    let result = (|| {
+        let mut tracking = |path: &Path, file: Option<&File>| {
+            if track_removals {
+                routes.insert(path.to_path_buf());
+            }
+            observed(path, file)
+        };
+        let result = if before.is_dir() {
+            materialize_expanded(source, destination, limits, cancelled, &mut tracking)
+        } else {
+            materialize_bundle(source, destination, limits, cancelled, &mut tracking)
+        };
+        let (application_read_bytes, application_read_operations) = result?;
+        let after = fs::metadata(source).map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::ConcurrentMutation,
-                "source changed during materialization",
+                "source disappeared",
             )
-        });
-    let after_report = match after_report {
-        Ok(after_report) => after_report,
-        Err(error) => {
-            let _ = fs::remove_dir_all(destination);
-            return Err(error);
+        })?;
+        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "source changed after verification",
+            ));
         }
-    };
-    if report.package_digest != after_report.package_digest
-        || report.transport_digest != after_report.transport_digest
-    {
+        let after_report = verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::ConcurrentMutation,
+                    "source changed during materialization",
+                )
+            });
+        let after_report = after_report?;
+        if report.package_digest != after_report.package_digest
+            || report.transport_digest != after_report.transport_digest
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "source changed during materialization",
+            ));
+        }
+        Ok(VerifiedMaterialization {
+            report,
+            application_read_bytes,
+            application_read_operations,
+        })
+    })();
+    if result.is_err() {
         let _ = fs::remove_dir_all(destination);
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::ConcurrentMutation,
-            "source changed during materialization",
-        ));
+        for path in routes {
+            if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            {
+                let _ = observed(&path, None);
+            }
+        }
     }
-    Ok(VerifiedMaterialization {
-        report,
-        application_read_bytes,
-        application_read_operations,
-    })
+    result
 }
 
 fn materialize_expanded(
@@ -718,7 +743,7 @@ fn materialize_expanded(
     destination: &Path,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
-    observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
+    observed: &mut impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
 ) -> Result<(u64, u64), PortableV2Error> {
     let mut read_bytes = 0_u64;
     let mut read_operations = 0_u64;
@@ -745,14 +770,20 @@ fn materialize_expanded(
             .map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stage entry")
             })?;
-        let (bytes, operations) =
-            copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled)?;
+        observed(&output_path, Some(&output))?;
+        let copied =
+            copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled);
+        let refreshed = observed(&output_path, Some(&output));
+        let (bytes, operations) = copied?;
+        refreshed?;
         read_bytes = read_bytes.saturating_add(bytes);
         read_operations = read_operations.saturating_add(operations);
-        output.sync_all().map_err(|_| {
+        let synced = output.sync_all().map_err(|_| {
             PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
-        })?;
-        observed(&output)?;
+        });
+        let refreshed = observed(&output_path, Some(&output));
+        synced?;
+        refreshed?;
         let after = fs::metadata(&input_path).map_err(|_| {
             PortableV2Error::at(
                 PortableV2ErrorCode::ConcurrentMutation,
@@ -777,7 +808,7 @@ fn materialize_bundle(
     destination: &Path,
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
-    observed: &mut impl FnMut(&File) -> Result<(), PortableV2Error>,
+    observed: &mut impl FnMut(&Path, Option<&File>) -> Result<(), PortableV2Error>,
 ) -> Result<(u64, u64), PortableV2Error> {
     let mut read_bytes = 0_u64;
     let mut read_operations = 0_u64;
@@ -821,19 +852,25 @@ fn materialize_bundle(
                 .map_err(|_| {
                     PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot stage entry")
                 })?;
-            let (bytes, operations) = copy_exact_materialized(
+            observed(&output_path, Some(&output))?;
+            let copied = copy_exact_materialized(
                 &mut input,
                 &mut output,
                 size,
                 limits.copy_buffer_bytes,
                 cancelled,
-            )?;
+            );
+            let refreshed = observed(&output_path, Some(&output));
+            let (bytes, operations) = copied?;
+            refreshed?;
             read_bytes = read_bytes.saturating_add(bytes);
             read_operations = read_operations.saturating_add(operations);
-            output.sync_all().map_err(|_| {
+            let synced = output.sync_all().map_err(|_| {
                 PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
-            })?;
-            observed(&output)?;
+            });
+            let refreshed = observed(&output_path, Some(&output));
+            synced?;
+            refreshed?;
         } else {
             skip_exact(&mut input, size, limits.copy_buffer_bytes, cancelled)?;
         }
@@ -3341,6 +3378,96 @@ mod tests {
         assert_eq!(expanded.component_count, bundled.component_count);
         assert_eq!(bundled.representation, PortableV2Representation::Bundle);
         assert_ne!(expanded.transport_digest, bundled.transport_digest);
+    }
+
+    #[test]
+    fn observed_materialization_failure_and_cancel_cleanup_retry_both_forms() {
+        let source = package();
+        let mut paths = Vec::new();
+        walk(
+            source.path(),
+            source.path(),
+            &mut paths,
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        paths.sort();
+        let mut bytes = Vec::new();
+        for path in paths {
+            bytes.extend(tar_entry(
+                &path,
+                &fs::read(source.path().join(&path)).unwrap(),
+            ));
+        }
+        bytes.extend([0_u8; 1024]);
+        let bundle = tempfile::NamedTempFile::new().unwrap();
+        fs::write(bundle.path(), bytes).unwrap();
+        for input in [source.path(), bundle.path()] {
+            for cancel in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let destination = root.path().join("materialized");
+                let operation = crate::StorageAllocationOperation::default();
+                let cancelled = AtomicBool::new(false);
+                let mut injected = false;
+                let result = materialize_verified_portable_v2_observed(
+                    input,
+                    &destination,
+                    PortableV2Limits::default(),
+                    Some(&cancelled),
+                    |path, file| {
+                        match file {
+                            Some(file) => {
+                                operation.replace_file_at(path, file).unwrap();
+                                if !injected && file.metadata().unwrap().len() > 0 {
+                                    injected = true;
+                                    if cancel {
+                                        cancelled.store(true, Ordering::Relaxed);
+                                    } else {
+                                        return Err(PortableV2Error::new(
+                                            PortableV2ErrorCode::Io,
+                                            "injected observed write failure",
+                                        ));
+                                    }
+                                }
+                            }
+                            None => {
+                                assert!(!path.exists());
+                                operation.remove_file_at(path).unwrap();
+                            }
+                        }
+                        Ok(())
+                    },
+                    true,
+                );
+                assert!(injected);
+                let error = result.err().expect("injected materialization must fail");
+                if !cancel {
+                    assert_eq!(error.code, PortableV2ErrorCode::Io);
+                }
+                assert!(!destination.exists());
+                assert_eq!(operation.totals().unwrap().0, 0);
+                assert!(operation.totals().unwrap().1 > 0);
+                cancelled.store(false, Ordering::Relaxed);
+                materialize_verified_portable_v2_observed(
+                    input,
+                    &destination,
+                    PortableV2Limits::default(),
+                    Some(&cancelled),
+                    |path, file| {
+                        match file {
+                            Some(file) => operation.replace_file_at(path, file).unwrap(),
+                            None => operation.remove_file_at(path).unwrap(),
+                        }
+                        Ok(())
+                    },
+                    true,
+                )
+                .unwrap();
+                let actual = crate::StorageAllocationOperation::from_paths(&[destination]).unwrap();
+                assert_eq!(operation.totals().unwrap().0, actual.totals().unwrap().0);
+            }
+        }
     }
 
     #[test]

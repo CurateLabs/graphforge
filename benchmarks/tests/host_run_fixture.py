@@ -67,6 +67,9 @@ def write_host_bundle(output: Path, scale: int, plan: dict | None = None) -> Non
     # Keep its native union above every owner view and below their sum.
     receipts["reopen_proof"][-1]["retained_storage_bytes"] = 500
     receipts["reopen_proof"][-1]["transient_peak_storage_bytes"] = 600
+    receipts["reopen_proof"][-1]["retained_owners"]["source-project-construction"]["totals"] = dict(
+        receipts["ingest"][0]["construction"]["construction_staging"]
+    )
     gf = graphforge(scale, receipts)
     gf["profile_id"] = plan["identities"]["profile_id"]
     authority = benchexec(gf)

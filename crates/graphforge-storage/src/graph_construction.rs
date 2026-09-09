@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{
     Array, FixedSizeBinaryArray, MutableArrayData, RecordBatch, StringArray, UInt32Array,
     make_array,
@@ -24,7 +25,7 @@ use arrow::array::{
 use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use graphforge_core::GfError;
-use graphforge_filesystem::{FileIdentity, StableDirectory, file_identity, file_link_count};
+use graphforge_filesystem::{FileIdentity, file_identity, file_link_count};
 use graphforge_ir::{CompositionBindingContext, CompositionBindingLimits, RuntimeCatalog};
 use graphforge_ontology::ActivationMode;
 use parquet::arrow::ArrowWriter;
@@ -1544,7 +1545,8 @@ impl GraphConstructionSession {
             return Err(storage("construction parent is no longer CURRENT"));
         }
 
-        let lease = crate::begin_graph_object_publication(admission.root())?;
+        let mut lease = crate::begin_graph_object_publication(admission.root())?;
+        lease.set_allocation_operation(self.root.allocation().cloned());
         let (mut manifest_state, manifest_read_bytes, manifest_read_calls) =
             match parent.declared_graph_files_participant()? {
                 Some(crate::GraphFilesParticipant::V2(root)) => {
@@ -1745,7 +1747,11 @@ impl GraphConstructionSession {
         };
         let publication =
             match crate::project_publication::stage_project_generation_from_admitted_parent(
-                admission, parent, &request, None,
+                admission,
+                parent,
+                &request,
+                None,
+                self.root.allocation(),
             )? {
                 crate::ProjectStageOutcome::Staged(staged) => staged
                     .validate(|_| Ok(()), |_, _| Ok(()))?
@@ -2005,12 +2011,79 @@ impl GraphConstructionSession {
         budgets: GraphConstructionBudgets,
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
+        Self::open_internal_with_allocation(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            semantic_authority,
+            budgets,
+            lifecycle_mode,
+            None,
+        )
+    }
+
+    /// First-party diagnostic construction using the ordinary authority checks.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_allocation(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        semantic_authority: Option<ConstructionSemanticAuthority>,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+        resume: bool,
+        allocation: &crate::StorageAllocationOperation,
+    ) -> Result<Self, GfError> {
+        if ontology_mode != graphforge_core::OntologyMode::Exploratory
+            && semantic_authority.is_none()
+        {
+            return Err(storage(
+                "strict or advisory construction requires pinned semantic authority",
+            ));
+        }
+        let parent = if resume {
+            resume_parent_topology_generation(project_dir, operation_uuid)?
+        } else {
+            parent_topology_generation
+        };
+        Self::open_internal_with_allocation(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent,
+            ontology_mode,
+            semantic_authority,
+            budgets,
+            lifecycle_mode,
+            Some(allocation),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn open_internal_with_allocation(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        semantic_authority: Option<ConstructionSemanticAuthority>,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> Result<Self, GfError> {
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()
             .map(ConstructionSemanticAuthority::digest)
             .transpose()?;
-        let project = StableDirectory::open(project_dir).map_err(storage)?;
+        let project = StableDirectory::open(project_dir)
+            .map_err(storage)?
+            .with_allocation(allocation.cloned());
         let project_identity = project.identity();
         let key = format!(
             "{}:{}:{}",
@@ -5961,9 +6034,24 @@ fn convert_identity_run(
     drop(writer);
     let published = (|| -> Result<(), GfError> {
         shape_publication_failure("install_child")?;
+        let allocation_file = if root.allocation().is_some() {
+            let file = root
+                .open_child_file(OsStr::new(&temporary))
+                .map_err(storage)?;
+            root.observe_file(OsStr::new(&temporary), &file)
+                .map_err(storage)?;
+            Some(file)
+        } else {
+            None
+        };
         publication
             .install_child(OsStr::new(output))
             .map_err(storage)?;
+        if let Some(file) = &allocation_file {
+            root.record_replacement(OsStr::new(&temporary), OsStr::new(output), file)
+                .map_err(storage)?;
+        }
+        drop(allocation_file);
         publication.sync_parent().map_err(storage)?;
         shape_publication_failure("directory_sync")?;
         shape_publication_failure("post_publication_metric_overflow")?;
@@ -6158,9 +6246,24 @@ fn copy_authenticated_run<const N: usize>(
     drop(writer);
     let published = (|| -> Result<(), GfError> {
         shape_publication_failure("install_child")?;
+        let allocation_file = if root.allocation().is_some() {
+            let file = root
+                .open_child_file(OsStr::new(&temporary))
+                .map_err(storage)?;
+            root.observe_file(OsStr::new(&temporary), &file)
+                .map_err(storage)?;
+            Some(file)
+        } else {
+            None
+        };
         publication
             .install_child(OsStr::new(output))
             .map_err(storage)?;
+        if let Some(file) = &allocation_file {
+            root.record_replacement(OsStr::new(&temporary), OsStr::new(output), file)
+                .map_err(storage)?;
+        }
+        drop(allocation_file);
         publication.sync_parent().map_err(storage)?;
         shape_publication_failure("directory_sync")?;
         shape_publication_failure("post_publication_metric_overflow")?;

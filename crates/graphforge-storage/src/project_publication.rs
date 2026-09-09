@@ -164,6 +164,7 @@ pub enum ProjectStageOutcome {
 
 /// A staged generation that still requires domain and composite validation.
 pub struct StagedProjectGeneration {
+    allocation: Option<crate::StorageAllocationOperation>,
     root: PathBuf,
     publication_lock: PublicationLock,
     admission: StagedAdmission,
@@ -403,6 +404,7 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
     parent: ResolvedProjectGeneration,
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -443,11 +445,13 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
             None,
             graph_tree,
             ParticipantPayloads::Memory,
+            allocation,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
 }
 
+#[allow(clippy::too_many_arguments)] // Ordinary staging inputs plus explicit diagnostic context.
 pub(crate) fn stage_project_generation_from_files_admitted(
     admission: crate::filesystem_admission::ProjectLifecycleAdmission,
     parent: ResolvedProjectGeneration,
@@ -456,6 +460,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
     graph_tree: Option<&Path>,
     cancelled: Option<&AtomicBool>,
     copy_buffer_bytes: usize,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
@@ -489,6 +494,7 @@ pub(crate) fn stage_project_generation_from_files_admitted(
             None,
             graph_tree,
             ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
+            allocation,
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -537,6 +543,7 @@ fn stage_project_generation_inner(
         None,
         graph_tree,
         ParticipantPayloads::Memory,
+        None,
     )
 }
 
@@ -568,6 +575,7 @@ fn stage_project_generation_optimistic_inner(
         Some(operation_fingerprint),
         graph_tree,
         ParticipantPayloads::Memory,
+        None,
     )
 }
 
@@ -596,6 +604,17 @@ pub(crate) fn stage_project_generation_with_lock(
         None,
         graph_tree,
         ParticipantPayloads::Memory,
+        None,
+    )
+}
+
+fn after_preparing_journal(request: &ProjectGenerationRequest) -> Result<(), GfError> {
+    project_failpoint::hit(
+        "project.after_journal_preparing",
+        Some(request.transaction_uuid),
+        Some(request.generation_uuid),
+        "PREPARING",
+        false,
     )
 }
 
@@ -613,6 +632,7 @@ fn stage_project_generation_inner_with_locks(
     operation_fingerprint: Option<[u8; 32]>,
     graph_tree: Option<&Path>,
     payloads: ParticipantPayloads<'_>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) =
@@ -631,6 +651,7 @@ fn stage_project_generation_inner_with_locks(
             &operation_fingerprint,
             revert.as_ref(),
             &journal_path,
+            allocation,
         )?
     {
         return Ok(outcome);
@@ -639,7 +660,7 @@ fn stage_project_generation_inner_with_locks(
     let requires_promotion = matches!(publication_lock, PublicationLock::Optimistic(_));
     let generation_root =
         prepare_generation_directory(&root, request, &request_fingerprint, requires_promotion)?;
-    write_journal(
+    write_journal_with_allocation(
         &journal_path,
         &JournalRecord::new(
             request,
@@ -650,18 +671,25 @@ fn stage_project_generation_inner_with_locks(
             None,
             revert.clone(),
         ),
+        allocation,
     )?;
-    project_failpoint::hit(
-        "project.after_journal_preparing",
-        Some(request.transaction_uuid),
-        Some(request.generation_uuid),
-        "PREPARING",
-        false,
-    )?;
+    after_preparing_journal(request)?;
 
-    stage_participant_files(request, &generation_root, &participants, payloads)?;
+    stage_participant_files(
+        request,
+        &generation_root,
+        &participants,
+        payloads,
+        allocation,
+    )?;
     sync_participant_directories(&generation_root.join(PARTICIPANTS_DIR), &participants)?;
-    stage_optional_graph_tree(&participants, &parent, &generation_root, graph_tree)?;
+    stage_optional_graph_tree(
+        &participants,
+        &parent,
+        &generation_root,
+        graph_tree,
+        allocation,
+    )?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",
         Some(request.transaction_uuid),
@@ -669,7 +697,7 @@ fn stage_project_generation_inner_with_locks(
         "STAGED",
         false,
     )?;
-    write_journal(
+    write_journal_with_allocation(
         &journal_path,
         &JournalRecord::new(
             request,
@@ -680,6 +708,7 @@ fn stage_project_generation_inner_with_locks(
             None,
             revert.clone(),
         ),
+        allocation,
     )?;
     project_failpoint::hit(
         "project.after_journal_staged",
@@ -691,6 +720,7 @@ fn stage_project_generation_inner_with_locks(
 
     Ok(ProjectStageOutcome::Staged(Box::new(
         StagedProjectGeneration {
+            allocation: allocation.cloned(),
             admission,
             root,
             publication_lock,
@@ -772,6 +802,7 @@ fn handle_existing_journal(
     operation_fingerprint: &str,
     expected_revert: Option<&RevertJournalExtension>,
     journal_path: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<Option<ProjectStageOutcome>, GfError> {
     let journal = read_journal(journal_path)?;
     if journal.operation_fingerprint() != operation_fingerprint
@@ -792,7 +823,7 @@ fn handle_existing_journal(
                 "aborted transaction cleanup is incomplete; run recovery again",
             ));
         }
-        cleanup_aborted_attempts(root, request.transaction_uuid)?;
+        cleanup_aborted_attempts(root, request.transaction_uuid, allocation)?;
         return Ok(None);
     }
     if journal.request_fingerprint != request_fingerprint
@@ -840,7 +871,11 @@ fn handle_existing_journal(
     )))
 }
 
-fn cleanup_aborted_attempts(root: &Path, transaction_uuid: Uuid) -> Result<(), GfError> {
+fn cleanup_aborted_attempts(
+    root: &Path,
+    transaction_uuid: Uuid,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     let attempts_root = root.join(ATTEMPTS_DIR);
     let transaction_root = attempts_root.join(transaction_uuid.hyphenated().to_string());
     let metadata = match std::fs::symlink_metadata(&transaction_root) {
@@ -854,7 +889,7 @@ fn cleanup_aborted_attempts(root: &Path, transaction_uuid: Uuid) -> Result<(), G
             "aborted transaction attempt path is linked or not a directory",
         ));
     }
-    std::fs::remove_dir_all(&transaction_root).map_err(publication_io)?;
+    crate::project_recovery::remove_recovery_tree_with_allocation(&transaction_root, allocation)?;
     sync_directory(&attempts_root)
 }
 
@@ -997,6 +1032,7 @@ fn stage_optional_graph_tree(
     parent: &ResolvedProjectGeneration,
     generation_root: &Path,
     graph_tree: Option<&Path>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let files_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
@@ -1068,7 +1104,12 @@ fn stage_optional_graph_tree(
             ));
         }
     };
-    crate::stage_graph_tree(source, generation_root, &inventory)?;
+    crate::graph_files::stage_graph_tree_with_allocation(
+        source,
+        generation_root,
+        &inventory,
+        allocation,
+    )?;
     sync_directory(generation_root)?;
     Ok(())
 }
@@ -1169,6 +1210,7 @@ fn stage_participant_files(
     generation_root: &Path,
     participants: &[StagedParticipant],
     payloads: ParticipantPayloads<'_>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     for metadata in participants {
         let (index, input) = request
@@ -1195,39 +1237,49 @@ fn stage_participant_files(
             .create_new(true)
             .open(&destination)
             .map_err(publication_io)?;
-        match payloads {
-            ParticipantPayloads::Memory => file.write_all(&input.bytes).map_err(publication_io)?,
-            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
-                let source = &files[index];
-                let mut input = crate::project_portable::open_regular_nofollow(&source.source)
-                    .map_err(publication_io)?;
-                let mut hash = Sha256::new();
-                let mut copied = 0;
-                let mut buffer = vec![0; copy_buffer_bytes];
-                loop {
-                    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        let write_result = (|| -> Result<(), GfError> {
+            match payloads {
+                ParticipantPayloads::Memory => {
+                    file.write_all(&input.bytes).map_err(publication_io)?;
+                }
+                ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
+                    let source = &files[index];
+                    let mut input = crate::project_portable::open_regular_nofollow(&source.source)
+                        .map_err(publication_io)?;
+                    let mut hash = Sha256::new();
+                    let mut copied = 0;
+                    let mut buffer = vec![0; copy_buffer_bytes];
+                    loop {
+                        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                            return Err(project_error(
+                                ProjectErrorCode::PublicationFailed,
+                                "portable import cancelled during staging",
+                            ));
+                        }
+                        let count = input.read(&mut buffer).map_err(publication_io)?;
+                        if count == 0 {
+                            break;
+                        }
+                        file.write_all(&buffer[..count]).map_err(publication_io)?;
+                        hash.update(&buffer[..count]);
+                        copied += count as u64;
+                    }
+                    let digest: [u8; 32] = hash.finalize().into();
+                    if copied != source.byte_length || digest != source.content_sha256 {
                         return Err(project_error(
                             ProjectErrorCode::PublicationFailed,
-                            "portable import cancelled during staging",
+                            "portable participant changed during staging",
                         ));
                     }
-                    let count = input.read(&mut buffer).map_err(publication_io)?;
-                    if count == 0 {
-                        break;
-                    }
-                    file.write_all(&buffer[..count]).map_err(publication_io)?;
-                    hash.update(&buffer[..count]);
-                    copied += count as u64;
-                }
-                let digest: [u8; 32] = hash.finalize().into();
-                if copied != source.byte_length || digest != source.content_sha256 {
-                    return Err(project_error(
-                        ProjectErrorCode::PublicationFailed,
-                        "portable participant changed during staging",
-                    ));
                 }
             }
-        }
+            Ok(())
+        })();
+        let observed = allocation.map_or(Ok(()), |allocation| {
+            allocation.replace_file_at(&destination, &file)
+        });
+        write_result?;
+        observed?;
         project_failpoint::hit(
             "project.after_participant_write",
             Some(request.transaction_uuid),
@@ -1236,6 +1288,9 @@ fn stage_participant_files(
             false,
         )?;
         file.sync_all().map_err(publication_io)?;
+        if let Some(allocation) = allocation {
+            allocation.replace_file_at(&destination, &file)?;
+        }
         project_failpoint::hit(
             "project.after_participant_fsync",
             Some(request.transaction_uuid),
@@ -1306,9 +1361,10 @@ impl StagedProjectGeneration {
             "VALIDATED",
             false,
         )?;
-        write_journal(
+        write_journal_with_allocation(
             &self.journal_path(),
             &self.journal(JournalPhase::Validated, None),
+            self.allocation.as_ref(),
         )?;
         project_failpoint::hit(
             "project.after_journal_validated",
@@ -1550,12 +1606,16 @@ fn has_compact_graph_participant(staged: &StagedProjectGeneration) -> Result<boo
 }
 
 fn abort_stale_generation(staged: &StagedProjectGeneration) -> Result<(), GfError> {
-    write_journal(
+    write_journal_with_allocation(
         &staged.journal_path(),
         &staged.journal(JournalPhase::Aborted, None),
+        staged.allocation.as_ref(),
     )?;
     if staged.generation_root.exists() {
-        std::fs::remove_dir_all(&staged.generation_root).map_err(publication_io)?;
+        crate::project_recovery::remove_recovery_tree_with_allocation(
+            &staged.generation_root,
+            staged.allocation.as_ref(),
+        )?;
         sync_directory(
             staged
                 .generation_root
@@ -1574,6 +1634,9 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         .open(&lease_path)
         .map_err(publication_io)?;
     lease.sync_all().map_err(publication_io)?;
+    if let Some(allocation) = &staged.allocation {
+        allocation.replace_file_at(&lease_path, &lease)?;
+    }
     // Windows rejects a parent-directory rename while a descendant file handle
     // is still live. The transaction lock, not this newly created lease file,
     // owns the staged attempt, so release the handle after its durability sync.
@@ -1597,7 +1660,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
     };
     let manifest_bytes = canonical_line(&manifest)?;
     let manifest_path = staged.generation_root.join(MANIFEST_FILE);
-    let manifest_file = write_new(&manifest_path, &manifest_bytes)?;
+    let manifest_file = write_new(&manifest_path, &manifest_bytes, staged.allocation.as_ref())?;
     project_failpoint::hit(
         "project.after_manifest_write",
         Some(staged.transaction_uuid),
@@ -1606,6 +1669,9 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         false,
     )?;
     manifest_file.sync_all().map_err(publication_io)?;
+    if let Some(allocation) = &staged.allocation {
+        allocation.replace_file_at(&manifest_path, &manifest_file)?;
+    }
     // Optimistic publication promotes the complete staging directory below.
     // Close the manifest handle before that rename for Windows parity.
     drop(manifest_file);
@@ -1645,9 +1711,10 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
     } else {
         sync_directory(&staged.root.join(GENERATIONS_DIR))?;
     }
-    write_journal(
+    write_journal_with_allocation(
         &staged.journal_path(),
         &staged.journal(JournalPhase::Durable, Some(hex_digest(manifest_sha256))),
+        staged.allocation.as_ref(),
     )?;
     project_failpoint::hit(
         "project.after_journal_durable",
@@ -1761,6 +1828,7 @@ fn replace_current(
             }
             Ok(())
         },
+        staged.allocation.as_ref(),
     );
     if let Err(error) = replace_result {
         reconcile_current_replacement_error(
@@ -1849,9 +1917,10 @@ fn finish_published_generation(
         "PUBLISHED",
         true,
     )?;
-    write_journal(
+    write_journal_with_allocation(
         &staged.journal_path(),
         &staged.journal(JournalPhase::Published, Some(hex_digest(manifest_sha256))),
+        staged.allocation.as_ref(),
     )
     .map_err(|error| {
         publication_error_from_parts(
@@ -2279,13 +2348,20 @@ fn sync_participant_directories(
     sync_directory(participants_root)
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<File, GfError> {
+fn write_new(
+    path: &Path,
+    bytes: &[u8],
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<File, GfError> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .map_err(publication_io)?;
-    file.write_all(bytes).map_err(publication_io)?;
+    let written = file.write_all(bytes).map_err(publication_io);
+    let observed = allocation.map_or(Ok(()), |allocation| allocation.replace_file_at(path, &file));
+    written?;
+    observed?;
     Ok(file)
 }
 
@@ -2402,9 +2478,19 @@ fn verify_exact_file(path: &Path, expected: &[u8]) -> Result<(), GfError> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), GfError> {
+    write_journal_with_allocation(path, journal, None)
+}
+
+pub(crate) fn write_journal_with_allocation(
+    path: &Path,
+    journal: &JournalRecord,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     let bytes = canonical_line(journal)?;
-    publish_atomic_bytes(path, &bytes, || Ok(()), || Ok(()), || Ok(())).map_err(publication_io)?;
+    publish_atomic_bytes_with_allocation(path, &bytes, || Ok(()), || Ok(()), || Ok(()), allocation)
+        .map_err(publication_io)?;
     sync_directory(
         path.parent()
             .expect("transaction journal always has a parent"),
@@ -2460,6 +2546,17 @@ pub(crate) fn publish_atomic_bytes(
     after_sync: impl FnOnce() -> std::io::Result<()>,
     before_replace: impl FnOnce() -> std::io::Result<()>,
 ) -> Result<(), AtomicPublishError> {
+    publish_atomic_bytes_with_allocation(path, bytes, after_write, after_sync, before_replace, None)
+}
+
+pub(crate) fn publish_atomic_bytes_with_allocation(
+    path: &Path,
+    bytes: &[u8],
+    after_write: impl FnOnce() -> std::io::Result<()>,
+    after_sync: impl FnOnce() -> std::io::Result<()>,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), AtomicPublishError> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("atomic publication target has no parent"))?;
@@ -2487,9 +2584,19 @@ pub(crate) fn publish_atomic_bytes(
         // not an authority across those environments, so the temporary file
         // itself carries a kernel-visible lease until replacement completes.
         crate::file_lock::lock_exclusive(&temp)?;
-        temp.write_all(bytes)?;
+        let written = temp.write_all(bytes);
+        let observed = allocation.map_or(Ok(()), |allocation| {
+            allocation.replace_file_at(&temp_path, &temp)
+        });
+        written?;
+        observed.map_err(std::io::Error::other)?;
         after_write()?;
         temp.sync_all()?;
+        if let Some(allocation) = allocation {
+            allocation
+                .replace_file_at(&temp_path, &temp)
+                .map_err(std::io::Error::other)?;
+        }
         after_sync()?;
         before_replace()?;
 
@@ -2522,17 +2629,49 @@ pub(crate) fn publish_atomic_bytes(
             }
             Err(error) => Err(AtomicPublishError::Io(error)),
         };
+        if result.is_ok() {
+            record_atomic_replacement(allocation, path, &temp_path, &temp)?;
+        }
         let unlock = crate::file_lock::unlock(&temp);
         drop(temp);
         result.and_then(|()| unlock.map_err(AtomicPublishError::Io))
     };
     let result = publish();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+    if result.is_err()
+        && std::fs::remove_file(&temp_path).is_ok()
+        && let Some(allocation) = allocation
+    {
+        // Preserve the original publication error, especially StateUnknown.
+        // This path cannot turn a failed publication into accepted evidence.
+        let _ = allocation.remove_file_at(&temp_path);
     }
     result
 }
 
+fn record_atomic_replacement(
+    allocation: Option<&crate::StorageAllocationOperation>,
+    destination: &Path,
+    temporary_path: &Path,
+    file: &File,
+) -> Result<(), AtomicPublishError> {
+    let Some(allocation) = allocation else {
+        return Ok(());
+    };
+    let recorded = (|| {
+        allocation.remove_file_at(destination)?;
+        allocation.replace_file_at(destination, file)?;
+        allocation.remove_file_at(temporary_path)
+    })();
+    // Namespace replacement has already occurred. An evidence failure must
+    // preserve the publisher's post-replacement reconciliation semantics.
+    recorded.map_err(|error| {
+        AtomicPublishError::Replacement(graphforge_filesystem::ReplaceFileError::StateUnknown(
+            std::io::Error::other(error),
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // Existing atomic interface plus optional diagnostic context.
 fn publish_atomic_bytes_in(
     directory: &graphforge_filesystem::StableDirectory,
     diagnostic_path: &Path,
@@ -2541,18 +2680,30 @@ fn publish_atomic_bytes_in(
     after_write: impl FnOnce() -> std::io::Result<()>,
     after_sync: impl FnOnce() -> std::io::Result<()>,
     before_replace: impl FnOnce() -> std::io::Result<()>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), AtomicPublishError> {
     let target_text = target_name
         .to_str()
         .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
     let temp_name = std::ffi::OsString::from(unique_atomic_temp_name(target_text));
     let mut temp = directory.create_replaceable_child_file(&temp_name)?;
+    let temp_path = diagnostic_path.with_file_name(&temp_name);
     let temp_identity = graphforge_filesystem::file_identity(&temp)?;
     let publish = || -> Result<(), AtomicPublishError> {
         crate::file_lock::lock_exclusive(&temp)?;
-        temp.write_all(bytes)?;
+        let written = temp.write_all(bytes);
+        let observed = allocation.map_or(Ok(()), |allocation| {
+            allocation.replace_file_at(&temp_path, &temp)
+        });
+        written?;
+        observed.map_err(std::io::Error::other)?;
         after_write()?;
         temp.sync_all()?;
+        if let Some(allocation) = allocation {
+            allocation
+                .replace_file_at(&temp_path, &temp)
+                .map_err(std::io::Error::other)?;
+        }
         after_sync()?;
         before_replace()?;
         let namespace_lock = lock_atomic_publish_target(diagnostic_path);
@@ -2560,12 +2711,18 @@ fn publish_atomic_bytes_in(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         directory.replace_child(&temp_name, temp_identity, target_name)?;
+        record_atomic_replacement(allocation, diagnostic_path, &temp_path, &temp)?;
         crate::file_lock::unlock(&temp)?;
         Ok(())
     };
     let result = publish();
-    if result.is_err() {
-        let _ = directory.unlink_child_if_identity(&temp_name, temp_identity);
+    if result.is_err()
+        && directory
+            .unlink_child_if_identity(&temp_name, temp_identity)
+            .is_ok()
+        && let Some(allocation) = allocation
+    {
+        let _ = allocation.remove_file_at(&temp_path);
     }
     result
 }
@@ -2629,6 +2786,13 @@ pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
 }
 
 pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
+    cleanup_atomicwrite_temp_with_allocation(path, None)
+}
+
+pub(crate) fn cleanup_atomicwrite_temp_with_allocation(
+    path: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<bool, GfError> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(false);
     };
@@ -2661,7 +2825,13 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
             let _ = crate::file_lock::unlock(&file);
             return Ok(false);
         }
+        if let Some(allocation) = allocation {
+            allocation.replace_file_at(path, &file)?;
+        }
         std::fs::remove_file(path).map_err(publication_io)?;
+        if let Some(allocation) = allocation {
+            allocation.remove_file_at(path)?;
+        }
         crate::file_lock::unlock(&file).map_err(publication_io)?;
         drop(file);
         sync_directory(
@@ -2702,7 +2872,15 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
                 return Ok(false);
             }
         }
+        if let Some(allocation) = allocation {
+            let file = crate::project_portable::open_regular_nofollow(&entry.path())
+                .map_err(publication_io)?;
+            allocation.replace_file_at(&entry.path(), &file)?;
+        }
         std::fs::remove_file(entry.path()).map_err(publication_io)?;
+        if let Some(allocation) = allocation {
+            allocation.remove_file_at(&entry.path())?;
+        }
     }
     std::fs::remove_dir(path).map_err(publication_io)?;
     sync_directory(
@@ -2850,10 +3028,150 @@ fn safe_cause(cause: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use super::*;
     use crate::open_or_initialize_project;
+
+    fn allocation_fixture_files(root: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(path) = pending.pop() {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files.push(entry.path());
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn allocation_observed_admitted_publication_matches_reopened_file_union() {
+        let root = project();
+        let operation = crate::StorageAllocationOperation::default();
+        for path in allocation_fixture_files(root.path()) {
+            operation
+                .replace_file_at(&path, &File::open(&path).unwrap())
+                .unwrap();
+        }
+        let admission = crate::filesystem_admission::admit_project_lifecycle(
+            root.path(),
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            crate::filesystem_admission::ProjectRootRequirement::Existing,
+        )
+        .unwrap();
+        let parent = resolve_project_generation(root.path()).unwrap();
+        let request = request(vec![participant("graph", "nodes", &vec![3_u8; 16384])]);
+        let ProjectStageOutcome::Staged(staged) = stage_project_generation_from_admitted_parent(
+            admission,
+            parent,
+            &request,
+            None,
+            Some(&operation),
+        )
+        .unwrap() else {
+            panic!("unexpected replay")
+        };
+        let receipt = staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            receipt.generation_uuid
+        );
+        let mut identities = BTreeMap::new();
+        for path in allocation_fixture_files(root.path()) {
+            let file = File::open(path).unwrap();
+            let identity = graphforge_filesystem::file_identity(&file).unwrap();
+            identities.insert(
+                (identity.volume_serial, identity.file_id),
+                graphforge_filesystem::file_space_usage(&file)
+                    .unwrap()
+                    .allocated_bytes,
+            );
+        }
+        let actual: u64 = identities.values().sum();
+        let (current, peak) = operation.totals().unwrap();
+        assert_eq!(current, actual);
+        assert!(peak >= current);
+    }
+
+    #[test]
+    fn allocation_observed_atomic_replacement_preserves_coexistence_and_cleanup() {
+        for stable in [false, true] {
+            for fail in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("CURRENT");
+                std::fs::write(&path, vec![1_u8; 8192]).unwrap();
+                let old = File::open(&path).unwrap();
+                let old_bytes = graphforge_filesystem::file_space_usage(&old)
+                    .unwrap()
+                    .allocated_bytes;
+                let operation = crate::StorageAllocationOperation::default();
+                operation.replace_file_at(&path, &old).unwrap();
+                drop(old);
+                let coexistence = std::cell::Cell::new(0);
+                let after_write = || {
+                    let (current, peak) = operation.totals().unwrap();
+                    assert!(current > old_bytes);
+                    assert_eq!(current, peak);
+                    coexistence.set(current);
+                    if fail {
+                        Err(std::io::Error::other("before replacement"))
+                    } else {
+                        Ok(())
+                    }
+                };
+                let payload = vec![2_u8; 16384];
+                let result = if stable {
+                    let directory =
+                        graphforge_filesystem::StableDirectory::open(root.path()).unwrap();
+                    publish_atomic_bytes_in(
+                        &directory,
+                        &path,
+                        std::ffi::OsStr::new("CURRENT"),
+                        &payload,
+                        after_write,
+                        || Ok(()),
+                        || Ok(()),
+                        Some(&operation),
+                    )
+                } else {
+                    publish_atomic_bytes_with_allocation(
+                        &path,
+                        &payload,
+                        after_write,
+                        || Ok(()),
+                        || Ok(()),
+                        Some(&operation),
+                    )
+                };
+                assert_eq!(result.is_err(), fail);
+                let actual = File::open(&path).unwrap();
+                let actual_bytes = graphforge_filesystem::file_space_usage(&actual)
+                    .unwrap()
+                    .allocated_bytes;
+                assert_eq!(
+                    operation.totals().unwrap(),
+                    (actual_bytes, coexistence.get())
+                );
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    if fail { vec![1_u8; 8192] } else { payload }
+                );
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+            }
+        }
+    }
 
     #[cfg(windows)]
     #[test]
@@ -3491,10 +3809,15 @@ mod tests {
         let other_parent = resolve_project_generation(other_root.path()).unwrap();
         let request = request(vec![participant("graph", "nodes", b"wrong-root")]);
 
-        let error =
-            stage_project_generation_from_admitted_parent(admission, other_parent, &request, None)
-                .err()
-                .expect("a prepared parent from another root must fail");
+        let error = stage_project_generation_from_admitted_parent(
+            admission,
+            other_parent,
+            &request,
+            None,
+            None,
+        )
+        .err()
+        .expect("a prepared parent from another root must fail");
 
         assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
         assert!(

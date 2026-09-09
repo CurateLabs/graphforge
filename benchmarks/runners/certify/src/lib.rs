@@ -159,7 +159,7 @@ impl Profile {
             && lifecycle.mechanics == "public-certification-v1"
             && lifecycle.phases == Phase::ALL
             && lifecycle.evidence_schema == EVIDENCE_SCHEMA
-            && lifecycle.storage_receipt == "graphforge-lifecycle-storage/1"
+            && lifecycle.storage_receipt == "graphforge-lifecycle-storage/2"
             && gate.requires_previous_pass
             && gate.projection_source_scales == expected.1
             && gate.limits.wall_seconds == 14_400
@@ -179,7 +179,7 @@ impl Profile {
             lifecycle.mechanics == "public-certification-v1"
                 && lifecycle.phases == Phase::ALL
                 && lifecycle.evidence_schema == EVIDENCE_SCHEMA
-                && lifecycle.storage_receipt == "graphforge-lifecycle-storage/1"
+                && lifecycle.storage_receipt == "graphforge-lifecycle-storage/2"
         })
     }
 }
@@ -277,6 +277,7 @@ pub trait PhaseExecutor {
 #[derive(Default)]
 pub struct PublicProcessExecutor {
     lifecycle: LifecycleStorageSession,
+    allocation_paths: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -291,6 +292,8 @@ struct LifecycleStorageSession {
     portable_import_peak_observed: bool,
     imported_project_observed: bool,
     finalized: bool,
+    retained_owner_facts: BTreeMap<String, graphforge_storage::PrivateStorageOwner>,
+    artifact_paths: BTreeMap<String, std::collections::BTreeSet<std::path::PathBuf>>,
 }
 
 impl LifecycleStorageSession {
@@ -303,7 +306,6 @@ impl LifecycleStorageSession {
         if self.finalized {
             return Err("lifecycle storage session was already finalized".to_owned());
         }
-        let phase_baseline_allocated_bytes = self.allocation.current_allocated_bytes();
         let commands: Vec<&[String]> = match &command.action {
             PhaseAction::BenchmarkGenerator { args, .. } | PhaseAction::GraphForgeCli { args } => {
                 vec![args]
@@ -312,27 +314,35 @@ impl LifecycleStorageSession {
                 commands.iter().map(Vec::as_slice).collect()
             }
         };
-        let mut files = BTreeMap::new();
+        let artifact_owner = if phase == Phase::Generate {
+            "generated-inputs"
+        } else if phase == Phase::Export {
+            "portable-package"
+        } else {
+            "query-results"
+        };
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
         for args in &commands {
             for flag in ["--nodes", "--edges", "--output"] {
                 if let Some(path) = argument_path(args, flag) {
-                    if path.is_file() {
-                        merge_file_identity(&mut files, path)?;
-                    } else if flag == "--output" && path.is_dir() {
-                        merge_directory_identities(&mut files, path)?;
+                    if path.exists() {
+                        self.artifact_paths
+                            .entry(artifact_owner.to_owned())
+                            .or_default()
+                            .insert(if path.is_absolute() {
+                                path.to_path_buf()
+                            } else {
+                                cwd.join(path)
+                            });
                     }
                 }
             }
         }
-        if !files.is_empty() {
-            self.allocation
-                .replace_owner(format!("phase-{phase}"), &files)
-                .map_err(|error| error.to_string())?;
-            if phase == Phase::Generate {
-                self.generator_observed = true;
-            } else if phase == Phase::Export {
-                self.portable_package_observed = true;
-            }
+        if phase == Phase::Generate {
+            self.generator_observed = true;
+        }
+        if phase == Phase::Export {
+            self.portable_package_observed = true;
         }
         if let Some(project) = commands
             .iter()
@@ -353,9 +363,16 @@ impl LifecycleStorageSession {
                     }
                     "source-project"
                 };
-                self.allocation
-                    .replace_owner(owner, &union.physical_identity_allocated_bytes)
+                let published = graphforge_storage::capture_published_storage_ownership(&selected)
                     .map_err(|error| error.to_string())?;
+                self.retained_owner_facts
+                    .insert(format!("{owner}-published"), published);
+                let private = graphforge_storage::capture_private_storage_ownership(project)
+                    .map_err(|error| error.to_string())?;
+                for (name, (_, snapshot)) in private.owners {
+                    let name = format!("{owner}-{name}");
+                    self.retained_owner_facts.insert(name, snapshot);
+                }
             }
         }
         for receipt in receipts {
@@ -363,36 +380,14 @@ impl LifecycleStorageSession {
                 == Some("graphforge-import-session/1")
                 && receipt.get("outcome").and_then(serde_json::Value::as_str) == Some("committed")
             {
-                let transient = receipt
-                    .get("construction")
-                    .and_then(|value| value.get("transient_peak_allocated_bytes"))
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(|| {
-                        "committed import omitted transient allocation evidence".to_owned()
-                    })?;
-                self.transient_peak_storage_bytes = self
-                    .transient_peak_storage_bytes
-                    .max(phase_baseline_allocated_bytes.saturating_add(transient));
                 self.construction_peak_observed = true;
             }
             if receipt.get("contract").and_then(serde_json::Value::as_str)
                 == Some("graphforge-portable-import/2")
             {
-                let transient = receipt
-                    .get("transient_peak_allocated_bytes")
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(|| {
-                        "portable import omitted transient allocation evidence".to_owned()
-                    })?;
-                self.transient_peak_storage_bytes = self
-                    .transient_peak_storage_bytes
-                    .max(phase_baseline_allocated_bytes.saturating_add(transient));
                 self.portable_import_peak_observed = true;
             }
         }
-        self.transient_peak_storage_bytes = self
-            .transient_peak_storage_bytes
-            .max(self.allocation.peak_allocated_bytes());
         if phase != Phase::ReopenProof {
             return Ok(None);
         }
@@ -412,16 +407,65 @@ impl LifecycleStorageSession {
         let source_project_current_allocated_bytes = self
             .source_project_current_allocated_bytes
             .ok_or_else(|| "source-project reopen allocation was not captured".to_owned())?;
-        self.finalized = true;
         let retained = self.allocation.current_allocated_bytes();
-        let peak = self.transient_peak_storage_bytes.max(retained);
+        let peak = self.transient_peak_storage_bytes;
+        if peak < retained {
+            return Err("observed operation peak is below final retained allocation".to_owned());
+        }
+        for name in ["generated-inputs", "query-results", "portable-package"] {
+            let paths = self
+                .artifact_paths
+                .get(name)
+                .ok_or_else(|| format!("missing raw owner {name}"))?
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let snapshot = graphforge_storage::capture_artifact_storage_ownership(&paths)
+                .map_err(|error| error.to_string())?;
+            self.retained_owner_facts.insert(name.to_owned(), snapshot);
+        }
+        validate_retained_owner_facts(&self.allocation, &self.retained_owner_facts)?;
+        self.finalized = true;
+        let retained_owners = self
+            .retained_owner_facts
+            .iter()
+            .map(|(name, snapshot)| (name.clone(), serde_json::json!({"totals": snapshot.totals})))
+            .collect::<serde_json::Map<_, _>>();
         Ok(Some(serde_json::json!({
-            "contract": "graphforge-lifecycle-storage/1",
+            "contract": "graphforge-lifecycle-storage/2",
             "source_project_current_allocated_bytes": source_project_current_allocated_bytes,
             "retained_storage_bytes": retained,
             "transient_peak_storage_bytes": peak,
+            "retained_owners": retained_owners,
         })))
     }
+}
+
+fn validate_retained_owner_facts(
+    allocation: &graphforge_storage::StorageAllocationLifecycle,
+    owners: &BTreeMap<String, graphforge_storage::PrivateStorageOwner>,
+) -> Result<(), String> {
+    let mut identities = BTreeMap::new();
+    let mut references = 0_u64;
+    for snapshot in owners.values() {
+        references = references
+            .checked_add(snapshot.totals.logical_references)
+            .ok_or_else(|| "raw owner reference count overflow".to_owned())?;
+        for (identity, allocated) in &snapshot.physical_identity_allocated_bytes {
+            if identities
+                .insert(identity.clone(), *allocated)
+                .is_some_and(|previous| previous != *allocated)
+            {
+                return Err("raw owners disagree on physical allocation".to_owned());
+            }
+        }
+    }
+    if !allocation.matches_file_inventory(&identities, references) {
+        return Err(
+            "raw owner identities or file references do not match retained baseline".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn argument_path<'a>(args: &'a [String], flag: &str) -> Option<&'a Path> {
@@ -430,77 +474,90 @@ fn argument_path<'a>(args: &'a [String], flag: &str) -> Option<&'a Path> {
         .map(|values| Path::new(&values[1]))
 }
 
-fn merge_file_identity(identities: &mut BTreeMap<String, u64>, path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "lifecycle allocation path has no parent".to_owned())?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| "lifecycle allocation path has no file name".to_owned())?;
-    let directory = graphforge_filesystem::StableDirectory::open(parent)
-        .map_err(|_| "lifecycle allocation parent could not be retained".to_owned())?;
-    let file = directory
-        .open_child_file(name)
-        .map_err(|_| "lifecycle allocation owner is not a stable regular file".to_owned())?;
-    merge_open_file_identity(identities, &file)
-}
-
-fn merge_directory_identities(
-    identities: &mut BTreeMap<String, u64>,
-    path: &Path,
-) -> Result<(), String> {
-    let directory = graphforge_filesystem::StableDirectory::open(path)
-        .map_err(|_| "lifecycle allocation directory could not be retained".to_owned())?;
-    let mut remaining = 1_000_000_usize;
-    merge_stable_directory_identities(identities, &directory, &mut remaining)
-}
-
-fn merge_stable_directory_identities(
-    identities: &mut BTreeMap<String, u64>,
-    directory: &graphforge_filesystem::StableDirectory,
-    remaining: &mut usize,
-) -> Result<(), String> {
-    let names = directory
-        .child_names_bounded(*remaining)
-        .map_err(|_| "lifecycle allocation directory exceeds identity bound".to_owned())?;
-    *remaining = remaining.saturating_sub(names.len());
-    for name in names {
-        match directory.open_child_directory(&name) {
-            Ok(child) => merge_stable_directory_identities(identities, &child, remaining)?,
-            Err(_) => {
-                let file = directory.open_child_file(&name).map_err(|_| {
-                    "lifecycle allocation entry is not an authenticated file or directory"
-                        .to_owned()
-                })?;
-                merge_open_file_identity(identities, &file)?;
+impl PublicProcessExecutor {
+    fn execute_cli_observed(
+        &mut self,
+        executable: &str,
+        args: &[String],
+    ) -> Result<Execution, String> {
+        if args == ["--info"] {
+            return execute_process(executable, args);
+        }
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        for flag in ["--input", "--nodes", "--edges", "--path", "--output"] {
+            if let Some(path) = argument_path(args, flag) {
+                self.allocation_paths.insert(if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                });
             }
         }
-    }
-    Ok(())
-}
-
-fn merge_open_file_identity(
-    identities: &mut BTreeMap<String, u64>,
-    file: &fs::File,
-) -> Result<(), String> {
-    let identity = graphforge_filesystem::file_identity(file)
-        .map_err(|_| "lifecycle allocation identity unavailable".to_owned())?;
-    let usage = graphforge_filesystem::file_space_usage(file)
-        .map_err(|_| "lifecycle allocation usage unavailable".to_owned())?;
-    let key = format!(
-        "{:016x}:{}",
-        identity.volume_serial,
-        identity
-            .file_id
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
-    match identities.insert(key, usage.allocated_bytes) {
-        Some(existing) if existing != usage.allocated_bytes => {
-            Err("lifecycle allocation changed during observation".to_owned())
+        if let Some(project) = argument_path(args, "--project") {
+            self.allocation_paths.extend(
+                graphforge_storage::StorageAllocationOperation::project_paths(project)
+                    .map_err(|error| error.to_string())?,
+            );
         }
-        _ => Ok(()),
+        let paths = self.allocation_paths.iter().cloned().collect::<Vec<_>>();
+        let baseline = graphforge_storage::StorageAllocationOperation::from_paths(&paths)
+            .map_err(|error| error.to_string())?;
+        let baseline_current = baseline.totals().map_err(|error| error.to_string())?.0;
+        let input = serde_json::to_vec(&baseline.snapshot().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let mut result = execute_process_with_allocation(executable, args, Some(input))?;
+        if result.exit_code != Some(0) || result.failure.is_some() {
+            result.receipts.retain(|receipt| {
+                receipt.get("contract").and_then(serde_json::Value::as_str)
+                    != Some("graphforge-allocation-operation/1")
+            });
+            return Ok(result);
+        }
+        let reports = result
+            .receipts
+            .iter()
+            .filter(|receipt| {
+                receipt.get("contract").and_then(serde_json::Value::as_str)
+                    == Some("graphforge-allocation-operation/1")
+            })
+            .collect::<Vec<_>>();
+        let validation = (|| -> Result<bool, String> {
+            let valid = if let [report] = reports.as_slice() {
+                let current = report
+                    .get("current_allocated_bytes")
+                    .and_then(serde_json::Value::as_u64);
+                let peak = report
+                    .get("peak_allocated_bytes")
+                    .and_then(serde_json::Value::as_u64);
+                let final_state =
+                    graphforge_storage::StorageAllocationOperation::from_paths(&paths)
+                        .map_err(|error| error.to_string())?;
+                let (actual, _) = final_state.totals().map_err(|error| error.to_string())?;
+                match (current, peak) {
+                    (Some(current), Some(peak))
+                        if current == actual && peak >= current && peak >= baseline_current =>
+                    {
+                        self.lifecycle.transient_peak_storage_bytes =
+                            self.lifecycle.transient_peak_storage_bytes.max(peak);
+                        self.lifecycle.allocation =
+                            final_state.snapshot().map_err(|error| error.to_string())?;
+                        true
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            Ok(valid)
+        })();
+        if !matches!(validation, Ok(true)) {
+            result.failure = Some(FailureKind::EvidenceInvalid);
+        }
+        result.receipts.retain(|receipt| {
+            receipt.get("contract").and_then(serde_json::Value::as_str)
+                != Some("graphforge-allocation-operation/1")
+        });
+        Ok(result)
     }
 }
 
@@ -512,7 +569,11 @@ impl PhaseExecutor for PublicProcessExecutor {
             let mut peak_rss_bytes = None;
             let mut receipts = Vec::new();
             for args in commands {
-                let execution = match execute_process(&profile.executable, args) {
+                let execution = match if produce_lifecycle_storage {
+                    self.execute_cli_observed(&profile.executable, args)
+                } else {
+                    execute_process(&profile.executable, args)
+                } {
                     Ok(execution) => execution,
                     Err(_) => {
                         return Ok(Execution {
@@ -565,8 +626,26 @@ impl PhaseExecutor for PublicProcessExecutor {
             PhaseAction::GraphForgeCli { args } => (profile.executable.as_str(), args.as_slice()),
             PhaseAction::GraphForgeCliWorkflow { .. } => unreachable!("handled above"),
         };
-        let mut result = execute_process(executable, args)?;
+        let mut result = if produce_lifecycle_storage
+            && matches!(&command.action, PhaseAction::GraphForgeCli { .. })
+        {
+            self.execute_cli_observed(executable, args)?
+        } else {
+            execute_process(executable, args)?
+        };
         if result.exit_code == Some(0) && produce_lifecycle_storage {
+            if matches!(&command.action, PhaseAction::BenchmarkGenerator { .. }) {
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                for flag in ["--nodes", "--edges", "--output"] {
+                    if let Some(path) = argument_path(args, flag) {
+                        self.allocation_paths.insert(if path.is_absolute() {
+                            path.to_path_buf()
+                        } else {
+                            cwd.join(path)
+                        });
+                    }
+                }
+            }
             match self
                 .lifecycle
                 .observe(command.phase, command, &result.receipts)
@@ -581,10 +660,27 @@ impl PhaseExecutor for PublicProcessExecutor {
 }
 
 fn execute_process(executable: &str, args: &[String]) -> Result<Execution, String> {
+    execute_process_with_allocation(executable, args, None)
+}
+
+fn execute_process_with_allocation(
+    executable: &str,
+    args: &[String],
+    baseline: Option<Vec<u8>>,
+) -> Result<Execution, String> {
     let started = Instant::now();
-    let mut child = Command::new(executable)
-        .args(args)
-        .stdin(Stdio::null())
+    let diagnostic = baseline.is_some();
+    let mut command = Command::new(executable);
+    command.args(args);
+    if diagnostic {
+        command.arg("--allocation-diagnostics");
+    }
+    let mut child = command
+        .stdin(if diagnostic {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -594,6 +690,20 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
         .take()
         .ok_or_else(|| "public command stdout unavailable".to_owned())?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, 1_048_576));
+    let stdin_writer = if let Some(bytes) = baseline {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "private allocation stdin unavailable".to_owned())?;
+        Some(thread::spawn(move || {
+            use std::io::Write as _;
+            stdin
+                .write_all(&bytes)
+                .map_err(|_| "private allocation input write failed".to_owned())
+        }))
+    } else {
+        None
+    };
     let mut peak_rss_bytes = None;
     loop {
         peak_rss_bytes = max_optional(peak_rss_bytes, resident_bytes(child.id()));
@@ -604,13 +714,21 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
+            let input_result = stdin_writer
+                .map(|writer| {
+                    writer
+                        .join()
+                        .map_err(|_| "private allocation writer failed".to_owned())
+                        .and_then(|result| result)
+                })
+                .unwrap_or(Ok(()));
             let receipts = parse_receipts(
                 &stdout,
                 status.success() && args.iter().any(|argument| argument == "--json"),
             );
             let released = release_command_owned_file_cache(args);
             if !status.success() {
-                let cleanup_failure = match (receipts.as_ref().err(), released.as_ref().err()) {
+                let mut cleanup_failure = match (receipts.as_ref().err(), released.as_ref().err()) {
                     (None, None) => None,
                     (Some(receipts), None) => Some(format!(
                         "child exit preserved; receipt cleanup also failed: {receipts}"
@@ -622,12 +740,28 @@ fn execute_process(executable: &str, args: &[String]) -> Result<Execution, Strin
                         "child exit preserved; receipt cleanup also failed: {receipts}; command-owned cache release also failed: {release}"
                     )),
                 };
+                if let Err(error) = input_result {
+                    cleanup_failure = Some(match cleanup_failure {
+                        Some(existing) => format!("{existing}; {error}"),
+                        None => error,
+                    });
+                }
                 return Ok(Execution {
                     exit_code: status.code(),
                     duration_ms: millis(started.elapsed()),
                     peak_rss_bytes,
                     failure: Some(FailureKind::CommandFailed),
                     cleanup_failure,
+                    receipts: receipts.unwrap_or_default(),
+                });
+            }
+            if input_result.is_err() {
+                return Ok(Execution {
+                    exit_code: status.code(),
+                    duration_ms: millis(started.elapsed()),
+                    peak_rss_bytes,
+                    failure: Some(FailureKind::EvidenceInvalid),
+                    cleanup_failure: input_result.err(),
                     receipts: receipts.unwrap_or_default(),
                 });
             }
@@ -887,13 +1021,28 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
         Some("graphforge-result-sink/1") => sanitize_legacy_result_sink(object),
         Some("graphforge-result-sink/2") => sanitize_result_sink(object),
         Some("graphforge-storage-attribution-command/1") => sanitize_storage_command(object),
-        Some("graphforge-lifecycle-storage/1") => copy_closed_receipt(
+        Some("graphforge-allocation-operation/1") => copy_closed_receipt(
+            object,
+            &[
+                "contract",
+                "current_allocated_bytes",
+                "peak_allocated_bytes",
+            ],
+        )
+        .filter(|receipt| {
+            sanitized_numeric_fields(
+                receipt,
+                &["current_allocated_bytes", "peak_allocated_bytes"],
+            )
+        }),
+        Some("graphforge-lifecycle-storage/2") => copy_closed_receipt(
             object,
             &[
                 "contract",
                 "source_project_current_allocated_bytes",
                 "retained_storage_bytes",
                 "transient_peak_storage_bytes",
+                "retained_owners",
             ],
         )
         .filter(|receipt| {
@@ -904,7 +1053,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                     "retained_storage_bytes",
                     "transient_peak_storage_bytes",
                 ],
-            )
+            ) && valid_retained_owners(receipt)
         }),
         Some("graphforge-query-qualification/1") => copy_closed_receipt(
             object,
@@ -1320,6 +1469,56 @@ fn sanitized_storage_categories(value: &serde_json::Value) -> bool {
                 })
             })
     })
+}
+
+fn valid_retained_owners(receipt: &serde_json::Value) -> bool {
+    const NAMES: [&str; 15] = [
+        "source-project-construction",
+        "source-project-import",
+        "source-project-transactions",
+        "source-project-locks",
+        "source-project-admission_lock",
+        "source-project-published",
+        "imported-project-construction",
+        "imported-project-import",
+        "imported-project-transactions",
+        "imported-project-locks",
+        "imported-project-admission_lock",
+        "imported-project-published",
+        "generated-inputs",
+        "query-results",
+        "portable-package",
+    ];
+    const FIELDS: [&str; 5] = [
+        "logical_references",
+        "logical_bytes",
+        "physical_objects",
+        "physical_logical_bytes",
+        "allocated_bytes",
+    ];
+    let Some(owners) = receipt
+        .get("retained_owners")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    owners.len() == NAMES.len()
+        && NAMES.iter().all(|name| {
+            let Some(owner) = owners.get(*name).and_then(serde_json::Value::as_object) else {
+                return false;
+            };
+            let Some(totals) = owner.get("totals").and_then(serde_json::Value::as_object) else {
+                return false;
+            };
+            owner.len() == 1
+                && totals.len() == FIELDS.len()
+                && FIELDS.iter().all(|field| {
+                    totals
+                        .get(*field)
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some()
+                })
+        })
 }
 
 fn copy_closed_receipt(
@@ -1785,6 +1984,48 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_owner_closure_refuses_unknown_zero_nonzero_and_alias_files() {
+        for unknown in ["zero", "nonzero", "alias"] {
+            let root = tempfile::tempdir().unwrap();
+            let known = root.path().join("known");
+            std::fs::write(&known, vec![1_u8; 8192]).unwrap();
+            let known_alias = root.path().join("known-alias");
+            std::fs::hard_link(&known, &known_alias).unwrap();
+            let paths = vec![known.clone(), known_alias];
+            let snapshot = graphforge_storage::capture_artifact_storage_ownership(&paths).unwrap();
+            let owners = std::collections::BTreeMap::from([("known".to_owned(), snapshot)]);
+            let baseline =
+                graphforge_storage::StorageAllocationOperation::from_paths(&paths).unwrap();
+            super::validate_retained_owner_facts(&baseline.snapshot().unwrap(), &owners).unwrap();
+            let missing = root.path().join("unknown");
+            match unknown {
+                "zero" => std::fs::write(&missing, []).unwrap(),
+                "nonzero" => std::fs::write(&missing, vec![2_u8; 4096]).unwrap(),
+                "alias" => std::fs::hard_link(&known, &missing).unwrap(),
+                _ => unreachable!(),
+            }
+            let baseline = graphforge_storage::StorageAllocationOperation::from_paths(&[root
+                .path()
+                .to_path_buf()])
+            .unwrap();
+            assert!(
+                super::validate_retained_owner_facts(&baseline.snapshot().unwrap(), &owners)
+                    .is_err(),
+                "{unknown}"
+            );
+            let complete = graphforge_storage::capture_artifact_storage_ownership(&[root
+                .path()
+                .to_path_buf()])
+            .unwrap();
+            super::validate_retained_owner_facts(
+                &baseline.snapshot().unwrap(),
+                &std::collections::BTreeMap::from([("complete".to_owned(), complete)]),
+            )
+            .unwrap();
+        }
+    }
+
     use super::*;
     use std::collections::VecDeque;
 
@@ -1968,8 +2209,34 @@ mod tests {
         let encoded = serde_json::to_vec(&leaked).expect("leaked receipt JSON");
         assert!(parse_receipts(&encoded, true).is_err());
 
+        let owners = [
+            "source-project-construction",
+            "source-project-import",
+            "source-project-transactions",
+            "source-project-locks",
+            "source-project-admission_lock",
+            "source-project-published",
+            "imported-project-construction",
+            "imported-project-import",
+            "imported-project-transactions",
+            "imported-project-locks",
+            "imported-project-admission_lock",
+            "imported-project-published",
+            "generated-inputs",
+            "query-results",
+            "portable-package",
+        ]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_owned(),
+                serde_json::json!({"totals": totals.clone()}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
         let lifecycle = serde_json::json!({
-            "contract": "graphforge-lifecycle-storage/1",
+            "retained_owners": owners,
+            "contract": "graphforge-lifecycle-storage/2",
             "source_project_current_allocated_bytes": 256,
             "retained_storage_bytes": 384,
             "transient_peak_storage_bytes": 512
@@ -1988,6 +2255,18 @@ mod tests {
             let encoded = serde_json::to_vec(&malformed).expect("malformed lifecycle receipt JSON");
             assert!(parse_receipts(&encoded, true).is_err());
         }
+        for owner in lifecycle["retained_owners"].as_object().unwrap().keys() {
+            let mut malformed = lifecycle.clone();
+            malformed["retained_owners"]
+                .as_object_mut()
+                .unwrap()
+                .remove(owner);
+            assert!(parse_receipts(&serde_json::to_vec(&malformed).unwrap(), true).is_err());
+        }
+        let mut leaked_owner = lifecycle.clone();
+        leaked_owner["retained_owners"]["source-project-published"]["identity"] =
+            serde_json::json!("private");
+        assert!(parse_receipts(&serde_json::to_vec(&leaked_owner).unwrap(), true).is_err());
         let mut missing = lifecycle;
         missing
             .as_object_mut()
@@ -2109,7 +2388,7 @@ mod tests {
             "mechanics": "public-certification-v1",
             "phases": Phase::ALL,
             "evidence_schema": EVIDENCE_SCHEMA,
-            "storage_receipt": "graphforge-lifecycle-storage/1"
+            "storage_receipt": "graphforge-lifecycle-storage/2"
         }));
         profile.gate = Some(serde_json::json!({
             "requires_previous_pass": true,
@@ -2585,32 +2864,19 @@ fi
                 .unwrap()
                 .is_none()
         );
-        session.generator_observed = true;
-        session.construction_peak_observed = true;
-        session.portable_package_observed = true;
-        session.portable_import_peak_observed = true;
-        session.imported_project_observed = true;
-        let final_command = PhaseCommand {
-            phase: Phase::ReopenProof,
-            action: PhaseAction::GraphForgeCli { args: Vec::new() },
-        };
-        let receipt = session
-            .observe(Phase::ReopenProof, &final_command, &[])
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            receipt["source_project_current_allocated_bytes"].as_u64(),
+            session.source_project_current_allocated_bytes,
             Some(union.allocated_bytes)
         );
         assert_ne!(
-            receipt["source_project_current_allocated_bytes"].as_u64(),
+            session.source_project_current_allocated_bytes,
             Some(selected.allocated_bytes)
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn lifecycle_storage_deduplicates_aliases_and_finalizes_once() {
+    fn lifecycle_storage_preserves_raw_aliases_and_refuses_legacy_scalar_peak() {
         let root =
             std::env::temp_dir().join(format!("gf-certify-lifecycle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -2639,8 +2905,15 @@ fi
                 .unwrap()
                 .is_none()
         );
-        let one_identity_allocation = session.allocation.current_allocated_bytes();
+        let raw =
+            graphforge_storage::capture_artifact_storage_ownership(&[nodes.clone(), alias.clone()])
+                .unwrap();
+        assert_eq!(raw.totals.logical_references, 2);
+        assert_eq!(raw.totals.physical_objects, 1);
+        let one_identity_allocation = raw.totals.allocated_bytes;
         assert!(one_identity_allocation > 0);
+        // Quiescent raw facts are not an operation peak or trusted continuation.
+        assert_eq!(session.allocation.current_allocated_bytes(), 0);
 
         let ingest = PhaseCommand {
             phase: Phase::Ingest,
@@ -2669,34 +2942,81 @@ fi
         };
         session.observe(Phase::Export, &export, &[]).unwrap();
         assert!(session.portable_package_observed);
-        session.source_project_observed = true;
-        session.source_project_current_allocated_bytes = Some(one_identity_allocation);
-        session.portable_import_peak_observed = true;
-        session.imported_project_observed = true;
-
+        assert_eq!(session.transient_peak_storage_bytes, 0);
+        assert_eq!(session.allocation.current_allocated_bytes(), 0);
         let final_command = PhaseCommand {
             phase: Phase::ReopenProof,
             action: PhaseAction::GraphForgeCli { args: Vec::new() },
         };
-        let receipt = session
-            .observe(Phase::ReopenProof, &final_command, &[])
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            receipt["source_project_current_allocated_bytes"].as_u64(),
-            Some(one_identity_allocation)
-        );
-        assert_eq!(
-            receipt["retained_storage_bytes"].as_u64(),
-            Some(one_identity_allocation)
-        );
-        assert_eq!(
-            receipt["transient_peak_storage_bytes"].as_u64(),
-            Some(one_identity_allocation.saturating_add(4_096))
-        );
         assert!(
             session
                 .observe(Phase::ReopenProof, &final_command, &[])
+                .unwrap_err()
+                .contains("missing an authenticated owner or transient phase")
+        );
+        let source = root.join("source");
+        let imported = root.join("imported");
+        graphforge_storage::open_or_initialize_ephemeral_project(&source).unwrap();
+        graphforge_storage::open_or_initialize_ephemeral_project(&imported).unwrap();
+        let query_output = root.join("query.arrow");
+        fs::hard_link(&nodes, &query_output).unwrap();
+        let source_command = PhaseCommand {
+            phase: Phase::Reopen,
+            action: PhaseAction::GraphForgeCli {
+                args: vec![
+                    "--project".into(),
+                    source.to_string_lossy().into_owned(),
+                    "--output".into(),
+                    query_output.to_string_lossy().into_owned(),
+                ],
+            },
+        };
+        session
+            .observe(Phase::Reopen, &source_command, &[])
+            .unwrap();
+        let operation =
+            graphforge_storage::StorageAllocationOperation::from_paths(&[root.clone()]).unwrap();
+        let baseline_current = operation.totals().unwrap().0;
+        let temporary = root.join("transient");
+        let file = fs::File::create(&temporary).unwrap();
+        file.set_len(4096).unwrap();
+        // Write actual blocks rather than assuming sparse set_len allocation.
+        use std::io::Write as _;
+        (&file).write_all(&[7; 4096]).unwrap();
+        file.sync_all().unwrap();
+        let temporary_allocated = graphforge_filesystem::file_space_usage(&file)
+            .unwrap()
+            .allocated_bytes;
+        operation.replace_file_at(&temporary, &file).unwrap();
+        drop(file);
+        fs::remove_file(&temporary).unwrap();
+        operation.remove_file_at(&temporary).unwrap();
+        assert_eq!(
+            operation.totals().unwrap(),
+            (baseline_current, baseline_current + temporary_allocated)
+        );
+        session.allocation = operation.snapshot().unwrap();
+        session.transient_peak_storage_bytes = operation.totals().unwrap().1;
+        session.portable_import_peak_observed = true;
+        let imported_command = PhaseCommand {
+            phase: Phase::ReopenProof,
+            action: PhaseAction::GraphForgeCli {
+                args: vec!["--project".into(), imported.to_string_lossy().into_owned()],
+            },
+        };
+        let receipt = session
+            .observe(Phase::ReopenProof, &imported_command, &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt["retained_storage_bytes"], baseline_current);
+        assert_eq!(
+            receipt["transient_peak_storage_bytes"],
+            baseline_current + temporary_allocated
+        );
+        assert!(valid_retained_owners(&receipt));
+        assert!(
+            session
+                .observe(Phase::ReopenProof, &imported_command, &[])
                 .unwrap_err()
                 .contains("already finalized")
         );

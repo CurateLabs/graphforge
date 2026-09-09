@@ -80,9 +80,123 @@
         },
         "lifecycle": {
           "type": "object", "additionalProperties": false,
-          "required": ["contract", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes"],
+          "required": ["contract", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "retained_owners"],
           "properties": {
-            "contract": {"const": "graphforge-lifecycle-storage/1"},
+            "contract": {"const": "graphforge-lifecycle-storage/2"},
+            "retained_owners": {
+              "type": "object",
+              "required": [
+                "source-project-construction",
+                "source-project-import",
+                "source-project-transactions",
+                "source-project-locks",
+                "source-project-admission_lock",
+                "source-project-published",
+                "imported-project-construction",
+                "imported-project-import",
+                "imported-project-transactions",
+                "imported-project-locks",
+                "imported-project-admission_lock",
+                "imported-project-published",
+                "generated-inputs",
+                "query-results",
+                "portable-package"
+              ],
+              "propertyNames": {
+                "enum": [
+                  "source-project-construction",
+                  "source-project-import",
+                  "source-project-transactions",
+                  "source-project-locks",
+                  "source-project-admission_lock",
+                  "source-project-published",
+                  "imported-project-construction",
+                  "imported-project-import",
+                  "imported-project-transactions",
+                  "imported-project-locks",
+                  "imported-project-admission_lock",
+                  "imported-project-published",
+                  "generated-inputs",
+                  "query-results",
+                  "portable-package"
+                ]
+              },
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "totals"
+                ],
+                "properties": {
+                  "totals": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "logical_references",
+                      "logical_bytes",
+                      "physical_objects",
+                      "physical_logical_bytes",
+                      "allocated_bytes"
+                    ],
+                    "properties": {
+                      "logical_references": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "logical_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "physical_objects": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "physical_logical_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "allocated_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "physical_objects": {
+                              "const": 0
+                            }
+                          },
+                          "required": [
+                            "physical_objects"
+                          ]
+                        },
+                        "then": {
+                          "properties": {
+                            "logical_references": {
+                              "const": 0
+                            },
+                            "logical_bytes": {
+                              "const": 0
+                            },
+                            "physical_objects": {
+                              "const": 0
+                            },
+                            "physical_logical_bytes": {
+                              "const": 0
+                            },
+                            "allocated_bytes": {
+                              "const": 0
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
             "source_project_current_allocated_bytes": {"$ref": "#/$defs/nonnegative"},
             "retained_storage_bytes": {"$ref": "#/$defs/nonnegative"},
             "transient_peak_storage_bytes": {"$ref": "#/$defs/nonnegative"}
