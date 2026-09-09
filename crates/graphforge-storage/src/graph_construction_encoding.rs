@@ -14,6 +14,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::cell::RefCell;
 
+use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, ListArray, StringArray,
@@ -541,6 +542,7 @@ pub(crate) fn inventory_authority_sha256(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn encode(
     source: &StableDirectory,
+    detail_codec: DetailCodec,
     shape: &ConstructionShape,
     generation: u64,
     ontology_mode: OntologyMode,
@@ -721,6 +723,7 @@ pub(crate) fn encode(
 
     let v4 = encode_nodes(
         source,
+        detail_codec,
         &output,
         shape,
         shape_outputs,
@@ -791,6 +794,7 @@ pub(crate) fn encode(
     }
     encode_edges(
         source,
+        detail_codec,
         &output,
         shape,
         shape_outputs,
@@ -1005,6 +1009,7 @@ fn property_projections(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn encode_nodes(
     source: &StableDirectory,
+    detail_codec: DetailCodec,
     output: &StableDirectory,
     shape: &ConstructionShape,
     shape_outputs: &[ArtifactReceipt],
@@ -1078,8 +1083,13 @@ fn encode_nodes(
             )
         })
         .transpose()?;
-    let mut details =
-        FixedReader::<NODE_DETAIL_WIDTH>::open(source, shape_outputs, details_name, cache_window)?;
+    let mut details = FixedReader::<NODE_DETAIL_WIDTH>::open_with_codec(
+        source,
+        shape_outputs,
+        details_name,
+        cache_window,
+        Some(detail_codec),
+    )?;
     let rows_per_window = budgets
         .max_batch_rows
         .min((budgets.max_batch_bytes / 128).max(1));
@@ -1361,6 +1371,7 @@ fn encode_node_properties(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn encode_edges(
     source: &StableDirectory,
+    detail_codec: DetailCodec,
     output: &StableDirectory,
     shape: &ConstructionShape,
     shape_outputs: &[ArtifactReceipt],
@@ -1391,8 +1402,13 @@ fn encode_edges(
         &shape.identities,
         cache_window,
     )?;
-    let mut details =
-        FixedReader::<EDGE_DETAIL_WIDTH>::open(source, shape_outputs, details_name, cache_window)?;
+    let mut details = FixedReader::<EDGE_DETAIL_WIDTH>::open_with_codec(
+        source,
+        shape_outputs,
+        details_name,
+        cache_window,
+        Some(detail_codec),
+    )?;
     let mut endpoints = FixedReader::<RESOLVED_ENDPOINT_WIDTH>::open(
         source,
         shape_outputs,
@@ -2606,6 +2622,7 @@ fn install_json<T: Serialize>(
 }
 
 struct FixedReader<const N: usize> {
+    detail_codec: Option<DetailCodec>,
     reader: BufReader<CountingInput<graphforge_filesystem::FileCacheReleasingReader>>,
     counter: IoCounter,
     identity: graphforge_filesystem::FileIdentity,
@@ -2622,13 +2639,26 @@ impl<const N: usize> FixedReader<N> {
         name: &str,
         cache_window: std::num::NonZeroU64,
     ) -> Result<Self, GfError> {
+        Self::open_with_codec(root, outputs, name, cache_window, None)
+    }
+
+    fn open_with_codec(
+        root: &StableDirectory,
+        outputs: &[ArtifactReceipt],
+        name: &str,
+        cache_window: std::num::NonZeroU64,
+        detail_codec: Option<DetailCodec>,
+    ) -> Result<Self, GfError> {
         let authenticated = open_authenticated_shape_source(root, outputs, name)?;
         let file = authenticated.file;
-        if file.metadata().map_err(storage)?.len() % N as u64 != 0 {
+        if detail_codec != Some(DetailCodec::Compact)
+            && file.metadata().map_err(storage)?.len() % N as u64 != 0
+        {
             return Err(storage("fixed-width construction stream is truncated"));
         }
         let counter = IoCounter::default();
         Ok(Self {
+            detail_codec,
             reader: BufReader::with_capacity(
                 COPY_BUFFER_BYTES,
                 CountingInput {
@@ -2651,22 +2681,34 @@ impl<const N: usize> FixedReader<N> {
     }
 
     fn next(&mut self) -> Result<Option<[u8; N]>, GfError> {
-        let mut record = [0_u8; N];
-        let mut read = 0;
-        while read < N {
-            let amount = self.reader.read(&mut record[read..]).map_err(storage)?;
-            if amount == 0 {
-                if read == 0 {
-                    return Ok(None);
+        let record = if let Some(codec) = self.detail_codec {
+            let Some(record) = codec.read::<N>(&mut self.reader).map_err(storage)? else {
+                return Ok(None);
+            };
+            record
+        } else {
+            let mut record = [0_u8; N];
+            let mut read = 0;
+            while read < N {
+                let amount = self.reader.read(&mut record[read..]).map_err(storage)?;
+                if amount == 0 {
+                    if read == 0 {
+                        return Ok(None);
+                    }
+                    return Err(storage("fixed-width construction stream is truncated"));
                 }
-                return Err(storage("fixed-width construction stream is truncated"));
+                read += amount;
             }
-            read += amount;
-        }
-        self.digest.update(record);
+            record
+        };
+        let wire = match self.detail_codec {
+            Some(codec) => codec.bytes(&record).map_err(storage)?,
+            None => &record,
+        };
+        self.digest.update(wire);
         self.consumed_bytes = self
             .consumed_bytes
-            .checked_add(u64::try_from(N).map_err(storage)?)
+            .checked_add(u64::try_from(wire.len()).map_err(storage)?)
             .ok_or_else(|| storage("fixed-width source byte count overflow"))?;
         Ok(Some(record))
     }
