@@ -971,6 +971,12 @@ jobs:
         run: >-
           cargo test -p graphforge-filesystem --lib --no-fail-fast
 
+      - name: Verify portable publication refuses a concurrent destination
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_portable_v2_export::tests::destination_replacement_and_source_mutation_fail_closed
+          -- --exact --nocapture
+
       - name: Run Windows native filesystem admission tests
         shell: bash
         run: >-

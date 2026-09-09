@@ -2282,6 +2282,44 @@ pub fn install_new_file(
     install_new_file_platform(directory, source_name, target_name, None)
 }
 
+/// Atomically move a file or directory without replacing any existing destination.
+///
+/// This never copies across volumes. The caller owns source admission and the
+/// containing-directory durability barrier after a successful namespace change.
+pub fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    rename_no_replace_platform(source, destination)
+}
+
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]
+fn rename_no_replace_platform(source: &Path, destination: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        source,
+        rustix::fs::CWD,
+        destination,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn rename_no_replace_platform(source: &Path, destination: &Path) -> io::Result<()> {
+    windows::rename_no_replace(source, destination)
+}
+
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "redox",
+    windows
+)))]
+fn rename_no_replace_platform(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unsupported",
+    ))
+}
+
 fn verify_single_component(name: &OsStr) -> io::Result<()> {
     let mut components = Path::new(name).components();
     if !matches!(components.next(), Some(std::path::Component::Normal(_)))
@@ -3442,6 +3480,26 @@ mod windows {
         Ok(())
     }
 
+    pub(super) fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+        let source = wide(source.as_os_str())?;
+        let destination = wide(destination.as_os_str())?;
+        // SAFETY: both UTF-16 buffers are NUL-terminated and live for the call.
+        // Zero flags deliberately omit REPLACE_EXISTING and COPY_ALLOWED:
+        // an existing destination or cross-volume move must fail unchanged.
+        let succeeded = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                0,
+            )
+        };
+        if succeeded == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn identity(path: &Path) -> io::Result<FileIdentity> {
         file_identity(&open_identity_handle(path)?)
     }
@@ -4240,6 +4298,81 @@ mod tests {
         replace_file(&handle, OsStr::new("source"), OsStr::new("target")).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert!(!source.exists());
+    }
+
+    #[test]
+    fn no_replace_rename_preserves_file_and_directory_destinations() {
+        for directory in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let target = root.path().join("target");
+            let contents = |path: &Path| {
+                if directory {
+                    path.join("payload")
+                } else {
+                    path.to_path_buf()
+                }
+            };
+            if directory {
+                std::fs::create_dir(&source).unwrap();
+                std::fs::create_dir(&target).unwrap();
+            }
+            std::fs::write(contents(&source), b"source").unwrap();
+            std::fs::write(contents(&target), b"sentinel").unwrap();
+            assert_eq!(
+                rename_no_replace(&source, &target).unwrap_err().kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(std::fs::read(contents(&source)).unwrap(), b"source");
+            assert_eq!(std::fs::read(contents(&target)).unwrap(), b"sentinel");
+            let absent = root.path().join("absent");
+            rename_no_replace(&source, &absent).unwrap();
+            assert!(!source.exists());
+            assert_eq!(std::fs::read(contents(&absent)).unwrap(), b"source");
+        }
+    }
+
+    #[test]
+    fn no_replace_rename_concurrent_publish_has_one_winner() {
+        use std::sync::{Arc, Barrier};
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for name in ["first", "second"] {
+            let source = root.path().join(name);
+            std::fs::write(&source, name.as_bytes()).unwrap();
+            let target = target.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                (source.clone(), rename_no_replace(&source, &target))
+            }));
+        }
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            1
+        );
+        for (source, result) in results {
+            if let Err(error) = result {
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+                assert_eq!(
+                    std::fs::read(&source).unwrap(),
+                    source.file_name().unwrap().to_str().unwrap().as_bytes()
+                );
+            } else {
+                assert!(!source.exists());
+                assert_eq!(
+                    std::fs::read(&target).unwrap(),
+                    source.file_name().unwrap().to_str().unwrap().as_bytes()
+                );
+            }
+        }
     }
 
     #[test]
