@@ -452,7 +452,12 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
 #[test]
 fn shared_verification_golden_matches_real_facade_and_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let package = root.join("tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+    // Bazel runfiles are links; verifier inputs must be ordinary owned files.
+    let fixture = root.join("tests/fixtures/hub/generated/v1/objects/openalex-openalex.gfpb");
+    let materialized = tempfile::tempdir().unwrap();
+    let package = materialized.path().join("openalex-openalex.gfpb");
+    fs::copy(&fixture, &package).unwrap();
+    assert_eq!(fs::read(&package).unwrap(), fs::read(&fixture).unwrap());
     let expected: Value = serde_json::from_slice(
         &fs::read(root.join("tests/fixtures/portable-v2/facade-verification-receipts.json"))
             .unwrap(),
