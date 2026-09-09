@@ -25,6 +25,8 @@ use graphforge_core::canonical::{
 };
 use parquet::arrow::ArrowWriter;
 
+mod runtime_remap;
+
 type GraphUuid = [u8; 16];
 type EdgeEndpoints = BTreeMap<GraphUuid, (GraphUuid, GraphUuid)>;
 
@@ -427,6 +429,7 @@ fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
         .map(|column| take(column.as_ref(), &indices, None).map_err(storage))
         .collect::<Result<Vec<_>, _>>()?;
     let canonical = RecordBatch::try_new(canonical.schema(), columns).map_err(storage)?;
+    let canonical = runtime_remap::compact(&canonical, target)?;
     write_parquet(&target.join("topology/runtime_catalog.parquet"), &canonical)
 }
 
@@ -1909,14 +1912,14 @@ mod tests {
         let (alice, bob, excluded) = (uuid(31), uuid(32), uuid(33));
         let (knows, ignores) = (uuid(41), uuid(42));
         let mut catalog = RuntimeCatalog::new();
-        let person = catalog.intern_label("Person").unwrap();
         let company = catalog.intern_label("Company").unwrap();
-        catalog.intern_relation_type("KNOWS").unwrap();
         catalog.intern_relation_type("IGNORES").unwrap();
+        catalog.intern_property("noise", Some("Company")).unwrap();
+        let person = catalog.intern_label("Person").unwrap();
+        catalog.intern_relation_type("KNOWS").unwrap();
         catalog.intern_property("name", Some("Person")).unwrap();
         catalog.intern_property("global", None).unwrap();
         catalog.intern_property("since", Some("KNOWS")).unwrap();
-        catalog.intern_property("noise", Some("Company")).unwrap();
 
         let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
         writer
@@ -2004,7 +2007,67 @@ mod tests {
             ])
         );
 
+        let reopened_catalog = RuntimeCatalog::from_record_batch(&projected).unwrap();
+        let (projected_person, name) = reopened_catalog
+            .entity_type_names_with_ids()
+            .next()
+            .unwrap();
+        assert_eq!(name, "Person");
+        assert_ne!(projected_person, person);
         let reopened_nodes = read_nodes(target.path()).unwrap();
+        let mut actual_nodes = Vec::new();
+        for batch in &reopened_nodes {
+            let ids = batch
+                .column_by_name("node_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let primary = batch
+                .column_by_name("type_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert_eq!(
+                    primary.value(row),
+                    EntityTypeId::runtime(projected_person).encode()
+                );
+                actual_nodes.push(ids.value(row).to_vec());
+            }
+        }
+        actual_nodes.sort();
+        assert_eq!(
+            actual_nodes,
+            vec![alice.as_bytes().to_vec(), bob.as_bytes().to_vec()]
+        );
+        let edge = read_parquet(&target.path().join("topology/edges/KNOWS.parquet"))
+            .unwrap()
+            .remove(0);
+        for (column, expected) in [("edge_uuid", knows), ("src_uuid", alice), ("dst_uuid", bob)] {
+            let ids = edge
+                .column_by_name(column)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(ids.value(0), expected.as_bytes());
+        }
+        let properties = crate::read_node_property_rows(target.path(), "Person").unwrap();
+        assert_eq!(
+            properties[alice.as_bytes()]["name"],
+            IrLiteral::Str("Alice".into())
+        );
+        let edge_properties = read_edge_properties(target.path(), "KNOWS").unwrap();
+        let since = edge_properties[0]
+            .column_by_name("since")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(since.value(0), 2020);
         assert_eq!(
             reopened_nodes
                 .iter()
