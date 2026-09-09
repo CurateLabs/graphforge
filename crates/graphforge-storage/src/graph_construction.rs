@@ -7,6 +7,7 @@
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
 mod shaping_merge;
+mod supersession;
 #[cfg(test)]
 use shaping_merge::online_merge_name_slot_bound;
 use shaping_merge::{
@@ -43,7 +44,7 @@ use crate::UuidIndexKind;
 use crate::construction_detail_codec::{DetailCodec, DetailValidator};
 use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -574,13 +575,13 @@ pub struct GraphConstructionEvidence {
     /// Hydration durability barriers completed on containing directories.
     #[serde(default)]
     pub hydration_directory_fsync_operations: u64,
-    /// Artifact bytes authenticated while repairing an interrupted append.
+    /// Artifact bytes authenticated during recovery or successor-bound reclamation.
     #[serde(default)]
     pub recovery_application_read_bytes: u64,
-    /// Bounded artifact reads used by interrupted-append recovery.
+    /// Bounded artifact reads used by recovery or successor-bound reclamation.
     #[serde(default)]
     pub recovery_application_read_operations: u64,
-    /// Synchronization barriers for checkpointing newly observed resume reads.
+    /// Directory and checkpoint synchronization barriers for recovery/reclamation.
     #[serde(default)]
     pub recovery_checkpoint_fsync_operations: u64,
     /// New canonical graph payload bytes emitted by encoding.
@@ -942,6 +943,10 @@ impl GraphConstructionEvidence {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 /// Publisher input produced from a sealed construction session.
+///
+/// Version-nine artifact names are durable receipt references: after encoding,
+/// their private payloads may be retired. Pass this handle back to the session
+/// encoder for authenticated replay rather than opening the named files.
 pub struct ConstructionShape {
     /// Ontology mode authenticated at session open and used for physical routing.
     pub ontology_mode: graphforge_core::OntologyMode,
@@ -1127,6 +1132,7 @@ pub struct ConstructionChunkReceipt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent persisted facts; retirement flags preserve v6–8 wire compatibility.
 struct Checkpoint {
     format_version: u32,
     operation_uuid: Uuid,
@@ -1156,6 +1162,10 @@ struct Checkpoint {
     shape_authority_sha256: Option<String>,
     #[serde(default)]
     encoding_inventory_sha256: Option<String>,
+    #[serde(default)]
+    inputs_retired: bool,
+    #[serde(default)]
+    shape_retired: bool,
     base_work: UuidConstructionSnapshotWork,
     evidence: GraphConstructionEvidence,
 }
@@ -1283,6 +1293,47 @@ impl Drop for GraphConstructionSession {
 }
 
 impl GraphConstructionSession {
+    /// Authenticate an already committed publication without preparing private
+    /// encoding, using its exact immutable generation after `CURRENT` advances.
+    /// Returns `None` if the transaction has not committed yet.
+    ///
+    /// # Errors
+    /// Refuses changed session, transaction, generation or successor payload authority.
+    pub fn replay_committed_publication(
+        &mut self,
+        target_generation_uuid: Uuid,
+        transaction_uuid: Uuid,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Option<crate::ProjectPublicationReceipt>, GfError> {
+        reject_cancelled(&mut cancelled)?;
+        self.revalidate_authority()?;
+        if !matches!(
+            self.checkpoint.publication_state,
+            Some(
+                ConstructionPublicationState::Publishing | ConstructionPublicationState::Published
+            )
+        ) {
+            return Ok(None);
+        }
+        let Some(published) =
+            crate::published_project_transaction(&self.project_path, transaction_uuid)?
+        else {
+            if self.publication_committed() {
+                return Err(storage("published construction transaction is absent"));
+            }
+            return Ok(None);
+        };
+        if published.generation_uuid != target_generation_uuid {
+            return Err(storage("published construction target changed"));
+        }
+        self.finish_publication_cancellable(
+            target_generation_uuid,
+            &hex(&published.generation_manifest_sha256),
+            &mut cancelled,
+        )?;
+        Ok(Some(published))
+    }
+
     /// Durably bind the sealed private inventory to the one target that the
     /// existing project publisher will stage. This records replay authority;
     /// it does not install objects, stage a generation, or mutate `CURRENT`.
@@ -1354,10 +1405,33 @@ impl GraphConstructionSession {
         target_generation_uuid: Uuid,
         target_generation_manifest_sha256: &str,
     ) -> Result<ConstructionPublicationReceipt, GfError> {
-        recover_publication(&self.project_path, &self.root, &mut self.checkpoint)?;
+        self.finish_publication_cancellable(
+            target_generation_uuid,
+            target_generation_manifest_sha256,
+            &mut || false,
+        )
+    }
+
+    fn finish_publication_cancellable(
+        &mut self,
+        target_generation_uuid: Uuid,
+        target_generation_manifest_sha256: &str,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ConstructionPublicationReceipt, GfError> {
+        recover_publication_cancellable(
+            &self.project_path,
+            &self.root,
+            &mut self.checkpoint,
+            cancelled,
+        )?;
         if self.checkpoint.publication_state == Some(ConstructionPublicationState::Published) {
             let receipt = read_publication_receipt(&self.root, &self.checkpoint)?;
-            authenticate_published_target(&self.project_path, &self.checkpoint, &receipt)?;
+            authenticate_published_target(
+                &self.project_path,
+                &mut self.checkpoint,
+                &receipt,
+                cancelled,
+            )?;
             if receipt.target_generation_uuid == target_generation_uuid
                 && receipt.target_generation_manifest_sha256 == target_generation_manifest_sha256
             {
@@ -1385,7 +1459,12 @@ impl GraphConstructionSession {
             target_generation_uuid,
             target_generation_manifest_sha256: target_generation_manifest_sha256.to_owned(),
         };
-        authenticate_published_target(&self.project_path, &self.checkpoint, &provisional)?;
+        authenticate_published_target(
+            &self.project_path,
+            &mut self.checkpoint,
+            &provisional,
+            cancelled,
+        )?;
         let receipt = provisional;
         install_control(&self.root, PUBLICATION_RECEIPT, &receipt)?;
         self.checkpoint.publication_state = Some(ConstructionPublicationState::Published);
@@ -1415,6 +1494,7 @@ impl GraphConstructionSession {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GraphConstructionEncoding, GfError> {
         self.revalidate_authority()?;
+        self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
         if self.checkpoint.state != GraphConstructionState::Sealed
             || self.checkpoint.publication_state != Some(ConstructionPublicationState::Sealed)
         {
@@ -1472,6 +1552,7 @@ impl GraphConstructionSession {
                 replace_checkpoint_control(&self.root, &self.checkpoint)?;
             }
         }
+        self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
         Ok(encoded)
     }
 
@@ -1510,9 +1591,10 @@ impl GraphConstructionSession {
             if published.generation_uuid != target_generation_uuid {
                 return Err(storage("published construction target changed"));
             }
-            self.finish_publication(
+            self.finish_publication_cancellable(
                 target_generation_uuid,
                 &hex(&published.generation_manifest_sha256),
+                &mut cancelled,
             )?;
             return Ok(published);
         }
@@ -1524,9 +1606,10 @@ impl GraphConstructionSession {
                 if published.generation_uuid != target_generation_uuid {
                     return Err(storage("published construction target changed"));
                 }
-                self.finish_publication(
+                self.finish_publication_cancellable(
                     target_generation_uuid,
                     &hex(&published.generation_manifest_sha256),
+                    &mut cancelled,
                 )?;
                 return Ok(published);
             }
@@ -1841,9 +1924,11 @@ impl GraphConstructionSession {
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             };
         construction_failpoint("publication.after_current_before_receipt");
-        self.finish_publication(
+        self.finish_publication_cancellable(
             target_generation_uuid,
             &hex(&publication.generation_manifest_sha256),
+            // CURRENT already committed; finish recording its durable receipt.
+            &mut || false,
         )?;
         Ok(publication)
     }
@@ -2443,6 +2528,8 @@ impl GraphConstructionSession {
                 edge_schema_sha256: BTreeSet::new(),
                 shape_authority_sha256: None,
                 encoding_inventory_sha256: None,
+                inputs_retired: false,
+                shape_retired: false,
                 base_work,
                 evidence,
             };
@@ -2538,6 +2625,7 @@ impl GraphConstructionSession {
                 });
         }
         session.revalidate_authority()?;
+        session.reclaim_superseded_payloads()?;
         let repaired_parent_phases = repair_unshaped_parent_phase_bytes(&mut session.checkpoint)?;
         if repaired_parent_phases
             || resumed_parent_work.bytes != 0
@@ -2599,6 +2687,7 @@ impl GraphConstructionSession {
             return Err(storage("only a sealed session can be prepared"));
         }
         if self.checkpoint.encoding_inventory_sha256.is_some() {
+            self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
             let encoded = self
                 .root
                 .open_child_directory(OsStr::new("encoded-v1"))
@@ -2635,12 +2724,20 @@ impl GraphConstructionSession {
         parent_topology_generation: u64,
         budgets: GraphConstructionBudgets,
     ) -> Result<Self, GfError> {
-        Self::open_with_mode(
+        // Historical mechanics fixtures use retained v8 payloads and some use
+        // the synthetic pre-container parent authority. V9 lifecycle tests
+        // select their format explicitly and use real project containers.
+        Self::open_internal_with_format(
+            project_dir,
             project_dir,
             operation_uuid,
             parent_topology_generation,
             graphforge_core::OntologyMode::Exploratory,
+            None,
             budgets,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            None,
+            8,
         )
     }
 
@@ -3100,9 +3197,12 @@ impl GraphConstructionSession {
             return Err(storage("only a sealed session can be shaped"));
         }
         reject_cancelled(&mut cancelled)?;
-        if let Some(shape) =
-            read_completed_shape(&self.root, &self.checkpoint, authenticate_completed_outputs)?
-        {
+        if let Some(shape) = read_completed_shape(
+            &self.root,
+            &self.checkpoint,
+            authenticate_completed_outputs && !self.has_encoding_successor(),
+        )? {
+            self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
             return Ok(shape);
         }
         reject_existing_merge_artifacts(&self.root)?;
@@ -3496,6 +3596,7 @@ impl GraphConstructionSession {
         construction_failpoint("shape.after_complete_inventory");
         replace_checkpoint_control(&self.root, &self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
+        self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
         Ok(shape)
     }
 
@@ -4640,8 +4741,10 @@ fn recover_shape_intent(
         {
             return Err(storage("complete shape manifest inventory is incomplete"));
         }
-        for output in &intent.outputs {
-            authenticate_shaped_output(root, output)?;
+        if checkpoint.format_version < 9 || checkpoint.encoding_inventory_sha256.is_none() {
+            for output in &intent.outputs {
+                authenticate_shaped_output(root, output)?;
+            }
         }
         let expected_shape_authority = shape_authority_sha256(shape, &intent.outputs)?;
         if intent.shape_authority_sha256.as_deref() != Some(&expected_shape_authority) {
@@ -4985,10 +5088,19 @@ fn read_publication_receipt(
     Ok(receipt)
 }
 
+fn recover_publication(
+    project_dir: &Path,
+    root: &StableDirectory,
+    checkpoint: &mut Checkpoint,
+) -> Result<(), GfError> {
+    recover_publication_cancellable(project_dir, root, checkpoint, &mut || false)
+}
+
 fn authenticate_published_target(
     project_dir: &Path,
-    checkpoint: &Checkpoint,
+    checkpoint: &mut Checkpoint,
     receipt: &ConstructionPublicationReceipt,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     let target = crate::resolve_generation_by_uuid(project_dir, receipt.target_generation_uuid)
         .map_err(|error| storage(format!("published target cannot be authenticated: {error}")))?;
@@ -5014,13 +5126,17 @@ fn authenticate_published_target(
             "project publication journal differs from construction publication authority",
         ));
     }
+    if checkpoint.format_version >= 9 {
+        supersession::authenticate_public_successor(&target, &mut checkpoint.evidence, cancelled)?;
+    }
     Ok(())
 }
 
-fn recover_publication(
+fn recover_publication_cancellable(
     project_dir: &Path,
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     let intent = match root.open_child_file(OsStr::new(PUBLICATION_INTENT)) {
         Ok(mut file) => {
@@ -5047,7 +5163,7 @@ fn recover_publication(
     };
     if receipt_exists {
         let receipt = read_publication_receipt(root, checkpoint)?;
-        authenticate_published_target(project_dir, checkpoint, &receipt)?;
+        authenticate_published_target(project_dir, checkpoint, &receipt, cancelled)?;
         if checkpoint.publication_state == Some(ConstructionPublicationState::Publishing) {
             checkpoint.publication_state = Some(ConstructionPublicationState::Published);
             replace_checkpoint_control(root, checkpoint)?;
@@ -7673,6 +7789,10 @@ fn validate_checkpoint(
             .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint.encoding_inventory_sha256.is_some()
             && checkpoint.shape_authority_sha256.is_none()
+        || checkpoint.inputs_retired
+            && (checkpoint.format_version < 9 || checkpoint.shape_authority_sha256.is_none())
+        || checkpoint.shape_retired
+            && (checkpoint.format_version < 9 || checkpoint.encoding_inventory_sha256.is_none())
         || match checkpoint.state {
             GraphConstructionState::Staging | GraphConstructionState::Aborted => {
                 checkpoint.publication_state.is_some()
@@ -8297,7 +8417,7 @@ fn validate_chunk_id(value: &str) -> Result<(), GfError> {
     Ok(())
 }
 
-fn reject_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), GfError> {
+pub(super) fn reject_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), GfError> {
     if cancelled() {
         return Err(storage("construction cancelled"));
     }
@@ -8356,6 +8476,7 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     include!("construction_detail_tests.rs");
+    include!("construction_lifecycle_tests.rs");
     use std::sync::Arc;
 
     use arrow::array::{BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray};
@@ -11838,11 +11959,10 @@ mod tests {
             project.path()
         ));
         let operation = Uuid::from_u128(9_340);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let mut session = GraphConstructionSession::open(
             project.path(),
             operation,
             2,
-            graphforge_core::OntologyMode::Exploratory,
             GraphConstructionBudgets::default(),
         )
         .unwrap();
@@ -11943,11 +12063,10 @@ mod tests {
         writer.close().unwrap();
         let operation = Uuid::from_u128(1156);
         let open = || {
-            GraphConstructionSession::open_with_mode(
+            GraphConstructionSession::open(
                 project.path(),
                 operation,
                 2,
-                graphforge_core::OntologyMode::Exploratory,
                 GraphConstructionBudgets::default(),
             )
             .unwrap()
@@ -12033,11 +12152,10 @@ mod tests {
     fn completed_encoding_replay_reauthenticates_retained_parent_payload() {
         let project = nonempty_project_generation_two();
         let operation = Uuid::from_u128(9_343);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let mut session = GraphConstructionSession::open(
             project.path(),
             operation,
             2,
-            graphforge_core::OntologyMode::Exploratory,
             GraphConstructionBudgets::default(),
         )
         .unwrap();
@@ -12062,11 +12180,10 @@ mod tests {
     fn generation_one_parent_uses_streamed_binary_carry_and_authenticates_result() {
         let project = nonempty_project_with_nodes(2);
         let operation = Uuid::from_u128(9_341);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let mut session = GraphConstructionSession::open(
             project.path(),
             operation,
             1,
-            graphforge_core::OntologyMode::Exploratory,
             GraphConstructionBudgets::default(),
         )
         .unwrap();

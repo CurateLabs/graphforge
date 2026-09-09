@@ -2400,9 +2400,10 @@ fn directory_for(
     Ok((directory, name))
 }
 
-fn authenticate_file(
+fn authenticate_file_cancellable(
     path: &str,
     file: File,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<
     (
         ConstructionEncodedArtifact,
@@ -2419,6 +2420,7 @@ fn authenticate_file(
     file.rewind().map_err(storage)?;
     let authentication = (|| -> Result<ConstructionEncodedArtifact, GfError> {
         loop {
+            crate::graph_construction::reject_cancelled(cancelled)?;
             let read = file.read(&mut buffer).map_err(storage)?;
             if read == 0 {
                 break;
@@ -2564,10 +2566,52 @@ fn is_encoding_temp(name: &str) -> bool {
     })
 }
 
-fn authenticate_inventory(
+pub(crate) fn authenticate_inventory(
     root: &StableDirectory,
     inventory: &GraphConstructionEncoding,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
+    if inventory.retained_artifacts.is_empty() {
+        if inventory.evidence.retained_index_runs != 0 {
+            return Err(storage("retained-index evidence lacks references"));
+        }
+    } else {
+        let parent = parent_index
+            .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
+        let mut previous = None;
+        let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
+        for retained in &inventory.retained_artifacts {
+            if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
+                return Err(storage(
+                    "retained artifact targets are not unique and sorted",
+                ));
+            }
+            references.push(
+                crate::uuid_membership::ConstructionReferenceAuthentication {
+                    source_root: &retained.source_root,
+                    source_root_volume: retained.source_root_volume,
+                    source_root_file_id: &retained.source_root_file_id,
+                    source_path: &retained.source_path,
+                    source_volume: retained.source_volume,
+                    source_file_id: &retained.source_file_id,
+                    target_path: &retained.target_path,
+                    bytes: retained.bytes,
+                    sha256: &retained.sha256,
+                    parent_manifest_sha256: &retained.parent_manifest_sha256,
+                },
+            );
+            previous = Some(retained.target_path.as_str());
+        }
+        parent.authenticate_construction_references(&references)?;
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn authenticate_inventory_payloads(
+    root: &StableDirectory,
+    inventory: &GraphConstructionEncoding,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
@@ -2601,7 +2645,8 @@ fn authenticate_inventory(
         let file = directory
             .open_child_file(OsStr::new(&name))
             .map_err(storage)?;
-        let (actual, released, operations) = authenticate_file(&expected.path, file)?;
+        let (actual, released, operations) =
+            authenticate_file_cancellable(&expected.path, file, cancelled)?;
         if &actual != expected {
             return Err(storage("canonical artifact differs from inventory"));
         }
@@ -2616,39 +2661,6 @@ fn authenticate_inventory(
             "input read operations",
         )?;
         account_cache_release(released, &mut evidence)?;
-    }
-    if inventory.retained_artifacts.is_empty() {
-        if inventory.evidence.retained_index_runs != 0 {
-            return Err(storage("retained-index evidence lacks references"));
-        }
-    } else {
-        let parent = parent_index
-            .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-        let mut previous = None;
-        let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-        for retained in &inventory.retained_artifacts {
-            if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-                return Err(storage(
-                    "retained artifact targets are not unique and sorted",
-                ));
-            }
-            references.push(
-                crate::uuid_membership::ConstructionReferenceAuthentication {
-                    source_root: &retained.source_root,
-                    source_root_volume: retained.source_root_volume,
-                    source_root_file_id: &retained.source_root_file_id,
-                    source_path: &retained.source_path,
-                    source_volume: retained.source_volume,
-                    source_file_id: &retained.source_file_id,
-                    target_path: &retained.target_path,
-                    bytes: retained.bytes,
-                    sha256: &retained.sha256,
-                    parent_manifest_sha256: &retained.parent_manifest_sha256,
-                },
-            );
-            previous = Some(retained.target_path.as_str());
-        }
-        parent.authenticate_construction_references(&references)?;
     }
     Ok(evidence)
 }

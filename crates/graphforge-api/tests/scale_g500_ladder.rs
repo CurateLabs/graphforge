@@ -4179,6 +4179,7 @@ const LINEARITY_PHASE_FIELDS: [&str; 7] = [
 
 #[derive(Clone, Copy)]
 enum RetainedMetricPolicy {
+    StructurallyZero,
     ScaleBearing,
     FilesystemQuantized,
     InventoryDerived,
@@ -4352,7 +4353,7 @@ const LINEARITY_RETAINED_FIELDS: [(&str, &str, RetainedMetricPolicy); 33] = [
     (
         "construction.current_merge_temporary_allocated_bytes",
         "/storage/construction/current_merge_temporary_allocated_bytes",
-        RetainedMetricPolicy::FilesystemQuantized,
+        RetainedMetricPolicy::StructurallyZero,
     ),
 ];
 
@@ -5687,7 +5688,16 @@ fn validate_category_taxonomy(
     for field in 0..6 {
         let values =
             std::array::from_fn(|rung| observations[rung].category_metrics[staging_key][field]);
-        if field < 4 {
+        if matches!(field, 0 | 2) {
+            // Completed version-nine construction retains only encoded payloads.
+            // These controlled fixtures keep route/schema/shard counts fixed;
+            // input chunk growth must not leave more retained objects.
+            if values[0] == 0 || values[0] != values[1] || values[0] != values[2] {
+                return Err(format!(
+                    "{staging_key}.field_{field} retained encoding inventory changed: {values:?}"
+                ));
+            }
+        } else if field < 4 {
             validate_affine_metric(
                 &format!("{staging_key}.field_{field}"),
                 values,
@@ -6110,6 +6120,11 @@ fn validate_lifecycle_metric_policies_for_axis(
             observations[2].retained[name],
         ];
         match policy {
+            RetainedMetricPolicy::StructurallyZero => {
+                if values != [0, 0, 0] {
+                    return Err(format!("{name} retains superseded construction payloads"));
+                }
+            }
             RetainedMetricPolicy::ScaleBearing => {
                 validate_affine_metric(name, values, denominators)?;
             }
@@ -6231,9 +6246,9 @@ fn synthetic_category_metrics(axis: LinearityAxis, factor: u64) -> BTreeMap<Stri
     metrics.insert(
         "construction.construction_staging".into(),
         [
-            6 + 2 * factor,
+            8,
             100 + 900 * factor,
-            6 + 2 * factor,
+            8,
             100 + 900 * factor,
             4096 * factor,
             8192 * factor,
@@ -6327,6 +6342,7 @@ fn synthetic_linearity_observations_for_axis(
                 .iter()
                 .map(|(name, _, policy)| {
                     let value = match policy {
+                        RetainedMetricPolicy::StructurallyZero => 0,
                         RetainedMetricPolicy::ScaleBearing => 100 + 900 * factor,
                         RetainedMetricPolicy::FilesystemQuantized => 4096 * factor,
                         RetainedMetricPolicy::InventoryDerived => {
@@ -6783,6 +6799,24 @@ fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
         }
         validate_lifecycle_metric_policies_for_axis(axis, &observations)
             .expect("catalog text lengths may gain digits without adding objects");
+        let mut retained_chunks = observations.clone();
+        for (rung, observation) in retained_chunks.iter_mut().enumerate() {
+            for metrics in [
+                &mut observation.category_metrics,
+                &mut observation.category_authority_metrics,
+            ] {
+                let staging = metrics
+                    .get_mut("construction.construction_staging")
+                    .unwrap();
+                staging[0] += rung as u64;
+                staging[2] += rung as u64;
+            }
+        }
+        assert!(
+            validate_lifecycle_metric_policies_for_axis(axis, &retained_chunks)
+                .unwrap_err()
+                .contains("retained encoding inventory changed")
+        );
         for (category, field) in [
             ("catalog_and_manifests", 1),
             ("catalog_and_manifests", 3),
@@ -7174,6 +7208,16 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
         u64::MAX,
     );
     assert!(validate_lifecycle_metric_policies(&excess_retained_shape).is_err());
+
+    let mut one_retained_shape_block = observations.clone();
+    one_retained_shape_block[2].retained.insert(
+        "construction.current_merge_temporary_allocated_bytes".into(),
+        4096,
+    );
+    assert!(
+        validate_lifecycle_metric_policies(&one_retained_shape_block).is_err(),
+        "even one surviving shape block violates completed supersession"
+    );
 
     let fsync_index = LINEARITY_PHASE_FIELDS
         .iter()

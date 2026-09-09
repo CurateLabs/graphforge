@@ -11,7 +11,7 @@ impl DetailCodec {
     pub(crate) fn from_version(version: u32) -> io::Result<Self> {
         match version {
             6 => Ok(Self::Legacy),
-            7 | 8 => Ok(Self::Compact),
+            7..=9 => Ok(Self::Compact),
             _ => Err(invalid("unsupported construction detail version")),
         }
     }

@@ -192,11 +192,12 @@ the filesystem quantization checks. Source/import categories still reconcile
 field-for-field with storage-owned authorities. Coherently changing those
 ledgers to zero or excessive growth does not bypass the policy tests.
 
-Completed construction retains authenticated shape/merge files for replay.
-Their current allocated bytes are measured against the retained native file
-inventory and checked with filesystem allocation quantization, alongside the
-other retained outputs; this counter is not structurally zero. Intermediate
-merge input removals subtract their actual allocations.
+Construction versions 6–8 retain authenticated shape/merge files for replay.
+Version 9 supersedes them with checkpoint-bound authenticated encoding and
+records identity-bound removal after directory synchronization. New-construction
+linearity fixtures require zero retained shape allocation, while preserving
+the historical peak and reconciling current allocation against the native file
+inventory. See [construction supersession](../book/architecture/construction-supersession.md).
 
 Ordered query admission recognizes the explicit `ordered_one_hop` and
 `ordered_two_hop` leaf families alongside the existing Expand/sort paths. The

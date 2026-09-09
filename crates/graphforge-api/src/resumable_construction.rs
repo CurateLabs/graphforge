@@ -275,18 +275,35 @@ impl GraphConstructionSession<'_> {
             token.checkpoint()?;
         }
         let _visibility = self.graph.graph_visibility.lock()?;
-        let encoding = self.prepare_encoding(cancellation)?;
-        if let Some(token) = cancellation {
-            token.checkpoint()?;
-        }
         let target = derived_uuid(self.session_uuid, b"generation");
         let transaction = derived_uuid(self.session_uuid, b"transaction");
-        let published = self.inner.publish_canonical_with_cancellation(
-            &encoding,
-            target,
-            transaction,
-            || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
-        )?;
+        let published = if let Some(replay) =
+            self.inner
+                .replay_committed_publication(target, transaction, || {
+                    cancellation.is_some_and(crate::CancellationToken::is_cancelled)
+                })? {
+            let current = graphforge_storage::resolve_project_generation(
+                self.graph.resolved_generation.container_root(),
+            )?;
+            if current.generation_uuid() != replay.generation_uuid {
+                return Ok(GraphConstructionPublicationReceipt {
+                    generation_uuid: replay.generation_uuid,
+                    idempotent_replay: true,
+                });
+            }
+            replay
+        } else {
+            let encoding = self.prepare_encoding(cancellation)?;
+            if let Some(token) = cancellation {
+                token.checkpoint()?;
+            }
+            self.inner.publish_canonical_with_cancellation(
+                &encoding,
+                target,
+                transaction,
+                || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
+            )?
+        };
 
         let refresh = (|| {
             let root = self.graph.resolved_generation.container_root();
@@ -703,6 +720,11 @@ mod tests {
         );
         drop(rejected);
 
+        // Keep the lazy old-generation stream unpolled while child construction
+        // retires both private predecessors and advances CURRENT.
+        let old_stream = graph
+            .execute_stream("MATCH (n:Person) RETURN n.node_uuid")
+            .unwrap();
         let added_node = Uuid::now_v7();
         let added_edge = Uuid::now_v7();
         let mut child = graph.begin_graph_construction(budgets).unwrap();
@@ -718,7 +740,37 @@ mod tests {
             .unwrap();
         let child_receipt = child.seal_and_publish().unwrap();
         assert_ne!(child_receipt.generation_uuid, first.generation_uuid);
+        assert_eq!(
+            child
+                .progress()
+                .evidence
+                .current_merge_temporary_allocated_bytes,
+            0
+        );
         drop(child);
+        use futures::TryStreamExt;
+        let old_batches: Vec<RecordBatch> = graph
+            .block_on(async {
+                old_stream
+                    .try_collect()
+                    .await
+                    .map_err(|error| GfError::Storage(format!("{error}")))
+            })
+            .unwrap();
+        let old_ids: std::collections::BTreeSet<Uuid> = old_batches
+            .iter()
+            .flat_map(|batch| {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(|row| Uuid::from_slice(ids.value(row)).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(old_ids, node_ids.into_iter().collect());
 
         let resolved_child = graphforge_storage::resolve_project_generation(&root).unwrap();
         assert_eq!(
@@ -775,6 +827,29 @@ mod tests {
                 .generation_uuid(),
             child_receipt.generation_uuid
         );
+        drop(child_replay);
+        let mut historical_replay = graph
+            .resume_graph_construction(session_uuid, budgets)
+            .unwrap();
+        let historical = historical_replay.seal_and_publish().unwrap();
+        assert!(historical.idempotent_replay);
+        assert_eq!(historical.generation_uuid, first.generation_uuid);
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&root)
+                .unwrap()
+                .generation_uuid(),
+            child_receipt.generation_uuid
+        );
+        drop(historical_replay);
+        let current_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap();
+        assert_eq!(
+            current_index.count(graphforge_storage::UuidIndexKind::Node),
+            4
+        );
+        assert_eq!(
+            current_index.count(graphforge_storage::UuidIndexKind::Edge),
+            3
+        );
     }
 
     #[test]
@@ -803,6 +878,7 @@ mod tests {
                 evidence.publication_application_read_bytes,
                 evidence.cas_application_read_bytes,
                 evidence.hydration_application_read_bytes,
+                evidence.recovery_application_read_bytes,
             ]
             .into_iter()
             .try_fold(0_u64, u64::checked_add)
@@ -819,6 +895,7 @@ mod tests {
                 (evidence.publication_application_read_bytes, 2),
                 (evidence.cas_application_read_bytes, 24),
                 (evidence.hydration_application_read_bytes, 24),
+                (evidence.recovery_application_read_bytes, 24),
                 (reconciled, 80),
             ] {
                 assert!(
@@ -847,6 +924,7 @@ mod tests {
                     evidence.encode_application_read_bytes,
                     evidence.cas_application_read_bytes,
                     evidence.hydration_application_read_bytes,
+                    evidence.recovery_application_read_bytes,
                     reconciled,
                 ],
             ));

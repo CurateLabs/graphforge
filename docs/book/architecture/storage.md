@@ -262,8 +262,11 @@ that remove or rename physical routes rebuild the mapping from their emitted
 inventory. Path containment, no-follow opens, native identity, link-count,
 collision, and exact-inventory checks still apply to encoded paths.
 
-Construction checkpoint version 8 selects mapped output explicitly. Versions 6
-and 7 retain their original encoding when resumed; versions 7 and 8 use the
+Construction checkpoint versions 8 and 9 select mapped output explicitly. Version
+9 also reclaims accepted payloads after authenticated shape and shaped payloads
+after authenticated encoding; see [construction supersession](construction-supersession.md).
+Versions 6
+and 7 retain their original encoding when resumed; versions 7–9 use the
 same compact detail codec. Mapped construction publication combines the
 retained parent routes with newly emitted routes and verifies the complete
 mapping before installing the version-4 manifest. Legacy parent payloads can
