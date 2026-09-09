@@ -589,8 +589,10 @@ fn cleanup_import_materialization(
             &mut cleanup_budget,
             allocation,
         )?;
+        let directory_identity = directory.identity();
+        drop(directory);
         parent
-            .remove_child_directory_if_identity(name, directory.identity())
+            .remove_child_directory_if_identity(name, directory_identity)
             .map_err(|_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
@@ -645,6 +647,9 @@ fn cleanup_import_owner(
             ));
         }
         removed_identities.extend(observed);
+        // Authentication handles deny delete sharing on Windows. The removal
+        // operation rechecks the saved identity after acquiring its own handle.
+        drop(file);
         parent
             .unlink_child_if_identity(name, identity)
             .map_err(|_| {
@@ -688,8 +693,10 @@ fn remove_stable_tree(
                 remaining,
                 allocation,
             )?;
+            let child_identity = child.identity();
+            drop(child);
             directory
-                .remove_child_directory_if_identity(&name, child.identity())
+                .remove_child_directory_if_identity(&name, child_identity)
                 .map_err(|_| {
                     PortableV2Error::new(
                         PortableV2ErrorCode::Io,
@@ -721,6 +728,7 @@ fn remove_stable_tree(
                 ));
             }
             removed_identities.extend(observed);
+            drop(file);
             directory
                 .unlink_child_if_identity(&name, identity)
                 .map_err(|_| {
@@ -1927,6 +1935,36 @@ mod tests {
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";
+
+    #[test]
+    fn authenticated_cleanup_releases_handles_before_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("stage");
+        let owner = root.path().join("stage.owner");
+        fs::create_dir_all(stage.join("nested")).unwrap();
+        fs::create_dir(stage.join("empty")).unwrap();
+        let mut identities = std::collections::BTreeMap::new();
+        for path in [
+            stage.join("payload"),
+            stage.join("nested/payload"),
+            owner.clone(),
+        ] {
+            fs::write(&path, b"authenticated materialization").unwrap();
+            let file = fs::File::open(path).unwrap();
+            record_import_file_identity(&file, &mut identities).unwrap();
+        }
+        let directory = graphforge_filesystem::StableDirectory::open(&stage).unwrap();
+        let stage_identity = directory.identity();
+        drop(directory);
+
+        let receipt =
+            cleanup_import_materialization(&stage, &owner, stage_identity, &identities, None)
+                .unwrap();
+        assert!(!stage.exists());
+        assert!(!owner.exists());
+        assert_eq!(receipt.removed_identity_allocated_bytes, identities);
+        assert!(receipt.parent_sync_confirmed);
+    }
 
     fn supported() -> Vec<ProjectCapability> {
         vec![
