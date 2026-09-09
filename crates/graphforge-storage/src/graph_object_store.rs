@@ -129,6 +129,7 @@ pub(crate) struct GraphObjectGcGuard {
 }
 
 struct CasRoot {
+    allocation: Option<crate::StorageAllocationOperation>,
     diagnostic_root: PathBuf,
     project: StableDirectory,
     objects: StableDirectory,
@@ -277,6 +278,7 @@ impl CasRoot {
         let lifecycle_identity = graphforge_filesystem::file_identity(&lifecycle)
             .map_err(|error| storage("inspect graph object lifecycle identity", root, error))?;
         Ok(Self {
+            allocation: None,
             diagnostic_root: root.to_path_buf(),
             project,
             objects,
@@ -444,6 +446,15 @@ impl Drop for GraphObjectPublicationLease {
 }
 
 impl GraphObjectPublicationLease {
+    /// Attach explicit private allocation evidence before this lease installs objects.
+    #[doc(hidden)]
+    pub fn set_allocation_operation(
+        &mut self,
+        allocation: Option<crate::StorageAllocationOperation>,
+    ) {
+        self.cas.allocation = allocation;
+    }
+
     /// Revalidate the stable CAS root immediately before publishing `CURRENT`.
     pub fn revalidate_for_publish(&self) -> Result<(), GfError> {
         validate_publication_identity(self)
@@ -3225,7 +3236,21 @@ where
     })?;
     #[cfg(windows)]
     let temporary_identity = temporary.identity();
-    let bytes_hashed = write_temporary(&mut temporary)?;
+    let written = write_temporary(&mut temporary);
+    let temporary_path = cas
+        .diagnostic_root
+        .join(GRAPH_OBJECTS_DIR)
+        .join(TEMP_DIR)
+        .join(&temporary_name);
+    #[cfg(unix)]
+    let observed_file = &temporary;
+    #[cfg(windows)]
+    let observed_file = temporary.as_file();
+    let observed = cas.allocation.as_ref().map_or(Ok(()), |allocation| {
+        allocation.replace_file_at(&temporary_path, observed_file)
+    });
+    let bytes_hashed = written?;
+    observed?;
     let preseal_io = if writer_authenticated || cfg!(windows) {
         ReadIoEvidence::default()
     } else {
@@ -3316,6 +3341,9 @@ fn try_reuse_existing_object(
         &graph_object_path(&cas.diagnostic_root, digest)?,
         &cas.diagnostic_root,
     )?;
+    if let Some(allocation) = &cas.allocation {
+        allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
+    }
     Ok(Some(reused_object_evidence(expected_length, io)))
 }
 
@@ -3375,6 +3403,9 @@ fn try_reuse_existing_object(
         .calls
         .checked_add(io.calls)
         .ok_or_else(|| validation("reused object read call count overflows"))?;
+    if let Some(allocation) = &cas.allocation {
+        allocation.replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &file)?;
+    }
     Ok(Some(evidence))
 }
 
@@ -3411,17 +3442,26 @@ fn finalize_temporary_object(
         expected_length,
         &cas.diagnostic_root,
     )?;
+    if let Some(allocation) = &cas.allocation {
+        allocation.replace_file_at(&temporary_path, &temporary.file)?;
+    }
     let sealed_bytes_hashed = sealed_io.bytes;
     validate_sealed_temporary(&temporary, expected_length, &cas.diagnostic_root)?;
     returned_error_boundary("install:temp-sealed")?;
     let mut concurrent_io = ReadIoEvidence::default();
-    let installed = if let Ok((_installed, _identity)) = cas.tmp.link_child_into(
+    let installed = if let Ok((installed, _identity)) = cas.tmp.link_child_into(
         &temporary.name,
         &temporary.file,
         temporary.identity,
         bucket,
         destination_name,
     ) {
+        if let Some(allocation) = &cas.allocation {
+            allocation.replace_file_at(
+                &graph_object_path(&cas.diagnostic_root, digest)?,
+                &installed,
+            )?;
+        }
         true
     } else {
         #[cfg(unix)]
@@ -3444,6 +3484,10 @@ fn finalize_temporary_object(
             &graph_object_path(&cas.diagnostic_root, digest)?,
             &cas.diagnostic_root,
         )?;
+        if let Some(allocation) = &cas.allocation {
+            allocation
+                .replace_file_at(&graph_object_path(&cas.diagnostic_root, digest)?, &existing)?;
+        }
         false
     };
     returned_error_boundary("install:final-linked")?;
@@ -3463,15 +3507,7 @@ fn finalize_temporary_object(
     // winner authentication are complete, so release it before exact-identity
     // cleanup; the fresh CAS-owned inode remains sealed at its final name.
     drop(temporary.file);
-    cas.tmp
-        .unlink_child_if_identity(&temporary.name, temporary.identity)
-        .map_err(|error| {
-            storage(
-                "remove stable temporary graph object",
-                &cas.diagnostic_root,
-                error,
-            )
-        })?;
+    remove_finalized_temporary(cas, &temporary.name, temporary.identity, &temporary_path)?;
     returned_error_boundary("install:temp-unlinked")?;
     cas.tmp.sync().map_err(|error| {
         storage(
@@ -3485,6 +3521,27 @@ fn finalize_temporary_object(
         sealed_bytes_hashed,
         checked_read_io_sum(sealed_io, concurrent_io)?,
     ))
+}
+
+fn remove_finalized_temporary(
+    cas: &CasRoot,
+    name: &std::ffi::OsStr,
+    identity: graphforge_filesystem::FileIdentity,
+    path: &Path,
+) -> Result<(), GfError> {
+    cas.tmp
+        .unlink_child_if_identity(name, identity)
+        .map_err(|error| {
+            storage(
+                "remove stable temporary graph object",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?;
+    if let Some(allocation) = &cas.allocation {
+        allocation.remove_file_at(path)?;
+    }
+    Ok(())
 }
 
 fn checked_read_io_sum(
@@ -3865,6 +3922,94 @@ mod tests {
                 format!("injected graph object returned error at {boundary}")
             ),
             other => panic!("unexpected injected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
+        let root = tempfile::tempdir().unwrap();
+        let operation = crate::StorageAllocationOperation::default();
+        let winner_operation = operation.clone();
+        let winner_root = root.path().to_path_buf();
+        let payload = vec![8_u8; 16384];
+        let winner_payload = payload.clone();
+        BEFORE_OBJECT_LINK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut winner = begin_graph_object_publication(&winner_root).unwrap();
+                winner.set_allocation_operation(Some(winner_operation));
+                install_graph_object_bytes_with_lease(&winner, &winner_payload).unwrap();
+            }));
+        });
+        let mut loser = begin_graph_object_publication(root.path()).unwrap();
+        loser.set_allocation_operation(Some(operation.clone()));
+        let (digest, evidence) = install_graph_object_bytes_with_lease(&loser, &payload).unwrap();
+        assert!(evidence.reused_existing);
+        assert!(evidence.attempted_install);
+        let final_file = File::open(graph_object_path(root.path(), &digest).unwrap()).unwrap();
+        let allocated = graphforge_filesystem::file_space_usage(&final_file)
+            .unwrap()
+            .allocated_bytes;
+        assert!(allocated > 0);
+        assert_eq!(operation.totals().unwrap(), (allocated, 2 * allocated));
+        assert_eq!(
+            fs::read_dir(root.path().join(GRAPH_OBJECTS_DIR).join(TEMP_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn allocation_observed_cas_install_reuse_and_returned_errors_match_real_union() {
+        for boundary in [
+            None,
+            Some("install:temp-sealed"),
+            Some("install:final-linked"),
+            Some("install:temp-unlinked"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let operation = crate::StorageAllocationOperation::default();
+            let mut lease = begin_graph_object_publication(root.path()).unwrap();
+            lease.set_allocation_operation(Some(operation.clone()));
+            let payload = vec![9_u8; 16384];
+            inject_returned_error(boundary);
+            let result = install_graph_object_bytes_with_lease(&lease, &payload);
+            inject_returned_error(None);
+            assert_eq!(result.is_err(), boundary.is_some());
+            let mut identities = BTreeMap::new();
+            for directory in [
+                root.path().join(GRAPH_OBJECTS_DIR).join(TEMP_DIR),
+                root.path().join(GRAPH_OBJECTS_DIR).join(SHA256_DIR),
+            ] {
+                // Only the bounded test fixture is walked after the install returned.
+                let mut pending = vec![directory.to_path_buf()];
+                while let Some(path) = pending.pop() {
+                    for entry in fs::read_dir(path).unwrap() {
+                        let entry = entry.unwrap();
+                        if entry.file_type().unwrap().is_dir() {
+                            pending.push(entry.path());
+                            continue;
+                        }
+                        let file = File::open(entry.path()).unwrap();
+                        let id = graphforge_filesystem::file_identity(&file).unwrap();
+                        identities.insert(
+                            (id.volume_serial, id.file_id),
+                            graphforge_filesystem::file_space_usage(&file)
+                                .unwrap()
+                                .allocated_bytes,
+                        );
+                    }
+                }
+            }
+            let actual: u64 = identities.values().sum();
+            assert!(actual > 0);
+            assert_eq!(operation.totals().unwrap(), (actual, actual));
+            if boundary.is_none() {
+                let before = operation.snapshot().unwrap();
+                let (_, reused) = install_graph_object_bytes_with_lease(&lease, &payload).unwrap();
+                assert!(reused.reused_existing);
+                assert_eq!(operation.snapshot().unwrap(), before);
+            }
         }
     }
 

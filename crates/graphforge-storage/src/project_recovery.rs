@@ -15,13 +15,15 @@ use uuid::Uuid;
 use crate::project_checkpoints::checkpoint_retention_roots_after_writer_lock;
 use crate::project_failpoint;
 use crate::project_generation::{
-    CURRENT_FILE, ResolvedProjectGeneration, open_or_initialize_project_admitted,
-    resolve_project_generation, validated_generation_manifest_sha256, validated_generation_parent,
+    CURRENT_FILE, ResolvedProjectGeneration, resolve_project_generation,
+    validated_generation_manifest_sha256, validated_generation_parent,
 };
+#[cfg(test)]
+use crate::project_publication::write_journal;
 use crate::project_publication::{
     ATTEMPTS_DIR, GENERATIONS_DIR, JournalPhase, LOCKS_DIR, TRANSACTIONS_DIR, WRITER_LOCK_FILE,
     ensure_machine_directory, open_regular_lock, open_transaction_lock, read_journal,
-    sync_directory, write_journal,
+    sync_directory, write_journal_with_allocation,
 };
 
 pub(crate) const TRASH_DIR: &str = "trash";
@@ -191,6 +193,7 @@ pub fn open_or_initialize_project_with_recovery(
     open_or_initialize_project_with_recovery_for_mode(
         container_root.as_ref(),
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        None,
     )
 }
 
@@ -206,12 +209,27 @@ pub fn open_or_initialize_ephemeral_project_with_recovery(
     open_or_initialize_project_with_recovery_for_mode(
         container_root.as_ref(),
         crate::filesystem_admission::ProjectLifecycleMode::Ephemeral,
+        None,
+    )
+}
+
+/// First-party diagnostic open with explicit operation allocation ownership.
+#[doc(hidden)]
+pub fn open_or_initialize_project_with_allocation(
+    root: &Path,
+    allocation: &crate::StorageAllocationOperation,
+) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+    open_or_initialize_project_with_recovery_for_mode(
+        root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        Some(allocation),
     )
 }
 
 fn open_or_initialize_project_with_recovery_for_mode(
     root: &Path,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
@@ -221,9 +239,11 @@ fn open_or_initialize_project_with_recovery_for_mode(
     admission.revalidate_identity()?;
     let root = admission.root();
     if root.join(CURRENT_FILE).exists() {
-        return recover_project_on_open_admitted(root);
+        return recover_project_on_open_admitted_with_allocation(root, allocation);
     }
-    let resolved = open_or_initialize_project_admitted(root)?;
+    let resolved = crate::project_generation::open_or_initialize_project_admitted_with_allocation(
+        root, allocation,
+    )?;
     Ok((
         resolved.clone(),
         ProjectOpenRecoveryEvidence::initialization(resolved.generation_uuid()),
@@ -255,6 +275,13 @@ pub fn recover_project_on_open(
 fn recover_project_on_open_admitted(
     root: &Path,
 ) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+    recover_project_on_open_admitted_with_allocation(root, None)
+}
+
+fn recover_project_on_open_admitted_with_allocation(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
     let started = Instant::now();
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let work_detected = project_needs_recovery_pass(root)?;
@@ -276,7 +303,7 @@ fn recover_project_on_open_admitted(
         ));
     }
 
-    match recover_project_transactions_admitted(root) {
+    match recover_project_transactions_admitted_with_allocation(root, allocation) {
         Ok(report) => {
             let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
             Ok((
@@ -459,9 +486,19 @@ pub fn remove_durable_project_root(container_root: impl AsRef<Path>) -> Result<(
 }
 
 fn recover_project_transactions_admitted(root: &Path) -> Result<ProjectRecoveryReport, GfError> {
+    recover_project_transactions_admitted_with_allocation(root, None)
+}
+
+fn recover_project_transactions_admitted_with_allocation(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<ProjectRecoveryReport, GfError> {
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let root = selected.container_root().to_owned();
     let writer_lock = acquire_recovery_lock(&root)?;
+    if let Some(allocation) = allocation {
+        allocation.replace_file_at(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE), &writer_lock)?;
+    }
 
     // A writer may have published between the read-side resolution and lock
     // acquisition. Only the post-lock resolution is authoritative here.
@@ -484,7 +521,14 @@ fn recover_project_transactions_admitted(root: &Path) -> Result<ProjectRecoveryR
 
     let transactions_root = root.join(TRANSACTIONS_DIR);
     if transactions_root.exists() {
-        recover_journals(&root, &transactions_root, &selected, &retained, &mut report)?;
+        recover_journals(
+            &root,
+            &transactions_root,
+            &selected,
+            &retained,
+            &mut report,
+            allocation,
+        )?;
     }
     report.preserved_unknown_entries += count_unknown_generation_entries(&root, &retained)?;
     // Release checkpoints.lock before writer.lock so concurrent mutators never
@@ -515,11 +559,15 @@ fn recover_journals(
     selected: &crate::ResolvedProjectGeneration,
     retained: &BTreeSet<Uuid>,
     report: &mut ProjectRecoveryReport,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let mut journal_paths = bounded_directory_entries(transactions_root)?;
     journal_paths.sort();
     for journal_path in journal_paths {
-        if crate::project_publication::cleanup_atomicwrite_temp(&journal_path)? {
+        if crate::project_publication::cleanup_atomicwrite_temp_with_allocation(
+            &journal_path,
+            allocation,
+        )? {
             continue;
         }
         let Some(transaction_uuid) = journal_file_uuid(&journal_path) else {
@@ -550,6 +598,7 @@ fn recover_journals(
                 &mut journal,
                 selected.manifest_sha256(),
                 report,
+                allocation,
             )?;
         } else if retained.contains(&generation_uuid) {
             repair_reachable_journal(
@@ -557,11 +606,12 @@ fn recover_journals(
                 &mut journal,
                 validated_generation_manifest_sha256(root, generation_uuid)?,
                 report,
+                allocation,
             )?;
         } else {
             if journal.phase != JournalPhase::Published && journal.phase != JournalPhase::Aborted {
                 journal.phase = JournalPhase::Aborted;
-                write_journal(&journal_path, &journal)?;
+                write_journal_with_allocation(&journal_path, &journal, allocation)?;
                 report.aborted_journals += 1;
             }
             report.removed_generations += cleanup_abandoned_generation(
@@ -570,6 +620,7 @@ fn recover_journals(
                 generation_uuid,
                 &journal.request_fingerprint,
                 retained,
+                allocation,
             )?;
         }
     }
@@ -581,6 +632,7 @@ fn repair_reachable_journal(
     journal: &mut crate::project_publication::JournalRecord,
     manifest_sha256: [u8; 32],
     report: &mut ProjectRecoveryReport,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let expected_digest = digest_hex(manifest_sha256);
     if journal.generation_manifest_sha256.as_deref() != Some(expected_digest.as_str()) {
@@ -590,7 +642,7 @@ fn repair_reachable_journal(
     }
     if journal.phase != JournalPhase::Published {
         journal.phase = JournalPhase::Published;
-        write_journal(path, journal)?;
+        write_journal_with_allocation(path, journal, allocation)?;
         report.repaired_journals += 1;
     }
     Ok(())
@@ -744,6 +796,7 @@ fn cleanup_abandoned_generation(
     generation_uuid: Uuid,
     request_fingerprint: &str,
     retained: &BTreeSet<Uuid>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<u64, GfError> {
     if retained.contains(&generation_uuid) {
         return Ok(0);
@@ -757,7 +810,7 @@ fn cleanup_abandoned_generation(
     let mut removed = 0;
     if attempt_path.exists() {
         reject_real_directory(&attempt_path)?;
-        std::fs::remove_dir_all(&attempt_path).map_err(storage_io)?;
+        remove_recovery_tree_with_allocation(&attempt_path, allocation)?;
         sync_directory(
             attempt_path
                 .parent()
@@ -777,12 +830,13 @@ fn cleanup_abandoned_generation(
     let trash_path = trash_root.join(&generation_name);
 
     if trash_path.exists() {
-        remove_trash_entry(
+        remove_trash_entry_with_allocation(
             root,
             &trash_root,
             &trash_path,
             transaction_uuid,
             generation_uuid,
+            allocation,
         )?;
         return Ok(1);
     }
@@ -810,12 +864,13 @@ fn cleanup_abandoned_generation(
         "GC",
         true,
     )?;
-    remove_trash_entry(
+    remove_trash_entry_with_allocation(
         root,
         &trash_root,
         &trash_path,
         transaction_uuid,
         generation_uuid,
+        allocation,
     )?;
     Ok(1)
 }
@@ -827,6 +882,24 @@ fn remove_trash_entry(
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
 ) -> Result<(), GfError> {
+    remove_trash_entry_with_allocation(
+        root,
+        trash_root,
+        trash_path,
+        transaction_uuid,
+        generation_uuid,
+        None,
+    )
+}
+
+fn remove_trash_entry_with_allocation(
+    root: &Path,
+    trash_root: &Path,
+    trash_path: &Path,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     reject_real_directory(trash_path)?;
     if resolve_project_generation(root)
         .map_err(map_recovery_resolution)?
@@ -837,7 +910,26 @@ fn remove_trash_entry(
             "trash entry is reachable from the committed pointer",
         ));
     }
-    std::fs::remove_dir_all(trash_path).map_err(storage_io)?;
+    // A returned failure after generation -> trash may leave this same
+    // operation holding the original route keys. Reconstruct those exact
+    // relative routes only when the original generation no longer exists.
+    // Never release keys belonging to a still-live generation with this UUID.
+    let generation_path = root
+        .join(GENERATIONS_DIR)
+        .join(generation_uuid.hyphenated().to_string());
+    let previous_root = if allocation.is_some() {
+        match std::fs::symlink_metadata(&generation_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Some(generation_path.as_path())
+            }
+            Ok(_) => None,
+            Err(error) => return Err(storage_io(error)),
+        }
+    } else {
+        None
+    };
+    let owners = recovery_removal_owners(trash_path, allocation, previous_root)?;
+    remove_recovery_tree_owners(trash_path, owners, allocation)?;
     sync_directory(trash_root)?;
     project_failpoint::hit(
         "project.after_gc_delete",
@@ -846,6 +938,78 @@ fn remove_trash_entry(
         "GC",
         true,
     )
+}
+
+// Only the caller's already authorized, idle cleanup subtree is inspected.
+// Retained directory handles refuse links; no graph payload bytes are read.
+fn recovery_removal_owners(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+    previous_root: Option<&Path>,
+) -> Result<Vec<String>, GfError> {
+    if allocation.is_none() {
+        return Ok(Vec::new());
+    }
+    let directory = graphforge_filesystem::StableDirectory::open(root).map_err(storage_io)?;
+    let mut pending = vec![directory];
+    let mut remaining = 1_000_000_usize;
+    let mut owners = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let names = directory
+            .child_names_bounded(remaining)
+            .map_err(storage_io)?;
+        remaining = remaining
+            .checked_sub(names.len())
+            .ok_or_else(|| storage_io("recovery allocation inventory exceeds bound"))?;
+        for name in names {
+            if let Ok(child) = directory.open_child_directory(&name) {
+                pending.push(child);
+            } else {
+                // Opening the retained child rejects symlinks and special files.
+                let _file = directory.open_child_file(&name).map_err(storage_io)?;
+                let path = directory.path().join(name);
+                owners.push(crate::StorageAllocationOperation::file_owner(&path)?);
+                if let Some(previous_root) = previous_root {
+                    let relative = path.strip_prefix(root).map_err(storage_io)?;
+                    owners.push(crate::StorageAllocationOperation::file_owner(
+                        &previous_root.join(relative),
+                    )?);
+                }
+            }
+        }
+    }
+    Ok(owners)
+}
+
+fn forget_recovery_owners(
+    owners: Vec<String>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    if let Some(allocation) = allocation {
+        for owner in owners {
+            allocation.remove_owner(&owner)?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete an authorized idle subtree and release its actual per-file owners.
+/// Callers retain the existing transaction/lease and reachability checks.
+pub(crate) fn remove_recovery_tree_with_allocation(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    let owners = recovery_removal_owners(root, allocation, None)?;
+    remove_recovery_tree_owners(root, owners, allocation)
+}
+
+fn remove_recovery_tree_owners(
+    root: &Path,
+    owners: Vec<String>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    std::fs::remove_dir_all(root).map_err(storage_io)?;
+    forget_recovery_owners(owners, allocation)
 }
 
 /// Delete a trash entry that is not the committed generation.
@@ -1019,6 +1183,206 @@ mod tests {
         "project.after_root_fsync",
         "project.after_journal_published",
     ];
+
+    #[cfg(unix)]
+    fn recovery_allocation_inventory(
+        root: &Path,
+        seed: Option<&crate::StorageAllocationOperation>,
+    ) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut pending = vec![root.to_owned()];
+        let mut identities = std::collections::BTreeMap::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let metadata = entry.path().symlink_metadata().unwrap();
+                if metadata.is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    assert!(metadata.is_file());
+                    identities.insert((metadata.dev(), metadata.ino()), metadata.blocks() * 512);
+                    if let Some(seed) = seed {
+                        seed.replace_file_at(&entry.path(), &File::open(entry.path()).unwrap())
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        identities.values().sum()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_allocation_tracks_repair_and_abandoned_generation_cleanup() {
+        use std::os::unix::fs::MetadataExt as _;
+        for publish in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            open_or_initialize_project(root.path()).unwrap();
+            let request = ProjectGenerationRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                capabilities: capabilities("graph"),
+                participants: participants("graph"),
+            };
+            let ProjectStageOutcome::Staged(staged) =
+                stage_project_generation(root.path(), &request).unwrap()
+            else {
+                panic!("fresh recovery allocation fixture replayed");
+            };
+            let journal_path = root
+                .path()
+                .join(TRANSACTIONS_DIR)
+                .join(format!("{}.json", request.transaction_uuid.hyphenated()));
+            if publish {
+                staged
+                    .validate(|_| Ok(()), |_, _| Ok(()))
+                    .unwrap()
+                    .publish()
+                    .unwrap();
+                let mut journal = read_journal(&journal_path).unwrap();
+                journal.phase = JournalPhase::Durable;
+                write_journal(&journal_path, &journal).unwrap();
+            } else {
+                drop(staged);
+            }
+            let allocation = crate::StorageAllocationOperation::default();
+            let before = recovery_allocation_inventory(root.path(), Some(&allocation));
+            assert_eq!(allocation.totals().unwrap(), (before, before));
+            let (_, report) =
+                open_or_initialize_project_with_allocation(root.path(), &allocation).unwrap();
+            let after = recovery_allocation_inventory(root.path(), None);
+            let journal_bytes = journal_path.metadata().unwrap().blocks() * 512;
+            assert_eq!(
+                allocation.totals().unwrap(),
+                (after, before + journal_bytes)
+            );
+            if publish {
+                assert_eq!(report.repaired_journals, 1);
+                assert_eq!(report.removed_generations, 0);
+            } else {
+                assert_eq!(report.aborted_journals, 1);
+                assert!(report.removed_generations > 0);
+                assert!(after < before);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_allocation_cleanup_preserves_aliases_and_refuses_links_before_delete() {
+        let root = tempfile::tempdir().unwrap();
+        let abandoned = root.path().join("abandoned");
+        std::fs::create_dir(&abandoned).unwrap();
+        let payload = abandoned.join("payload");
+        std::fs::write(&payload, vec![1_u8; 8192]).unwrap();
+        std::fs::hard_link(&payload, root.path().join("retained-alias")).unwrap();
+        let allocation = crate::StorageAllocationOperation::default();
+        let before = recovery_allocation_inventory(root.path(), Some(&allocation));
+        std::os::unix::fs::symlink(root.path().join("retained-alias"), abandoned.join("unsafe"))
+            .unwrap();
+        let unchanged = allocation.snapshot().unwrap();
+        assert!(remove_recovery_tree_with_allocation(&abandoned, Some(&allocation)).is_err());
+        assert!(payload.exists());
+        assert_eq!(allocation.snapshot().unwrap(), unchanged);
+        std::fs::remove_file(abandoned.join("unsafe")).unwrap();
+        remove_recovery_tree_with_allocation(&abandoned, Some(&allocation)).unwrap();
+        assert!(!abandoned.exists());
+        assert_eq!(allocation.totals().unwrap(), (before, before));
+        assert_eq!(recovery_allocation_inventory(root.path(), None), before);
+        allocation
+            .snapshot()
+            .unwrap()
+            .validate_continuation()
+            .unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_allocation_returned_errors_allow_same_context_retry() {
+        const CHILD: &str = "GRAPHFORGE_RECOVERY_ALLOCATION_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            for boundary in [
+                "project.after_gc_move.error",
+                "project.after_gc_delete.error",
+            ] {
+                let status = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "project_recovery::tests::recovery_allocation_returned_errors_allow_same_context_retry",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("GRAPHFORGE_PROJECT_FAILPOINTS", ENABLE_COOKIE)
+                    .env("GRAPHFORGE_PROJECT_FAILPOINT", boundary)
+                    .status().unwrap();
+                assert!(
+                    status.success(),
+                    "same-context recovery failed at {boundary}"
+                );
+            }
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: capabilities("graph"),
+            participants: participants("graph"),
+        };
+        let staged = stage_project_generation(root.path(), &request).unwrap();
+        drop(staged);
+        let allocation = crate::StorageAllocationOperation::default();
+        recovery_allocation_inventory(root.path(), Some(&allocation));
+        let error = open_or_initialize_project_with_allocation(root.path(), &allocation)
+            .err()
+            .expect("selected recovery boundary must fail");
+        assert!(error.to_string().contains("injected_failpoint"));
+        assert_eq!(
+            allocation.totals().unwrap().0,
+            recovery_allocation_inventory(root.path(), None),
+            "a returned error must preserve the actual surviving union",
+        );
+        open_or_initialize_project_with_allocation(root.path(), &allocation).unwrap();
+        assert_eq!(
+            allocation.totals().unwrap().0,
+            recovery_allocation_inventory(root.path(), None),
+            "same-context retry must release original route owners",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_allocation_trash_cleanup_preserves_existing_generation_routes() {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        let generation = Uuid::now_v7();
+        let name = generation.hyphenated().to_string();
+        let generation_path = root.path().join(GENERATIONS_DIR).join(&name);
+        let trash_root = root.path().join(TRASH_DIR);
+        let trash_path = trash_root.join(&name);
+        std::fs::create_dir_all(&generation_path).unwrap();
+        std::fs::create_dir_all(&trash_path).unwrap();
+        std::fs::write(generation_path.join("payload"), vec![1_u8; 8192]).unwrap();
+        std::fs::write(trash_path.join("payload"), vec![2_u8; 8192]).unwrap();
+        let allocation = crate::StorageAllocationOperation::default();
+        recovery_allocation_inventory(root.path(), Some(&allocation));
+        remove_trash_entry_with_allocation(
+            root.path(),
+            &trash_root,
+            &trash_path,
+            Uuid::now_v7(),
+            generation,
+            Some(&allocation),
+        )
+        .unwrap();
+        assert!(generation_path.join("payload").exists());
+        assert!(!trash_path.exists());
+        assert_eq!(
+            allocation.totals().unwrap().0,
+            recovery_allocation_inventory(root.path(), None),
+        );
+    }
 
     #[derive(serde::Serialize)]
     struct NativeOracleObservation {

@@ -923,6 +923,13 @@ pub(crate) fn open_or_initialize_project_for_mode(
 pub(crate) fn open_or_initialize_project_admitted(
     root: &Path,
 ) -> Result<ResolvedProjectGeneration, GfError> {
+    open_or_initialize_project_admitted_with_allocation(root, None)
+}
+
+pub(crate) fn open_or_initialize_project_admitted_with_allocation(
+    root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<ResolvedProjectGeneration, GfError> {
     reject_root_link(root)?;
     let _root_lock = lock_project_root(root)?;
     let mut entries = std::fs::read_dir(root).map_err(|error| {
@@ -937,12 +944,12 @@ pub(crate) fn open_or_initialize_project_admitted(
         return match resolve_project_generation(root) {
             Err(error) if error.code() == "GF_PROJECT_UNINITIALIZED" => {
                 let generation_uuid = validate_resumable_uninitialized_layout(root)?;
-                initialize_empty_generation(root, false, Some(generation_uuid))
+                initialize_empty_generation(root, false, Some(generation_uuid), allocation)
             }
             result => result,
         };
     }
-    initialize_empty_generation(root, true, None)
+    initialize_empty_generation(root, true, None, allocation)
 }
 
 fn validate_resumable_uninitialized_layout(root: &Path) -> Result<Uuid, GfError> {
@@ -1141,6 +1148,7 @@ fn initialize_empty_generation(
     root: &Path,
     write_format: bool,
     generation_uuid: Option<Uuid>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
     let generation_uuid = generation_uuid.unwrap_or_else(Uuid::now_v7);
     let transaction_uuid = Uuid::now_v7();
@@ -1152,7 +1160,12 @@ fn initialize_empty_generation(
         .map_err(|error| GfError::Storage(format!("failed to create project layout: {error}")))?;
     if write_format {
         let format_path = root.join(FORMAT_FILE);
-        write_new_synced(&format_path, PROJECT_FORMAT_BYTES, "project format")?;
+        write_new_synced(
+            &format_path,
+            PROJECT_FORMAT_BYTES,
+            "project format",
+            allocation,
+        )?;
         project_failpoint::hit(
             "project.after_format_fsync",
             Some(transaction_uuid),
@@ -1161,7 +1174,8 @@ fn initialize_empty_generation(
             false,
         )?;
     }
-    let participant_descriptors = install_empty_workspace_participants(&participants_root)?;
+    let participant_descriptors =
+        install_empty_workspace_participants(&participants_root, allocation)?;
     sync_directory(&participants_root)?;
     sync_directory(&generation_root)?;
     sync_directory(&root.join("generations"))?;
@@ -1175,7 +1189,12 @@ fn initialize_empty_generation(
             false,
         )?;
     }
-    write_new_synced(&generation_root.join(LEASE_FILE), &[], "generation lease")?;
+    write_new_synced(
+        &generation_root.join(LEASE_FILE),
+        &[],
+        "generation lease",
+        allocation,
+    )?;
     let manifest = GenerationManifest {
         format: "graphforge-generation".into(),
         format_version: 1,
@@ -1201,6 +1220,7 @@ fn initialize_empty_generation(
         &generation_root.join(MANIFEST_FILE),
         &manifest_bytes,
         "generation",
+        allocation,
     )?;
     sync_directory(&generation_root)?;
     sync_directory(&root.join("generations"))?;
@@ -1214,12 +1234,13 @@ fn initialize_empty_generation(
     let mut current_bytes = serde_json::to_vec(&current)
         .map_err(|error| GfError::Storage(format!("failed to encode CURRENT: {error}")))?;
     current_bytes.push(b'\n');
-    crate::project_publication::publish_atomic_bytes(
+    crate::project_publication::publish_atomic_bytes_with_allocation(
         &root.join(CURRENT_FILE),
         &current_bytes,
         || Ok(()),
         || Ok(()),
         || Ok(()),
+        allocation,
     )
     .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
     sync_directory(root)?;
@@ -1228,6 +1249,7 @@ fn initialize_empty_generation(
 
 fn install_empty_workspace_participants(
     participants_root: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<Vec<ParticipantDescriptor>, GfError> {
     let workspace_participants = crate::workspace_participants::empty_workspace_participants()?;
     let workspace_root = participants_root.join("workspace");
@@ -1243,6 +1265,7 @@ fn install_empty_workspace_participants(
             &participants_root.join(&relative_path),
             &participant.bytes,
             "workspace participant",
+            allocation,
         )?;
         descriptors.push(ParticipantDescriptor {
             capability_id: participant.capability_id,
@@ -1273,7 +1296,12 @@ fn install_empty_workspace_participants(
     Ok(descriptors)
 }
 
-fn write_new_synced(path: &Path, bytes: &[u8], name: &str) -> Result<(), GfError> {
+fn write_new_synced(
+    path: &Path,
+    bytes: &[u8],
+    name: &str,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     use std::io::Write as _;
 
     let mut file = OpenOptions::new()
@@ -1283,7 +1311,11 @@ fn write_new_synced(path: &Path, bytes: &[u8], name: &str) -> Result<(), GfError
         .map_err(|error| GfError::Storage(format!("failed to create {name}: {error}")))?;
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))
+        .map_err(|error| GfError::Storage(format!("failed to write {name}: {error}")))?;
+    if let Some(allocation) = allocation {
+        allocation.replace_file_at(path, &file)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

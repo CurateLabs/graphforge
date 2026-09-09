@@ -314,6 +314,15 @@ pub fn stage_graph_tree(
     generation_root: &Path,
     inventory: &GraphFilesInventory,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
+    stage_graph_tree_with_allocation(source_root, generation_root, inventory, None)
+}
+
+pub(crate) fn stage_graph_tree_with_allocation(
+    source_root: &Path,
+    generation_root: &Path,
+    inventory: &GraphFilesInventory,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<GraphFilesOpenEvidence, GfError> {
     validate_inventory_contract(inventory)?;
     let destination_root = graph_tree_root(generation_root);
     if destination_root.exists() {
@@ -347,7 +356,7 @@ pub fn stage_graph_tree(
             fs::create_dir_all(parent)
                 .map_err(|error| storage("create graph tree directory", parent, error))?;
         }
-        let copied = copy_regular_file(&source, &destination)?;
+        let copied = copy_regular_file_with_allocation(&source, &destination, allocation)?;
         let digest = copied.digest;
         evidence.application_read_bytes = evidence
             .application_read_bytes
@@ -895,6 +904,42 @@ struct CopyIoEvidence {
     write_bytes: u64,
     write_calls: u64,
     fsync_calls: u64,
+}
+
+fn copy_regular_file_with_allocation(
+    source: &Path,
+    destination: &Path,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<CopyIoEvidence, GfError> {
+    let result = copy_regular_file(source, destination);
+    let observed = if let Some(allocation) = allocation {
+        (|| {
+            let parent = destination
+                .parent()
+                .ok_or_else(|| validation("graph destination has no parent"))?;
+            let directory = graphforge_filesystem::StableDirectory::open(parent)
+                .map_err(|error| storage("observe graph destination", destination, error))?;
+            let name = destination
+                .file_name()
+                .ok_or_else(|| validation("graph destination has no name"))?;
+            match directory.open_child_file(name) {
+                Ok(file) => allocation.replace_file_at(destination, &file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && result.is_err() => {
+                    Ok(())
+                }
+                Err(error) => Err(storage("observe graph destination", destination, error)),
+            }
+        })()
+    } else {
+        Ok(())
+    };
+    match result {
+        Err(primary) => Err(primary),
+        Ok(copied) => {
+            observed?;
+            Ok(copied)
+        }
+    }
 }
 
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence, GfError> {

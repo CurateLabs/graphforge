@@ -135,11 +135,11 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
             reserved_headroom_bytes=overrides.get("reserved_headroom_bytes", RESERVED_BYTES),
         )
 
-    def test_two_complete_adjacent_rungs_produce_valid_exact_v3_evidence(self) -> None:
+    def test_two_complete_adjacent_rungs_produce_valid_exact_v4_evidence(self) -> None:
         low, high = self.source_pair()
         evidence = self.build_pair()
         validate(evidence)
-        self.assertEqual(evidence["schema"], "graphforge-g500-ladder-qualification/3")
+        self.assertEqual(evidence["schema"], "graphforge-g500-ladder-qualification/4")
         self.assertEqual(evidence["projection"]["source_rungs"], ["S20", "S22"])
         self.assertEqual(
             evidence["projection"]["rate"],
@@ -150,7 +150,7 @@ class ProgressiveStorageQualificationTests(unittest.TestCase):
                 "denominator_count": high["storage_attribution"]["counts"]["source_edges"],
             },
         )
-        self.assertEqual(len(evidence["rungs"][0]["artifacts"]), 9)
+        self.assertEqual(len(evidence["rungs"][0]["artifacts"]), 24)
         self.assertEqual(len(evidence["rungs"][0]["phases"]), 9)
         staging = next(
             item

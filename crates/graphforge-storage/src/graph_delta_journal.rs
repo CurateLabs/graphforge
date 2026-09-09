@@ -1491,6 +1491,7 @@ fn publish_graph_delta_after_prepare(
         parent,
         &generation_request,
         Some(prepared.graph_tree_root()),
+        None,
     )? {
         ProjectStageOutcome::Staged(staged) => {
             staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?

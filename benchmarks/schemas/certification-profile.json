@@ -52,7 +52,7 @@
           "const": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]
         },
         "evidence_schema": { "const": "graphforge-public-certification/1" },
-        "storage_receipt": { "const": "graphforge-lifecycle-storage/1" }
+        "storage_receipt": { "const": "graphforge-lifecycle-storage/2" }
       },
       "required": ["mechanics", "phases", "evidence_schema", "storage_receipt"],
       "additionalProperties": false

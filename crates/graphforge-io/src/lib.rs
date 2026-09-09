@@ -163,32 +163,50 @@ fn temp_bytes(temporary: &tempfile::NamedTempFile) -> u64 {
         .map_or(0, |metadata| metadata.len())
 }
 
-async fn drain_stream<E, F>(
+fn check_sink_cancellation(
+    cancelled: bool,
+    started: Instant,
+    rows: u64,
+    batches: u64,
+    temporary: &tempfile::NamedTempFile,
+) -> Result<(), ResultSinkError> {
+    if cancelled {
+        Err(failure(
+            started,
+            "cancelled",
+            rows,
+            batches,
+            temp_bytes(temporary),
+            "operation was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn drain_stream<E, F, O>(
     stream: &mut Pin<Box<dyn Stream<Item = Result<RecordBatch, E>> + Send>>,
     writer: &mut IncrementalWriter,
     schema: &SchemaRef,
     options: &ResultSinkOptions,
-    temporary: &tempfile::NamedTempFile,
+    ownership: &mut ObservedSinkGuard<O>,
     started: Instant,
     cancelled: &mut F,
 ) -> Result<(u64, u64), ResultSinkError>
 where
     E: Display,
     F: FnMut() -> bool,
+    O: FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>,
 {
+    let temporary = ownership
+        .temporary
+        .as_ref()
+        .expect("retained sink temporary");
+    let observed = &mut ownership.observed;
     let mut rows = 0_u64;
     let mut batches = 0_u64;
     loop {
-        if cancelled() {
-            return Err(failure(
-                started,
-                "cancelled",
-                rows,
-                batches,
-                temp_bytes(temporary),
-                "operation was cancelled",
-            ));
-        }
+        check_sink_cancellation(cancelled(), started, rows, batches, temporary)?;
         let Some(item) = stream.next().await else {
             break;
         };
@@ -226,16 +244,7 @@ where
                 ),
             ));
         }
-        if cancelled() {
-            return Err(failure(
-                started,
-                "cancelled",
-                rows,
-                batches,
-                temp_bytes(temporary),
-                "operation was cancelled",
-            ));
-        }
+        check_sink_cancellation(cancelled(), started, rows, batches, temporary)?;
         #[cfg(test)]
         if FAIL_WRITE_AFTER_BATCHES.with(|limit| batches >= limit.get()) {
             return Err(failure(
@@ -251,6 +260,16 @@ where
             failure(
                 started,
                 "write",
+                rows,
+                batches,
+                temp_bytes(temporary),
+                error,
+            )
+        })?;
+        observed(temporary.path(), Some(temporary.as_file())).map_err(|error| {
+            failure(
+                started,
+                "observe",
                 rows,
                 batches,
                 temp_bytes(temporary),
@@ -285,16 +304,44 @@ impl IncrementalWriter {
 /// successful writer close and file sync. Pulling only after each write gives
 /// the writer natural backpressure over query execution.
 pub async fn sink_record_batch_stream<E, F>(
+    stream: Pin<Box<dyn Stream<Item = Result<RecordBatch, E>> + Send>>,
+    schema: SchemaRef,
+    destination: &Path,
+    format: ResultSinkFormat,
+    options: &ResultSinkOptions,
+    cancelled: F,
+) -> Result<ResultSinkReceipt, ResultSinkError>
+where
+    E: Display,
+    F: FnMut() -> bool,
+{
+    sink_record_batch_stream_observed(
+        stream,
+        schema,
+        destination,
+        format,
+        options,
+        cancelled,
+        |_, _| Ok(()),
+    )
+    .await
+}
+
+/// First-party file ownership observations at the existing result writer boundaries.
+#[doc(hidden)]
+pub async fn sink_record_batch_stream_observed<E, F, O>(
     mut stream: Pin<Box<dyn Stream<Item = Result<RecordBatch, E>> + Send>>,
     schema: SchemaRef,
     destination: &Path,
     format: ResultSinkFormat,
     options: &ResultSinkOptions,
     mut cancelled: F,
+    observed: O,
 ) -> Result<ResultSinkReceipt, ResultSinkError>
 where
     E: Display,
     F: FnMut() -> bool,
+    O: FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>,
 {
     let started = Instant::now();
     if options.max_row_group_rows == 0 || options.max_batch_rows == 0 {
@@ -315,50 +362,61 @@ where
         .prefix(".graphforge-result-")
         .tempfile_in(parent)
         .map_err(|error| failure(started, "create", 0, 0, 0, error.to_string()))?;
-    let writer_file = temporary
-        .reopen()
-        .map_err(|error| failure(started, "create", 0, 0, 0, error.to_string()))?;
-    let mut writer = create_writer(writer_file, &schema, format, options)
-        .map_err(|error| failure(started, "create", 0, 0, 0, error))?;
-    let (rows, batches) = drain_stream(
-        &mut stream,
-        &mut writer,
-        &schema,
-        options,
-        &temporary,
-        started,
-        &mut cancelled,
-    )
-    .await?;
-    writer.finish().map_err(|error| {
-        failure(
+    let mut ownership = ObservedSinkGuard {
+        temporary: Some(temporary),
+        observed,
+    };
+    let (rows, batches) = ownership
+        .write_stream(
+            &mut stream,
+            &schema,
+            format,
+            options,
+            &mut cancelled,
             started,
-            "finish",
-            rows,
-            batches,
-            temp_bytes(&temporary),
-            error,
         )
-    })?;
-    temporary.as_file().sync_all().map_err(|error| {
+        .await?;
+    let temporary = ownership
+        .temporary
+        .as_ref()
+        .expect("retained sink temporary");
+    let mut observed = &mut ownership.observed;
+    let temporary_path = temporary.path().to_path_buf();
+    let final_bytes = temp_bytes(temporary);
+    let temporary = ownership.temporary.take().expect("retained sink temporary");
+    let published = match temporary.persist(destination) {
+        Ok(published) => published,
+        Err(error) => {
+            let failure = failure(
+                started,
+                "publish",
+                rows,
+                batches,
+                final_bytes,
+                error.error.to_string(),
+            );
+            cleanup_observed_sink(error.file, &mut observed);
+            return Err(failure);
+        }
+    };
+    observed(&temporary_path, None).map_err(|error| {
         failure(
             started,
-            "sync",
-            rows,
-            batches,
-            temp_bytes(&temporary),
-            error.to_string(),
-        )
-    })?;
-    let final_bytes = temp_bytes(&temporary);
-    temporary.persist(destination).map_err(|error| {
-        failure(
-            started,
-            "publish",
+            "published-observe",
             rows,
             batches,
             final_bytes,
-            error.error.to_string(),
+            error,
+        )
+    })?;
+    observed(destination, Some(&published)).map_err(|error| {
+        failure(
+            started,
+            "published-observe",
+            rows,
+            batches,
+            final_bytes,
+            error,
         )
     })?;
     Ok(ResultSinkReceipt {
@@ -373,6 +431,93 @@ where
             complete: true,
         },
     })
+}
+
+struct ObservedSinkGuard<O: FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>> {
+    temporary: Option<tempfile::NamedTempFile>,
+    observed: O,
+}
+impl<O: FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>> ObservedSinkGuard<O> {
+    async fn write_stream<E: Display, F: FnMut() -> bool>(
+        &mut self,
+        stream: &mut Pin<Box<dyn Stream<Item = Result<RecordBatch, E>> + Send>>,
+        schema: &SchemaRef,
+        format: ResultSinkFormat,
+        options: &ResultSinkOptions,
+        cancelled: &mut F,
+        started: Instant,
+    ) -> Result<(u64, u64), ResultSinkError> {
+        let writer_file = self
+            .temporary
+            .as_ref()
+            .expect("retained sink temporary")
+            .reopen()
+            .map_err(|error| failure(started, "create", 0, 0, 0, error.to_string()))?;
+        let mut writer = create_writer(writer_file, schema, format, options)
+            .map_err(|error| failure(started, "create", 0, 0, 0, error))?;
+        let (rows, batches) = drain_stream(
+            stream,
+            &mut writer,
+            schema,
+            options,
+            self,
+            started,
+            cancelled,
+        )
+        .await?;
+        let temporary = self.temporary.as_ref().expect("retained sink temporary");
+        writer.finish().map_err(|error| {
+            failure(
+                started,
+                "finish",
+                rows,
+                batches,
+                temp_bytes(temporary),
+                error,
+            )
+        })?;
+        temporary.as_file().sync_all().map_err(|error| {
+            failure(
+                started,
+                "sync",
+                rows,
+                batches,
+                temp_bytes(temporary),
+                error.to_string(),
+            )
+        })?;
+        (self.observed)(temporary.path(), Some(temporary.as_file())).map_err(|error| {
+            failure(
+                started,
+                "observe",
+                rows,
+                batches,
+                temp_bytes(temporary),
+                error,
+            )
+        })?;
+        Ok((rows, batches))
+    }
+}
+
+impl<O: FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>> Drop for ObservedSinkGuard<O> {
+    fn drop(&mut self) {
+        if let Some(temporary) = self.temporary.take() {
+            cleanup_observed_sink(temporary, &mut self.observed);
+        }
+    }
+}
+
+fn cleanup_observed_sink(
+    temporary: tempfile::NamedTempFile,
+    observed: &mut impl FnMut(&Path, Option<&std::fs::File>) -> Result<(), String>,
+) {
+    let path = temporary.path().to_path_buf();
+    let _ = observed(&path, Some(temporary.as_file()));
+    // Never remove evidence for a retained file after a failed unlink.
+    if temporary.close().is_ok() {
+        let _ = observed(&path, None);
+    }
 }
 
 #[must_use]
@@ -426,6 +571,95 @@ mod tests {
         batches: Vec<RecordBatch>,
     ) -> Pin<Box<dyn Stream<Item = Result<RecordBatch, String>> + Send>> {
         Box::pin(stream::iter(batches.into_iter().map(Ok)))
+    }
+
+    #[test]
+    fn dropping_pending_observed_sink_releases_temporary_ownership() {
+        use std::future::Future;
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("result.arrow");
+        let (schema, batches) = fixture();
+        let input =
+            stream::iter(vec![Ok::<_, String>(batches[0].clone())]).chain(stream::pending());
+        let live = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+        let reported = Arc::clone(&live);
+        let options = ResultSinkOptions::default();
+        let mut future = Box::pin(sink_record_batch_stream_observed(
+            Box::pin(input),
+            schema,
+            &destination,
+            ResultSinkFormat::ArrowIpc,
+            &options,
+            || false,
+            move |path, file| {
+                let mut live = reported.lock().unwrap();
+                if let Some(file) = file {
+                    live.insert(path.to_path_buf(), file.metadata().unwrap().len());
+                } else {
+                    assert!(!path.exists());
+                    live.remove(path);
+                }
+                Ok(())
+            },
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        assert!(live.lock().unwrap().values().any(|bytes| *bytes > 0));
+        drop(future);
+        assert!(live.lock().unwrap().is_empty());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn observed_partial_failure_and_cancellation_release_only_removed_temporary() {
+        for cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let destination = root.path().join("result.arrow");
+            std::fs::write(&destination, b"original destination").unwrap();
+            let (schema, batches) = fixture();
+            let stream: Pin<Box<dyn Stream<Item = Result<RecordBatch, String>> + Send>> =
+                Box::pin(stream::iter(vec![
+                    Ok(batches[0].clone()),
+                    Err("intentional execution failure".to_owned()),
+                ]));
+            let seen_write = std::cell::Cell::new(false);
+            let mut live = std::collections::BTreeMap::new();
+            let mut observed_nonempty = false;
+            let error = futures::executor::block_on(sink_record_batch_stream_observed(
+                stream,
+                schema,
+                &destination,
+                ResultSinkFormat::ArrowIpc,
+                &ResultSinkOptions::default(),
+                || cancel && seen_write.get(),
+                |path, file| {
+                    if let Some(file) = file {
+                        let bytes = file.metadata().unwrap().len();
+                        observed_nonempty |= bytes > 0;
+                        live.insert(path.to_path_buf(), bytes);
+                        seen_write.set(true);
+                    } else {
+                        assert!(!path.exists());
+                        assert!(live.remove(path).is_some());
+                    }
+                    Ok(())
+                },
+            ))
+            .unwrap_err();
+            assert_eq!(error.phase, if cancel { "cancelled" } else { "execute" });
+            if !cancel {
+                assert!(error.to_string().contains("intentional execution failure"));
+            }
+            assert!(observed_nonempty);
+            assert!(live.is_empty());
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                b"original destination"
+            );
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

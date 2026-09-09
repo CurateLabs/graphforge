@@ -250,6 +250,7 @@ impl GraphForge {
 
     fn refresh_worker_handle(&self) -> Self {
         Self {
+            allocation_operation: self.allocation_operation.clone(),
             #[cfg(test)]
             last_mutation_outcome: std::sync::Mutex::new(None),
             identity: self.identity.clone(),

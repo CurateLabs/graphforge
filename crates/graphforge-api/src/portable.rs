@@ -448,13 +448,14 @@ impl GraphForge {
         };
         let default_cancelled = AtomicBool::new(false);
         let cancelled = cancelled.unwrap_or(&default_cancelled);
-        let receipt = graphforge_storage::export_complete_portable_v2(
+        let receipt = graphforge_storage::export_complete_portable_v2_with_allocation(
             &plan,
             &request.output_path,
             request.representation,
             request.limits,
             cancelled,
             progress,
+            self.allocation_operation.as_ref(),
         )?;
         Ok(PortableV2ExportFacadeResult {
             contract: "graphforge-portable-export/2",
@@ -541,9 +542,18 @@ impl GraphForge {
         request: &PortableV2ImportRequest,
         cancelled: Option<&AtomicBool>,
     ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
+        Self::import_portable_v2_with_allocation(project_root, request, cancelled, None)
+    }
+
+    pub(crate) fn import_portable_v2_with_allocation(
+        project_root: &Path,
+        request: &PortableV2ImportRequest,
+        cancelled: Option<&AtomicBool>,
+        allocation: Option<&graphforge_storage::StorageAllocationOperation>,
+    ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
         let generation_uuid =
             graphforge_core::uuid::portable_v2_import_generation(&request.operation_id.0);
-        let receipt = graphforge_storage::import_complete_portable_v2(
+        let receipt = graphforge_storage::import_complete_portable_v2_with_allocation(
             &request.input,
             project_root,
             request.operation_id.0,
@@ -551,6 +561,8 @@ impl GraphForge {
             &supported_capabilities(),
             request.limits,
             cancelled,
+            |_| {},
+            allocation,
         )?;
         let root = project_root.to_str().ok_or_else(|| {
             graphforge_core::portable::PortableV2Error::new(
@@ -558,7 +570,13 @@ impl GraphForge {
                 "invalid project path",
             )
         })?;
-        let reopened = Self::new(Some(root)).map_err(|_| {
+        let reopened = match allocation {
+            Some(allocation) => {
+                Self::open_with_allocation_diagnostics(project_root, allocation.clone())
+            }
+            None => Self::new(Some(root)),
+        }
+        .map_err(|_| {
             graphforge_core::portable::PortableV2Error::new(
                 graphforge_core::portable::PortableV2ErrorCode::Io,
                 "imported project did not reopen",

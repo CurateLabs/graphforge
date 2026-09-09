@@ -289,7 +289,7 @@ class NativeLadderControllerTests(unittest.TestCase):
             write_host_bundle(output, 22)
             paths = [output / "s20-rung.json", output / "s22-rung.json"]
             qualification = build_native(paths, work_root=work, reserved_headroom_bytes=1)
-            self.assertEqual(qualification["schema"], "graphforge-g500-ladder-qualification/3")
+            self.assertEqual(qualification["schema"], "graphforge-g500-ladder-qualification/4")
             retained = work / "workspace" / "s20"
             retained.mkdir(parents=True)
             with self.assertRaisesRegex(StorageQualificationError, "not been reclaimed"):

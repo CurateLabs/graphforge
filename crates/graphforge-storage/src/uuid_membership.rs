@@ -178,13 +178,178 @@ pub(crate) struct V4OrdinalBuildMetrics {
 pub(crate) struct V4ConstructionArtifactBundle {
     pub(crate) manifest: crate::V4OrdinalIdentityManifest,
     pub(crate) metrics: V4OrdinalBuildMetrics,
-    publications: Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: Vec<(String, V4PublicationGuard)>,
+}
+
+// Publication ownership carries the optional observer through explicit cleanup
+// and ordinary RAII cleanup. Only current file owners and a high-water survive.
+#[derive(Debug)]
+struct V4PublicationGuard {
+    directory: Option<graphforge_filesystem::StableDirectory>,
+    inner: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    path: PathBuf,
+    allocation: Option<crate::StorageAllocationOperation>,
+}
+impl V4PublicationGuard {
+    fn create(
+        directory: &graphforge_filesystem::StableDirectory,
+        name: &str,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            directory: allocation.map(|_| directory.try_clone()).transpose()?,
+            inner: Some(
+                directory.create_unpublished_replaceable_child(std::ffi::OsStr::new(name))?,
+            ),
+            path: directory.path().join(name),
+            allocation: allocation.cloned(),
+        })
+    }
+    fn inner(&self) -> &graphforge_filesystem::UnpublishedArtifactGuard {
+        self.inner.as_ref().expect("live publication")
+    }
+    fn inner_mut(&mut self) -> &mut graphforge_filesystem::UnpublishedArtifactGuard {
+        self.inner.as_mut().expect("live publication")
+    }
+    fn identity(&self) -> std::io::Result<graphforge_filesystem::FileIdentity> {
+        self.inner().identity()
+    }
+    fn verify_identity_with(
+        &mut self,
+        check: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<graphforge_filesystem::FileIdentity> {
+        self.inner_mut().verify_identity_with(check)
+    }
+    fn take_file(&mut self) -> std::io::Result<File> {
+        self.inner_mut().take_file()
+    }
+    fn open_sibling(&self, name: &std::ffi::OsStr) -> std::io::Result<File> {
+        self.inner().open_sibling(name)
+    }
+    fn observe(&self, file: &File) -> std::io::Result<()> {
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .replace_file_at(&self.path, file)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+    fn observe_named(&self) -> std::io::Result<()> {
+        if let Some(directory) = &self.directory {
+            match directory.open_child_file(self.path.file_name().expect("artifact name")) {
+                Ok(file) => {
+                    if let Ok(expected) = self.identity()
+                        && graphforge_filesystem::file_identity(&file)? != expected
+                    {
+                        return Err(std::io::Error::other("observed artifact identity changed"));
+                    }
+                    self.observe(&file)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+    fn reconcile_removed(
+        &self,
+        expected: Option<graphforge_filesystem::FileIdentity>,
+    ) -> std::io::Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        let removed = match directory.open_child_file(self.path.file_name().expect("artifact name"))
+        {
+            Ok(file) => match expected {
+                Some(expected) => graphforge_filesystem::file_identity(&file)? != expected,
+                None => {
+                    return Err(std::io::Error::other(
+                        "artifact identity unavailable during cleanup",
+                    ));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
+        if removed {
+            self.allocation
+                .as_ref()
+                .expect("observed directory")
+                .remove_file_at(&self.path)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+    fn install_child(&mut self, target: &std::ffi::OsStr) -> std::io::Result<()> {
+        self.observe_named()?;
+        let installed = self.inner_mut().install_child(target);
+        if installed.is_err() {
+            // Installation can rename successfully before a later validation
+            // fails. Rebind only the actual retained artifact, never a collision.
+            if let Some(directory) = &self.directory
+                && let Ok(file) = directory.open_child_file(target)
+                && matches!(
+                    (graphforge_filesystem::file_identity(&file), self.identity()),
+                    (Ok(actual), Ok(expected)) if actual == expected
+                )
+            {
+                let previous = self.path.clone();
+                self.path.set_file_name(target);
+                let _ = self.observe(&file);
+                if let Some(allocation) = &self.allocation {
+                    let _ = allocation.remove_file_at(&previous);
+                }
+            }
+            return installed;
+        }
+        let previous = self.path.clone();
+        self.path.set_file_name(target);
+        self.observe_named()?;
+        if let Some(allocation) = &self.allocation {
+            allocation
+                .remove_file_at(&previous)
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+    fn sync_parent(&mut self) -> std::io::Result<()> {
+        self.inner_mut().sync_parent()
+    }
+    fn commit(mut self) -> std::io::Result<()> {
+        let identity = self.identity().ok();
+        let committed = self.inner.take().expect("live publication").commit();
+        if committed.is_err() {
+            let _ = self.reconcile_removed(identity);
+        }
+        committed
+    }
+    fn cleanup_checked(
+        &mut self,
+        check: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let observed = self.observe_named();
+        let identity = self.identity().ok();
+        let cleaned = self.inner_mut().cleanup_checked(check);
+        // Cleanup may unlink successfully then fail its directory barrier or
+        // finalization hook. Release the absent route even on that error.
+        let reconciled = self.reconcile_removed(identity);
+        cleaned?;
+        observed?;
+        reconciled
+    }
+}
+impl Drop for V4PublicationGuard {
+    fn drop(&mut self) {
+        if self.inner.is_some() {
+            let _ = self.cleanup_checked(|| Ok(()));
+        }
+    }
 }
 
 struct V4AuthorityTransactionProof;
 
 fn commit_v4_publications(
-    publications: Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: Vec<(String, V4PublicationGuard)>,
     _proof: V4AuthorityTransactionProof,
 ) -> Result<(), GfError> {
     for (_, publication) in publications {
@@ -194,18 +359,16 @@ fn commit_v4_publications(
 }
 
 fn retain_v4_publication(
-    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: &mut Vec<(String, V4PublicationGuard)>,
     name: String,
-    publication: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    publication: Option<V4PublicationGuard>,
 ) {
     if let Some(publication) = publication {
         publications.push((name, publication));
     }
 }
 
-fn cleanup_v4_publication(
-    publication: &mut graphforge_filesystem::UnpublishedArtifactGuard,
-) -> Result<(), GfError> {
+fn cleanup_v4_publication(publication: &mut V4PublicationGuard) -> Result<(), GfError> {
     publication
         .cleanup_checked(|| {
             take_v4_output_cleanup_failure()
@@ -423,12 +586,13 @@ where
 /// Incremental v4 encoder used to tee the already-assigned fresh-construction
 /// node stream without retaining it or reading it a second time.
 pub(crate) struct V4OrdinalConstructionWriter<'a> {
+    allocation: Option<crate::StorageAllocationOperation>,
     generation: u64,
     index: &'a graphforge_filesystem::StableDirectory,
     cache_window: std::num::NonZeroU64,
     forward: StreamingV4Artifact,
     ranges: Vec<crate::V4OrdinalRange>,
-    publications: Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: Vec<(String, V4PublicationGuard)>,
     current: Option<V4OrdinalRangeWriter>,
     previous_forward_uuid: Option<[u8; 16]>,
     previous_ordinal_node_id: u64,
@@ -448,18 +612,30 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
     ) -> Result<Self, GfError> {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage_err)?;
-        Self::start_with_cache_window(generation, index, cache_window)
+        Self::start_with_cache_window(generation, index, cache_window, None)
+    }
+
+    pub(crate) fn start_with_allocation(
+        generation: u64,
+        index: &'a graphforge_filesystem::StableDirectory,
+        allocation: Option<&crate::StorageAllocationOperation>,
+    ) -> Result<Self, GfError> {
+        let cache_window =
+            graphforge_filesystem::cache_release_window_for_streams(2).map_err(storage_err)?;
+        Self::start_with_cache_window(generation, index, cache_window, allocation)
     }
 
     pub(crate) fn start_with_cache_window(
         generation: u64,
         index: &'a graphforge_filesystem::StableDirectory,
         cache_window: std::num::NonZeroU64,
+        allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
         if generation == 0 {
             return Err(storage_err("v4 ordinal generation is zero"));
         }
-        let forward = StreamingV4Artifact::create_with_window(index, "forward", cache_window)?;
+        let forward =
+            StreamingV4Artifact::create_with_window(index, "forward", cache_window, allocation)?;
         let validated = graphforge_filesystem::validate_cache_release_operation_windows(&[forward
             .writer
             .get_ref()
@@ -473,6 +649,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
         Ok(Self {
             generation,
             index,
+            allocation: allocation.cloned(),
             cache_window,
             forward,
             ranges: Vec::new(),
@@ -593,6 +770,7 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
                 self.ranges.len(),
                 node_id,
                 self.cache_window,
+                self.allocation.as_ref(),
             )?);
         }
         self.current
@@ -653,7 +831,12 @@ impl<'a> V4OrdinalConstructionWriter<'a> {
         // Construction has no deletions, but an explicit authenticated empty run
         // commits that fact instead of leaving tombstone authority implicit.
         let tombstone = finish_streamed_v4_artifact(
-            StreamingV4Artifact::create_with_window(self.index, "tombstones", self.cache_window)?,
+            StreamingV4Artifact::create_with_window(
+                self.index,
+                "tombstones",
+                self.cache_window,
+                self.allocation.as_ref(),
+            )?,
             "tombstones-v4",
             self.generation,
             crate::V4OrdinalArtifactKind::NodeTombstones,
@@ -720,7 +903,7 @@ fn add_v4_mapping_commitment(commitment: &mut [u8; 32], domain: u8, uuid: [u8; 1
 
 struct StreamingV4Artifact {
     writer: BufWriter<graphforge_filesystem::DurableFileCacheWriter>,
-    publication: graphforge_filesystem::UnpublishedArtifactGuard,
+    publication: V4PublicationGuard,
     digest: Sha256,
     bytes: u64,
 }
@@ -730,11 +913,11 @@ impl StreamingV4Artifact {
         index: &graphforge_filesystem::StableDirectory,
         role: &str,
         cache_window: std::num::NonZeroU64,
+        allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
         let temporary_name = format!(".v4-{role}-{}.tmp", Uuid::new_v4().simple());
-        let mut publication = index
-            .create_unpublished_replaceable_child(std::ffi::OsStr::new(&temporary_name))
-            .map_err(storage_err)?;
+        let mut publication =
+            V4PublicationGuard::create(index, &temporary_name, allocation).map_err(storage_err)?;
         if let Err(primary) = publication
             .verify_identity_with(|| v4_publication_io_failure("initial_file_identity"))
             .map_err(storage_err)
@@ -763,7 +946,18 @@ impl StreamingV4Artifact {
     }
 
     fn push(&mut self, bytes: &[u8]) -> Result<(), GfError> {
-        self.writer.write_all(bytes).map_err(storage_err)?;
+        let flushes =
+            self.writer.buffer().len().saturating_add(bytes.len()) > self.writer.capacity();
+        let written = self.writer.write_all(bytes).map_err(storage_err);
+        let observed = if flushes || written.is_err() {
+            self.publication
+                .observe(self.writer.get_ref().file())
+                .map_err(storage_err)
+        } else {
+            Ok(())
+        };
+        written?;
+        observed?;
         self.digest.update(bytes);
         self.bytes = self
             .bytes
@@ -784,7 +978,12 @@ impl StreamingV4Artifact {
             .get_mut()
             .sync_all_and_release()
             .map_err(storage_err);
+        let observed = self
+            .publication
+            .observe(self.writer.get_ref().file())
+            .map_err(storage_err);
         let cache_release = self.writer.get_ref().evidence();
+        let synchronized = combine_v4_cleanup(synchronized, observed, "v4 allocation observation");
         let finalized = combine_v4_cleanup(flushed, synchronized, "v4 output synchronization");
         drop(self.writer);
         let removed = cleanup_v4_publication(&mut self.publication);
@@ -798,7 +997,7 @@ impl StreamingV4Artifact {
 #[derive(Debug)]
 struct GuardedV4Artifact {
     artifact: crate::V4OrdinalArtifact,
-    publication: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    publication: Option<V4PublicationGuard>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -821,6 +1020,10 @@ fn finish_streamed_v4_artifact(
         merge_cache_release_evidence(&mut metrics.cache_release, cache_release);
         return combine_v4_cleanup(Err(primary), cleanup, "v4 failed output cleanup");
     }
+    writer
+        .publication
+        .observe(writer.writer.get_ref().file())
+        .map_err(storage_err)?;
     let cache_release = writer.writer.get_ref().evidence();
     let prepared = (|| -> Result<(_, _), GfError> {
         v4_publication_failure("fsync_evidence_overflow")?;
@@ -929,12 +1132,14 @@ impl V4OrdinalRangeWriter {
         ordinal: usize,
         first_node_id: u64,
         cache_window: std::num::NonZeroU64,
+        allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
         Ok(Self {
             artifact: StreamingV4Artifact::create_with_window(
                 index,
                 &format!("ordinal-{ordinal:08}"),
                 cache_window,
+                allocation,
             )?,
             first_node_id,
             count: 0,
@@ -987,7 +1192,7 @@ fn finish_streamed_v4_range(
     generation: u64,
     mut writer: V4OrdinalRangeWriter,
     ranges: &mut Vec<crate::V4OrdinalRange>,
-    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: &mut Vec<(String, V4PublicationGuard)>,
     metrics: &mut V4OrdinalBuildMetrics,
 ) -> Result<(), GfError> {
     let prepared = if writer.count == 0 {
@@ -1548,6 +1753,7 @@ pub(crate) fn publish_v4_construction_artifacts(
         &crate::V4OrdinalIdentityManifest,
     )>,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<
     (
         Vec<ConstructionIndexOutput>,
@@ -1573,6 +1779,7 @@ pub(crate) fn publish_v4_construction_artifacts(
                 &mut publications,
                 &mut local_names,
                 cancelled,
+                allocation,
             )?,
             None => (0, 0),
         };
@@ -1587,6 +1794,7 @@ pub(crate) fn publish_v4_construction_artifacts(
             generation,
             topology_delta_sha256,
             &local_names,
+            allocation,
         )?;
         publication.read_bytes = read_bytes;
         publication.read_operations = read_operations;
@@ -1632,9 +1840,10 @@ fn merge_construction_v4_delta(
     prior: &crate::V4OrdinalIdentityManifest,
     delta: &mut crate::V4OrdinalIdentityManifest,
     metrics: &mut V4OrdinalBuildMetrics,
-    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: &mut Vec<(String, V4PublicationGuard)>,
     local_names: &mut BTreeSet<String>,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(u64, u64), GfError> {
     if prior.topology_generation.checked_add(1) != Some(delta.topology_generation) {
         return Err(storage_err(
@@ -1727,6 +1936,7 @@ fn merge_construction_v4_delta(
         &mut combined,
         &mut created,
         cancelled,
+        allocation,
     )?;
     metrics.artifact_bytes = metrics
         .artifact_bytes
@@ -1770,7 +1980,7 @@ fn merge_construction_v4_delta(
 }
 
 fn cleanup_v4_publications(
-    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: &mut Vec<(String, V4PublicationGuard)>,
 ) -> Result<(), GfError> {
     let mut cleanup = Ok(());
     for (_, mut publication) in publications.drain(..).rev() {
@@ -1788,10 +1998,11 @@ fn publish_v4_construction_artifacts_inner(
     encoded: &graphforge_filesystem::StableDirectory,
     manifest: &crate::V4OrdinalIdentityManifest,
     metrics: &V4OrdinalBuildMetrics,
-    publications: &mut Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: &mut Vec<(String, V4PublicationGuard)>,
     generation: u64,
     topology_delta_sha256: &str,
     local_names: &BTreeSet<String>,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<
     (
         Vec<ConstructionIndexOutput>,
@@ -1843,18 +2054,28 @@ fn publish_v4_construction_artifacts_inner(
     // The selected project generation is still unpublished. Install the
     // receipt first, then its manifest, and create the lock last so every
     // visible construction inventory is complete and reopenable.
-    let (receipt_output, receipt_publication) =
-        install_construction_bytes(&index, V4_ORDINAL_RECEIPT, &receipt_body, &mut work)?;
+    let (receipt_output, receipt_publication) = install_construction_bytes(
+        &index,
+        V4_ORDINAL_RECEIPT,
+        &receipt_body,
+        &mut work,
+        allocation,
+    )?;
     outputs.push(receipt_output);
     publications.push((V4_ORDINAL_RECEIPT.to_owned(), receipt_publication));
     crate::graph_construction::construction_failpoint("v4_publish.after_receipt_install");
-    let (manifest_output, manifest_publication) =
-        install_construction_bytes(&index, V4_ORDINAL_MANIFEST, &manifest_body, &mut work)?;
+    let (manifest_output, manifest_publication) = install_construction_bytes(
+        &index,
+        V4_ORDINAL_MANIFEST,
+        &manifest_body,
+        &mut work,
+        allocation,
+    )?;
     outputs.push(manifest_output);
     publications.push((V4_ORDINAL_MANIFEST.to_owned(), manifest_publication));
     crate::graph_construction::construction_failpoint("v4_publish.after_manifest_install");
     let (lock_output, lock_publication) =
-        install_construction_bytes(&index, "ordinal-v4.lock", &[], &mut work)?;
+        install_construction_bytes(&index, "ordinal-v4.lock", &[], &mut work, allocation)?;
     outputs.push(lock_output);
     publications.push(("ordinal-v4.lock".to_owned(), lock_publication));
     crate::graph_construction::construction_failpoint("v4_publish.after_lock_install");
@@ -1923,6 +2144,7 @@ struct ConstructionRecoveryIntent {
 }
 
 struct ConstructionIndexCleanupGuard<'a> {
+    allocation: Option<crate::StorageAllocationOperation>,
     encoded: &'a graphforge_filesystem::StableDirectory,
     armed: bool,
 }
@@ -1936,7 +2158,10 @@ impl ConstructionIndexCleanupGuard<'_> {
 impl Drop for ConstructionIndexCleanupGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = cleanup_private_construction_index(self.encoded);
+            let _ = cleanup_private_construction_index_with_allocation(
+                self.encoded,
+                self.allocation.as_ref(),
+            );
         }
     }
 }
@@ -3014,11 +3239,13 @@ pub(crate) fn encode_construction_index(
     live_nodes: u64,
     live_edges: u64,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ConstructionIndexEncoding, GfError> {
-    cleanup_private_construction_index(encoded)?;
+    cleanup_private_construction_index_with_allocation(encoded, allocation)?;
     let mut cleanup_guard = ConstructionIndexCleanupGuard {
         encoded,
         armed: true,
+        allocation: allocation.cloned(),
     };
     let result = encode_construction_index_inner(
         source,
@@ -3031,6 +3258,7 @@ pub(crate) fn encode_construction_index(
         live_nodes,
         live_edges,
         cancelled,
+        allocation,
     );
     match result {
         Ok(value) => {
@@ -3038,9 +3266,9 @@ pub(crate) fn encode_construction_index(
             Ok(value)
         }
         Err(original) => {
-            cleanup_private_construction_index(encoded).map_err(|cleanup| {
-                storage_err(format!("{original}; exact cleanup also failed: {cleanup}"))
-            })?;
+            cleanup_private_construction_index_with_allocation(encoded, allocation).map_err(
+                |cleanup| storage_err(format!("{original}; exact cleanup also failed: {cleanup}")),
+            )?;
             Err(original)
         }
     }
@@ -3058,7 +3286,11 @@ fn encode_construction_index_inner(
     live_nodes: u64,
     live_edges: u64,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ConstructionIndexEncoding, GfError> {
+    let encoded =
+        crate::construction_directory::ConstructionDirectory::from_physical(encoded, allocation)
+            .map_err(storage_err)?;
     let graph = encoded
         .create_child_directory(std::ffi::OsStr::new("graph"))
         .map_err(storage_err)?;
@@ -3240,6 +3472,18 @@ fn encode_construction_index_inner(
         }
         Ok(())
     })();
+    let observed = (|| {
+        index
+            .observe_file(std::ffi::OsStr::new(&identity_temp), identity_writer.file())
+            .map_err(storage_err)?;
+        index
+            .observe_file(
+                std::ffi::OsStr::new(&surrogate_temp),
+                surrogate_writer.file(),
+            )
+            .map_err(storage_err)
+    })();
+    let streamed = combine_v4_cleanup(streamed, observed, "construction allocation observation");
     let released = input.finish().map_err(storage_err);
     let input_cache_release = match (streamed, released) {
         (Ok(()), Ok(released)) => released,
@@ -3275,6 +3519,15 @@ fn encode_construction_index_inner(
         .map_err(storage_err)?;
     surrogate_writer
         .sync_all_and_release()
+        .map_err(storage_err)?;
+    index
+        .observe_file(std::ffi::OsStr::new(&identity_temp), identity_writer.file())
+        .map_err(storage_err)?;
+    index
+        .observe_file(
+            std::ffi::OsStr::new(&surrogate_temp),
+            surrogate_writer.file(),
+        )
         .map_err(storage_err)?;
     let identity_cache_release = identity_writer.evidence();
     let surrogate_cache_release = surrogate_writer.evidence();
@@ -3388,7 +3641,7 @@ fn encode_construction_index_inner(
 
     let body = serde_json::to_vec(&manifest).map_err(storage_err)?;
     let (manifest_output, manifest_publication) =
-        install_construction_bytes(&index, MANIFEST, &body, &mut work)?;
+        install_construction_bytes(index.physical(), MANIFEST, &body, &mut work, allocation)?;
     crate::graph_construction::construction_failpoint("uuid_encode.after_manifest");
     artifacts.push(manifest_output);
     let retained_names = manifest_file_names(&manifest);
@@ -3488,9 +3741,20 @@ fn encode_construction_index_inner(
     })
 }
 
+#[cfg(test)]
 fn cleanup_private_construction_index(
     encoded: &graphforge_filesystem::StableDirectory,
 ) -> Result<(), GfError> {
+    cleanup_private_construction_index_with_allocation(encoded, None)
+}
+
+fn cleanup_private_construction_index_with_allocation(
+    encoded: &graphforge_filesystem::StableDirectory,
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(), GfError> {
+    let encoded =
+        crate::construction_directory::ConstructionDirectory::from_physical(encoded, allocation)
+            .map_err(storage_err)?;
     let graph = match encoded.open_child_directory(std::ffi::OsStr::new("graph")) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -3520,8 +3784,19 @@ fn cleanup_private_construction_index(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(storage_err(error)),
     }
-    let names = index.child_names().map_err(storage_err)?;
-    let v4_allowed = authenticate_private_v4_residue(&index, &names)?;
+    let names = if allocation.is_some() {
+        index.child_names_bounded(1_000_000)
+    } else {
+        index.child_names()
+    }
+    .map_err(storage_err)?;
+    let v4_allowed = authenticate_private_v4_residue(index.physical(), &names)?;
+    if allocation.is_some() {
+        for name in &names {
+            let file = index.open_child_file(name).map_err(storage_err)?;
+            index.observe_file(name, &file).map_err(storage_err)?;
+        }
+    }
     for name in names {
         let name_text = name
             .to_str()
@@ -3869,7 +4144,7 @@ fn sha256_reader_streaming(file: File) -> Result<String, GfError> {
 }
 
 fn write_construction_intent(
-    index: &graphforge_filesystem::StableDirectory,
+    index: &crate::construction_directory::ConstructionDirectory,
     intent: &ConstructionRecoveryIntent,
     work: &mut ConstructionIndexWork,
 ) -> Result<(), GfError> {
@@ -3880,10 +4155,18 @@ fn write_construction_intent(
         .create_replaceable_child_file(std::ffi::OsStr::new(&temporary))
         .map_err(storage_err)?;
     let identity = graphforge_filesystem::file_identity(&file).map_err(storage_err)?;
-    file.write_all(&body).map_err(storage_err)?;
+    let written = file.write_all(&body).map_err(storage_err);
+    let observed = index
+        .observe_file(std::ffi::OsStr::new(&temporary), &file)
+        .map_err(storage_err);
+    written?;
+    observed?;
     work.write_bytes = work.write_bytes.saturating_add(body.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
     file.sync_all().map_err(storage_err)?;
+    index
+        .observe_file(std::ffi::OsStr::new(&temporary), &file)
+        .map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     drop(file);
     index
@@ -3900,7 +4183,7 @@ fn write_construction_intent(
 
 #[allow(clippy::too_many_arguments)]
 fn compact_construction_levels(
-    output: &graphforge_filesystem::StableDirectory,
+    output: &crate::construction_directory::ConstructionDirectory,
     parent: Option<&AuthenticatedUuidIndexSnapshot>,
     generation: u64,
     manifest: &mut Manifest,
@@ -3988,7 +4271,7 @@ fn compact_construction_levels(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Streamed merge keeps both reader cleanups coupled to the primary result.
 fn merge_construction_records(
-    output: &graphforge_filesystem::StableDirectory,
+    output: &crate::construction_directory::ConstructionDirectory,
     parent: Option<&AuthenticatedUuidIndexSnapshot>,
     left: &FileRecord,
     right: &FileRecord,
@@ -4120,8 +4403,15 @@ fn merge_construction_records(
         right_reader.finish_cache(),
         "right construction merge source",
     );
+    let observed = output
+        .observe_file(std::ffi::OsStr::new(&temporary), writer.file())
+        .map_err(storage_err);
+    let merged = combine_v4_cleanup(merged, observed, "construction merge allocation");
     merged?;
     writer.sync_all_and_release().map_err(storage_err)?;
+    output
+        .observe_file(std::ffi::OsStr::new(&temporary), writer.file())
+        .map_err(storage_err)?;
     let write_cache_release = writer.evidence();
     work.fsync_operations = work
         .fsync_operations
@@ -4319,7 +4609,7 @@ fn finish_construction_cursor_pair<T>(
 }
 
 fn open_construction_source(
-    output: &graphforge_filesystem::StableDirectory,
+    output: &crate::construction_directory::ConstructionDirectory,
     parent: Option<&AuthenticatedUuidIndexSnapshot>,
     record: &FileRecord,
     output_names: &BTreeSet<String>,
@@ -4345,7 +4635,7 @@ fn open_construction_source(
 }
 
 fn install_empty_construction_run(
-    output: &graphforge_filesystem::StableDirectory,
+    output: &crate::construction_directory::ConstructionDirectory,
     prefix: &str,
     generation: u64,
     width: usize,
@@ -4367,7 +4657,7 @@ fn install_empty_construction_run(
 
 #[allow(clippy::too_many_arguments)]
 fn describe_and_install_construction_run(
-    output: &graphforge_filesystem::StableDirectory,
+    output: &crate::construction_directory::ConstructionDirectory,
     temporary: &str,
     identity: graphforge_filesystem::FileIdentity,
     prefix: &str,
@@ -4470,25 +4760,23 @@ fn install_construction_bytes(
     name: &str,
     bytes: &[u8],
     work: &mut ConstructionIndexWork,
-) -> Result<
-    (
-        ConstructionIndexOutput,
-        graphforge_filesystem::UnpublishedArtifactGuard,
-    ),
-    GfError,
-> {
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<(ConstructionIndexOutput, V4PublicationGuard), GfError> {
     let temporary = format!(".{name}-{}.tmp", Uuid::new_v4().simple());
-    let mut publication = output
-        .create_unpublished_replaceable_child(std::ffi::OsStr::new(&temporary))
-        .map_err(storage_err)?;
+    let mut publication =
+        V4PublicationGuard::create(output, &temporary, allocation).map_err(storage_err)?;
     let mut file = publication.take_file().map_err(storage_err)?;
-    file.write_all(bytes).map_err(storage_err)?;
+    let written = file.write_all(bytes).map_err(storage_err);
+    let observed = publication.observe(&file).map_err(storage_err);
+    written?;
+    observed?;
     work.write_bytes = work.write_bytes.saturating_add(bytes.len() as u64);
     work.write_operations = work.write_operations.saturating_add(1);
     work.peak_temporary_bytes = work
         .peak_temporary_bytes
         .max(u64::try_from(bytes.len()).map_err(storage_err)?);
     file.sync_all().map_err(storage_err)?;
+    publication.observe(&file).map_err(storage_err)?;
     work.fsync_operations = work.fsync_operations.saturating_add(1);
     let failpoint = match name {
         V4_ORDINAL_RECEIPT => Some("v4_publish.after_receipt_temp_fsync"),
@@ -7606,7 +7894,7 @@ fn write_v4_tombstone_artifact(
 
 struct GuardedV4Tombstones {
     run: crate::V4OrdinalTombstones,
-    publication: Option<graphforge_filesystem::UnpublishedArtifactGuard>,
+    publication: Option<V4PublicationGuard>,
 }
 
 struct V4TombstoneStreamWriter {
@@ -7625,13 +7913,14 @@ impl V4TombstoneStreamWriter {
     ) -> Result<Self, GfError> {
         let cache_window =
             graphforge_filesystem::cache_release_window_for_streams(1).map_err(storage_err)?;
-        Self::new_with_cache_window(index, generation, cache_window)
+        Self::new_with_cache_window(index, generation, cache_window, None)
     }
 
     fn new_with_cache_window(
         index: &graphforge_filesystem::StableDirectory,
         generation: u64,
         cache_window: std::num::NonZeroU64,
+        allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
         Ok(Self {
             generation,
@@ -7639,6 +7928,7 @@ impl V4TombstoneStreamWriter {
                 index,
                 "tombstones-delta",
                 cache_window,
+                allocation,
             )?,
             blocks: Vec::new(),
             block: Vec::with_capacity(V4_ORDINAL_BLOCK_BYTES),
@@ -7788,7 +8078,7 @@ struct V4CompactionWork {
     fsync_operations: u64,
     cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
     peak_configured_cache_window_bytes: u64,
-    publications: Vec<(String, graphforge_filesystem::UnpublishedArtifactGuard)>,
+    publications: Vec<(String, V4PublicationGuard)>,
 }
 
 fn compact_v4_binary_carry(
@@ -7805,6 +8095,7 @@ fn compact_v4_binary_carry(
         manifest,
         created,
         &mut || false,
+        None,
     )
 }
 
@@ -7815,6 +8106,7 @@ fn compact_v4_binary_carry_with_cancellation(
     manifest: &mut crate::V4OrdinalIdentityManifest,
     created: &mut HashMap<String, PathBuf>,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<V4CompactionWork, GfError> {
     let prior_manifest = manifest.clone();
     let prior_created = created.clone();
@@ -7825,6 +8117,7 @@ fn compact_v4_binary_carry_with_cancellation(
         manifest,
         created,
         cancelled,
+        allocation,
     ) {
         Ok(work) => Ok(work),
         Err(error) => {
@@ -7842,6 +8135,7 @@ fn compact_v4_binary_carry_inner(
     manifest: &mut crate::V4OrdinalIdentityManifest,
     created: &mut HashMap<String, PathBuf>,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<V4CompactionWork, GfError> {
     let mut work = V4CompactionWork::default();
     loop {
@@ -7866,6 +8160,7 @@ fn compact_v4_binary_carry_inner(
             right.1,
             &mut work,
             cancelled,
+            allocation,
         )?;
         created.insert(
             merged_forward.artifact.name.clone(),
@@ -7891,6 +8186,7 @@ fn compact_v4_binary_carry_inner(
             right.1,
             &mut work,
             cancelled,
+            allocation,
         )?;
         compact_v4_tombstone_interval(
             pinned,
@@ -7902,6 +8198,7 @@ fn compact_v4_binary_carry_inner(
             right.1,
             &mut work,
             cancelled,
+            allocation,
         )?;
         work.compactions = work.compactions.saturating_add(1);
     }
@@ -8125,6 +8422,7 @@ fn merge_v4_forward_artifacts(
     generation: u64,
     work: &mut V4CompactionWork,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<GuardedV4Artifact, GfError> {
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(3).map_err(storage_err)?;
@@ -8148,8 +8446,12 @@ fn merge_v4_forward_artifacts(
             .map_err(storage_err)?,
         ),
     ];
-    let mut writer =
-        StreamingV4Artifact::create_with_window(index, "forward-compact", cache_window)?;
+    let mut writer = StreamingV4Artifact::create_with_window(
+        index,
+        "forward-compact",
+        cache_window,
+        allocation,
+    )?;
     let configured = record_v4_compaction_windows(
         work,
         &[
@@ -8288,6 +8590,7 @@ fn compact_v4_ordinal_interval(
     last_generation: u64,
     work: &mut V4CompactionWork,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let mut replacement = Vec::new();
     let mut cursor = 0;
@@ -8327,6 +8630,7 @@ fn compact_v4_ordinal_interval(
                 replacement.len(),
                 manifest.ordinal_ranges[start].first_node_id,
                 cache_window,
+                allocation,
             )?;
             let compacted = (|| -> Result<u64, GfError> {
                 let mut reader_peak = 0_u64;
@@ -8439,6 +8743,7 @@ fn compact_v4_tombstone_interval(
     last_generation: u64,
     work: &mut V4CompactionWork,
     cancelled: &mut impl FnMut() -> bool,
+    allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<(), GfError> {
     let selected = manifest
         .tombstones
@@ -8467,8 +8772,12 @@ fn compact_v4_tombstone_interval(
             .map_err(storage_err)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut merged =
-        V4TombstoneStreamWriter::new_with_cache_window(index, last_generation, cache_window)?;
+    let mut merged = V4TombstoneStreamWriter::new_with_cache_window(
+        index,
+        last_generation,
+        cache_window,
+        allocation,
+    )?;
     let mut windows = readers
         .iter()
         .map(|reader| reader.get_ref().window_bytes())
@@ -10117,7 +10426,8 @@ pub(crate) mod tests {
                 .unwrap(),
             );
         }
-        let writer = V4TombstoneStreamWriter::new_with_cache_window(&index, 9, window).unwrap();
+        let writer =
+            V4TombstoneStreamWriter::new_with_cache_window(&index, 9, window, None).unwrap();
         let mut windows = readers
             .iter()
             .map(graphforge_filesystem::FileCacheReleasingReader::window_bytes)
@@ -10154,6 +10464,7 @@ pub(crate) mod tests {
             2,
             &mut work,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10228,6 +10539,7 @@ pub(crate) mod tests {
             2,
             &mut work,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10256,6 +10568,7 @@ pub(crate) mod tests {
             3,
             &mut release_work,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10361,6 +10674,7 @@ pub(crate) mod tests {
             &hex_sha256(b"delta"),
             None,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10391,6 +10705,7 @@ pub(crate) mod tests {
             &hex_sha256(b"delta"),
             None,
             &mut || false,
+            None,
         )
         .unwrap();
         for (name, identity, bytes) in &originals {
@@ -10496,6 +10811,7 @@ pub(crate) mod tests {
             2,
             &mut work,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10564,6 +10880,7 @@ pub(crate) mod tests {
             2,
             &mut work,
             &mut || false,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -10996,6 +11313,7 @@ pub(crate) mod tests {
             &hex_sha256(b"delta"),
             None,
             &mut || false,
+            None,
         )
         .unwrap();
 
@@ -11035,6 +11353,7 @@ pub(crate) mod tests {
                 records,
                 0,
                 &mut || false,
+                None,
             )
             .unwrap();
             let identity_blocks = (records * IDENTITY_RECORD_BYTES).div_ceil(BULK_IO_BYTES as u64);
@@ -12238,6 +12557,43 @@ pub(crate) mod tests {
                 .to_string()
                 .contains("invalid node surrogate")
         );
+    }
+
+    #[test]
+    fn v4_observed_guard_tracks_install_and_failed_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = graphforge_filesystem::StableDirectory::open(root.path()).unwrap();
+        let operation = crate::StorageAllocationOperation::default();
+        let mut guard =
+            V4PublicationGuard::create(&directory, ".temporary", Some(&operation)).unwrap();
+        let mut file = guard.take_file().unwrap();
+        file.write_all(&vec![7_u8; 32768]).unwrap();
+        file.sync_all().unwrap();
+        guard.observe(&file).unwrap();
+        let actual = graphforge_filesystem::file_space_usage(&file)
+            .unwrap()
+            .allocated_bytes;
+        assert!(actual > 0);
+        assert_eq!(operation.totals().unwrap(), (actual, actual));
+        drop(file);
+        guard
+            .install_child(std::ffi::OsStr::new("installed"))
+            .unwrap();
+        let expected =
+            crate::StorageAllocationOperation::from_paths(&[root.path().to_path_buf()]).unwrap();
+        assert_eq!(operation.snapshot().unwrap(), expected.snapshot().unwrap());
+        let error = guard
+            .cleanup_checked(|| Err(std::io::Error::other("after unlink")))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unpublished artifact cleanup finalization failed")
+        );
+        assert!(!root.path().join("installed").exists());
+        assert_eq!(operation.totals().unwrap(), (0, actual));
+        drop(guard);
+        assert_eq!(operation.totals().unwrap(), (0, actual));
     }
 
     #[test]

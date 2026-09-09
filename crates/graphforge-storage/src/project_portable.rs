@@ -286,13 +286,14 @@ fn import_portable_project_after_prepare(
     };
     let target = target.to_owned();
     before_stage(&target)?;
-    let publication =
-        match stage_project_generation_from_admitted_parent(admission, parent, &request, None)? {
-            ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
-            ProjectStageOutcome::Staged(staged) => {
-                staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
-            }
-        };
+    let publication = match stage_project_generation_from_admitted_parent(
+        admission, parent, &request, None, None,
+    )? {
+        ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
+        ProjectStageOutcome::Staged(staged) => {
+            staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
+        }
+    };
     Ok(PortableImportReceipt {
         envelope_sha256: validated.envelope_sha256,
         source_generation_uuid: validated.source_generation_uuid,

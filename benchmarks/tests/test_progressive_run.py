@@ -31,9 +31,11 @@ from graphforge_bench.progressive_run import (
     resolve_executables,
     run,
     validate_fixture_bundle,
+    validate_lifecycle_storage_receipt,
     write_plan,
     write_s20_projection,
 )
+from tests.lifecycle_storage_fixture import retained_owners
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = "78b75aed8fef71cfa3e4700b80a05d6b71e64f22"
@@ -231,7 +233,8 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
             two_hop,
             imported_storage,
             {
-                "contract": "graphforge-lifecycle-storage/1",
+                "contract": "graphforge-lifecycle-storage/2",
+                "retained_owners": retained_owners(105, 120, 150, 50),
                 "source_project_current_allocated_bytes": 105,
                 "retained_storage_bytes": 200,
                 "transient_peak_storage_bytes": 300,
@@ -343,6 +346,56 @@ def rung_storage_attribution(scale: int) -> dict:
 
 
 class ProgressiveRunControllerTests(unittest.TestCase):
+    def test_lifecycle_owner_reconciliation_preserves_aliases_and_rejects_omissions(self) -> None:
+        receipt = authoritative_receipts(18)["reopen_proof"][-1]
+        # Overlapping owner views sum above the actual union; no additive estimate is used.
+        validate_lifecycle_storage_receipt(receipt)
+        for name in receipt["retained_owners"]:
+            with self.subTest(missing_owner=name):
+                missing = copy.deepcopy(receipt)
+                del missing["retained_owners"][name]
+                with self.assertRaises(ControllerError):
+                    validate_lifecycle_storage_receipt(missing)
+        for field, value in (
+            ("retained_storage_bytes", 149),
+            ("retained_storage_bytes", 426),
+            ("transient_peak_storage_bytes", 199),
+            ("source_project_current_allocated_bytes", 104),
+            ("contract", "graphforge-lifecycle-storage/1"),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = copy.deepcopy(receipt)
+                invalid[field] = value
+                with self.assertRaises(ControllerError):
+                    validate_lifecycle_storage_receipt(invalid)
+        for field in (
+            "allocated_bytes",
+            "physical_logical_bytes",
+            "logical_bytes",
+            "logical_references",
+        ):
+            with self.subTest(empty_owner_field=field):
+                invalid = copy.deepcopy(receipt)
+                invalid["retained_owners"]["source-project-locks"]["totals"][field] = 1
+                with self.assertRaises(ControllerError):
+                    validate_lifecycle_storage_receipt(invalid)
+        empty_file = copy.deepcopy(receipt)
+        empty_file["retained_owners"]["source-project-locks"]["totals"].update(
+            logical_references=1, physical_objects=1
+        )
+        validate_lifecycle_storage_receipt(empty_file)
+        for field, value in (
+            ("logical_references", 0),
+            ("physical_logical_bytes", 151),
+            ("allocated_bytes", True),
+            ("native_identity", "must-not-be-exposed"),
+        ):
+            with self.subTest(owner_field=field):
+                invalid = copy.deepcopy(receipt)
+                invalid["retained_owners"]["portable-package"]["totals"][field] = value
+                with self.assertRaises(ControllerError):
+                    validate_lifecycle_storage_receipt(invalid)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name)
@@ -630,7 +683,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         missing_lifecycle = authoritative_receipts(18)
         missing_lifecycle["reopen_proof"] = missing_lifecycle["reopen_proof"][:-1]
         changed_gf = graphforge(18, missing_lifecycle)
-        with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/1"):
+        with self.assertRaisesRegex(ControllerError, "graphforge-lifecycle-storage/2"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )

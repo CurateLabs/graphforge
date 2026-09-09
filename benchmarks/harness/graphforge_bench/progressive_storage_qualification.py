@@ -14,7 +14,12 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
-from graphforge_bench.progressive_run import publish_json_no_clobber
+from graphforge_bench.progressive_run import (
+    RETAINED_OWNER_NAMES,
+    ControllerError,
+    publish_json_no_clobber,
+    validate_lifecycle_storage_receipt,
+)
 
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BENCHMARK_ROOT.parent
@@ -25,7 +30,7 @@ QUALIFICATION_SCHEMA = (
 PROVIDER_RESULT_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-result.json"
 PROVIDER_PLAN_SCHEMA = BENCHMARK_ROOT / "schemas/progressive-provider-run-plan.json"
 ASSEMBLY_CONTRACT = "graphforge-progressive-rung-assembly/3"
-QUALIFICATION_CONTRACT = "graphforge-g500-ladder-qualification/3"
+QUALIFICATION_CONTRACT = "graphforge-g500-ladder-qualification/4"
 S26_EDGES = 1 << 30
 S26_NODES = 1 << 26
 SOURCE_CATEGORIES = (
@@ -190,6 +195,10 @@ def validate_source_rung(value: Mapping[str, Any]) -> None:
     if value.get("status") != "passed" or value.get("correctness") is not True:
         raise StorageQualificationError("storage qualification requires passed correct rungs")
     storage = value["storage_attribution"]
+    try:
+        validate_lifecycle_storage_receipt(storage["lifecycle"])
+    except ControllerError as error:
+        raise StorageQualificationError(str(error)) from error
     _validate_snapshot(storage["source"], "source")
     _validate_snapshot(storage["imported"], "imported")
     construction = storage["construction"]
@@ -267,6 +276,10 @@ def adapt_rung(value: Mapping[str, Any]) -> dict[str, Any]:
         _artifact(name, source["categories"][category], owner)
         for name, category, owner in SOURCE_CATEGORIES
     ]
+    artifacts.extend(
+        _artifact(name, lifecycle["retained_owners"][name]["totals"], "lifecycle_owner_snapshot")
+        for name in RETAINED_OWNER_NAMES
+    )
     artifacts.append(
         _artifact(
             "construction_staging_spill",

@@ -7,6 +7,7 @@ import unittest
 
 from graphforge_bench.smoke import FIXTURE_DIRECTORIES, discover_fixtures, workspace_root
 from jsonschema import Draft202012Validator
+from tests.lifecycle_storage_fixture import retained_owners
 
 
 class WorkspaceSmokeTests(unittest.TestCase):
@@ -58,7 +59,8 @@ class WorkspaceSmokeTests(unittest.TestCase):
         )
         validator = Draft202012Validator(schema)
         receipt = {
-            "contract": "graphforge-lifecycle-storage/1",
+            "contract": "graphforge-lifecycle-storage/2",
+            "retained_owners": retained_owners(1024, 1024, 1024),
             "source_project_current_allocated_bytes": 1024,
             "retained_storage_bytes": 2048,
             "transient_peak_storage_bytes": 4096,
@@ -83,6 +85,17 @@ class WorkspaceSmokeTests(unittest.TestCase):
             }
 
         validator.validate(evidence(receipt))
+        historical = {key: value for key, value in receipt.items() if key != "retained_owners"}
+        historical["contract"] = "graphforge-lifecycle-storage/1"
+        validator.validate(evidence(historical))
+        self.assertFalse(validator.is_valid(evidence({**receipt, "storage": {"identity": "raw"}})))
+        for name in receipt["retained_owners"]:
+            invalid = {**receipt, "retained_owners": dict(receipt["retained_owners"])}
+            del invalid["retained_owners"][name]
+            self.assertFalse(validator.is_valid(evidence(invalid)))
+        invalid = {**receipt, "retained_owners": retained_owners(1024, 1024, 1024)}
+        invalid["retained_owners"]["source-project-locks"]["totals"]["allocated_bytes"] = 1
+        self.assertFalse(validator.is_valid(evidence(invalid)))
         for missing in (
             "source_project_current_allocated_bytes",
             "retained_storage_bytes",

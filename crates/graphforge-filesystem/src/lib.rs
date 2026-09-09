@@ -633,6 +633,13 @@ impl io::Seek for WindowsCasWriter {
 
 #[cfg(windows)]
 impl WindowsCasWriter {
+    /// Borrow the owned writer for first-party metadata accounting.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn as_file(&self) -> &File {
+        &self.file
+    }
+
     /// Flush the exact retained writer.
     pub fn sync_all(&self) -> io::Result<()> {
         self.file.sync_all()

@@ -72,7 +72,35 @@ impl GraphForge {
         }
         let parent_topology_generation = graphforge_storage::read_topology_generation(&self.dir)?;
         let project = self.resolved_generation.container_root();
-        let inner = if self.ontology_mode == OntologyMode::Exploratory {
+        let inner = if let Some(allocation) = &self.allocation_operation {
+            let authority = if self.ontology_mode == OntologyMode::Exploratory {
+                None
+            } else {
+                Some(graphforge_storage::ConstructionSemanticAuthority {
+                    composition: self
+                        .workspace_ontology_composition()?
+                        .ok_or_else(|| validation("construction semantic composition is absent"))?,
+                    bindings: self
+                        .semantic_storage_bindings
+                        .lock()
+                        .expect("semantic storage binding lock poisoned")
+                        .clone()
+                        .ok_or_else(|| validation("construction semantic bindings are absent"))?,
+                })
+            };
+            graphforge_storage::GraphConstructionSession::open_with_allocation(
+                project,
+                &self.dir,
+                session_uuid,
+                parent_topology_generation,
+                self.ontology_mode,
+                authority,
+                budgets,
+                self.lifecycle_mode,
+                resume,
+                allocation,
+            )?
+        } else if self.ontology_mode == OntologyMode::Exploratory {
             if resume {
                 graphforge_storage::GraphConstructionSession::resume_with_mode_and_lifecycle_from_graph(
                     project,

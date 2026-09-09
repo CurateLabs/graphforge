@@ -292,7 +292,7 @@
       "reopen_proof"
     ],
     "evidence_schema": "graphforge-public-certification/1",
-    "storage_receipt": "graphforge-lifecycle-storage/1"
+    "storage_receipt": "graphforge-lifecycle-storage/2"
   },
   "gate": {
     "requires_previous_pass": true,

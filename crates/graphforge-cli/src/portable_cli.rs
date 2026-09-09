@@ -218,6 +218,7 @@ pub(crate) fn run_portable(
     command: PortableCommand,
     json: bool,
     output: &mut dyn Write,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), crate::CliRuntimeError> {
     match command {
         PortableCommand::Preview(args) => {
@@ -288,7 +289,7 @@ pub(crate) fn run_portable(
             }
         },
         command => {
-            return run_portable_without_graph(project_root, command, json, output);
+            return run_portable_without_graph(project_root, command, json, output, allocation);
         }
     }
     Ok(())
@@ -309,6 +310,7 @@ pub(crate) fn run_portable_without_graph(
     command: PortableCommand,
     json: bool,
     output: &mut dyn Write,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), crate::CliRuntimeError> {
     match command {
         PortableCommand::Preview(_)
@@ -340,15 +342,15 @@ pub(crate) fn run_portable_without_graph(
             Ok(())
         }
         PortableCommand::Import(args) => {
-            let result = GraphForge::import_portable_v2(
-                project_root,
-                &PortableV2ImportRequest {
-                    input: args.input,
-                    operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
-                    limits: PortableV2Limits::default(),
-                },
-                None,
-            )
+            let request = PortableV2ImportRequest {
+                input: args.input,
+                operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
+                limits: PortableV2Limits::default(),
+            };
+            let result = match allocation {
+                Some(allocation) => allocation.import(project_root, &request, None),
+                None => GraphForge::import_portable_v2(project_root, &request, None),
+            }
             .map_err(map_portable)?;
             let transient_peak_allocated_bytes = import_transient_peak(&result)?;
             if json {

@@ -330,6 +330,7 @@ struct SessionManifest {
 
 /// Owned handle for a durable staged import. The handle contains no live rows.
 pub struct GraphImportSession {
+    allocation_operation: Option<graphforge_storage::StorageAllocationOperation>,
     root: PathBuf,
     manifest: SessionManifest,
     observed: Instant,
@@ -369,8 +370,9 @@ impl GraphForge {
             construction_session_uuid: None,
             updated_unix_millis: unix_millis()?,
         };
-        write_manifest(&root, &manifest)?;
+        write_manifest_with_allocation(&root, &manifest, self.allocation_operation.as_ref())?;
         Ok(GraphImportSession {
+            allocation_operation: self.allocation_operation.clone(),
             root,
             manifest,
             observed: Instant::now(),
@@ -391,6 +393,7 @@ impl GraphForge {
             return Err(validation("terminal import sessions cannot be resumed"));
         }
         Ok(GraphImportSession {
+            allocation_operation: self.allocation_operation.clone(),
             root,
             manifest,
             observed: Instant::now(),
@@ -438,6 +441,7 @@ impl GraphForge {
                 continue;
             }
             GraphImportSession {
+                allocation_operation: self.allocation_operation.clone(),
                 root,
                 manifest,
                 observed: Instant::now(),
@@ -450,6 +454,52 @@ impl GraphForge {
 }
 
 impl GraphImportSession {
+    fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
+        let observed = if let Some(allocation) = &self.allocation_operation {
+            let directory = graphforge_filesystem::StableDirectory::open(
+                temporary
+                    .parent()
+                    .ok_or_else(|| storage("import temporary has no parent"))?,
+            )
+            .map_err(storage)?;
+            let file = directory
+                .open_child_file(
+                    temporary
+                        .file_name()
+                        .ok_or_else(|| storage("import temporary has no name"))?,
+                )
+                .map_err(storage)?;
+            allocation.replace_file_at(temporary, &file)?;
+            Some(file)
+        } else {
+            None
+        };
+        fs::rename(temporary, destination).map_err(storage)?;
+        if let (Some(allocation), Some(file)) = (&self.allocation_operation, observed) {
+            allocation.remove_file_at(destination)?;
+            allocation.replace_file_at(destination, &file)?;
+            allocation.remove_file_at(temporary)?;
+        }
+        Ok(())
+    }
+
+    fn persist_manifest(&self) -> Result<(), GfError> {
+        write_manifest_with_allocation(
+            &self.root,
+            &self.manifest,
+            self.allocation_operation.as_ref(),
+        )
+    }
+
+    fn cleanup_source(&self, destination: &Path) -> Result<(), GfError> {
+        if fs::remove_file(destination).is_ok()
+            && let Some(allocation) = &self.allocation_operation
+        {
+            allocation.remove_file_at(destination)?;
+        }
+        Ok(())
+    }
+
     /// Durable identifier used for resume.
     #[must_use]
     pub const fn session_uuid(&self) -> Uuid {
@@ -506,7 +556,7 @@ impl GraphImportSession {
             .get_mut()
             .sync_all_and_release()
             .map_err(storage)?;
-        fs::rename(&temporary, &destination).map_err(storage)?;
+        self.publish_source(&temporary, &destination)?;
         let result = self.register_record(
             source_kind,
             name,
@@ -514,7 +564,7 @@ impl GraphImportSession {
             rows,
         );
         if result.is_err() {
-            let _ = fs::remove_file(destination);
+            self.cleanup_source(&destination)?;
         }
         result
     }
@@ -562,7 +612,7 @@ impl GraphImportSession {
             let _ = fs::remove_file(&temporary);
             return Err(storage("Parquet source length changed while copying"));
         }
-        fs::rename(&temporary, &destination).map_err(storage)?;
+        self.publish_source(&temporary, &destination)?;
         let result = self.register_record(
             match kind {
                 BulkInputKind::Node => ImportSourceKind::ParquetNodes,
@@ -573,7 +623,7 @@ impl GraphImportSession {
             0,
         );
         if result.is_err() {
-            let _ = fs::remove_file(destination);
+            self.cleanup_source(&destination)?;
         }
         result
     }
@@ -586,7 +636,7 @@ impl GraphImportSession {
             );
         self.observed = Instant::now();
         self.manifest.updated_unix_millis = unix_millis()?;
-        write_manifest(&self.root, &self.manifest)?;
+        self.persist_manifest()?;
         Ok(self.manifest.progress.clone())
     }
 
@@ -635,13 +685,13 @@ impl GraphImportSession {
                         batch_index += 1;
                         self.manifest.sources[source_index].batches_staged = batch_index;
                         self.manifest.sources[source_index].inflight_batch = None;
-                        write_manifest(&self.root, &self.manifest)?;
+                        self.persist_manifest()?;
                         return Ok(());
                     }
                     let recovering = source.inflight_batch == Some(batch_index);
                     if !recovering {
                         self.manifest.sources[source_index].inflight_batch = Some(batch_index);
-                        write_manifest(&self.root, &self.manifest)?;
+                        self.persist_manifest()?;
                     }
                     let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
                     let staged = match (input_kind, cancellation) {
@@ -666,7 +716,7 @@ impl GraphImportSession {
                             .progress
                             .rows_rejected
                             .saturating_add((batch.num_rows() as u64).min(remaining));
-                        write_manifest(&self.root, &self.manifest)?;
+                        self.persist_manifest()?;
                         return Err(error);
                     }
                     batch_index += 1;
@@ -683,13 +733,13 @@ impl GraphImportSession {
                         .peak_batch_rows
                         .max(batch.num_rows() as u64);
                     self.update_construction_progress(&construction.progress())?;
-                    write_manifest(&self.root, &self.manifest)?;
+                    self.persist_manifest()?;
                     Ok(())
                 })?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
-                write_manifest(&self.root, &self.manifest)?;
+                self.persist_manifest()?;
             }
         }
         construction.validate_and_seal(cancellation)?;
@@ -723,7 +773,7 @@ impl GraphImportSession {
             }
             Err(error) => {
                 self.manifest.phase = ImportPhase::Quarantined;
-                let _ = write_manifest(&self.root, &self.manifest);
+                let _ = self.persist_manifest();
                 Err(error)
             }
         }
@@ -793,7 +843,7 @@ impl GraphImportSession {
         }
         let session = graph.begin_graph_construction(budgets)?;
         self.manifest.construction_session_uuid = Some(session.session_uuid());
-        write_manifest(&self.root, &self.manifest)?;
+        self.persist_manifest()?;
         Ok(session)
     }
 
@@ -1151,14 +1201,36 @@ fn import_root(graph: &GraphForge, session_uuid: Uuid) -> Result<PathBuf, GfErro
     Ok(sessions.join(session_uuid.hyphenated().to_string()))
 }
 
+#[cfg(test)]
 fn write_manifest(root: &Path, manifest: &SessionManifest) -> Result<(), GfError> {
+    write_manifest_with_allocation(root, manifest, None)
+}
+
+fn write_manifest_with_allocation(
+    root: &Path,
+    manifest: &SessionManifest,
+    allocation: Option<&graphforge_storage::StorageAllocationOperation>,
+) -> Result<(), GfError> {
     let temporary = root.join("manifest.tmp");
     let mut file = BufWriter::new(File::create(&temporary).map_err(storage)?);
     serde_json::to_writer(&mut file, manifest).map_err(storage)?;
     file.flush().map_err(storage)?;
     file.get_ref().sync_all().map_err(storage)?;
+    let observed = if let Some(allocation) = allocation {
+        allocation.replace_file_at(&temporary, file.get_ref())?;
+        Some(file.get_ref().try_clone().map_err(storage)?)
+    } else {
+        None
+    };
     drop(file);
-    fs::rename(temporary, root.join(MANIFEST)).map_err(storage)
+    let target = root.join(MANIFEST);
+    fs::rename(&temporary, &target).map_err(storage)?;
+    if let (Some(allocation), Some(file)) = (allocation, observed) {
+        allocation.remove_file_at(&target)?;
+        allocation.replace_file_at(&target, &file)?;
+        allocation.remove_file_at(&temporary)?;
+    }
+    Ok(())
 }
 
 fn read_manifest(root: &Path) -> Result<SessionManifest, GfError> {

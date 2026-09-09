@@ -642,8 +642,11 @@ Ordinary `storage-attribution --json` receipts preserve source and clean-import
 allocated and logical-EOF components separately. Construction evidence owns
 logical I/O, reader-call, transient-construction, and publication-work
 components; it is not relabeled as a whole-lifecycle storage peak. Passed rung
-evidence therefore also requires an authenticated `graphforge-lifecycle-storage/1`
-owner-union receipt for retained and transient lifecycle maxima. The controller
+evidence therefore also requires a `graphforge-lifecycle-storage/2`
+owner-union receipt for retained and transient lifecycle maxima, including raw
+reference, logical-EOF, physical-object, and allocated-byte facts for all 15
+published, private, control, and artifact owner views. The source denominator
+remains the authenticated published-project union. The controller
 fails closed while that ordinary receipt is absent rather than summing project
 owners or treating portable logical payload bytes as allocated storage.
 Newly assembled rungs identify `graphforge-progressive-rung-assembly/3`; for

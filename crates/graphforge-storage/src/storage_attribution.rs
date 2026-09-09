@@ -468,41 +468,42 @@ pub struct StorageAllocationLifecycle {
     peak_allocated_bytes: u64,
 }
 
+struct PreparedAllocationChange {
+    active: BTreeMap<String, Option<(u64, u64)>>,
+    current: u64,
+    peak: u64,
+}
+
 impl StorageAllocationLifecycle {
+    /// Check diagnostic raw owner facts against a per-file baseline without exposing identities.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn matches_file_inventory(
+        &self,
+        identities: &BTreeMap<String, u64>,
+        logical_references: u64,
+    ) -> bool {
+        u64::try_from(self.owners.len()).ok() == Some(logical_references)
+            && self.owners.values().all(|owner| owner.len() == 1)
+            && self.active.len() == identities.len()
+            && self
+                .active
+                .iter()
+                .all(|(identity, (allocated, _))| identities.get(identity) == Some(allocated))
+    }
+
     /// Replace an owner's exact authenticated identity inventory.
     pub fn replace_owner(
         &mut self,
         owner: impl Into<String>,
         identities: &BTreeMap<String, u64>,
     ) -> Result<(), GfError> {
-        let mut candidate = self.clone();
-        candidate.replace_owner_inner(owner.into(), identities)?;
-        *self = candidate;
-        Ok(())
-    }
-
-    fn replace_owner_inner(
-        &mut self,
-        owner: String,
-        identities: &BTreeMap<String, u64>,
-    ) -> Result<(), GfError> {
-        self.remove_owner(&owner)?;
-        let mut installed = BTreeSet::new();
-        for (identity, allocated) in identities {
-            if let Some((existing, references)) = self.active.get_mut(identity) {
-                if existing != allocated {
-                    return Err(validation("active identity allocation changed"));
-                }
-                *references = checked_add(*references, 1)?;
-            } else {
-                self.current_allocated_bytes =
-                    checked_add(self.current_allocated_bytes, *allocated)?;
-                self.active.insert(identity.clone(), (*allocated, 1));
-            }
-            installed.insert(identity.clone());
-            self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
-        }
-        self.owners.insert(owner, installed);
+        let owner = owner.into();
+        let removed = self.owners.get(&owner).cloned().unwrap_or_default();
+        let prepared = self.prepare_change(&removed, identities)?;
+        self.commit_change(prepared);
+        self.owners
+            .insert(owner, identities.keys().cloned().collect());
         Ok(())
     }
 
@@ -523,90 +524,158 @@ impl StorageAllocationLifecycle {
         owner: impl Into<String>,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
-        let mut candidate = self.clone();
-        candidate.apply_owner_transition_inner(owner.into(), transition)?;
-        *self = candidate;
-        Ok(())
-    }
-
-    fn apply_owner_transition_inner(
-        &mut self,
-        owner: String,
-        transition: &StorageAllocationTransition,
-    ) -> Result<(), GfError> {
+        let owner = owner.into();
         if transition
             .installed
             .keys()
-            .any(|identity| transition.removed.contains(identity))
+            .any(|id| transition.removed.contains(id))
         {
             return Err(validation(
                 "allocation transition installs and removes one identity",
             ));
         }
-        let owner_identities = self.owners.entry(owner).or_default();
-        for identity in &transition.removed {
-            if !owner_identities.remove(identity) {
-                return Err(validation(
-                    "allocation transition removes an unowned identity",
-                ));
-            }
-            let (allocated, references) = self
-                .active
-                .get(identity)
-                .copied()
-                .ok_or_else(|| validation("active transition identity is absent"))?;
-            if references == 1 {
-                self.active.remove(identity);
-                self.current_allocated_bytes = self
-                    .current_allocated_bytes
-                    .checked_sub(allocated)
-                    .ok_or_else(|| validation("active allocation underflow"))?;
-            } else {
-                self.active
-                    .insert(identity.clone(), (allocated, references - 1));
-            }
+        let existing = self.owners.get(&owner);
+        if transition
+            .removed
+            .iter()
+            .any(|id| existing.is_none_or(|ids| !ids.contains(id)))
+        {
+            return Err(validation(
+                "allocation transition removes an unowned identity",
+            ));
         }
-        for (identity, allocated) in &transition.installed {
-            if !owner_identities.insert(identity.clone()) {
-                return Err(validation(
-                    "allocation transition installs an owned identity",
-                ));
-            }
-            if let Some((existing, references)) = self.active.get_mut(identity) {
-                if existing != allocated {
-                    return Err(validation("active identity allocation changed"));
-                }
-                *references = checked_add(*references, 1)?;
-            } else {
-                self.current_allocated_bytes =
-                    checked_add(self.current_allocated_bytes, *allocated)?;
-                self.active.insert(identity.clone(), (*allocated, 1));
-            }
-            self.peak_allocated_bytes = self.peak_allocated_bytes.max(self.current_allocated_bytes);
+        if transition
+            .installed
+            .keys()
+            .any(|id| existing.is_some_and(|ids| ids.contains(id)))
+        {
+            return Err(validation(
+                "allocation transition installs an owned identity",
+            ));
         }
+        let prepared = self.prepare_change(&transition.removed, &transition.installed)?;
+        self.commit_change(prepared);
+        let identities = self.owners.entry(owner).or_default();
+        for id in &transition.removed {
+            identities.remove(id);
+        }
+        identities.extend(transition.installed.keys().cloned());
         Ok(())
     }
 
     /// Remove an owner and decrement every exact identity reference.
     pub fn remove_owner(&mut self, owner: &str) -> Result<(), GfError> {
-        let Some(identities) = self.owners.remove(owner) else {
+        let Some(removed) = self.owners.get(owner) else {
             return Ok(());
         };
-        for identity in identities {
+        let prepared = self.prepare_change(removed, &BTreeMap::new())?;
+        self.commit_change(prepared);
+        self.owners.remove(owner);
+        Ok(())
+    }
+
+    // Validate only changed identities. All fallible arithmetic and consistency
+    // checks precede mutation; unrelated owners are neither copied nor visited.
+    fn prepare_change(
+        &self,
+        removed: &BTreeSet<String>,
+        installed: &BTreeMap<String, u64>,
+    ) -> Result<PreparedAllocationChange, GfError> {
+        let mut active = BTreeMap::new();
+        let mut current = self.current_allocated_bytes;
+        for id in removed {
             let (allocated, references) = self
                 .active
-                .get(&identity)
+                .get(id)
                 .copied()
                 .ok_or_else(|| validation("active identity owner is absent"))?;
-            if references == 1 {
-                self.active.remove(&identity);
-                self.current_allocated_bytes = self
-                    .current_allocated_bytes
+            let references = references
+                .checked_sub(1)
+                .ok_or_else(|| validation("active identity has no references"))?;
+            let next = if references == 0 {
+                current = current
                     .checked_sub(allocated)
                     .ok_or_else(|| validation("active allocation underflow"))?;
+                None
             } else {
-                self.active.insert(identity, (allocated, references - 1));
+                Some((allocated, references))
+            };
+            active.insert(id.clone(), next);
+        }
+        for (id, allocated) in installed {
+            let previous = active
+                .get(id)
+                .copied()
+                .unwrap_or_else(|| self.active.get(id).copied());
+            let next = if let Some((previous, references)) = previous {
+                if previous != *allocated || references == 0 {
+                    return Err(validation("active identity allocation changed"));
+                }
+                (*allocated, checked_add(references, 1)?)
+            } else {
+                current = checked_add(current, *allocated)?;
+                (*allocated, 1)
+            };
+            active.insert(id.clone(), Some(next));
+        }
+        Ok(PreparedAllocationChange {
+            active,
+            current,
+            peak: self.peak_allocated_bytes.max(current),
+        })
+    }
+
+    fn commit_change(&mut self, prepared: PreparedAllocationChange) {
+        for (id, value) in prepared.active {
+            if let Some(value) = value {
+                self.active.insert(id, value);
+            } else {
+                self.active.remove(&id);
             }
+        }
+        self.current_allocated_bytes = prepared.current;
+        self.peak_allocated_bytes = prepared.peak;
+    }
+
+    /// Validate private continuation state once before operation admission.
+    /// This checks structure and arithmetic, not the provenance of its peak.
+    /// The transport must separately bound encoded bytes and authenticate the
+    /// producing operation; ordinary writer updates do not repeat this scan.
+    ///
+    /// # Errors
+    /// Rejects excessive inventory, dangling identities, inconsistent reference
+    /// counts or totals, overflow, and a peak below current allocation.
+    pub fn validate_continuation(&self) -> Result<(), GfError> {
+        const MAX_ENTRIES: usize = 1_000_000;
+        if self.owners.len() > MAX_ENTRIES || self.active.len() > MAX_ENTRIES {
+            return Err(validation("allocation continuation exceeds entry bound"));
+        }
+        let mut references = BTreeMap::<&String, u64>::new();
+        let mut entries = 0_usize;
+        for ids in self.owners.values() {
+            entries = entries
+                .checked_add(ids.len())
+                .filter(|count| *count <= MAX_ENTRIES)
+                .ok_or_else(|| validation("allocation continuation exceeds reference bound"))?;
+            for id in ids {
+                let count = references.entry(id).or_default();
+                *count = checked_add(*count, 1)?;
+            }
+        }
+        if references.len() != self.active.len() {
+            return Err(validation("allocation continuation identity set differs"));
+        }
+        let mut current = 0_u64;
+        for (id, (allocated, count)) in &self.active {
+            if *count == 0 || references.get(id) != Some(count) {
+                return Err(validation(
+                    "allocation continuation reference counts differ",
+                ));
+            }
+            current = checked_add(current, *allocated)?;
+        }
+        if current != self.current_allocated_bytes || self.peak_allocated_bytes < current {
+            return Err(validation("allocation continuation totals differ"));
         }
         Ok(())
     }
@@ -1235,7 +1304,7 @@ fn checked_add(left: u64, right: u64) -> Result<u64, GfError> {
         .ok_or_else(|| validation("storage attribution counter overflow"))
 }
 
-fn native_identity_key(volume_serial: u64, file_id: &[u8; 16]) -> String {
+pub(crate) fn native_identity_key(volume_serial: u64, file_id: &[u8; 16]) -> String {
     use std::fmt::Write as _;
     let mut value = format!("{volume_serial:016x}:");
     for byte in file_id {
@@ -1291,6 +1360,129 @@ mod tests {
             .publish()
             .unwrap();
         crate::resolve_project_generation(project).unwrap()
+    }
+
+    #[test]
+    fn lifecycle_rejected_updates_are_atomic() {
+        let mut state = StorageAllocationLifecycle::default();
+        state
+            .replace_owner(
+                "writer",
+                &BTreeMap::from([("a".into(), 4), ("b".into(), 8)]),
+            )
+            .unwrap();
+        state
+            .replace_owner("alias", &BTreeMap::from([("a".into(), 4)]))
+            .unwrap();
+        let before = state.clone();
+        assert!(
+            state
+                .replace_owner("writer", &BTreeMap::from([("a".into(), 5)]))
+                .is_err()
+        );
+        assert_eq!(state, before);
+        for change in [
+            StorageAllocationTransition {
+                installed: BTreeMap::new(),
+                removed: ["a".into(), "missing".into()].into(),
+            },
+            StorageAllocationTransition {
+                installed: BTreeMap::from([("a".into(), 4)]),
+                removed: ["b".into()].into(),
+            },
+            StorageAllocationTransition {
+                installed: BTreeMap::from([("b".into(), 8)]),
+                removed: ["b".into()].into(),
+            },
+            StorageAllocationTransition {
+                installed: BTreeMap::from([("z".into(), u64::MAX)]),
+                removed: ["b".into()].into(),
+            },
+        ] {
+            assert!(state.apply_owner_transition("writer", &change).is_err());
+            assert_eq!(state, before);
+        }
+        let mut malformed = before.clone();
+        malformed.active.remove("b");
+        let unchanged = malformed.clone();
+        assert!(malformed.remove_owner("writer").is_err());
+        assert_eq!(malformed, unchanged);
+        let mut overflow = before.clone();
+        overflow.active.get_mut("a").unwrap().1 = u64::MAX;
+        let unchanged = overflow.clone();
+        assert!(
+            overflow
+                .replace_owner("new-alias", &BTreeMap::from([("a".into(), 4)]))
+                .is_err()
+        );
+        assert_eq!(overflow, unchanged);
+        state.remove_owner("alias").unwrap();
+        state
+            .replace_owner("writer", &BTreeMap::from([("a".into(), 20)]))
+            .unwrap();
+        assert_eq!(
+            (
+                state.current_allocated_bytes(),
+                state.peak_allocated_bytes()
+            ),
+            (20, 20)
+        );
+        state.validate_continuation().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_continuation_rejects_inconsistent_deserialized_state() {
+        let mut valid = StorageAllocationLifecycle::default();
+        valid
+            .replace_owner("one", &BTreeMap::from([("a".into(), 4096)]))
+            .unwrap();
+        valid
+            .replace_owner("two", &BTreeMap::from([("a".into(), 4096)]))
+            .unwrap();
+        valid.validate_continuation().unwrap();
+        let encoded = serde_json::to_value(&valid).unwrap();
+        let mut malformed = Vec::new();
+        let mut value = encoded.clone();
+        value["active"]["a"][1] = serde_json::json!(1);
+        malformed.push(value);
+        let mut value = encoded.clone();
+        value["active"]["a"][1] = serde_json::json!(0);
+        malformed.push(value);
+        let mut value = encoded.clone();
+        value["active"]["extra"] = serde_json::json!([1, 1]);
+        malformed.push(value);
+        let mut value = encoded.clone();
+        value["owners"]["one"] = serde_json::json!(["absent"]);
+        malformed.push(value);
+        let mut value = encoded.clone();
+        value["current_allocated_bytes"] = serde_json::json!(4097);
+        malformed.push(value);
+        let mut value = encoded;
+        value["peak_allocated_bytes"] = serde_json::json!(4095);
+        malformed.push(value);
+        for value in malformed {
+            let state: StorageAllocationLifecycle = serde_json::from_value(value).unwrap();
+            assert!(state.validate_continuation().is_err());
+        }
+    }
+
+    #[test]
+    fn lifecycle_single_file_preflight_does_not_copy_unrelated_inventory() {
+        let mut state = StorageAllocationLifecycle::default();
+        for count in [16, 256, 4096] {
+            let identities = (0..count).map(|n| (format!("file-{n}"), 1)).collect();
+            state.replace_owner("unrelated", &identities).unwrap();
+            let prepared = state
+                .prepare_change(&BTreeSet::new(), &BTreeMap::from([("new".into(), 7)]))
+                .unwrap();
+            assert_eq!(
+                prepared.active.len(),
+                1,
+                "only the affected identity is staged"
+            );
+            assert_eq!(prepared.current, count + 7);
+            state.validate_continuation().unwrap();
+        }
     }
 
     #[test]

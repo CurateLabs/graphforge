@@ -362,6 +362,7 @@ fn compact_graph_delta_after_prepare(
         parent,
         &generation_request,
         Some(staging.path()),
+        None,
     )? {
         ProjectStageOutcome::Staged(staged) => {
             // Pre-publication verification authenticates the exact bounded

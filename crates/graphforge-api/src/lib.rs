@@ -421,6 +421,7 @@ struct GenerationPropertyAuthority {
 /// resolved [`OntologyMode`], an optional compiled ontology, and a shared
 /// [`RuntimeCatalog`] that the binder grows as it observes new labels/properties.
 pub struct GraphForge {
+    allocation_operation: Option<graphforge_storage::StorageAllocationOperation>,
     /// Opaque ownership token for public handles created by this instance.
     identity: GraphIdentity,
     /// The configured path, if the instance is Parquet-backed; `None` for an
@@ -605,6 +606,32 @@ impl GraphForge {
         Self::new_with_options(path, GraphForgeOptions::default())
     }
 
+    /// Open a project for first-party allocation qualification using an explicit
+    /// pre-operation owner context. Ordinary facade options remain unchanged.
+    ///
+    /// # Errors
+    /// Returns ordinary project-open errors and allocation evidence errors.
+    #[doc(hidden)]
+    pub(crate) fn open_with_allocation_diagnostics(
+        path: &std::path::Path,
+        allocation: graphforge_storage::StorageAllocationOperation,
+    ) -> Result<Self, GfError> {
+        let path = graphforge_storage::StorageAllocationOperation::resolve_project_path(path)?;
+        let (options, policy) = GraphForgeOptions::default().validate()?;
+        let (resolved, recovery) =
+            graphforge_storage::open_or_initialize_project_with_allocation(&path, &allocation)?;
+        let mut graph = Self::open_resolved_with_options(
+            path.clone(),
+            resolved,
+            false,
+            options,
+            policy,
+            recovery,
+        )?;
+        graph.allocation_operation = Some(allocation);
+        Ok(graph)
+    }
+
     /// Create a facade with an explicit embedded project-write policy.
     ///
     /// # Errors
@@ -658,6 +685,7 @@ impl GraphForge {
             last_mutation_outcome: Mutex::new(None),
             graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&options)),
             write_options: options,
+            allocation_operation: None,
             heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
                 resource_policy.max_concurrent_heavy_queries,
             )),
@@ -867,6 +895,7 @@ impl GraphForge {
             last_mutation_outcome: Mutex::new(None),
             graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&write_options)),
             write_options,
+            allocation_operation: None,
             resource_policy,
             compute_pool,
             heavy_query_admission,
@@ -3457,13 +3486,30 @@ impl GraphForge {
         let stream = self.execute_stream_with_params(cypher, params)?;
         let schema = stream.schema();
         let result = self.block_on(async {
-            graphforge_io::sink_record_batch_stream(
+            graphforge_io::sink_record_batch_stream_observed(
                 stream,
                 schema,
                 std::path::Path::new(path),
                 format,
                 options,
                 || cancellation.is_some_and(CancellationToken::is_cancelled),
+                |path, file| {
+                    let Some(allocation) = &self.allocation_operation else {
+                        return Ok(());
+                    };
+                    let path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        std::env::current_dir()
+                            .map_err(|error| error.to_string())?
+                            .join(path)
+                    };
+                    match file {
+                        Some(file) => allocation.replace_file_at(&path, file),
+                        None => allocation.remove_file_at(&path),
+                    }
+                    .map_err(|error| error.to_string())
+                },
             )
             .await
             .map_err(|error| {
@@ -20765,3 +20811,7 @@ pub use graphforge_core::portable::{
 };
 pub use graphforge_portable_oci::{HttpOciRegistry, MemoryOciRegistry, PortableV2OciRegistry};
 pub use portable_oci::{PortableV2OciPublishRequest, PortableV2OciPullRequest};
+
+mod allocation_diagnostics;
+#[doc(hidden)]
+pub use allocation_diagnostics::StorageAllocationDiagnostics;

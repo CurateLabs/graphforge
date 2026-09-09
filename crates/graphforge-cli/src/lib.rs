@@ -221,6 +221,10 @@ fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, graphforge_api::Gf
 #[derive(Parser)]
 #[command(name = "graphforge", version, about = "GraphForge CLI")]
 struct Cli {
+    /// First-party qualification channel; input contains no graph payload.
+    #[arg(long, global = true, hide = true)]
+    allocation_diagnostics: bool,
+
     /// Print version info and exit.
     #[arg(long)]
     info: bool,
@@ -329,6 +333,7 @@ fn run_storage_attribution(
     path: &Path,
     json: bool,
     output: &mut dyn Write,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), graphforge_api::GfError> {
     let storage = graph.storage_attribution_receipt()?;
     storage.validate_reconciliation()?;
@@ -336,7 +341,7 @@ fn run_storage_attribution(
     let path_text = path.to_str().ok_or_else(|| {
         graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
     })?;
-    let reopened = GraphForge::new(Some(path_text))?;
+    let reopened = open_cli_graph(Path::new(path_text), allocation)?;
     let reopened_storage = reopened.storage_attribution_receipt()?;
     reopened_storage.validate_reconciliation()?;
     if reopened_storage != storage {
@@ -1226,6 +1231,48 @@ impl From<graphforge_api::MultiOntologyError> for CliRuntimeError {
 
 #[allow(clippy::too_many_lines)]
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
+    let allocation = if cli.allocation_diagnostics {
+        if !cli.json {
+            return Err(graphforge_api::GfError::Validation(
+                "allocation diagnostics require --json".into(),
+            )
+            .into());
+        }
+        Some(graphforge_api::StorageAllocationDiagnostics::read(
+            std::io::stdin().lock(),
+        )?)
+    } else {
+        None
+    };
+    let result = run_with_allocation(cli, output, allocation.as_ref())?;
+    if let Some(allocation) = allocation {
+        let (current, peak) = allocation.totals()?;
+        serde_json::to_writer(&mut *output, &serde_json::json!({"contract":"graphforge-allocation-operation/1", "current_allocated_bytes":current, "peak_allocated_bytes":peak})).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+    Ok(result)
+}
+
+fn open_cli_graph(
+    path: &Path,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+) -> Result<GraphForge, graphforge_api::GfError> {
+    if let Some(allocation) = allocation {
+        allocation.open(path)
+    } else {
+        let path = path.to_str().ok_or_else(|| {
+            graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
+        })?;
+        GraphForge::new(Some(path))
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_allocation(
+    cli: Cli,
+    output: &mut dyn Write,
+    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+) -> Result<i32, CliRuntimeError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
             .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
@@ -1266,22 +1313,27 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
                     command,
                     cli.json,
                     output,
+                    allocation,
                 )
                 .map(|()| 0);
             }
             portable_cli::PortableCommand::Import(_) => {
                 let path = resolve_project_path(cli.project, cli.project_dir)?;
-                return portable_cli::run_portable_without_graph(&path, command, cli.json, output)
-                    .map(|()| 0);
+                return portable_cli::run_portable_without_graph(
+                    &path, command, cli.json, output, allocation,
+                )
+                .map(|()| 0);
             }
             command => {
                 let path = resolve_project_path(cli.project, cli.project_dir)?;
                 let path_text = path.to_str().ok_or_else(|| {
                     graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
                 })?;
-                let mut graph = GraphForge::new(Some(path_text))?;
-                return portable_cli::run_portable(&mut graph, &path, command, cli.json, output)
-                    .map(|()| 0);
+                let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
+                return portable_cli::run_portable(
+                    &mut graph, &path, command, cli.json, output, allocation,
+                )
+                .map(|()| 0);
             }
         }
     }
@@ -1300,7 +1352,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     let path_text = path.to_str().ok_or_else(|| {
         graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
     })?;
-    let mut graph = GraphForge::new(Some(path_text))?;
+    let mut graph = open_cli_graph(Path::new(path_text), allocation)?;
     let command = match command {
         Command::Export(args) => {
             return run_export(&graph, args, cli.json, output)
@@ -1323,7 +1375,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
                 .map_err(Into::into);
         }
         Command::StorageAttribution => {
-            return run_storage_attribution(graph, &path, cli.json, output)
+            return run_storage_attribution(graph, &path, cli.json, output, allocation)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
