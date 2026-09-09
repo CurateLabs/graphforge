@@ -5,7 +5,7 @@ use datafusion::logical_expr::{Signature, Volatility};
 use datafusion::scalar::ScalarValue;
 use std::sync::LazyLock;
 
-use super::{cypher_order, cypher_value_eq, scalar_as_f64};
+use super::value_semantics::{cypher_order, cypher_value_eq, scalar_as_f64};
 
 /// `min`/`max` over a heterogeneous (tagged) column use Cypher orderability
 /// ([`cypher_order`]) — native struct min/max would order by `__het_key` (null for
@@ -624,7 +624,6 @@ fn is_percentile_numeric_type(dt: &DataType) -> bool {
 mod tests {
     use super::*;
     use datafusion::arrow::array::Array;
-    use datafusion::arrow::datatypes::Field;
     use std::sync::Arc;
 
     #[test]
