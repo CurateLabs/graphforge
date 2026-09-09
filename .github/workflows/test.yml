@@ -1252,7 +1252,7 @@ jobs:
             //:resource_inputs \
             //:release_bins 2>&1 | tee dist/bazel-representative-build.log
 
-      - name: Real tiny progressive lifecycle producer
+      - name: Real tiny and ownership-growth lifecycle producer
         shell: bash
         run: |
           set -euo pipefail
@@ -1267,6 +1267,13 @@ jobs:
           test -x "$gf_bin"
           uv run --project benchmarks --locked python \
             benchmarks/scripts/test-tiny-lifecycle-certification.py \
+            --gf "$gf_bin" \
+            --certify benchmarks/target/debug/graphforge-benchmark-certify \
+            --generator benchmarks/target/debug/graphforge-benchmark-graph500-generator \
+            --workspace-root "$RUNNER_TEMP"
+          uv run --project benchmarks --locked python \
+            benchmarks/scripts/test-tiny-lifecycle-certification.py \
+            --growth \
             --gf "$gf_bin" \
             --certify benchmarks/target/debug/graphforge-benchmark-certify \
             --generator benchmarks/target/debug/graphforge-benchmark-graph500-generator \
