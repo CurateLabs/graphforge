@@ -7628,17 +7628,12 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
             progress.evidence.input_batches
         );
         assert_eq!(progress.evidence.immutable_artifacts, 7 * factor + 4);
-        // Each full node-detail run (272 * 65,536 bytes = 17 MiB) and
-        // edge-detail run (304 * 65,536 bytes = 19 MiB) crosses the 16 MiB
-        // per-stream cache window once. The final edge chunk is two rows
-        // short and still crosses once; the separately acknowledged one-edge
-        // chunk does not. These synchronized rollovers add two real barriers
-        // per factor to the original artifact publication protocol on Linux.
-        let rollover_fsyncs = u64::from(cfg!(target_os = "linux")) * 2 * factor;
-        assert_eq!(
-            progress.evidence.fsync_operations,
-            23 * factor + 13 + rollover_fsyncs
-        );
+        // Compact Node details use 16 + 1 + 4 = 21 bytes per row, and
+        // LINK details use 48 + 1 + 4 = 53. At 65,536 rows their streams
+        // remain below the 16 MiB cache window, as do the fixed identity
+        // and endpoint streams. No cache-window rollover adds a barrier
+        // to the artifact publication protocol.
+        assert_eq!(progress.evidence.fsync_operations, 23 * factor + 13);
         assert!(progress.evidence.peak_batch_rows <= CONSTRUCTION_BATCH_ROWS as u64);
         assert!(progress.evidence.peak_accounted_live_bytes <= 64 * 1024 * 1024);
         assert!(progress.evidence.peak_run_records <= budgets.max_run_records as u64);
@@ -7675,11 +7670,11 @@ fn tiny_construction_ladder_resumes_and_scales_bounded_work_linearly() {
                     // One bounded edge merge window may overlap its immutable
                     // identity, endpoint, and detail inputs with the unified
                     // identity output. These are the construction format's
-                    // fixed record widths, so this is a derived byte bound,
+                    // wire widths for this fixture, so this is a derived bound,
                     // not general-purpose disk slack.
                     const IDENTITY_RECORD_BYTES: u64 = 16;
                     const ENDPOINT_RECORD_BYTES: u64 = 48;
-                    const EDGE_DETAIL_RECORD_BYTES: u64 = 304;
+                    const EDGE_DETAIL_RECORD_BYTES: u64 = 48 + 1 + REL_TYPE.len() as u64;
                     const UNIFIED_IDENTITY_RECORD_BYTES: u64 = 32;
                     let fixed_edge_merge_window_bytes = CONSTRUCTION_BATCH_ROWS as u64
                         * (IDENTITY_RECORD_BYTES
