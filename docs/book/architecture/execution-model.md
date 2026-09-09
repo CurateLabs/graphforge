@@ -77,6 +77,14 @@ GraphPlan (Graph IR)
 
 ---
 
+## List expression execution
+
+`graphforge-rel` keeps quantifier and list-comprehension UDF execution in the
+private `expr::list_execution` module. Expression lowering constructs those UDFs;
+the module owns three-valued quantifier reduction, invariant-predicate evaluation,
+comprehension filtering/projection, and rewriting their embedded expression trees.
+The public `rewrite_embedded_expressions` entry point retains its existing path.
+
 ## Error identity across DataFusion
 
 A GraphForge operator wraps its `GfError` as a downcastable
