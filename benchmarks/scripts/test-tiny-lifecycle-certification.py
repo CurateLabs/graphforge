@@ -183,9 +183,13 @@ def positive_slopes(name: str, values: list[int], work: list[int]) -> None:
         raise ValueError(f"{name}: adjacent normalized slopes differ by more than factor2")
 
 
-def normalized_ceiling(name: str, values: list[int], work: list[int]) -> None:
-    if values[0] <= 0 or any(b < a for a, b in itertools.pairwise(values)):
-        raise ValueError(f"{name}: positive nondecreasing evidence required")
+def normalized_ceiling(
+    name: str, values: list[int], work: list[int], *, nondecreasing: bool = True
+) -> None:
+    if any(value <= 0 for value in values):
+        raise ValueError(f"{name}: positive evidence required")
+    if nondecreasing and any(b < a for a, b in itertools.pairwise(values)):
+        raise ValueError(f"{name}: nondecreasing evidence required")
     if any(values[i] * work[0] > 2 * values[0] * work[i] for i in (1, 2)):
         raise ValueError(f"{name}: exceeds existing factor2 normalized ceiling")
 
@@ -251,7 +255,17 @@ def validate_growth(observations: list[dict[str, object]]) -> None:
                 if len(set(values)) != 1:
                     raise ValueError(f"{owner}: fixed lock inventory changed")
             elif owner in DATA_OWNERS:
-                normalized_ceiling(f"{owner}.{field}", values, work)
+                # Published inventories include content-addressed radix nodes. Their
+                # count depends on hashed path prefixes, not graph row count; a
+                # larger graph can need fewer nodes. Each run still reconciles
+                # every physical file independently before this growth check.
+                published_count = owner in {
+                    "source-project-published",
+                    "imported-project-published",
+                } and field in {"logical_references", "physical_objects"}
+                normalized_ceiling(
+                    f"{owner}.{field}", values, work, nondecreasing=not published_count
+                )
                 if field in ("logical_bytes", "physical_logical_bytes"):
                     positive_slopes(f"{owner}.{field}", values, work)
             # Transaction journals have fixed protocol shape and fixed-width

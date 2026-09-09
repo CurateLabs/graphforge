@@ -10,7 +10,9 @@ use arrow::compute::concat;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_search::{FusedSearchHit, VectorLifecycleLimits, project_label_members};
-use graphforge_storage::{list_property_stems, read_properties};
+use graphforge_storage::{
+    AuthenticatedPropertyInventory, PropertyRouteKind, read_properties_from_inventory,
+};
 
 use super::GfError;
 
@@ -44,6 +46,7 @@ type LoadedProperties = (
 /// hit order is preserved exactly; retrieval owns scoring and ordering.
 pub(crate) fn shape_search_output(
     project_dir: &std::path::Path,
+    inventory: &AuthenticatedPropertyInventory,
     label_id: graphforge_value::EntityTypeSelection,
     hits: &[FusedSearchHit],
 ) -> Result<RecordBatch, GfError> {
@@ -61,7 +64,7 @@ pub(crate) fn shape_search_output(
         )));
     }
 
-    let (batches, rows, properties) = load_properties(project_dir, &eligible)?;
+    let (batches, rows, properties) = load_properties(project_dir, inventory, &eligible)?;
     let mut fields = Vec::<Arc<Field>>::with_capacity(properties.len() + 3);
     let mut columns = Vec::<ArrayRef>::with_capacity(properties.len() + 3);
 
@@ -139,17 +142,18 @@ fn validate_hits(hits: &[FusedSearchHit]) -> Result<(), GfError> {
 
 fn load_properties(
     project_dir: &std::path::Path,
+    inventory: &AuthenticatedPropertyInventory,
     eligible: &BTreeSet<[u8; 16]>,
 ) -> Result<LoadedProperties, GfError> {
     let mut batches = Vec::new();
     let mut rows = HashMap::new();
     let mut properties = BTreeMap::<String, PropertySpec>::new();
-    for stem in list_property_stems(project_dir) {
-        let stem_batches = read_properties(project_dir, &stem)
+    for stem in inventory.routes(PropertyRouteKind::Node) {
+        let stem_batches = read_properties_from_inventory(project_dir, inventory, stem)
             .map_err(|error| storage(format!("read property table {stem:?}: {error}")))?;
         for batch in stem_batches {
             let batch_index = batches.len();
-            let uuids = uuid_column(&batch, &stem)?;
+            let uuids = uuid_column(&batch, stem)?;
             let mut contains_member = false;
             for row in 0..batch.num_rows() {
                 if uuids.is_null(row) {
@@ -284,6 +288,22 @@ fn execution(message: impl Into<String>) -> GfError {
 
 #[cfg(test)]
 mod tests {
+    fn shape_test_output(
+        project_dir: &std::path::Path,
+        label_id: graphforge_value::EntityTypeSelection,
+        hits: &[FusedSearchHit],
+    ) -> Result<RecordBatch, GfError> {
+        let catalog = graphforge_storage::GraphCatalog::open(
+            project_dir,
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .map_err(|error| storage(error.to_string()))?;
+        let inventory = catalog
+            .admitted_inventory()
+            .expect("admitted fixture inventory");
+        shape_search_output(project_dir, &inventory, label_id, hits)
+    }
     use std::collections::HashMap;
 
     use arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
@@ -375,7 +395,7 @@ mod tests {
             hit(1, 0.5, MatchedOn::TextAndVector),
             hit(3, -0.25, MatchedOn::Text),
         ];
-        let batch = shape_search_output(
+        let batch = shape_test_output(
             project.path(),
             graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),
@@ -451,7 +471,7 @@ mod tests {
             [Some("vector"), Some("text+vector"), Some("text")]
         );
 
-        let empty = shape_search_output(
+        let empty = shape_test_output(
             project.path(),
             graphforge_value::EntityTypeSelection::Known(
                 graphforge_value::EntityTypeId::decode(9).unwrap(),
@@ -473,7 +493,7 @@ mod tests {
         writer.flush().unwrap();
 
         assert!(matches!(
-            shape_search_output(
+            shape_test_output(
                 project.path(),
                 graphforge_value::EntityTypeSelection::Known(
                     graphforge_value::EntityTypeId::decode(9).unwrap()
@@ -483,7 +503,7 @@ mod tests {
             Err(GfError::Validation(_))
         ));
         assert!(matches!(
-            shape_search_output(
+            shape_test_output(
                 project.path(),
                 graphforge_value::EntityTypeSelection::Known(
                     graphforge_value::EntityTypeId::decode(9).unwrap()
@@ -493,7 +513,7 @@ mod tests {
             Err(GfError::Validation(_))
         ));
         assert!(matches!(
-            shape_search_output(
+            shape_test_output(
                 project.path(),
                 graphforge_value::EntityTypeSelection::Known(
                     graphforge_value::EntityTypeId::decode(9).unwrap()

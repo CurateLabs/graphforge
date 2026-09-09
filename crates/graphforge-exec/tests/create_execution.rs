@@ -19,7 +19,7 @@ use graphforge_ir::{Binder, GraphPlan, IrLiteral, OntologyMode, RuntimeCatalog};
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::{
     EdgePropertyTable, GraphCatalog, PropertyOverlayLimits, PropertyRouteKind, PropertyTable,
-    enumerate_property_fragments, visit_authenticated_property_snapshots,
+    visit_authenticated_property_snapshots,
 };
 
 fn hr_handle() -> OntologyHandle {
@@ -65,6 +65,13 @@ fn parquet_row_count(path: &Path) -> usize {
     reader.next().unwrap().unwrap().num_rows()
 }
 
+fn admitted_inventory(dir: &Path) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    GraphCatalog::open(dir, None, &RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
 fn property_rows(
     dir: &Path,
     kind: PropertyRouteKind,
@@ -89,7 +96,7 @@ fn property_rows(
 }
 
 fn assert_canonical_fragment(dir: &Path, kind: PropertyRouteKind, route: &str) {
-    let fragments = enumerate_property_fragments(dir, kind, route).unwrap();
+    let fragments = admitted_inventory(dir).property_fragments(kind, route);
     assert!(!fragments.is_empty(), "missing immutable property fragment");
     for fragment in fragments {
         assert_ne!(fragment.id.generation, 0, "new writes are not legacy files");
@@ -163,9 +170,12 @@ async fn create_edge_between_two_nodes_strict() {
         parquet_row_count(&dir.path().join("topology/nodes.parquet")),
         2
     );
-    let edges = dir.path().join("topology/edges/IS_FRIEND_OF.parquet");
+    let inventory = admitted_inventory(dir.path());
+    let paths = inventory.edge_files(Some("IS_FRIEND_OF"));
+    assert_eq!(paths.len(), 1);
+    let edges = &paths[0].1;
     assert!(edges.exists(), "typed edge file should exist");
-    assert_eq!(parquet_row_count(&edges), 1);
+    assert_eq!(parquet_row_count(edges), 1);
 }
 
 #[tokio::test]

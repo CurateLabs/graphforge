@@ -1003,11 +1003,9 @@ fn sync_materialized_tree(root: &Path) -> Result<(), PortableV2Error> {
     }
     directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for directory in directories {
-        File::open(directory)
-            .and_then(|file| file.sync_all())
-            .map_err(|_| {
-                PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync staged directory")
-            })?;
+        crate::project_publication::sync_directory(&directory).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync staged directory")
+        })?;
     }
     Ok(())
 }

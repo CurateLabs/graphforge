@@ -79,7 +79,12 @@ impl GraphForge {
                 force_stale,
                 limit,
             )?;
-            let batch = shape_search_output(&self.dir, label_id, &hits)?;
+            let batch = shape_search_output(
+                &self.dir,
+                &self.property_inventory_for_session(),
+                label_id,
+                &hits,
+            )?;
             if before == read_search_generation(&self.dir)? {
                 return Ok(batch);
             }

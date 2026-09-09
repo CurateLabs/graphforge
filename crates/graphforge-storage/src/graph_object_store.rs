@@ -810,6 +810,27 @@ impl GraphManifestState {
                 .ok_or_else(|| validation("manifest open read calls overflow"))?;
             Ok(bytes)
         })?;
+        let mut authority_read_bytes = 0_u64;
+        crate::route_component::authenticate_manifest_routes(
+            root.format_version,
+            &entries,
+            |entry| {
+                let (bytes, io) = read_graph_object_by_digest_file_counted(
+                    lease.cas.open_digest(&entry.content_sha256)?,
+                    &entry.content_sha256,
+                    64 * 1024 * 1024,
+                    &lease.cas.diagnostic_root,
+                )?;
+                authority_read_bytes = authority_read_bytes
+                    .checked_add(io.bytes)
+                    .ok_or_else(|| validation("route authority read bytes overflow"))?;
+                read_calls = read_calls
+                    .checked_add(io.calls)
+                    .ok_or_else(|| validation("route authority read count overflow"))?;
+                Ok(bytes)
+            },
+        )?;
+        evidence.authority_read_bytes = authority_read_bytes;
         evidence.application_read_calls = read_calls;
         Ok((
             Self {
@@ -1208,7 +1229,33 @@ pub fn append_graph_files_v2(
     sealed_paths: &[PathBuf],
     tombstones: &[String],
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
-    append_graph_files_v2_inner(lease, workspace, state, sealed_paths, None, tombstones)
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        state,
+        sealed_paths,
+        None,
+        tombstones,
+        None,
+    )
+}
+
+/// Seal a verified mapped import into a fresh CAS root, checking exact table closure.
+pub(crate) fn append_mapped_import_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    paths: &[PathBuf],
+    routes: &crate::route_component::RouteTable,
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        &mut GraphManifestState::empty(),
+        paths,
+        None,
+        &[],
+        Some(routes),
+    )
 }
 
 /// Publish writer-authenticated files with one copy-and-hash authentication
@@ -1231,7 +1278,106 @@ pub(crate) fn append_authenticated_graph_files_v2(
         &paths,
         Some(sealed_files),
         tombstones,
+        None,
     )
+}
+
+/// Append a checkpoint-authorized mapped encoding, retaining legacy payload objects by digest.
+pub(crate) fn append_authenticated_mapped_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    sealed_files: &[AuthenticatedGraphFile],
+    tombstones: &[String],
+    routes: &crate::route_component::RouteTable,
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    validate_publication_identity(lease)?;
+    if state
+        .project_identity
+        .is_some_and(|identity| identity != lease.cas.project.identity())
+    {
+        return Err(validation(
+            "graph manifest state belongs to a different project",
+        ));
+    }
+    let mut staged = state.clone();
+    let mut migration_io = GraphPublicationIo::default();
+    let mut changed = 0_u64;
+    if staged
+        .root
+        .as_ref()
+        .is_some_and(|root| root.format_version == GRAPH_FILES_V2_VERSION)
+    {
+        let mut rebuilt = BTreeMap::new();
+        let mut expected = crate::route_component::RouteTable::default();
+        let mut digest = install_manifest_node(lease, &empty_branch(0), &mut migration_io)?;
+        for old in staged.entries.values() {
+            let logical = crate::graph_files::legacy_inventory_logical_text(&old.relative_path)?;
+            let path = crate::route_component::encode_relative_route(
+                &logical,
+                &mut expected,
+                64 * 1024 * 1024,
+                100_000,
+            )?;
+            if let Some(component) = crate::route_component::route_position(&path)?
+                && routes.route(component)? != expected.route(component)?
+            {
+                return Err(validation(
+                    "mapped parent route differs from encoding authority",
+                ));
+            }
+            let mut entry = old.clone();
+            entry.relative_path.clone_from(&path);
+            if rebuilt.insert(path.clone(), entry.clone()).is_some() {
+                return Err(validation("mapped parent paths collide"));
+            }
+            digest = update_manifest_path(
+                lease,
+                Some(&digest),
+                0,
+                &path,
+                Some(entry),
+                &mut migration_io,
+            )?
+            .ok_or_else(|| validation("mapped parent root disappeared"))?;
+            changed = changed
+                .checked_add(1)
+                .ok_or_else(|| validation("mapped parent count overflow"))?;
+        }
+        staged.entries = rebuilt;
+        let root = staged.root.as_mut().expect("legacy parent root exists");
+        root.root_node_sha256 = digest;
+        root.format_version = crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION;
+    }
+    let paths = sealed_files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    let (root, mut evidence) = append_graph_files_v2_inner(
+        lease,
+        workspace,
+        &mut staged,
+        &paths,
+        Some(sealed_files),
+        tombstones,
+        Some(routes),
+    )?;
+    evidence.publication_io.checked_add_assign(&migration_io)?;
+    let totals = evidence.publication_io.totals()?;
+    evidence.bytes_installed = totals.installed_bytes;
+    evidence.read_calls = totals.read_calls;
+    evidence.write_calls = totals.write_calls;
+    evidence.write_bytes = totals.write_bytes;
+    evidence.fsync_calls = totals
+        .file_fsync_calls
+        .checked_add(totals.directory_fsync_calls)
+        .ok_or_else(|| validation("mapped synchronization count overflow"))?;
+    evidence.changed_entries_examined = evidence
+        .changed_entries_examined
+        .checked_add(changed)
+        .ok_or_else(|| validation("mapped changed entry count overflow"))?;
+    *state = staged;
+    Ok((root, evidence))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1242,6 +1388,7 @@ fn append_graph_files_v2_inner(
     sealed_paths: &[PathBuf],
     authenticated: Option<&[AuthenticatedGraphFile]>,
     tombstones: &[String],
+    mapped_routes: Option<&crate::route_component::RouteTable>,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
     if state
@@ -1336,6 +1483,27 @@ fn append_graph_files_v2_inner(
                 .ok_or_else(|| validation("graph files v2 logical byte total underflows"))?;
         }
     }
+    if let Some(routes) = mapped_routes {
+        let mut final_entries = state.entries.clone();
+        for entry in &additions {
+            final_entries.insert(entry.relative_path.clone(), entry.clone());
+        }
+        for path in &tombstones {
+            final_entries.remove(path);
+        }
+        routes.validate_paths(final_entries.keys().map(String::as_str))?;
+        let table = routes.encode(64 * 1024 * 1024)?;
+        let authority = final_entries
+            .get(crate::route_component::TABLE_FILE)
+            .ok_or_else(|| validation("mapped publication lacks route authority"))?;
+        if authority.byte_length != table.len() as u64
+            || authority.content_sha256 != hex_digest(Sha256::digest(&table).into())
+        {
+            return Err(validation(
+                "mapped publication route authority differs from sealed table",
+            ));
+        }
+    }
     // All payload objects are authenticated before any manifest node can
     // reference them. A returned error here therefore leaves only unreferenced,
     // retry-safe CAS state.
@@ -1398,7 +1566,11 @@ fn append_graph_files_v2_inner(
         .ok_or_else(|| validation("graph files v2 file total overflow"))?;
     let root = GraphFilesRootV2 {
         format: GRAPH_FILES_V2_FORMAT.into(),
-        format_version: GRAPH_FILES_V2_VERSION,
+        format_version: if mapped_routes.is_some() {
+            crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+        } else {
+            GRAPH_FILES_V2_VERSION
+        },
         root_node_sha256: root_digest,
         logical_file_count: u64::try_from(logical_file_count)
             .map_err(|_| validation("graph files v2 logical file count exceeds u64"))?,
@@ -2051,6 +2223,11 @@ pub fn materialize_graph_objects(
     target: &Path,
 ) -> Result<GraphFilesOpenEvidence, GfError> {
     let lease = begin_graph_object_publication(root)?;
+    let mut route_io = GraphObjectIoTotals::default();
+    let routes =
+        crate::route_component::materialize::MaterializationRoutes::prepare(inventory, |entry| {
+            read_graph_object_counted(root, &entry.content_sha256, 64 * 1024 * 1024, &mut route_io)
+        })?;
     let _target_guard = open_empty_materialization_target(target)?;
     let target_directory = StableDirectory::open(target)
         .map_err(|error| storage("retain stable materialization target", target, error))?;
@@ -2058,10 +2235,17 @@ pub fn materialize_graph_objects(
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
         files_validated: inventory.file_count,
         bytes_validated: inventory.total_byte_length,
+        application_read_bytes: route_io.read_bytes,
+        application_read_calls: route_io.read_calls,
         ..GraphFilesOpenEvidence::default()
     };
-    for entry in &inventory.files {
-        let materialized = materialize_from_cas(&lease.cas, &target_directory, entry)?;
+    for (entry, destination) in inventory.files.iter().zip(&routes.destinations) {
+        let mut translated = entry.clone();
+        translated.relative_path.clone_from(destination);
+        let copy_route =
+            routes.legacy && crate::route_component::route_position(destination)?.is_some();
+        let materialized =
+            materialize_from_cas(&lease.cas, &target_directory, &translated, copy_route)?;
         evidence.application_read_bytes = evidence
             .application_read_bytes
             .checked_add(materialized.read_bytes)
@@ -2110,6 +2294,7 @@ pub fn materialize_graph_objects(
                 .ok_or_else(|| validation("object hydration reused-byte count overflows"))?;
         }
     }
+    routes.install_table(target, &mut evidence)?;
     lease.revalidate_for_publish()?;
     Ok(evidence)
 }
@@ -2118,6 +2303,7 @@ fn materialize_from_cas(
     cas: &CasRoot,
     target: &StableDirectory,
     entry: &crate::GraphFileEntry,
+    copy_route: bool,
 ) -> Result<MaterializeIoEvidence, GfError> {
     validate_logical_path(Path::new(&entry.relative_path))?;
     let bucket = cas.digest_bucket(&entry.content_sha256, false)?;
@@ -2150,7 +2336,7 @@ fn materialize_from_cas(
             })?);
         } else {
             let parent = parent.as_ref().unwrap_or(target);
-            if requires_single_link_materialization(&entry.relative_path) {
+            if copy_route || requires_single_link_materialization(&entry.relative_path) {
                 return copy_single_link_materialized_object(cas, &source, parent, name, entry);
             }
             let (installed, installed_identity) = bucket
@@ -2199,6 +2385,9 @@ struct MaterializeIoEvidence {
 }
 
 fn requires_single_link_materialization(relative_path: &str) -> bool {
+    if relative_path == crate::route_component::TABLE_FILE {
+        return true;
+    }
     let Some(name) = relative_path.strip_prefix("topology/uuid-membership/") else {
         return false;
     };
@@ -4774,10 +4963,12 @@ mod tests {
     }
 
     #[test]
-    fn materialization_preserves_ordinary_workspace_relative_paths() {
+    fn materialization_translates_legacy_topology_route_and_counts_owned_copy() {
         let root = tempfile::tempdir().unwrap();
         let payload = b"ordinary topology payload";
         let (digest, _) = install_graph_object_bytes(root.path(), payload).unwrap();
+        let source_path = graph_object_path(root.path(), &digest).unwrap();
+        let source_identity = graphforge_filesystem::path_identity(&source_path).unwrap();
         let inventory = crate::graph_files::inventory_from_entries(vec![crate::GraphFileEntry {
             relative_path: "topology/edges/knows.parquet".into(),
             byte_length: payload.len() as u64,
@@ -4791,18 +4982,44 @@ mod tests {
         let evidence = materialize_graph_objects(root.path(), &inventory, &target).unwrap();
 
         assert_eq!(
-            fs::read(target.join("topology/edges/knows.parquet")).unwrap(),
+            fs::read(target.join("topology/edges").join(format!(
+                "{}.parquet",
+                crate::route_component::component("knows")
+            )))
+            .unwrap(),
             payload
         );
+        assert!(!target.join("topology/edges/knows.parquet").exists());
+        let table_bytes = fs::read(target.join(crate::route_component::TABLE_FILE))
+            .unwrap()
+            .len() as u64;
+        assert_eq!(fs::read(&source_path).unwrap(), payload);
+        assert_eq!(
+            graphforge_filesystem::path_identity(&source_path).unwrap(),
+            source_identity
+        );
+        assert_ne!(
+            graphforge_filesystem::path_identity(&target.join("topology/edges").join(format!(
+                "{}.parquet",
+                crate::route_component::component("knows")
+            )))
+            .unwrap(),
+            source_identity
+        );
         assert!(!target.join("files").exists());
-        assert_eq!(evidence.files_reused, 1);
-        assert_eq!(evidence.bytes_reused, payload.len() as u64);
-        assert_eq!(evidence.files_copied, 0);
-        assert_eq!(evidence.application_read_bytes, payload.len() as u64);
-        assert_eq!(evidence.application_read_calls, 1);
-        assert_eq!(evidence.application_write_bytes, 0);
-        assert_eq!(evidence.application_write_calls, 0);
-        assert_eq!(evidence.fsync_calls, 0);
+        assert_eq!(evidence.files_reused, 0);
+        assert_eq!(evidence.bytes_reused, 0);
+        assert_eq!(evidence.files_copied, 1);
+        assert_eq!(evidence.application_read_bytes, payload.len() as u64 * 2);
+        assert_eq!(evidence.application_read_calls, 2);
+        assert_eq!(
+            evidence.application_write_bytes,
+            payload.len() as u64 + table_bytes
+        );
+        assert_eq!(evidence.application_write_calls, 2);
+        assert_eq!(evidence.fsync_calls, 4);
+        assert_eq!(evidence.file_fsync_calls, 2);
+        assert_eq!(evidence.directory_fsync_calls, 2);
     }
 
     #[test]
@@ -4850,11 +5067,17 @@ mod tests {
             .count() as u64;
         assert_eq!(evidence.application_read_bytes, nonempty_bytes * 2);
         assert_eq!(evidence.application_read_calls, nonempty_files * 2);
-        assert_eq!(evidence.application_write_bytes, nonempty_bytes);
-        assert_eq!(evidence.application_write_calls, nonempty_files);
-        assert_eq!(evidence.fsync_calls, inventory.file_count * 2);
-        assert_eq!(evidence.file_fsync_calls, inventory.file_count);
-        assert_eq!(evidence.directory_fsync_calls, inventory.file_count);
+        let table_bytes = fs::read(target.join(crate::route_component::TABLE_FILE))
+            .unwrap()
+            .len() as u64;
+        assert_eq!(
+            evidence.application_write_bytes,
+            nonempty_bytes + table_bytes
+        );
+        assert_eq!(evidence.application_write_calls, nonempty_files + 1);
+        assert_eq!(evidence.fsync_calls, inventory.file_count * 2 + 2);
+        assert_eq!(evidence.file_fsync_calls, inventory.file_count + 1);
+        assert_eq!(evidence.directory_fsync_calls, inventory.file_count + 1);
         for entry in &inventory.files {
             let file = File::open(target.join(&entry.relative_path)).unwrap();
             assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);

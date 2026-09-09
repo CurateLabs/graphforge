@@ -465,8 +465,7 @@ impl MutationLifecycle for LocalMutationLifecycle<'_> {
             .catalog
             .refresh_property_inventory(self.resource.directory())
             .map_err(graphforge_core::GfError::from_execution_error)?;
-        self.session.adjacency_provider.invalidate();
-        Ok(())
+        self.session.refresh_adjacency_after_mutation()
     }
     fn abort(&mut self) -> Result<(), graphforge_core::GfError> {
         let health = self.session.mutation_health.clone();

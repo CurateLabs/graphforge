@@ -43,7 +43,7 @@ use crate::UuidIndexKind;
 use crate::construction_detail_codec::{DetailCodec, DetailValidator};
 use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -280,16 +280,45 @@ fn ordinal_manifest_descriptors(
 
 fn compact_parent_inventory(
     parent: &crate::ResolvedProjectGeneration,
-) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+) -> Result<(Option<crate::GraphFilesInventory>, ReadWork), GfError> {
     let Some(crate::GraphFilesParticipant::V2(root)) = parent.declared_graph_files_participant()?
     else {
-        return Ok(None);
+        return Ok((None, ReadWork::default()));
     };
+    let mut io = crate::GraphObjectIoTotals::default();
     let (entries, _) =
         crate::resolve_graph_manifest(&root, crate::GraphManifestLimits::default(), |digest| {
-            crate::read_graph_object_by_digest(parent.container_root(), digest, 64 * 1024 * 1024)
+            crate::graph_object_store::read_graph_object_counted(
+                parent.container_root(),
+                digest,
+                64 * 1024 * 1024,
+                &mut io,
+            )
         })?;
-    crate::graph_files::inventory_from_entries(entries).map(Some)
+    crate::route_component::authenticate_manifest_routes(root.format_version, &entries, |entry| {
+        crate::graph_object_store::read_graph_object_counted(
+            parent.container_root(),
+            &entry.content_sha256,
+            64 * 1024 * 1024,
+            &mut io,
+        )
+    })?;
+    let inventory = crate::graph_files::inventory_from_entries_with_version(
+        entries,
+        if root.format_version == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION {
+            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+        } else {
+            crate::GRAPH_FILES_RECORD_VERSION
+        },
+    )?;
+    Ok((
+        Some(inventory),
+        ReadWork {
+            bytes: io.read_bytes,
+            operations: io.read_calls,
+            ..ReadWork::default()
+        },
+    ))
 }
 
 fn compact_parent_surrogate_tails(
@@ -1409,6 +1438,7 @@ impl GraphConstructionSession {
         }
         let encoded = crate::graph_construction_encoding::encode(
             &self.root,
+            self.checkpoint.format_version >= 8,
             DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
             shape,
             generation,
@@ -1563,7 +1593,10 @@ impl GraphConstructionSession {
                     )?;
                     (
                         state,
-                        evidence.decoded_bytes,
+                        evidence
+                            .decoded_bytes
+                            .checked_add(evidence.authority_read_bytes)
+                            .ok_or_else(|| storage("manifest authority read bytes overflow"))?,
                         evidence.application_read_calls,
                     )
                 }
@@ -1645,14 +1678,57 @@ impl GraphConstructionSession {
             .publication_application_read_operations
             .checked_add(ordinal_io.read_calls)
             .ok_or_else(|| storage("ordinal publication read calls overflow"))?;
-        let (graph_root, cas_evidence) =
+        let (graph_root, cas_evidence) = if self.checkpoint.format_version >= 8 {
+            let artifact = encoding
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.path == crate::route_component::TABLE_FILE)
+                .ok_or_else(|| storage("mapped encoding lacks route authority"))?;
+            let entry = crate::GraphFileEntry {
+                relative_path: artifact.path.clone(),
+                byte_length: artifact.bytes,
+                content_sha256: artifact.sha256.clone(),
+                role: crate::GraphFileRole::Other,
+            };
+            let (bytes, calls) = crate::graph_files::read_route_table_counted(&workspace, &entry)?;
+            if bytes.len() as u64 != artifact.bytes
+                || hex(&Sha256::digest(&bytes)) != artifact.sha256
+            {
+                return Err(storage("mapped encoding route authority changed"));
+            }
+            let routes =
+                crate::route_component::RouteTable::decode(&bytes, 64 * 1024 * 1024, 100_000)?;
+            self.checkpoint.evidence.publication_application_read_bytes = checked_evidence_sum(
+                "route publication read bytes",
+                self.checkpoint.evidence.publication_application_read_bytes,
+                &[bytes.len() as u64],
+            )?;
+            self.checkpoint
+                .evidence
+                .publication_application_read_operations = checked_evidence_sum(
+                "route publication read calls",
+                self.checkpoint
+                    .evidence
+                    .publication_application_read_operations,
+                &[calls],
+            )?;
+            crate::graph_object_store::append_authenticated_mapped_graph_files(
+                &lease,
+                &workspace,
+                &mut manifest_state,
+                &sealed_files,
+                &ordinal_tombstones,
+                &routes,
+            )?
+        } else {
             crate::graph_object_store::append_authenticated_graph_files_v2(
                 &lease,
                 &workspace,
                 &mut manifest_state,
                 &sealed_files,
                 &ordinal_tombstones,
-            )?;
+            )?
+        };
         self.checkpoint.evidence.cas_application_read_bytes = self
             .checkpoint
             .evidence
@@ -2223,12 +2299,13 @@ impl GraphConstructionSession {
                 )
             )
         });
-        let compact_inventory = if publication_replay || project_dir == graph_source_dir {
-            None
-        } else {
-            let parent = crate::resolve_project_generation(project_dir)?;
-            compact_parent_inventory(&parent)?
-        };
+        let (compact_inventory, compact_inventory_work) =
+            if publication_replay || project_dir == graph_source_dir {
+                (None, ReadWork::default())
+            } else {
+                let parent = crate::resolve_project_generation(project_dir)?;
+                compact_parent_inventory(&parent)?
+            };
         let (base_snapshot, base_work) = if publication_replay {
             (
                 None,
@@ -2278,7 +2355,8 @@ impl GraphConstructionSession {
             };
             (Some(snapshot), work)
         };
-        let (parent_catalog, parent_catalog_sha256, parent_catalog_work) = if publication_replay {
+        let (parent_catalog, parent_catalog_sha256, mut parent_catalog_work) = if publication_replay
+        {
             (
                 RuntimeCatalog::new(),
                 recovered_checkpoint
@@ -2299,6 +2377,14 @@ impl GraphConstructionSession {
             let graph_source = StableDirectory::open(graph_source_dir).map_err(storage)?;
             load_parent_runtime_catalog(&graph_source, parent_topology_generation, budgets)?
         };
+        parent_catalog_work.bytes = parent_catalog_work
+            .bytes
+            .checked_add(compact_inventory_work.bytes)
+            .ok_or_else(|| storage("parent inventory read bytes overflow"))?;
+        parent_catalog_work.operations = parent_catalog_work
+            .operations
+            .checked_add(compact_inventory_work.operations)
+            .ok_or_else(|| storage("parent inventory read calls overflow"))?;
         let resumed_parent_work = if recovered_checkpoint.is_some() && !publication_replay {
             ReadWork {
                 bytes: base_work
@@ -10892,8 +10978,12 @@ mod tests {
                 .unwrap();
             assert!(ids.values().iter().all(|id| *id == person_id));
         }
-        let edges = crate::read_edges(
-            &graph,
+        let (files, _) = crate::capture_graph_files(&graph).unwrap();
+        let admitted =
+            crate::AuthenticatedPropertyInventory::from_inventory_at_root(&graph, files, None)
+                .unwrap();
+        let edges = crate::read_edges_from_inventory(
+            &admitted,
             &relation_route,
             graphforge_core::OntologyMode::Strict,
         )
@@ -10918,10 +11008,16 @@ mod tests {
         let index = crate::UuidMembershipIndex::open(&graph).unwrap();
         assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
         assert_eq!(index.count(crate::UuidIndexKind::Edge), 2);
-        let adjacency =
-            crate::adjacency::build_adjacency_index(&graph, shape.runtime_catalog_now_micros)
-                .unwrap();
-        assert!(!adjacency.is_empty());
+        let adjacency = crate::adjacency::build_adjacency_index_from_inventory(
+            &graph,
+            &graph,
+            Some(&admitted),
+            shape.runtime_catalog_now_micros,
+            &crate::adjacency::AdjacencyBuildOptions::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(!adjacency.0.is_empty());
 
         drop(session);
         let mut resumed_session = GraphConstructionSession::open_with_semantic_authority(
@@ -11681,8 +11777,12 @@ mod tests {
                     .map_or_else(|| fallback.to_owned(), |binding| binding.route.clone())
             };
             let relation_route = route(crate::SemanticRouteKind::Relation, "R", "R");
+            let (files, _) = crate::capture_graph_files(&graph).unwrap();
+            let admitted =
+                crate::AuthenticatedPropertyInventory::from_inventory_at_root(&graph, files, None)
+                    .unwrap();
             assert_eq!(
-                crate::read_edges(&graph, &relation_route, mode)
+                crate::read_edges_from_inventory(&admitted, &relation_route, mode)
                     .unwrap()
                     .iter()
                     .map(RecordBatch::num_rows)
@@ -11690,7 +11790,12 @@ mod tests {
                 1
             );
             let property_stem = if mode == graphforge_core::OntologyMode::Exploratory {
-                assert!(graph.join("topology/edges/_exploratory").is_dir());
+                assert!(
+                    graph
+                        .join("topology/edges")
+                        .join(crate::route_component::component("_exploratory"))
+                        .is_dir()
+                );
                 "_untyped".to_owned()
             } else {
                 assert!(!graph.join("topology/edges/R").exists());
@@ -12567,7 +12672,14 @@ mod tests {
             .join(operation.simple().to_string())
             .join(&encoding.root)
             .join("graph")
-            .join(&encoding.artifacts[0].path);
+            .join(
+                &encoding
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.path.ends_with(".parquet"))
+                    .unwrap()
+                    .path,
+            );
         std::fs::write(victim, b"tampered").unwrap();
 
         let error = session

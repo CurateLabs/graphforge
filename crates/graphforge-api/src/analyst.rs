@@ -31,9 +31,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let projection = graphforge_exec::rank_projection_fingerprint(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -110,9 +114,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let projection = graphforge_exec::cluster_projection_fingerprint(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -197,9 +205,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let projection = graphforge_exec::similar_projection_fingerprint(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -296,9 +308,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let prepared = graphforge_exec::prepare_embedding_invocation_descriptor_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -610,9 +626,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let projection = graphforge_exec::analyze_projection_fingerprint(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -739,9 +759,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let projection = graphforge_exec::paths_projection_fingerprint(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             source,
@@ -939,9 +963,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let batch = graphforge_exec::rank_algorithm_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -997,9 +1025,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let batch = graphforge_exec::cluster_algorithm_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -1055,9 +1087,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         graphforge_exec::paths_algorithm_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             source.map(|uuid| *uuid.as_bytes()),
@@ -1091,9 +1127,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         graphforge_exec::analyze_algorithm_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -1126,9 +1166,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         graphforge_exec::embedding_algorithm_execution_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,
@@ -1159,9 +1203,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        self.adjacency_provider.revalidate();
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         graphforge_exec::similar_algorithm_with_compute(
-            self.adjacency_provider.as_ref(),
+            &graphforge_exec::AdmittedAdjacencyProvider::new(
+                adjacency_provider.as_ref(),
+                self.property_inventory_for_session(),
+            ),
             &self.dir,
             self.ontology_mode,
             label_id,

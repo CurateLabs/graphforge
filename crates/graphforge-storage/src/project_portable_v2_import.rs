@@ -589,8 +589,10 @@ fn cleanup_import_materialization(
             &mut cleanup_budget,
             allocation,
         )?;
+        let directory_identity = directory.identity();
+        drop(directory);
         parent
-            .remove_child_directory_if_identity(name, directory.identity())
+            .remove_child_directory_if_identity(name, directory_identity)
             .map_err(|_| {
                 PortableV2Error::new(
                     PortableV2ErrorCode::Io,
@@ -645,6 +647,9 @@ fn cleanup_import_owner(
             ));
         }
         removed_identities.extend(observed);
+        // Authentication handles deny delete sharing on Windows. The removal
+        // operation rechecks the saved identity after acquiring its own handle.
+        drop(file);
         parent
             .unlink_child_if_identity(name, identity)
             .map_err(|_| {
@@ -688,8 +693,10 @@ fn remove_stable_tree(
                 remaining,
                 allocation,
             )?;
+            let child_identity = child.identity();
+            drop(child);
             directory
-                .remove_child_directory_if_identity(&name, child.identity())
+                .remove_child_directory_if_identity(&name, child_identity)
                 .map_err(|_| {
                     PortableV2Error::new(
                         PortableV2ErrorCode::Io,
@@ -721,6 +728,7 @@ fn remove_stable_tree(
                 ));
             }
             removed_identities.extend(observed);
+            drop(file);
             directory
                 .unlink_child_if_identity(&name, identity)
                 .map_err(|_| {
@@ -832,7 +840,7 @@ fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt as _;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     OpenOptions::new()
-        .read(true)
+        .write(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?
         .sync_all()
@@ -1290,7 +1298,11 @@ fn prepare_compact_import_graph_with_allocation(
             "graph tree requires a graph/files participant",
         ));
     };
-    if participant.participant.record_version != crate::GRAPH_FILES_V2_RECORD_VERSION {
+    if !matches!(
+        participant.participant.record_version,
+        crate::GRAPH_FILES_V2_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+    ) {
         return Ok(None);
     }
     let mut lease =
@@ -1306,13 +1318,29 @@ fn prepare_compact_import_graph_with_allocation(
     let mut remaining = entry_count.saturating_mul(2).saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
     paths.sort();
-    let (root, _) = crate::graph_object_store::append_graph_files_v2(
-        &lease,
-        graph_tree,
-        &mut crate::graph_object_store::GraphManifestState::empty(),
-        &paths,
-        &[],
-    )
+    let (root, _) = if participant.participant.record_version
+        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+    {
+        let routes = crate::route_component::owned::read_owned_layout_table(&directory)
+            .map_err(|error| storage(&error))?
+            .ok_or_else(|| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidStructure,
+                    "mapped compact import requires route authority",
+                )
+            })?;
+        crate::graph_object_store::append_mapped_import_graph_files(
+            &lease, graph_tree, &paths, &routes,
+        )
+    } else {
+        crate::graph_object_store::append_graph_files_v2(
+            &lease,
+            graph_tree,
+            &mut crate::graph_object_store::GraphManifestState::empty(),
+            &paths,
+            &[],
+        )
+    }
     .map_err(|error| storage(&error))?;
     let bytes = crate::graph_manifest::encode_root(&root).map_err(|error| storage(&error))?;
     crate::project_publication::publish_atomic_bytes(
@@ -1328,7 +1356,11 @@ fn prepare_compact_import_graph_with_allocation(
             "cannot publish imported compact graph root",
         )
     })?;
-    let file = fs::File::open(&participant.source).map_err(|_| {
+    #[cfg(not(windows))]
+    let file = fs::File::open(&participant.source);
+    #[cfg(windows)]
+    let file = OpenOptions::new().write(true).open(&participant.source);
+    let file = file.map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::Io,
             "cannot reopen imported compact graph root",
@@ -1904,6 +1936,36 @@ mod tests {
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";
 
+    #[test]
+    fn authenticated_cleanup_releases_handles_before_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("stage");
+        let owner = root.path().join("stage.owner");
+        fs::create_dir_all(stage.join("nested")).unwrap();
+        fs::create_dir(stage.join("empty")).unwrap();
+        let mut identities = std::collections::BTreeMap::new();
+        for path in [
+            stage.join("payload"),
+            stage.join("nested/payload"),
+            owner.clone(),
+        ] {
+            fs::write(&path, b"authenticated materialization").unwrap();
+            let file = fs::File::open(path).unwrap();
+            record_import_file_identity(&file, &mut identities).unwrap();
+        }
+        let directory = graphforge_filesystem::StableDirectory::open(&stage).unwrap();
+        let stage_identity = directory.identity();
+        drop(directory);
+
+        let receipt =
+            cleanup_import_materialization(&stage, &owner, stage_identity, &identities, None)
+                .unwrap();
+        assert!(!stage.exists());
+        assert!(!owner.exists());
+        assert_eq!(receipt.removed_identity_allocated_bytes, identities);
+        assert!(receipt.parent_sync_confirmed);
+    }
+
     fn supported() -> Vec<ProjectCapability> {
         vec![
             ProjectCapability {
@@ -2090,9 +2152,18 @@ mod tests {
                     vec![Arc::new(ids) as ArrayRef, Arc::new(values)],
                 )
                 .unwrap();
-                let path = tree.join("properties/_untyped.parquet");
+                let table_path = tree.join(crate::route_component::TABLE_FILE);
+                let mut table = crate::route_component::RouteTable::decode(
+                    &fs::read(&table_path).unwrap(),
+                    64 * 1024 * 1024,
+                    100_000,
+                )
+                .unwrap();
+                let component = table.insert("_untyped", 64 * 1024 * 1024, 100_000).unwrap();
+                let path = tree.join(format!("properties/{component}.parquet"));
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 crate::graph_projection::write_parquet(&path, &batch).unwrap();
+                fs::write(table_path, table.encode(64 * 1024 * 1024).unwrap()).unwrap();
             });
             if let Some(expected_error) = expected_error {
                 let error = assert_identity_package_rejected(&package);

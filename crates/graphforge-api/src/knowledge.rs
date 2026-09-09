@@ -2876,8 +2876,12 @@ fn match_requested_edge_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    let batches = graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
-        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let batches = graphforge_storage::read_edges_from_inventory(
+        &graph.property_inventory_for_session(),
+        "*",
+        graph.ontology_mode,
+    )
+    .map_err(|error| GfError::Storage(error.to_string()))?;
     match_requested_uuids(batches, "edge_uuid", pending)
 }
 

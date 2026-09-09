@@ -292,8 +292,49 @@ pub(crate) fn write_replay_overlay_streaming(
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
 ) -> Result<(), GfError> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut target_routes = crate::route_component::owned::admit_owned_workspace(target)?;
+    let property_inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
+        source,
+        source_inventory.clone(),
+        None,
+    )?;
+    let node_scan = stream_replay_nodes(source, target, overlay, limits)?;
 
+    validate_replay_edge_endpoints(overlay, &node_scan)?;
+    stream_replay_edges(
+        target,
+        &property_inventory,
+        &mut target_routes,
+        overlay,
+        limits,
+        &node_scan,
+    )?;
+    stream_replay_properties(
+        target,
+        &property_inventory,
+        overlay,
+        limits,
+        false,
+        &mut target_routes,
+    )?;
+    stream_replay_properties(
+        target,
+        &property_inventory,
+        overlay,
+        limits,
+        true,
+        &mut target_routes,
+    )?;
+    replace_private_replay_route_table(target, &target_routes)
+}
+
+fn stream_replay_nodes(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<ReplayNodeAuthority, GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let node_path = source.join("topology/nodes.parquet");
     let output_node_path = target.join("topology/nodes.parquet");
     let node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
@@ -385,15 +426,7 @@ pub(crate) fn write_replay_overlay_streaming(
     }
     writer.close().map_err(pq_err)?;
 
-    validate_replay_edge_endpoints(overlay, &node_scan)?;
-    stream_replay_edges(source, target, overlay, limits, &node_scan)?;
-    let property_inventory = crate::AuthenticatedPropertyInventory::from_entries_at_root(
-        source,
-        source_inventory.files.clone(),
-    )?;
-    stream_replay_properties(target, &property_inventory, overlay, limits, false)?;
-    stream_replay_properties(target, &property_inventory, overlay, limits, true)?;
-    Ok(())
+    Ok(node_scan)
 }
 
 struct ReplayNodeAuthority {
@@ -659,33 +692,21 @@ fn replay_node_batch(
 
 #[allow(clippy::too_many_lines)] // Two bounded passes keep validation and emission consistent.
 fn stream_replay_edges(
-    source: &Path,
     target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    route_table: &mut crate::route_component::RouteTable,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     nodes: &ReplayNodeAuthority,
 ) -> Result<(), GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let source_dir = source.join("topology/edges");
     let target_dir = target.join("topology/edges");
     fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
-    let mut relations = std::collections::BTreeSet::new();
-    if source_dir.exists() {
-        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
-            let entry = entry.map_err(|error| io_err(&error))?;
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "parquet")
-            {
-                let stem = path
-                    .file_stem()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .ok_or_else(|| pq_err("edge Parquet stem is not UTF-8"))?;
-                relations.insert(stem.to_owned());
-            }
-        }
-    }
+    let mut relations = inventory
+        .edge_files(None)
+        .into_iter()
+        .map(|(route, _)| route)
+        .collect::<std::collections::BTreeSet<_>>();
     relations.extend(
         overlay
             .edges
@@ -697,13 +718,14 @@ fn stream_replay_edges(
         sum.saturating_add(64).saturating_add(relation.len())
     });
     for relation in relations {
-        let source_path = source_dir.join(format!("{relation}.parquet"));
-        let target_path = target_dir.join(format!("{relation}.parquet"));
+        let source_paths = inventory.edge_files(Some(&relation));
+        let component = route_table.insert(&relation, 64 * 1024 * 1024, 100_000)?;
+        let target_path = target_dir.join(format!("{component}.parquet"));
         let mut existing_overlay = HashSet::new();
         let mut base_max = 0_u64;
         let mut base_rows = 0_usize;
-        if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+        for (_, source_path) in &source_paths {
+            let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(limits.max_batch_rows)
@@ -774,11 +796,13 @@ fn stream_replay_edges(
             .capacity()
             .saturating_mul(std::mem::size_of::<&str>() + 8)
             .saturating_add(relation_authority_bytes)
-            .saturating_add(if source_path.exists() {
-                parquet_reader_metadata_reservation(&source_path)?
-            } else {
-                0
-            });
+            .saturating_add(
+                source_paths
+                    .iter()
+                    .try_fold(0_usize, |maximum, (_, path)| {
+                        Ok::<_, GfError>(maximum.max(parquet_reader_metadata_reservation(path)?))
+                    })?,
+            );
         admit_replay_writer(
             overlay.estimated_memory(),
             nodes
@@ -795,8 +819,8 @@ fn stream_replay_edges(
             Some(replay_writer_properties(limits.max_batch_rows)),
         )
         .map_err(pq_err)?;
-        if source_path.exists() {
-            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+        for (_, source_path) in &source_paths {
+            let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
             let reader = ParquetRecordBatchReaderBuilder::try_new(input)
                 .map_err(pq_err)?
                 .with_batch_size(limits.max_batch_rows)
@@ -838,6 +862,11 @@ fn stream_replay_edges(
             writer.flush().map_err(pq_err)?;
         }
         writer.close().map_err(pq_err)?;
+        for (_, path) in crate::mutator::edge_parquet_files(target, Some(&component))? {
+            if path != target_path {
+                fs::remove_file(&path).map_err(|error| io_err(&error))?;
+            }
+        }
     }
     Ok(())
 }
@@ -902,6 +931,7 @@ fn stream_replay_properties(
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
     let operations = if edge {
         &overlay.edge_properties
@@ -935,7 +965,15 @@ fn stream_replay_properties(
     // Legacy flat baselines are admitted as generation zero fragments and are
     // resolved through the same byte-charged chunk path. There is no second
     // unbounded flat-file replay fallback.
-    stream_replay_property_fragments(target, inventory, overlay, limits, edge, fragment_routes)
+    stream_replay_property_fragments(
+        target,
+        inventory,
+        overlay,
+        limits,
+        edge,
+        fragment_routes,
+        route_table,
+    )
 }
 
 fn stream_replay_property_fragments(
@@ -945,17 +983,17 @@ fn stream_replay_property_fragments(
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
     routes: std::collections::BTreeSet<String>,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
-    let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
     for route in routes {
-        stream_replay_property_route(
+        stream_replay_property_route_with_table(
             target,
             inventory,
             overlay,
             limits,
             edge,
             &route,
-            scratch.path(),
+            route_table,
         )?;
     }
     Ok(())
@@ -1161,8 +1199,9 @@ fn open_replay_property_fragment(
         PROPERTY_OVERLAY_FORMAT_KEY, PROPERTY_ROUTE_KEY, PROPERTY_TOMBSTONE_FIELD,
         PropertyFragmentId,
     };
+    let component = crate::route_component::component(route);
     let prior_generation =
-        crate::property_overlay::enumerate_property_fragments(target, kind, route)?
+        crate::property_overlay::enumerate_property_fragments(target, kind, &component)?
             .last()
             .map_or(0, |fragment| fragment.id.generation);
     let generation = prior_generation
@@ -1192,7 +1231,7 @@ fn open_replay_property_fragment(
     } else {
         "properties"
     };
-    let path = target.join(subdir).join(route).join(
+    let path = target.join(subdir).join(component).join(
         PropertyFragmentId {
             generation,
             ordinal: 0,
@@ -1216,15 +1255,16 @@ fn open_replay_property_fragment(
     })
 }
 
-fn stream_replay_property_route(
+fn stream_replay_property_route_with_table(
     target: &Path,
     inventory: &crate::AuthenticatedPropertyInventory,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
     edge: bool,
     route: &str,
-    _scratch: &Path,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
+    route_table.check_insert(route, 64 * 1024 * 1024, 100_000)?;
     let (kind, operations) = replay_property_route_context(overlay, edge);
     let target_names = replay_property_target_names(overlay, operations, edge, route);
     let touched_rows = u64::try_from(target_names.len()).unwrap_or(u64::MAX);
@@ -1322,7 +1362,40 @@ fn stream_replay_property_route(
         .writer
         .close()
         .map_err(pq_err)?;
+    route_table.insert(route, 64 * 1024 * 1024, 100_000)?;
     Ok(())
+}
+
+fn replace_private_replay_route_table(
+    target: &Path,
+    table: &crate::route_component::RouteTable,
+) -> Result<(), GfError> {
+    let mut batch = RewriteBatch::new();
+    batch.stage_named_control_bytes(
+        &target.join(crate::route_component::TABLE_FILE),
+        &table.encode(64 * 1024 * 1024)?,
+        "semantic-routes.json.",
+    )?;
+    crate::durable_rewrite::commit(batch, target, false, false, false, None)?;
+    crate::capture_graph_files(target)?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn stream_replay_property_route(
+    target: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    edge: bool,
+    route: &str,
+    _scratch: &Path,
+) -> Result<(), GfError> {
+    let mut table = crate::route_component::owned::admit_owned_workspace(target)?;
+    stream_replay_property_route_with_table(
+        target, inventory, overlay, limits, edge, route, &mut table,
+    )?;
+    replace_private_replay_route_table(target, &table)
 }
 
 type ReplayPropertyOperations =
@@ -2027,6 +2100,7 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] if the directory cannot be created.
     pub fn open_at(dir: &Path, mode: OntologyMode, now_micros: i64) -> Result<Self, GfError> {
         fs::create_dir_all(dir).map_err(|e| io_err(&e))?;
+        crate::route_component::owned::admit_owned_workspace(dir)?;
         // Continue surrogate assignment from the on-disk maximum so a writer
         // opened on an existing project appends rather than colliding with /
         // overwriting prior rows. Absent files → max 0 → start at 1.
@@ -2940,10 +3014,21 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush(&mut self) -> Result<(), GfError> {
         let mut staged = RewriteBatch::new();
-        self.flush_into(&mut staged)?;
+        self.flush_into(&mut staged).map_err(|error| match error {
+            GfError::Storage(message) => {
+                GfError::Storage(format!("graph flush staging: {message}"))
+            }
+            other => other,
+        })?;
         let pending = self.take_pending_delta();
-        if let Some(generation) =
-            self.commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())?
+        if let Some(generation) = self
+            .commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())
+            .map_err(|error| match error {
+                GfError::Storage(message) => {
+                    GfError::Storage(format!("graph flush commit: {message}"))
+                }
+                other => other,
+            })?
         {
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges
@@ -3242,14 +3327,13 @@ impl GraphWriter {
             // for monotonic writer sessions.
             let first = rows.first().map_or(0, |row| row.edge_id);
             let last = rows.last().map_or(first, |row| row.edge_id);
-            let existing = crate::mutator::edge_parquet_files(&self.dir, Some(&stem))?;
+            let component = staged.route_component(&self.dir, &stem)?;
+            let existing = crate::mutator::edge_parquet_files(&self.dir, Some(&component))?;
             let path = if existing.is_empty() {
-                // Retain the v1 flat route for the first fragment so existing
-                // projects and external readers remain forward-compatible.
-                edges_dir.join(format!("{stem}.parquet"))
+                edges_dir.join(format!("{component}.parquet"))
             } else {
                 edges_dir
-                    .join(&stem)
+                    .join(&component)
                     .join(format!("{first:020}-{last:020}.parquet"))
             };
             if path.exists() || staged.staged_temp(&path).is_some() {
@@ -4322,28 +4406,36 @@ fn decode_edge_property_rows(batches: &[RecordBatch]) -> Result<Vec<EdgePropRow>
 /// Decode every persisted node-property row while retaining its canonical
 /// [`IrLiteral`] type. This is the bounded base decoder used by authoritative
 /// graph-delta replay; callers must apply their own aggregate replay budget.
-pub(crate) fn read_all_node_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+pub(crate) fn read_all_node_properties(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+) -> Result<Vec<TypedPropertyRow>, GfError> {
     let mut rows = Vec::new();
-    for stem in crate::catalog::list_property_stems(dir) {
-        let batches = crate::catalog::read_properties(dir, &stem).map_err(pq_err)?;
+    for stem in inventory.routes(crate::PropertyRouteKind::Node) {
+        let batches =
+            crate::catalog::read_properties_from_inventory(dir, inventory, stem).map_err(pq_err)?;
         rows.extend(
             decode_property_rows(&batches)?
                 .into_iter()
-                .map(|row| (stem.clone(), row.node_uuid, row.props)),
+                .map(|row| (stem.to_owned(), row.node_uuid, row.props)),
         );
     }
     Ok(rows)
 }
 
 /// Edge-property analogue of [`read_all_node_properties`].
-pub(crate) fn read_all_edge_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+pub(crate) fn read_all_edge_properties(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+) -> Result<Vec<TypedPropertyRow>, GfError> {
     let mut rows = Vec::new();
-    for stem in crate::catalog::list_edge_property_stems(dir) {
-        let batches = crate::catalog::read_edge_properties(dir, &stem).map_err(pq_err)?;
+    for stem in inventory.routes(crate::PropertyRouteKind::Edge) {
+        let batches = crate::catalog::read_edge_properties_from_inventory(dir, inventory, stem)
+            .map_err(pq_err)?;
         rows.extend(
             decode_edge_property_rows(&batches)?
                 .into_iter()
-                .map(|row| (stem.clone(), row.edge_uuid, row.props)),
+                .map(|row| (stem.to_owned(), row.edge_uuid, row.props)),
         );
     }
     Ok(rows)
@@ -4426,6 +4518,31 @@ pub fn read_node_property_rows(
         .collect())
 }
 
+/// Read typed node rows through an explicitly admitted generation inventory.
+pub fn read_node_property_rows_from_inventory(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    route: &str,
+) -> Result<HashMap<[u8; 16], HashMap<String, IrLiteral>>, GfError> {
+    let mut rows = HashMap::new();
+    crate::catalog::visit_property_overlay_batched_with_inventory(
+        dir,
+        Some(inventory),
+        route,
+        false,
+        8_192,
+        |batch| {
+            let decoded = decode_property_rows(std::slice::from_ref(batch)).map_err(|error| {
+                datafusion::common::DataFusionError::Execution(error.to_string())
+            })?;
+            rows.extend(decoded.into_iter().map(|row| (row.node_uuid, row.props)));
+            Ok(true)
+        },
+    )
+    .map_err(pq_err)?;
+    Ok(rows)
+}
+
 /// Count non-null properties owned by the selected persisted entities across
 /// every dynamic-schema property partition.
 pub fn count_entity_properties<S: std::hash::BuildHasher>(
@@ -4436,17 +4553,32 @@ pub fn count_entity_properties<S: std::hash::BuildHasher>(
     if targets.is_empty() {
         return Ok(0);
     }
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_rewrite(
+        dir,
+        &RewriteBatch::new(),
+    )?;
+    count_entity_properties_from_inventory(dir, &inventory, targets, is_edge)
+}
+
+/// Count selected entity properties through the caller's admitted route inventory.
+pub fn count_entity_properties_from_inventory<S: std::hash::BuildHasher>(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    targets: &HashSet<[u8; 16], S>,
+    is_edge: bool,
+) -> Result<u64, GfError> {
     let mut count = 0u64;
-    let stems = if is_edge {
-        crate::catalog::list_edge_property_stems(dir)
+    let kind = if is_edge {
+        crate::PropertyRouteKind::Edge
     } else {
-        crate::catalog::list_property_stems(dir)
+        crate::PropertyRouteKind::Node
     };
+    let stems = inventory.routes(kind);
     for stem in stems {
         let batches = if is_edge {
-            crate::catalog::read_edge_properties(dir, &stem)
+            crate::catalog::read_edge_properties_from_inventory(dir, inventory, stem)
         } else {
-            crate::catalog::read_properties(dir, &stem)
+            crate::catalog::read_properties_from_inventory(dir, inventory, stem)
         }
         .map_err(pq_err)?;
         if is_edge {
@@ -5631,10 +5763,11 @@ fn complete_node_property_window(
 ) -> Result<CompletedPropertyWindow<PropRow>, GfError> {
     let rows = merge_node_property_window(rows);
     let targets = rows.iter().map(|row| row.node_uuid).collect();
-    let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_rewrite_route(
         dir,
         crate::PropertyRouteKind::Node,
         route,
+        staged,
     )?;
     let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
         &inventory,
@@ -5701,10 +5834,11 @@ fn complete_edge_property_window(
 ) -> Result<CompletedPropertyWindow<EdgePropRow>, GfError> {
     let rows = merge_edge_property_window(rows);
     let targets = rows.iter().map(|row| row.edge_uuid).collect();
-    let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_rewrite_route(
         dir,
         crate::PropertyRouteKind::Edge,
         route,
+        staged,
     )?;
     let (mut complete, _) = crate::read_authenticated_property_snapshots_for_inventory(
         &inventory,
@@ -5766,21 +5900,6 @@ fn complete_edge_property_window(
         &after,
     )?;
     Ok((rows, Some(schema), inventory.generation_authority()))
-}
-
-pub(crate) fn stage_property_tombstones<S: std::hash::BuildHasher>(
-    staged: &mut RewriteBatch,
-    dir: &Path,
-    kind: crate::property_overlay::PropertyRouteKind,
-    route: &str,
-    uuids: &HashSet<[u8; 16], S>,
-) -> Result<(), GfError> {
-    if uuids.is_empty() {
-        return Ok(());
-    }
-    let inventory =
-        crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, route)?;
-    stage_property_tombstones_from_inventory(staged, dir, &inventory, kind, route, uuids)
 }
 
 /// Stage whole-row tombstones using an already authenticated generation inventory.
@@ -6051,7 +6170,8 @@ pub(crate) fn seal_property_windows(
                 });
             }
         }
-        if enumerate_property_fragments(dir, key.kind, &key.route)?
+        let component = staged.route_component(dir, &key.route)?;
+        if enumerate_property_fragments(dir, key.kind, &component)?
             .iter()
             .any(|fragment| fragment.id.generation >= generation)
         {
@@ -6076,7 +6196,7 @@ pub(crate) fn seal_property_windows(
             crate::property_overlay::PropertyRouteKind::Node => "properties",
             crate::property_overlay::PropertyRouteKind::Edge => "edge_properties",
         };
-        let destination = dir.join(subdir).join(&key.route).join(
+        let destination = dir.join(subdir).join(component).join(
             PropertyFragmentId {
                 generation,
                 ordinal: 0,
@@ -6119,13 +6239,19 @@ mod tests {
 
     const TS: i64 = 1_700_000_000_000_000;
 
+    fn test_inventory(dir: &Path) -> crate::AuthenticatedPropertyInventory {
+        let (files, _) = crate::capture_graph_files(dir).unwrap();
+        crate::AuthenticatedPropertyInventory::from_inventory_at_root(dir, files, None).unwrap()
+    }
+
     #[test]
     fn delta_replay_new_routes_start_and_continue_live_schema_authority() {
         let project = TempDir::new().unwrap();
         let (empty_files, _) = crate::capture_graph_files(project.path()).unwrap();
-        let empty = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        let empty = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
             project.path(),
-            empty_files.files,
+            empty_files,
+            None,
         )
         .unwrap();
         let mut limits = crate::GraphDeltaJournalLimits::default();
@@ -6174,9 +6300,10 @@ mod tests {
         .unwrap();
 
         let (files, _) = crate::capture_graph_files(project.path()).unwrap();
-        let created = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        let created = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
             project.path(),
-            files.files,
+            files,
+            None,
         )
         .unwrap();
         let summary_count = |schema: &SchemaRef, key: &str| {
@@ -6236,9 +6363,10 @@ mod tests {
         .unwrap();
 
         let (files, _) = crate::capture_graph_files(project.path()).unwrap();
-        let reopened = crate::AuthenticatedPropertyInventory::from_entries_at_root(
+        let reopened = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
             project.path(),
-            files.files,
+            files,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -6392,9 +6520,12 @@ mod tests {
         reopened.flush().unwrap();
 
         let (captured, _) = crate::capture_graph_files(dir.path()).unwrap();
-        let inventory =
-            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), captured.files)
-                .unwrap();
+        let inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
+            dir.path(),
+            captured,
+            None,
+        )
+        .unwrap();
         let scratch = TempDir::new().unwrap();
         let mut rows = Vec::new();
         inventory
@@ -6639,10 +6770,17 @@ mod tests {
             .unwrap();
         second.flush().unwrap();
 
-        let fragments = crate::mutator::edge_parquet_files(dir.path(), Some("KNOWS")).unwrap();
+        let fragments = crate::mutator::edge_parquet_files(
+            dir.path(),
+            Some(&crate::route_component::component("KNOWS")),
+        )
+        .unwrap();
         assert_eq!(fragments.len(), 2);
         assert!(fragments.iter().any(|(_, path)| {
-            path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("KNOWS"))
+            path.parent().and_then(Path::file_name)
+                == Some(std::ffi::OsStr::new(&crate::route_component::component(
+                    "KNOWS",
+                )))
         }));
         let work = second.topology_write_work();
         assert_eq!(work.existing_rows_rewritten, 0);
@@ -6652,11 +6790,15 @@ mod tests {
         assert_eq!(work.rows_encoded, 1);
         assert_eq!(work.shard_count, 1);
         assert!(work.output_bytes > 0);
-        let rows = crate::catalog::read_edges(dir.path(), "KNOWS", OntologyMode::Strict)
-            .unwrap()
-            .into_iter()
-            .map(|batch| batch.num_rows())
-            .sum::<usize>();
+        let rows = crate::catalog::read_edges_from_inventory(
+            &test_inventory(dir.path()),
+            "KNOWS",
+            OntologyMode::Strict,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
         assert_eq!(rows, 2, "ordinary direct reader must union all fragments");
     }
 
@@ -6750,8 +6892,12 @@ mod tests {
             .unwrap();
         second.flush().unwrap();
 
-        let fragments =
-            crate::mutator::property_parquet_files(dir.path(), "properties", "_untyped").unwrap();
+        let fragments = crate::mutator::property_parquet_files(
+            dir.path(),
+            "properties",
+            &crate::route_component::component("_untyped"),
+        )
+        .unwrap();
         assert_eq!(fragments.len(), 2);
         let rows = read_node_property_rows(dir.path(), "_untyped").unwrap();
         assert_eq!(rows.len(), 2);
@@ -7424,8 +7570,11 @@ mod tests {
     fn empty_flush_creates_no_directories() {
         let dir = TempDir::new().unwrap();
         let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        // Owned layout admission creates only its protocol metadata. Empty flush
+        // must add no data files or rewrite that admitted metadata.
+        let before = crate::capture_graph_files(dir.path()).unwrap().0;
         w.flush().unwrap();
-        assert!(!dir.path().join("topology").exists());
+        assert_eq!(crate::capture_graph_files(dir.path()).unwrap().0, before);
         assert!(!dir.path().join("properties").exists());
     }
 
@@ -7658,11 +7807,15 @@ mod tests {
         kind: crate::property_overlay::PropertyRouteKind,
         route: &str,
     ) -> PathBuf {
-        crate::property_overlay::enumerate_property_fragments(dir, kind, route)
-            .unwrap()
-            .pop()
-            .expect("property route has a committed fragment")
-            .path
+        crate::property_overlay::enumerate_property_fragments(
+            dir,
+            kind,
+            &crate::route_component::component(route),
+        )
+        .unwrap()
+        .pop()
+        .expect("property route has a committed fragment")
+        .path
     }
 
     #[test]
@@ -7753,7 +7906,7 @@ mod tests {
             !crate::property_overlay::enumerate_property_fragments(
                 dir.path(),
                 crate::property_overlay::PropertyRouteKind::Node,
-                "Person",
+                &crate::route_component::component("Person"),
             )
             .unwrap()
             .is_empty()
@@ -8029,9 +8182,16 @@ mod tests {
         let removed = to_bytes(&removed);
         let resurrected = to_bytes(&resurrected);
         let mut staged = RewriteBatch::new();
-        stage_property_tombstones(
+        let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            "_untyped",
+        )
+        .unwrap();
+        stage_property_tombstones_authenticated(
             &mut staged,
             dir.path(),
+            &inventory,
             crate::PropertyRouteKind::Node,
             "_untyped",
             &HashSet::from([removed, resurrected]),
@@ -8240,6 +8400,18 @@ mod tests {
         let legacy = property_snapshots_to_batch("_untyped", false, legacy_rows)
             .unwrap()
             .unwrap();
+        drop(writer);
+        let table_path = dir.path().join(crate::route_component::TABLE_FILE);
+        assert_eq!(
+            crate::route_component::RouteTable::decode(
+                &fs::read(&table_path).unwrap(),
+                64 * 1024 * 1024,
+                100_000
+            )
+            .unwrap(),
+            crate::route_component::RouteTable::default()
+        );
+        fs::remove_file(&table_path).unwrap();
         fs::create_dir_all(dir.path().join("properties")).unwrap();
         let mut parquet = parquet::arrow::ArrowWriter::try_new(
             File::create(dir.path().join("properties/_untyped.parquet")).unwrap(),
@@ -8249,6 +8421,8 @@ mod tests {
         .unwrap();
         parquet.write(&legacy).unwrap();
         parquet.close().unwrap();
+        let migrated = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        drop(migrated);
 
         set_node_properties(
             dir.path(),
@@ -8269,7 +8443,7 @@ mod tests {
         let fragments = crate::property_overlay::enumerate_property_fragments(
             dir.path(),
             crate::property_overlay::PropertyRouteKind::Node,
-            "_untyped",
+            &crate::route_component::component("_untyped"),
         )
         .unwrap();
         assert_eq!(fragments.first().unwrap().id.generation, 0);
@@ -8459,9 +8633,10 @@ mod tests {
             !read_edge_props(dir.path(), "KNOWS").contains_key(&to_bytes(&e1)),
             "cancelled edge's props never hit disk"
         );
-        let edges = crate::catalog::read_parquet_or_empty(
-            &dir.path().join("topology/edges/_exploratory.parquet"),
-            EXPLORATORY_EDGE_SCHEMA.clone(),
+        let edges = crate::catalog::read_edges_from_inventory(
+            &test_inventory(dir.path()),
+            "*",
+            OntologyMode::Exploratory,
         )
         .unwrap();
         let total: usize = edges.iter().map(RecordBatch::num_rows).sum();

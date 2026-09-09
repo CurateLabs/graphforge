@@ -13,8 +13,7 @@ use graphforge_core::GfError;
 use graphforge_exec::{ExecutionResult, ExecutionSession, MutationKind, MutationSubjectKind};
 use graphforge_ir::{Binder, GraphPlan, IrLiteral, OntologyMode, RuntimeCatalog};
 use graphforge_storage::{
-    GraphCatalog, PropertyOverlayLimits, PropertyRouteKind, enumerate_property_fragments,
-    visit_authenticated_property_snapshots,
+    GraphCatalog, PropertyOverlayLimits, PropertyRouteKind, visit_authenticated_property_snapshots,
 };
 
 /// Bind `query` in Exploratory mode against the shared runtime catalog.
@@ -79,6 +78,13 @@ fn rows(path: &Path) -> usize {
         .unwrap()
         .map(|b| b.unwrap().num_rows())
         .sum()
+}
+
+fn admitted_inventory(dir: &Path) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    GraphCatalog::open(dir, None, &RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
 }
 
 fn logical_property_rows(dir: &Path, route: &str) -> Vec<graphforge_storage::PropertySnapshotRow> {
@@ -156,7 +162,11 @@ async fn create_edge_then_plain_delete_errors_with_nothing_persisted() {
     // Nothing persisted: no T node, no edge file, a intact.
     assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 1);
     assert_eq!(
-        rows(&dir.path().join("topology/edges/_exploratory.parquet")),
+        admitted_inventory(dir.path())
+            .edge_files(Some("_exploratory"))
+            .iter()
+            .map(|(_, path)| rows(path))
+            .sum::<usize>(),
         0
     );
 }
@@ -187,7 +197,11 @@ async fn create_edge_then_detach_delete_drops_pending_edge() {
         1
     );
     assert_eq!(
-        rows(&dir.path().join("topology/edges/_exploratory.parquet")),
+        admitted_inventory(dir.path())
+            .edge_files(Some("_exploratory"))
+            .iter()
+            .map(|(_, path)| rows(path))
+            .sum::<usize>(),
         0
     );
 }
@@ -205,7 +219,7 @@ async fn set_on_created_node_lands_in_buffer() {
     // The property merged into the buffered row and became authenticated
     // immutable logical authority.
     let fragments =
-        enumerate_property_fragments(dir.path(), PropertyRouteKind::Node, "_untyped").unwrap();
+        admitted_inventory(dir.path()).property_fragments(PropertyRouteKind::Node, "_untyped");
     assert_eq!(fragments.len(), 1);
     assert_ne!(fragments[0].id.generation, 0);
     assert_eq!(
@@ -292,7 +306,11 @@ async fn second_create_references_first_with_distinct_surrogates() {
     assert_eq!(counters(&r), [2, 1, 0, 0, 0, 0]);
     assert_eq!(rows(&dir.path().join("topology/nodes.parquet")), 2);
     assert_eq!(
-        rows(&dir.path().join("topology/edges/_exploratory.parquet")),
+        admitted_inventory(dir.path())
+            .edge_files(Some("_exploratory"))
+            .iter()
+            .map(|(_, path)| rows(path))
+            .sum::<usize>(),
         1
     );
 

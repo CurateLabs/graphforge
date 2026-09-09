@@ -55,12 +55,22 @@ fn write_diamond(dir: &Path) -> [u64; 4] {
     [ids[0], ids[1], ids[2], ids[3]]
 }
 
+fn admitted_inventory(
+    dir: &std::path::Path,
+) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
 fn persistent(dir: &Path, mode: OntologyMode) -> PersistentAdjacencyProvider {
     PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+        .with_inventory(admitted_inventory(dir))
 }
 
 fn scan(dir: &Path, mode: OntologyMode) -> ScanBuildAdjacencyProvider {
-    ScanBuildAdjacencyProvider::new(dir.to_path_buf(), mode)
+    ScanBuildAdjacencyProvider::new(dir.to_path_buf(), mode).with_inventory(admitted_inventory(dir))
 }
 
 /// Seed a 3-node KNOWS chain `a→b→c`, build the index, then DELETE the `a→b`
@@ -291,6 +301,7 @@ fn absent_capability_dir_rebuilds_on_first_access() {
     write_diamond(dir.path());
 
     let provider = persistent(dir.path(), OntologyMode::Strict);
+
     assert_eq!(
         provider.status("KNOWS", Direction::Out),
         AdjacencyStatus::Building
@@ -444,11 +455,13 @@ fn hit_serves_without_reading_edge_files() {
         .adjacency("KNOWS", Direction::Out)
         .unwrap();
 
+    let provider = persistent(dir.path(), OntologyMode::Strict);
+    let scanned = scan(dir.path(), OntologyMode::Strict);
+
     // Remove the edge files WITHOUT bumping the generation: the index still
     // reads as fresh, and only a provider that never scans can serve it.
     std::fs::remove_dir_all(dir.path().join("topology").join("edges")).unwrap();
 
-    let provider = persistent(dir.path(), OntologyMode::Strict);
     assert_eq!(
         provider.status("KNOWS", Direction::Out),
         AdjacencyStatus::Hit
@@ -457,13 +470,8 @@ fn hit_serves_without_reading_edge_files() {
         provider.adjacency("KNOWS", Direction::Out).unwrap(),
         expected
     );
-    // The scan-build provider on the same project sees nothing.
-    assert!(
-        scan(dir.path(), OntologyMode::Strict)
-            .adjacency("KNOWS", Direction::Out)
-            .unwrap()
-            .is_empty()
-    );
+    // The admitted scan requires its payload; the index retains the rows.
+    assert!(scanned.adjacency("KNOWS", Direction::Out).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +736,10 @@ mod session_wiring {
 
         let before = session.execute_plan(&plan).await.unwrap();
         assert_eq!(before.stats.rows_produced, 2, "a reaches b and c");
+        let old_stream = session
+            .execute_plan_stream(&plan, &std::collections::HashMap::new())
+            .await
+            .unwrap();
 
         // Extend the chain THROUGH THE SAME SESSION: c -> d.
         let extend = bind(
@@ -735,6 +747,17 @@ mod session_wiring {
             &rc,
         );
         session.execute_write_statement(&extend).await.unwrap();
+        let old_batches = futures::TryStreamExt::try_collect::<Vec<_>>(old_stream)
+            .await
+            .unwrap();
+        assert_eq!(
+            old_batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            2,
+            "an already planned stream retains its pre-write adjacency"
+        );
 
         let after = session.execute_plan(&plan).await.unwrap();
         assert_eq!(
@@ -781,12 +804,14 @@ async fn zero_hop_traversal_on_hit_never_opens_edge_files() {
     session().execute_write_statement(&edge).await.unwrap();
     build_adjacency_index(dir.path(), TS).unwrap();
 
+    let admitted_session = session();
+
     // Delete the edge files WITHOUT bumping the generation: only a traversal
     // that truly reads zero edge bytes can succeed now.
     std::fs::remove_dir_all(dir.path().join("topology").join("edges")).unwrap();
 
     let zero_hop = bind("MATCH (a:Person {name: 'Alice'})-[r:KNOWS*0..0]->(b) RETURN 1 AS one");
-    let result = session().execute_plan(&zero_hop).await.unwrap();
+    let result = admitted_session.execute_plan(&zero_hop).await.unwrap();
     assert_eq!(result.stats.rows_produced, 1, "the 0-hop self path");
 }
 

@@ -215,6 +215,27 @@ pub fn build_adjacency_index_into_with_metrics(
     options: &AdjacencyBuildOptions,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
+    let inventory = super::capture_adjacency_inventory(source_project_dir)?;
+    build_adjacency_index_from_inventory(
+        source_project_dir,
+        artifact_project_dir,
+        Some(&inventory),
+        built_at_micros,
+        options,
+        &mut checkpoint,
+    )
+}
+
+/// Build derived adjacency using already-admitted route authority, without rehashing the graph.
+/// `None` retains the explicit legacy raw-layout contract.
+pub fn build_adjacency_index_from_inventory(
+    source_project_dir: &Path,
+    artifact_project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
     checkpoint()?;
     // Generation BEFORE the scan — see the race note in the doc comment.
     let generation = crate::generation::read_topology_generation(source_project_dir)?;
@@ -238,6 +259,7 @@ pub fn build_adjacency_index_into_with_metrics(
     let build_result = (|| {
         let mut groups = stream_build_groups(
             source_project_dir,
+            inventory,
             &options,
             &mut spill,
             &mut metrics,
@@ -345,8 +367,11 @@ impl SpillSession {
     fn next_run_path(&mut self, label: &str, direction: Direction) -> PathBuf {
         let id = self.run_counter;
         self.run_counter += 1;
-        self.root
-            .join(format!("{label}.{}.{id}.run", direction.as_str()))
+        self.root.join(format!(
+            "{}.{}.{id}.run",
+            crate::route_component::component(label),
+            direction.as_str()
+        ))
     }
 
     fn account_write(&mut self, bytes: u64) -> Result<(), GfError> {
@@ -749,6 +774,7 @@ fn merge_keyed_runs(
 
 fn stream_build_groups(
     project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
     options: &AdjacencyBuildOptions,
     spill: &mut SpillSession,
     metrics: &mut AdjacencyBuildMetrics,
@@ -764,6 +790,7 @@ fn stream_build_groups(
 
     for_each_adjacency_edge_file(
         project_dir,
+        inventory,
         options.batch_size,
         &mut |stem, exploratory, batch| {
             checkpoint()?;

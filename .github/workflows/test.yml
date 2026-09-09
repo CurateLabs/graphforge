@@ -996,6 +996,22 @@ jobs:
             graph_object_store::tests::publication_and_gc_lifecycles_are_mutually_exclusive \
             -- --exact --nocapture
 
+      - name: Verify mapped routes and portable lifecycle on Windows
+        shell: bash
+        run: |
+          route_status=0
+          cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib project_portable_v2_export::tests::canonical_source_path_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-api --lib mapped_portable_tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-api --lib mapped_stream_tests:: -- --nocapture || route_status=1
+          exit "$route_status"
+
       - name: Cross-check Windows publication-kill results against the fault oracle
         shell: bash
         env:
@@ -1089,6 +1105,22 @@ jobs:
       - name: Run macOS exact filesystem primitive tests
         run: >-
           cargo test -p graphforge-filesystem --lib --no-fail-fast
+
+      - name: Verify mapped routes and portable lifecycle on macOS
+        shell: bash
+        run: |
+          route_status=0
+          cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib project_portable_v2_export::tests::canonical_source_path_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib route_component::owned::tests::legacy_cas_materialization_translates_routes_before_creating_paths -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib adjacency::builder::tests::admitted_reserved_relations_build_portable_distinct_indexes -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-api --lib mapped_portable_tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-api --lib mapped_stream_tests:: -- --nocapture || route_status=1
+          exit "$route_status"
 
       - name: Cross-check macOS publication-kill results against the fault oracle
         env:

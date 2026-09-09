@@ -542,6 +542,7 @@ pub(crate) fn inventory_authority_sha256(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn encode(
     source: &StableDirectory,
+    mapped_routes: bool,
     detail_codec: DetailCodec,
     shape: &ConstructionShape,
     generation: u64,
@@ -584,7 +585,12 @@ pub(crate) fn encode(
     cleanup_encoding_temps(&output, budgets)?;
     if let Some(mut existing) = read_inventory(&output)? {
         let authentication = authenticate_inventory(&output, &existing, parent_index)?;
-        if existing.generation != generation
+        if existing
+            .artifacts
+            .iter()
+            .any(|entry| entry.path == crate::route_component::TABLE_FILE)
+            != mapped_routes
+            || existing.generation != generation
             || existing.ontology_mode != shape.ontology_mode
             || existing.semantic_authority_sha256 != shape.semantic_authority_sha256
             || existing.shape_inputs_sha256 != shape.runtime_catalog_inputs_sha256
@@ -639,6 +645,9 @@ pub(crate) fn encode(
         peak_open_writers: 1,
         ..Default::default()
     };
+    let mut routes = mapped_routes
+        .then(|| construction_parent_routes(parent_generation, &mut evidence))
+        .transpose()?;
     let mut artifacts = Vec::new();
     let label_ids = {
         let (catalog_spool, _catalog_guard) = authenticated_source_spool(
@@ -737,6 +746,7 @@ pub(crate) fn encode(
         cancelled,
         &mut artifacts,
         &mut evidence,
+        &mut routes,
     )?;
     if let Some(bundle) = v4 {
         let metrics = &bundle.metrics;
@@ -805,6 +815,7 @@ pub(crate) fn encode(
         cancelled,
         &mut artifacts,
         &mut evidence,
+        &mut routes,
     )?;
     write_surrogate_tails(
         &output,
@@ -823,6 +834,16 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
     )?;
+
+    if let Some(routes) = &routes {
+        copy_artifact(
+            std::io::Cursor::new(routes.encode(64 * 1024 * 1024)?),
+            &output,
+            crate::route_component::TABLE_FILE,
+            &mut artifacts,
+            &mut evidence,
+        )?;
+    }
 
     evidence.membership_records = index.input_records;
     evidence.membership_read_bytes = index.read_bytes;
@@ -874,6 +895,84 @@ pub(crate) fn encode(
         evidence: invocation,
     };
     Ok(completed)
+}
+
+fn encoded_route_component(
+    routes: &mut Option<crate::route_component::RouteTable>,
+    route: &str,
+) -> Result<String, GfError> {
+    match routes {
+        Some(table) => table.insert(route, 64 * 1024 * 1024, 100_000),
+        None => Ok(route.to_owned()),
+    }
+}
+
+fn construction_parent_routes(
+    parent: Option<&crate::ResolvedProjectGeneration>,
+    evidence: &mut GraphConstructionEncodingEvidence,
+) -> Result<crate::route_component::RouteTable, GfError> {
+    let mut io = crate::GraphObjectIoTotals::default();
+    let (version, entries) = match parent
+        .map(crate::ResolvedProjectGeneration::declared_graph_files_participant)
+        .transpose()?
+        .flatten()
+    {
+        Some(crate::GraphFilesParticipant::V1(inventory)) => {
+            (inventory.format_version, inventory.files)
+        }
+        Some(crate::GraphFilesParticipant::V2(root)) => {
+            let parent = parent.expect("participant has parent");
+            let (entries, _) = crate::resolve_graph_manifest(
+                &root,
+                crate::GraphManifestLimits::default(),
+                |digest| {
+                    crate::graph_object_store::read_graph_object_counted(
+                        parent.container_root(),
+                        digest,
+                        64 * 1024 * 1024,
+                        &mut io,
+                    )
+                },
+            )?;
+            (root.format_version, entries)
+        }
+        None => return Ok(crate::route_component::RouteTable::default()),
+    };
+    let table = crate::route_component::authenticate_manifest_routes(version, &entries, |entry| {
+        let parent = parent.expect("table authority has parent");
+        let (_, bytes) = parent
+            .authenticated_graph_file_bytes_counted(
+                &entry.relative_path,
+                64 * 1024 * 1024,
+                None,
+                &mut io,
+            )?
+            .ok_or_else(|| storage("parent route authority is absent"))?;
+        Ok(bytes)
+    })?;
+    let mut table = table.unwrap_or_default();
+    if matches!(version, 1 | 2) {
+        for entry in &entries {
+            let logical = crate::graph_files::legacy_inventory_logical_text(&entry.relative_path)?;
+            crate::route_component::encode_relative_route(
+                &logical,
+                &mut table,
+                64 * 1024 * 1024,
+                100_000,
+            )?;
+        }
+    }
+    add_evidence_counter(
+        &mut evidence.input_read_bytes,
+        io.read_bytes,
+        "parent route read bytes",
+    )?;
+    add_evidence_counter(
+        &mut evidence.input_read_operations,
+        io.read_calls,
+        "parent route read calls",
+    )?;
+    Ok(table)
 }
 
 fn retained_artifact(value: ConstructionIndexReference) -> ConstructionRetainedArtifact {
@@ -1023,6 +1122,7 @@ fn encode_nodes(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
+    route_table: &mut Option<crate::route_component::RouteTable>,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
     if shape.node_rows.is_empty() {
         if !build_v4 {
@@ -1202,6 +1302,7 @@ fn encode_nodes(
         cancelled,
         artifacts,
         evidence,
+        route_table,
     )?;
     v4.map(crate::uuid_membership::V4OrdinalConstructionWriter::finish)
         .transpose()
@@ -1220,6 +1321,7 @@ fn encode_node_properties(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
+    route_table: &mut Option<crate::route_component::RouteTable>,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.node_rows {
@@ -1318,7 +1420,8 @@ fn encode_node_properties(
                             property
                         };
                         let path = format!(
-                            "properties/{route}/{:020}-{ordinal:020}.parquet",
+                            "properties/{}/{:020}-{ordinal:020}.parquet",
+                            encoded_route_component(route_table, &route)?,
                             shape.parent_topology_generation + 1
                         );
                         artifacts.push(write_parquet(
@@ -1382,6 +1485,7 @@ fn encode_edges(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
+    route_table: &mut Option<crate::route_component::RouteTable>,
 ) -> Result<(), GfError> {
     if shape.edge_rows.is_empty() {
         return Ok(());
@@ -1531,8 +1635,10 @@ fn encode_edges(
                     .ok_or_else(|| storage("canonical edge ids are incompatible"))?;
                 let first = ids.value(0);
                 let last = ids.value(ids.len() - 1);
-                let path =
-                    format!("topology/edges/{topology_route}/{first:020}-{last:020}.parquet");
+                let path = format!(
+                    "topology/edges/{}/{first:020}-{last:020}.parquet",
+                    encoded_route_component(route_table, topology_route)?
+                );
                 artifacts.push(write_parquet(
                     output,
                     &path,
@@ -1579,6 +1685,7 @@ fn encode_edges(
         cancelled,
         artifacts,
         evidence,
+        route_table,
     )
 }
 
@@ -1595,6 +1702,7 @@ fn encode_edge_properties(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
+    route_table: &mut Option<crate::route_component::RouteTable>,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.edge_rows {
@@ -1693,7 +1801,8 @@ fn encode_edge_properties(
                             property
                         };
                         let path = format!(
-                            "edge_properties/{property_route}/{:020}-{ordinal:020}.parquet",
+                            "edge_properties/{}/{:020}-{ordinal:020}.parquet",
+                            encoded_route_component(route_table, &property_route)?,
                             shape.parent_topology_generation + 1
                         );
                         artifacts.push(write_parquet(

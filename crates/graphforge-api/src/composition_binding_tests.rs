@@ -358,12 +358,16 @@ fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
     forge
         .execute("CREATE (n:`research:Person`)")
         .expect_err("stale legacy publication must fail");
-    assert!(forge.dir.join("topology/edges/KNOWS.parquet").exists());
+    let retained_edges = forge.property_inventory_for_session().edge_files(None);
+    assert!(
+        retained_edges
+            .iter()
+            .any(|(route, path)| route == "KNOWS" && path.exists())
+    );
     assert_eq!(
-        std::fs::read_dir(forge.dir.join("topology/edges"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("s-"))
+        retained_edges
+            .iter()
+            .filter(|(route, _)| route.starts_with("s-"))
             .count(),
         0
     );
@@ -717,10 +721,11 @@ fn facade_reopens_relation_edge_property_through_default_context() {
         })
         .unwrap();
     assert_ne!(relation.route, genealogy_relation.route);
-    let edge_path = forge
-        .dir
-        .join("topology/edges")
-        .join(format!("{}.parquet", relation.route));
+    let paths = forge
+        .property_inventory_for_session()
+        .edge_files(Some(&relation.route));
+    assert_eq!(paths.len(), 1);
+    let edge_path = &paths[0].1;
     assert!(
         edge_path.exists(),
         "missing opaque edge route {}",

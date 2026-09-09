@@ -23,8 +23,7 @@ use graphforge_storage::io_stats::{
     FilteredReadObserver, FilteredReadPruning, FilteredReadStrategy, FilteredReadTable,
 };
 use graphforge_storage::{
-    GraphWriter, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, read_edges_filtered,
-    read_nodes_filtered_observed,
+    GraphWriter, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, read_nodes_filtered_observed,
 };
 use graphforge_value::EntityTypeId;
 
@@ -395,4 +394,27 @@ fn unexpected_dense_rows_are_discarded_before_conservative_retry() {
     assert_eq!(pruning[0].validation_fallbacks, 1);
     assert_eq!(pruning[1].strategy, FilteredReadStrategy::RowGroupPredicate);
     assert_eq!(pruning[1].metadata_fallbacks, 0);
+}
+
+fn admitted_inventory(
+    root: &std::path::Path,
+) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(root, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
+fn read_edges_filtered(
+    root: &std::path::Path,
+    route: &str,
+    mode: OntologyMode,
+    ids: &HashSet<u64>,
+) -> Result<Vec<arrow::record_batch::RecordBatch>, datafusion::error::DataFusionError> {
+    graphforge_storage::read_edges_filtered_from_inventory(
+        &admitted_inventory(root),
+        route,
+        mode,
+        ids,
+    )
 }

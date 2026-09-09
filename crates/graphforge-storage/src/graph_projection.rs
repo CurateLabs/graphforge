@@ -7,6 +7,7 @@
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId, RuntimeEntityId};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,6 +27,90 @@ use graphforge_core::canonical::{
 use parquet::arrow::ArrowWriter;
 
 mod runtime_remap;
+
+/// Route authority captured once for a private graph transform. Never migrates the source.
+pub(crate) struct TransformRoutes {
+    table: Option<crate::route_component::RouteTable>,
+    pub(crate) properties: crate::AuthenticatedPropertyInventory,
+}
+
+impl TransformRoutes {
+    pub(crate) fn capture(root: &Path) -> Result<Self, GfError> {
+        let (inventory, _) = crate::capture_graph_files(root)?;
+        Self::from_inventory(root, inventory)
+    }
+
+    pub(crate) fn from_inventory(
+        root: &Path,
+        inventory: crate::GraphFilesInventory,
+    ) -> Result<Self, GfError> {
+        let table = match inventory.format_version {
+            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION => Some(
+                crate::graph_files::authenticate_route_table(root, &inventory)?,
+            ),
+            crate::graph_files::GRAPH_FILES_RECORD_VERSION => None,
+            _ => {
+                return Err(validation(
+                    "graph transform requires an expanded graph inventory",
+                ));
+            }
+        };
+        let properties =
+            crate::AuthenticatedPropertyInventory::from_inventory_at_root(root, inventory, None)?;
+        Ok(Self { table, properties })
+    }
+
+    pub(crate) fn semantic_path(&self, relative: &str) -> Result<String, GfError> {
+        match &self.table {
+            Some(table) => table.semantic_relative_path(relative),
+            None => crate::graph_files::legacy_inventory_logical_text(relative),
+        }
+    }
+
+    pub(crate) fn property_batches(
+        &self,
+        root: &Path,
+        route: &str,
+        edge: bool,
+    ) -> Result<Vec<RecordBatch>, GfError> {
+        let mut batches = Vec::new();
+        crate::catalog::visit_property_overlay_batched_with_inventory(
+            root,
+            Some(&self.properties),
+            route,
+            edge,
+            8192,
+            |batch| {
+                batches.push(batch.clone());
+                Ok(true)
+            },
+        )
+        .map_err(storage)?;
+        Ok(batches)
+    }
+}
+
+pub(crate) fn encode_transform_path(
+    relative: &str,
+    table: &mut crate::route_component::RouteTable,
+) -> Result<String, GfError> {
+    crate::route_component::encode_relative_route(relative, table, 64 * 1024 * 1024, 100_000)
+}
+
+/// The caller owns this unpublished graph and has finished emitting every route.
+pub(crate) fn install_transform_table(
+    root: &Path,
+    table: &crate::route_component::RouteTable,
+) -> Result<(), GfError> {
+    let bytes = table.encode(64 * 1024 * 1024)?;
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(root.join(crate::route_component::TABLE_FILE))
+        .map_err(storage)?;
+    file.write_all(&bytes).map_err(storage)?;
+    file.sync_all().map_err(storage)
+}
 
 type GraphUuid = [u8; 16];
 type EdgeEndpoints = BTreeMap<GraphUuid, (GraphUuid, GraphUuid)>;
@@ -106,6 +191,8 @@ fn materialize_graph_projection_with_options(
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
 
+    let routes = TransformRoutes::capture(source)?;
+    let mut output_table = crate::route_component::RouteTable::default();
     let node_paths = crate::mutator::node_parquet_files(source).map_err(storage)?;
     let node_ids = uuid_rows_files(&node_paths, "node_uuid")?;
     require_present(&selection.node_uuids, &node_ids, "node")?;
@@ -134,16 +221,28 @@ fn materialize_graph_projection_with_options(
             &selection.exclude_properties,
         )?;
     }
-    project_parquet_directory(
-        &source.join("topology/edges"),
-        &target.join("topology/edges"),
-        "edge_uuid",
-        &selected_edges,
-        &BTreeSet::new(),
-    )?;
+    for path in edge_files {
+        let relative = path
+            .strip_prefix(source)
+            .map_err(storage)?
+            .to_str()
+            .ok_or_else(|| validation("graph path is not UTF-8"))?
+            .replace('\\', "/");
+        let semantic = routes.semantic_path(&relative)?;
+        let destination = encode_transform_path(&semantic, &mut output_table)?;
+        project_parquet_file(
+            &path,
+            &target.join(destination),
+            "edge_uuid",
+            &selected_edges,
+            &BTreeSet::new(),
+        )?;
+    }
     project_property_directory(
         source,
         target,
+        &routes,
+        &mut output_table,
         false,
         "node_uuid",
         &selected_nodes,
@@ -152,11 +251,14 @@ fn materialize_graph_projection_with_options(
     project_property_directory(
         source,
         target,
+        &routes,
+        &mut output_table,
         true,
         "edge_uuid",
         &selected_edges,
         &selection.exclude_properties,
     )?;
+    install_transform_table(target, &output_table)?;
     copy_runtime_catalog(source, target)?;
     if copy_ontology_files {
         for file in [
@@ -263,28 +365,6 @@ fn uuid_rows_files(paths: &[PathBuf], column: &str) -> Result<BTreeSet<GraphUuid
     Ok(rows)
 }
 
-fn project_parquet_directory(
-    source: &Path,
-    target: &Path,
-    key: &str,
-    selected: &BTreeSet<[u8; 16]>,
-    exclude_properties: &BTreeSet<String>,
-) -> Result<(), GfError> {
-    for path in sorted_parquet_files(source)? {
-        let relative = path
-            .strip_prefix(source)
-            .map_err(|_| validation("graph parquet path escaped source directory"))?;
-        project_parquet_file(
-            &path,
-            &target.join(relative),
-            key,
-            selected,
-            exclude_properties,
-        )?;
-    }
-    Ok(())
-}
-
 fn project_parquet_file(
     source: &Path,
     target: &Path,
@@ -309,38 +389,40 @@ fn project_parquet_file(
     project_record_batch(&combined, target, key, selected, exclude_properties)
 }
 
+#[allow(clippy::too_many_arguments)] // explicit input authority and output table belong to one transform
 fn project_property_directory(
     source: &Path,
     target: &Path,
+    authority: &TransformRoutes,
+    table: &mut crate::route_component::RouteTable,
     edge: bool,
     key: &str,
     selected: &BTreeSet<[u8; 16]>,
     exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
-    let routes = if edge {
-        crate::catalog::list_edge_property_stems(source)
+    let kind = if edge {
+        crate::PropertyRouteKind::Edge
     } else {
-        crate::catalog::list_property_stems(source)
+        crate::PropertyRouteKind::Node
     };
+    let routes = authority.properties.routes(kind);
     let directory = if edge {
         "edge_properties"
     } else {
         "properties"
     };
     for route in routes {
-        let batches = if edge {
-            crate::catalog::read_edge_properties(source, &route)
-        } else {
-            crate::catalog::read_properties(source, &route)
-        }
-        .map_err(|error| GfError::Storage(error.to_string()))?;
+        let batches = authority.property_batches(source, route, edge)?;
         let Some(schema) = batches.first().map(RecordBatch::schema) else {
             continue;
         };
         let combined = concat_batches(&schema, &batches).map_err(storage)?;
         project_record_batch(
             &combined,
-            &target.join(directory).join(format!("{route}.parquet")),
+            &target.join(encode_transform_path(
+                &format!("{directory}/{route}.parquet"),
+                table,
+            )?),
             key,
             selected,
             exclude_properties,
@@ -438,6 +520,7 @@ fn copy_runtime_catalog(source: &Path, target: &Path) -> Result<(), GfError> {
     reason = "catalog dependency closure remains one auditable selection pass"
 )]
 fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usize>, GfError> {
+    let authority = TransformRoutes::capture(target)?;
     let mut type_ids = HashSet::new();
     for nodes in crate::mutator::node_parquet_files(target).map_err(storage)? {
         for batch in read_parquet(&nodes)? {
@@ -489,7 +572,22 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut relation_names = BTreeSet::new();
     let edge_root = target.join("topology/edges");
     for path in sorted_parquet_files(&edge_root)? {
-        let stem = edge_relation_name(&edge_root, &path)?;
+        let logical = authority.semantic_path(
+            &path
+                .strip_prefix(target)
+                .map_err(storage)?
+                .to_str()
+                .ok_or_else(|| validation("edge path is not UTF-8"))?
+                .replace('\\', "/"),
+        )?;
+        let parts = logical.split('/').collect::<Vec<_>>();
+        let stem = match parts.as_slice() {
+            ["topology", "edges", file] => file
+                .strip_suffix(".parquet")
+                .ok_or_else(|| validation("edge route suffix is invalid"))?,
+            ["topology", "edges", route, _] => route,
+            _ => return Err(validation("edge route shape is invalid")),
+        };
         let batches = read_parquet(&path)?;
         if stem != "_exploratory" && batches.iter().any(|batch| batch.num_rows() != 0) {
             relation_names.insert(stem.to_owned());
@@ -628,6 +726,7 @@ pub(crate) fn projected_graph_fingerprint(root: &Path) -> Result<[u8; 32], GfErr
 /// Portable semantic graph identity excludes runtime catalog IDs while
 /// retaining decoded topology, edges, node properties, and edge properties.
 pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], GfError> {
+    let authority = TransformRoutes::capture(root)?;
     let runtime_entity_names = portable_runtime_entity_names(root)?;
     let mut tables = Vec::<(String, RecordBatch)>::new();
     let node_paths = crate::mutator::node_parquet_files(root).map_err(storage)?;
@@ -656,23 +755,18 @@ pub(crate) fn portable_graph_data_fingerprint(root: &Path) -> Result<[u8; 32], G
         let batches = read_parquet(&path)?;
         let schema = batches[0].schema();
         tables.push((
-            relative,
+            authority.semantic_path(&relative)?,
             concat_batches(&schema, &batches).map_err(storage)?,
         ));
     }
     for (directory, is_edge) in [("properties", false), ("edge_properties", true)] {
-        let stems = if is_edge {
-            crate::catalog::list_edge_property_stems(root)
+        let kind = if is_edge {
+            crate::PropertyRouteKind::Edge
         } else {
-            crate::catalog::list_property_stems(root)
+            crate::PropertyRouteKind::Node
         };
-        for stem in stems {
-            let batches = if is_edge {
-                crate::catalog::read_edge_properties(root, &stem)
-            } else {
-                crate::catalog::read_properties(root, &stem)
-            }
-            .map_err(storage)?;
+        for stem in authority.properties.routes(kind) {
+            let batches = authority.property_batches(root, stem, is_edge)?;
             if let Some(schema) = batches.first().map(RecordBatch::schema) {
                 tables.push((
                     format!("{directory}/{stem}.parquet"),
@@ -709,20 +803,19 @@ fn fingerprint_graph_paths_with_runtime_names(
     paths: Vec<PathBuf>,
     runtime_entity_names: Option<&HashMap<RuntimeEntityId, String>>,
 ) -> Result<[u8; 32], GfError> {
+    let authority = TransformRoutes::capture(root)?;
     let mut logical_tables = BTreeMap::<String, Vec<PathBuf>>::new();
     for path in paths {
         let relative = path
             .strip_prefix(root)
             .map_err(|_| validation("graph projection path escaped target"))?;
-        let components = relative
-            .components()
-            .map(|component| match component {
-                std::path::Component::Normal(value) => value
-                    .to_str()
-                    .ok_or_else(|| validation("graph projection path is not UTF-8")),
-                _ => Err(validation("graph projection path is not canonical")),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let semantic = authority.semantic_path(
+            &relative
+                .to_str()
+                .ok_or_else(|| validation("graph path is not UTF-8"))?
+                .replace('\\', "/"),
+        )?;
+        let components = semantic.split('/').collect::<Vec<_>>();
         let logical = match components.as_slice() {
             ["topology", "nodes.parquet"] | ["topology", "nodes", _] => {
                 "topology/nodes.parquet".to_owned()
@@ -1281,27 +1374,6 @@ fn sorted_parquet_files(directory: &Path) -> Result<Vec<PathBuf>, GfError> {
     Ok(paths)
 }
 
-fn edge_relation_name<'a>(root: &Path, path: &'a Path) -> Result<&'a str, GfError> {
-    let relative = path
-        .strip_prefix(root)
-        .map_err(|_| validation("edge topology path escaped root"))?;
-    let mut components = relative.components();
-    let first = components
-        .next()
-        .and_then(|component| match component {
-            std::path::Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .ok_or_else(|| validation("edge topology relation is not canonical UTF-8"))?;
-    if components.next().is_some() {
-        Ok(first)
-    } else {
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| validation("edge topology stem is not UTF-8"))
-    }
-}
-
 fn uuid_column<'a>(
     batch: &'a RecordBatch,
     name: &str,
@@ -1496,6 +1568,18 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 
 #[cfg(test)]
 mod tests {
+    fn admitted_test_path(root: &std::path::Path, semantic: &str) -> std::path::PathBuf {
+        let (inventory, _) = crate::capture_graph_files(root).unwrap();
+        let authority = super::TransformRoutes::from_inventory(root, inventory.clone()).unwrap();
+        let entries = inventory
+            .files
+            .iter()
+            .filter(|entry| authority.semantic_path(&entry.relative_path).unwrap() == semantic)
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "one exact fixture route {semantic}");
+        crate::graph_files::resolve_v1_inventory_entry(root, entries[0]).unwrap()
+    }
+
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1521,6 +1605,94 @@ mod tests {
         let mut bytes = [0_u8; 16];
         bytes[15] = marker;
         Uuid::from_bytes(bytes)
+    }
+
+    #[test]
+    fn mapped_projection_keeps_exact_routes_and_source_inventory() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
+        let a = uuid(120);
+        let b = uuid(121);
+        let edge = uuid(122);
+        for node in [a, b] {
+            writer
+                .create_node(node, EntityTypeId::ontology(TypeId(1)).unwrap())
+                .unwrap();
+        }
+        writer.create_edge(edge, "CON\\route", &a, &b).unwrap();
+        writer
+            .set_properties(
+                &a,
+                Some("AUX\\label"),
+                HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("CON\\route"),
+                HashMap::from([("cost".into(), IrLiteral::Float(2.5))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let before = crate::capture_graph_files(source.path()).unwrap().0;
+        let summary = materialize_portable_graph_tree_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: BTreeSet::from([*a.as_bytes()]),
+                edge_uuids: BTreeSet::from([*edge.as_bytes()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.node_uuids, vec![*a.as_bytes(), *b.as_bytes()]);
+        assert_eq!(summary.edge_uuids, vec![*edge.as_bytes()]);
+        let output = crate::capture_graph_files(target.path()).unwrap().0;
+        let table = crate::graph_files::authenticate_route_table(target.path(), &output).unwrap();
+        table
+            .validate_paths(
+                output
+                    .files
+                    .iter()
+                    .map(|entry| entry.relative_path.as_str()),
+            )
+            .unwrap();
+        let authority = TransformRoutes::from_inventory(target.path(), output).unwrap();
+        assert_eq!(
+            authority
+                .properties
+                .routes(crate::PropertyRouteKind::Node)
+                .collect::<Vec<_>>(),
+            vec!["AUX\\label"]
+        );
+        assert_eq!(
+            authority
+                .properties
+                .routes(crate::PropertyRouteKind::Edge)
+                .collect::<Vec<_>>(),
+            vec!["CON\\route"]
+        );
+        let rows = authority
+            .property_batches(target.path(), "CON\\route", true)
+            .unwrap();
+        assert_eq!(
+            rows[0]
+                .column_by_name("cost")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            2.5
+        );
+        assert_eq!(crate::capture_graph_files(source.path()).unwrap().0, before);
+        assert_eq!(
+            portable_graph_data_fingerprint(source.path()).unwrap(),
+            portable_graph_data_fingerprint(target.path()).unwrap()
+        );
     }
 
     #[test]
@@ -1680,15 +1852,22 @@ mod tests {
             &[7, 9]
         );
 
-        let projected_edges =
-            read_parquet(&target.path().join("topology/edges/_exploratory.parquet")).unwrap();
+        let projected_edges = read_parquet(&admitted_test_path(
+            target.path(),
+            "topology/edges/_exploratory.parquet",
+        ))
+        .unwrap();
         assert_eq!(projected_edges[0].num_rows(), 1);
         assert_eq!(
             uuid_at(uuid_column(&projected_edges[0], "edge_uuid").unwrap(), 0).unwrap(),
             *edges[0].as_bytes()
         );
         let source_edge_ids = id_map(
-            &read_parquet(&source.path().join("topology/edges/_exploratory.parquet")).unwrap()[0],
+            &read_parquet(&admitted_test_path(
+                source.path(),
+                "topology/edges/_exploratory.parquet",
+            ))
+            .unwrap()[0],
             "edge_uuid",
             "edge_id",
         );
@@ -1801,8 +1980,8 @@ mod tests {
             "topology/runtime_catalog.parquet",
         ] {
             assert_eq!(
-                fs::read(first.path().join(relative)).unwrap(),
-                fs::read(second.path().join(relative)).unwrap(),
+                fs::read(admitted_test_path(first.path(), relative)).unwrap(),
+                fs::read(admitted_test_path(second.path(), relative)).unwrap(),
                 "non-deterministic output for {relative}"
             );
         }
@@ -1824,7 +2003,7 @@ mod tests {
 
         let mut paths = vec![
             source.path().join("topology/nodes.parquet"),
-            source.path().join("topology/edges/_exploratory.parquet"),
+            admitted_test_path(source.path(), "topology/edges/_exploratory.parquet"),
             source.path().join("topology/runtime_catalog.parquet"),
         ];
         for (kind, route) in [
@@ -2042,9 +2221,10 @@ mod tests {
             actual_nodes,
             vec![alice.as_bytes().to_vec(), bob.as_bytes().to_vec()]
         );
-        let edge = read_parquet(&target.path().join("topology/edges/KNOWS.parquet"))
-            .unwrap()
-            .remove(0);
+        let admitted = TransformRoutes::capture(target.path()).unwrap();
+        let edge_paths = admitted.properties.edge_files(Some("KNOWS"));
+        assert_eq!(edge_paths.len(), 1);
+        let edge = read_parquet(&edge_paths[0].1).unwrap().remove(0);
         for (column, expected) in [("edge_uuid", knows), ("src_uuid", alice), ("dst_uuid", bob)] {
             let ids = edge
                 .column_by_name(column)

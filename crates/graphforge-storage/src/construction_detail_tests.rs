@@ -61,6 +61,205 @@ mod compact_details {
     }
 
     #[test]
+    fn mapped_encoding_versions_resume_with_explicit_layout_authority() {
+        for version in [6, 7, 8] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let operation = Uuid::new_v4();
+            let budgets = GraphConstructionBudgets::default();
+            let mut session = create(&root, operation, version, budgets, None);
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "nodes",
+                    &node_property_batch(1, 3),
+                )
+                .unwrap();
+            session
+                .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+                .unwrap();
+            session.seal().unwrap();
+            drop(session);
+            let mut resumed =
+                GraphConstructionSession::open(root.path(), operation, 0, budgets).unwrap();
+            assert_eq!(resumed.checkpoint.format_version, version);
+            let encoded = resumed.prepare_canonical_encoding(1).unwrap();
+            assert_eq!(
+                encoded
+                    .artifacts
+                    .iter()
+                    .any(|entry| entry.path == crate::route_component::TABLE_FILE),
+                version == 8
+            );
+            resumed
+                .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
+                .unwrap();
+            drop(resumed);
+            let selected = crate::resolve_project_generation(root.path()).unwrap();
+            let crate::GraphFilesParticipant::V2(compact) = selected
+                .declared_graph_files_participant()
+                .unwrap()
+                .unwrap()
+            else {
+                panic!("compact publication required")
+            };
+            assert_eq!(compact.format_version, if version == 8 { 4 } else { 2 });
+            let inventory = selected.graph_files_inventory().unwrap().unwrap();
+            assert_eq!(inventory.format_version, if version == 8 { 3 } else { 1 });
+            let admitted =
+                crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+            let edges = crate::read_edges_from_inventory(
+                &admitted,
+                "*",
+                graphforge_core::OntologyMode::Exploratory,
+            )
+            .unwrap();
+            assert_eq!(edges.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+            let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+            let (_, evidence) = crate::GraphManifestState::open(
+                &lease,
+                compact,
+                crate::GraphManifestLimits::default(),
+            )
+            .unwrap();
+            let expected = inventory
+                .files
+                .iter()
+                .find(|entry| entry.relative_path == crate::route_component::TABLE_FILE)
+                .map_or(0, |entry| entry.byte_length);
+            assert_eq!(evidence.authority_read_bytes, expected);
+            assert!(evidence.decoded_bytes > 0);
+        }
+        assert!(DetailCodec::from_version(9).is_err());
+        assert_eq!(
+            DetailCodec::from_version(7).unwrap(),
+            DetailCodec::from_version(8).unwrap()
+        );
+    }
+
+    #[test]
+    fn mapped_encoding_appends_preserve_parent_routes_and_refuse_changed_table() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut initial = create(
+            &root,
+            Uuid::new_v4(),
+            7,
+            GraphConstructionBudgets::default(),
+            None,
+        );
+        initial
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        initial
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+            .unwrap();
+        initial.seal().unwrap();
+        let encoded = initial.prepare_canonical_encoding(1).unwrap();
+        initial
+            .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        drop(initial);
+        let mut prior = crate::resolve_project_generation(root.path())
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+            .unwrap();
+        for generation in [2, 3] {
+            let (_source, mut session, shape) =
+                ordinal_append_session(&root, generation, u128::from(generation + 2), 1);
+            assert_eq!(session.checkpoint.format_version, 8);
+            let encoding = session.encode_canonical(&shape, generation).unwrap();
+            let path = session
+                .root
+                .path()
+                .join(&encoding.root)
+                .join("graph")
+                .join(crate::route_component::TABLE_FILE);
+            let bytes = std::fs::read(&path).unwrap();
+            let table =
+                crate::route_component::RouteTable::decode(&bytes, 64 * 1024 * 1024, 100_000)
+                    .unwrap();
+            let before = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let mut corrupted = bytes.clone();
+            corrupted[0] ^= 1;
+            std::fs::write(&path, &corrupted).unwrap();
+            let target = Uuid::new_v4();
+            let transaction = Uuid::new_v4();
+            assert!(
+                session
+                    .publish_canonical(&encoding, target, transaction)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                before
+            );
+            std::fs::write(&path, &bytes).unwrap();
+            session
+                .publish_canonical(&encoding, target, transaction)
+                .unwrap();
+            drop(session);
+            let selected = crate::resolve_project_generation(root.path()).unwrap();
+            let current = selected.graph_files_inventory().unwrap().unwrap();
+            assert_eq!(current.format_version, 3);
+            table
+                .validate_paths(
+                    current
+                        .files
+                        .iter()
+                        .map(|entry| entry.relative_path.as_str()),
+                )
+                .unwrap();
+            for old in &prior.files {
+                if crate::route_component::route_position(&old.relative_path)
+                    .unwrap()
+                    .is_none()
+                {
+                    continue;
+                }
+                let path = if prior.format_version == 1 {
+                    crate::route_component::encode_relative_route(
+                        &old.relative_path,
+                        &mut crate::route_component::RouteTable::default(),
+                        64 * 1024 * 1024,
+                        100_000,
+                    )
+                    .unwrap()
+                } else {
+                    old.relative_path.clone()
+                };
+                let retained = current
+                    .files
+                    .iter()
+                    .find(|entry| entry.relative_path == path)
+                    .unwrap();
+                assert_eq!(retained.content_sha256, old.content_sha256);
+                assert_eq!(retained.byte_length, old.byte_length);
+            }
+            let admitted =
+                crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+            assert_eq!(
+                crate::read_edges_from_inventory(
+                    &admitted,
+                    "*",
+                    graphforge_core::OntologyMode::Exploratory
+                )
+                .unwrap()
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+                2
+            );
+            prior = current;
+        }
+    }
+
+    #[test]
     fn detail_codec_legacy_and_compact_resume_cross_multiple_merge_levels() {
         let mut measurements = Vec::new();
         for version in [6, 7] {

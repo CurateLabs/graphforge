@@ -52,20 +52,30 @@ impl<'a> FacadeMutationLifecycle<'a> {
     fn refresh_unpublished(&self) -> Result<(), GfError> {
         let (inventory, _) = graphforge_storage::capture_graph_files(&self.graph.dir)?;
         let inventory = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_generation(
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &self.parent,
                 &self.graph.dir,
-                inventory.files,
+                inventory,
             )?,
         );
+        let adjacency = Arc::new(crate::adjacency_provider_for_graph(
+            &self.graph.dir,
+            self.graph.ontology_mode,
+            Arc::clone(&inventory),
+        )?);
         *self
             .graph
             .property_authority
             .lock()
             .expect("property authority lock poisoned") = crate::GenerationPropertyAuthority {
             generation_uuid: self.parent.generation_uuid(),
-            inventory,
+            inventory: Arc::clone(&inventory),
         };
+        *self
+            .graph
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") = adjacency;
         Ok(())
     }
 }
@@ -100,7 +110,7 @@ impl MutationLifecycle for FacadeMutationLifecycle<'_> {
         if !self.publish {
             self.refresh_unpublished()?;
         }
-        self.graph.adjacency_provider.invalidate();
+        self.graph.adjacency_provider_for_session().invalidate();
         Ok(())
     }
 
@@ -153,7 +163,7 @@ impl FacadeMutationLifecycle<'_> {
             .uuid_membership_index
             .lock()
             .expect("UUID membership index lock poisoned") = None;
-        self.graph.adjacency_provider.invalidate();
+        self.graph.adjacency_provider_for_session().invalidate();
         Ok(())
     }
 }

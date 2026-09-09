@@ -434,10 +434,15 @@ impl GraphForge {
                 .expect("runtime catalog poisoned")
                 .clone(),
         ));
-        projected.adjacency_provider = Arc::new(crate::adjacency_provider_for_graph(
-            &projected.dir,
-            projected.ontology_mode,
-        )?);
+        *projected
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") =
+            Arc::new(crate::adjacency_provider_for_graph(
+                &projected.dir,
+                projected.ontology_mode,
+                projected.property_inventory_for_session(),
+            )?);
         let current = self.generation_for_read()?;
         if current.generation_uuid() != source_generation_uuid {
             return Err(transaction_conflict(

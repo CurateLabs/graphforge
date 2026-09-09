@@ -361,7 +361,28 @@ impl ResolvedProjectGeneration {
                         entry.byte_length,
                     )?;
                 }
-                crate::graph_files::inventory_from_entries(files).map(Some)
+                crate::route_component::authenticate_manifest_routes(
+                    root.format_version,
+                    &files,
+                    |entry| {
+                        crate::read_graph_object_by_digest(
+                            self.container_root(),
+                            &entry.content_sha256,
+                            MAX_SEGMENT_BYTES,
+                        )
+                    },
+                )?;
+                crate::graph_files::inventory_from_entries_with_version(
+                    files,
+                    if root.format_version
+                        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+                    {
+                        crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+                    } else {
+                        crate::GRAPH_FILES_RECORD_VERSION
+                    },
+                )
+                .map(Some)
             }
         }
     }
@@ -391,7 +412,10 @@ impl ResolvedProjectGeneration {
         if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
             || !matches!(
                 snapshot.record_version,
-                crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+                crate::GRAPH_FILES_RECORD_VERSION
+                    | crate::GRAPH_FILES_V2_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+                    | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
             )
             || snapshot.encoding != "json"
         {

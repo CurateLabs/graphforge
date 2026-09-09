@@ -313,6 +313,14 @@ impl Drop for RewriteGuard {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn rewrite_lock_is_held() -> bool {
+    matches!(
+        PROCESS_REWRITE_LOCK.try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    )
+}
+
 fn acquire(root: &Path) -> Result<RewriteGuard, GfError> {
     // This mutex owns ordering only; the durable journal owns recovery state.
     // A panicking holder must not disable every later rewrite in the process.
@@ -425,7 +433,7 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
         expected,
         std::ffi::OsStr::new(JOURNAL),
     )
-    .map_err(storage)?;
+    .map_err(|error| storage(format!("rewrite journal publication: {error}")))?;
     root.sync().map_err(storage)
 }
 
@@ -448,9 +456,18 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
             authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
             let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
             drop(temp);
+            let authority = if entry.destination == crate::route_component::TABLE_FILE {
+                "semantic routes"
+            } else if entry.class == EntryClass::GenerationAuthority {
+                "generation"
+            } else if entry.destination.starts_with("topology/uuid-membership/") {
+                "UUID membership"
+            } else {
+                "graph data"
+            };
             parent
                 .replace_child(&temporary, expected, &target)
-                .map_err(storage)?;
+                .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?;
             parent.sync().map_err(storage)?;
             authenticate_installed_destination(&parent, &target, entry)?;
         }
@@ -947,7 +964,7 @@ pub(crate) fn commit(
 
 #[allow(clippy::too_many_lines)] // Linear crash-barrier state machine; splitting obscures order.
 pub(crate) fn commit_with_participant(
-    mut batch: RewriteBatch,
+    batch: RewriteBatch,
     root: &Path,
     bump_topology: bool,
     bump_search: bool,
@@ -955,7 +972,6 @@ pub(crate) fn commit_with_participant(
     auxiliary: Option<AuxiliaryReceipt>,
     participant: Option<RewriteParticipantPreparer<'_>>,
 ) -> Result<GenerationPair, GfError> {
-    let has_participant = participant.is_some();
     // Serialize the pinned-generation precondition with CURRENT replacement.
     // Project publication takes this same lock before it can replace CURRENT.
     let _project_authority_guard = batch
@@ -963,6 +979,62 @@ pub(crate) fn commit_with_participant(
         .map(crate::project_publication::wait_for_writer_lock)
         .transpose()?;
     let guard = acquire(root)?;
+    commit_locked(
+        batch,
+        root,
+        bump_topology,
+        bump_search,
+        bump_property,
+        auxiliary,
+        participant,
+        &guard,
+    )
+}
+
+// Retain the existing journal lock through owned-layout admission, staging and
+// final authentication. The callback cannot introduce published authority.
+pub(crate) fn prepare_owned_layout<T, R>(
+    root: &Path,
+    prepare: impl FnOnce(&StableDirectory) -> Result<(RewriteBatch, T), GfError>,
+    authenticate: impl FnOnce(T) -> Result<R, GfError>,
+) -> Result<R, GfError> {
+    let guard = acquire(root)?;
+    guard.revalidate()?;
+    let current = crate::generation::read_generation_state_raw(root)?;
+    recover_locked(
+        root,
+        &guard.directory,
+        GenerationPair {
+            topology: current.topology,
+            search: current.search,
+            property: current.property,
+        },
+    )?;
+    let (batch, prepared) = prepare(&guard.directory)?;
+    if batch.property_authority_root()?.is_some() {
+        return Err(storage(
+            "owned layout preparation cannot carry project authority",
+        ));
+    }
+    commit_locked(batch, root, false, false, false, None, None, &guard)?;
+    let result = authenticate(prepared)?;
+    guard.revalidate()?;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)] // Existing commit arguments plus the retained lock; no new public options.
+#[allow(clippy::too_many_lines)] // Preserve the journal's linear crash-barrier ordering.
+fn commit_locked(
+    mut batch: RewriteBatch,
+    root: &Path,
+    bump_topology: bool,
+    bump_search: bool,
+    bump_property: bool,
+    auxiliary: Option<AuxiliaryReceipt>,
+    participant: Option<RewriteParticipantPreparer<'_>>,
+    guard: &RewriteGuard,
+) -> Result<GenerationPair, GfError> {
+    let has_participant = participant.is_some();
     guard.revalidate()?;
     let prior_state = crate::generation::read_generation_state_raw(root)?;
     let prior = GenerationPair {
@@ -1071,6 +1143,7 @@ pub(crate) fn commit_with_participant(
             "UUID rewrite participant must stage its namespace and exact typed receipt",
         ));
     }
+    let route_table_prior = batch.prepare_registered_routes(root, &guard.directory)?;
     let generation_bytes =
         crate::generation::encode_generation_state(next.topology, next.search, next.property)?;
     guard.revalidate()?;
@@ -1159,6 +1232,9 @@ pub(crate) fn commit_with_participant(
     validate_intent(&intent)?;
     for entry in &intent.entries {
         moves::check(root, &guard.directory, entry, false)?;
+    }
+    if let Some(prior) = route_table_prior {
+        prior.verify(&guard.directory)?;
     }
     intent.checksum = checksum(&intent)?;
     if intent.auxiliary.as_ref().is_some_and(is_v4_ordinal_receipt) {

@@ -254,16 +254,18 @@ impl GraphForge {
         // not enable an absolute spill directory so cancel/failure cleanup is
         // scoped to the unpublished artifact (#336).
         let build_options = self.adjacency_build_options(staged.path());
-        graphforge_storage::adjacency::build_adjacency_index_into_with_options(
+        graphforge_storage::adjacency::build_adjacency_index_from_inventory(
             &self.dir,
             staged.path(),
+            Some(&self.property_inventory_for_session()),
             transaction_time_micros(),
             &build_options,
             &mut || token.checkpoint(),
         )?;
-        let issues = graphforge_storage::adjacency::validate_adjacency_index_against(
+        let issues = graphforge_storage::adjacency::validate_adjacency_index_from_inventory(
             &self.dir,
             staged.path(),
+            Some(&self.property_inventory_for_session()),
         )?;
         if !issues.is_empty() {
             return Err(GfError::Validation(format!(
@@ -295,7 +297,7 @@ impl GraphForge {
         }
         let staged_adjacency = graphforge_storage::adjacency::adjacency_dir(staged.path());
         if let Err(error) = std::fs::rename(&staged_adjacency, &adjacency) {
-            self.adjacency_provider.invalidate();
+            self.adjacency_provider_for_session().invalidate();
             let restore = had_prior
                 .then(|| std::fs::rename(&backup, &adjacency))
                 .transpose()
@@ -303,7 +305,7 @@ impl GraphForge {
                 .map(|restore| restore.to_string());
             return Err(adjacency_swap_error(&error.to_string(), restore.as_deref()));
         }
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         let prior_generation = *self
             .current_generation_uuid
             .lock()
@@ -316,7 +318,7 @@ impl GraphForge {
         if let Err(error) =
             reconcile_adjacency_publication(prior_generation, observed_generation, publication)
         {
-            self.adjacency_provider.invalidate();
+            self.adjacency_provider_for_session().invalidate();
             std::fs::remove_dir_all(&adjacency).map_err(|restore| {
                 GfError::Storage(format!(
                     "adjacency publication failed ({error}); rollback cleanup failed: {restore}"
@@ -329,10 +331,10 @@ impl GraphForge {
                     ))
                 })?;
             }
-            self.adjacency_provider.invalidate();
+            self.adjacency_provider_for_session().invalidate();
             return Err(error);
         }
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         if had_prior {
             // Publication is already authoritative. A best-effort cleanup
             // failure must not turn a committed rebuild into a false failure.
@@ -398,7 +400,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let inspection = graphforge_storage::adjacency::inspect_adjacency_index(&self.dir)?;
+        let inspection = graphforge_storage::adjacency::inspect_adjacency_index_from_inventory(
+            &self.dir,
+            Some(&self.property_inventory_for_session()),
+        )?;
         Ok(AdjacencyInspection {
             project_generation_uuid: *self
                 .current_generation_uuid

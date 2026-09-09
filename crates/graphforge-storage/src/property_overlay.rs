@@ -248,6 +248,7 @@ pub struct AuthenticatedPropertyInventory {
     root: Option<graphforge_filesystem::StableDirectory>,
     root_path: Option<PathBuf>,
     routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>>,
+    edge_routes: BTreeMap<String, Vec<AdmittedEdgeFile>>,
     schemas: BTreeMap<(PropertyRouteKind, String), arrow::datatypes::SchemaRef>,
     authority_bytes: u64,
     authority_block_equivalents: u64,
@@ -258,6 +259,12 @@ pub struct AuthenticatedPropertyInventory {
     late_decoder_failure_row_countdown: Arc<AtomicU64>,
     #[cfg(test)]
     mutation_barrier: Mutex<Option<Arc<TestMutationBarrier>>>,
+}
+
+#[derive(Debug)]
+struct AdmittedEdgeFile {
+    path: PathBuf,
+    relative_path: String,
 }
 
 /// One-time I/O performed while admitting and authenticating an immutable
@@ -365,6 +372,29 @@ struct RouteSchemaBuilder {
 }
 
 impl AuthenticatedPropertyInventory {
+    /// Return semantic relation names and their admitted physical payload paths.
+    /// The inventory retains the generation lease and route authority.
+    #[must_use]
+    pub fn edge_files(&self, relation: Option<&str>) -> Vec<(String, PathBuf)> {
+        self.edge_routes
+            .iter()
+            .filter(|(route, _)| relation.is_none_or(|expected| expected == route.as_str()))
+            .flat_map(|(route, paths)| paths.iter().map(|path| (route.clone(), path.path.clone())))
+            .collect()
+    }
+
+    pub(crate) fn edge_rewrite_files(&self) -> impl Iterator<Item = (&str, &Path, &str)> {
+        self.edge_routes.iter().flat_map(|(route, files)| {
+            files.iter().map(move |file| {
+                (
+                    route.as_str(),
+                    file.path.as_path(),
+                    file.relative_path.as_str(),
+                )
+            })
+        })
+    }
+
     pub(crate) fn admitted_source_files(
         &self,
         kind: PropertyRouteKind,
@@ -486,12 +516,65 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    /// Return admitted immutable property fragments in oldest-to-newest order.
+    /// The caller must retain this inventory while using its physical paths.
+    #[must_use]
+    pub fn property_fragments(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Vec<PropertyFragment> {
+        let Some(root) = &self.root_path else {
+            return Vec::new();
+        };
+        self.routes
+            .get(&(kind, route.to_owned()))
+            .into_iter()
+            .flatten()
+            .map(|fragment| PropertyFragment {
+                id: fragment.id,
+                path: root.join(&fragment.physical_relative),
+            })
+            .collect()
+    }
+
     /// Canonical property routes admitted into this immutable snapshot.
     pub fn routes(&self, kind: PropertyRouteKind) -> impl Iterator<Item = &str> {
         self.routes
             .keys()
             .filter(move |(candidate, _)| *candidate == kind)
             .map(|(_, route)| route.as_str())
+    }
+
+    // Discovery controls wildcard membership; retained authority supplies the exact
+    // semantic spelling without rediscovering or decoding an unauthenticated table.
+    pub(crate) fn discovered_routes(
+        &self,
+        kind: PropertyRouteKind,
+        physical_stems: &[String],
+    ) -> Vec<String> {
+        let physical_stems: BTreeSet<&str> = physical_stems.iter().map(String::as_str).collect();
+        self.routes
+            .iter()
+            .filter(|((candidate, _), fragments)| {
+                *candidate == kind
+                    && fragments.iter().any(|fragment| {
+                        let component =
+                            Path::new(&fragment.entry.relative_path).components().nth(1);
+                        component
+                            .and_then(|part| {
+                                let path = std::path::Path::new(part.as_os_str());
+                                match fragment.layout {
+                                    PropertyFragmentLayout::LegacyFlat => path.file_stem(),
+                                    PropertyFragmentLayout::CanonicalNested => path.file_name(),
+                                }
+                            })
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| physical_stems.contains(name))
+                    })
+            })
+            .map(|((_, route), _)| route.clone())
+            .collect()
     }
 
     /// Exact one-time admission evidence for this cached inventory.
@@ -553,6 +636,55 @@ impl AuthenticatedPropertyInventory {
         Ok(admitted)
     }
 
+    /// Admit a materialized workspace with its explicit captured layout authority.
+    pub fn from_materialized_inventory(
+        generation: &crate::ResolvedProjectGeneration,
+        root: &Path,
+        inventory: crate::GraphFilesInventory,
+    ) -> Result<Self, GfError> {
+        let mut admitted = Self::from_inventory_at_root(root, inventory, None)?;
+        admitted.generation_lease = Some(generation.clone());
+        Ok(admitted)
+    }
+
+    pub(crate) fn from_inventory_at_root(
+        root: &Path,
+        inventory: crate::GraphFilesInventory,
+        requested_route: Option<(PropertyRouteKind, &str)>,
+    ) -> Result<Self, GfError> {
+        let table = crate::route_component::authenticate_manifest_routes(
+            inventory.format_version,
+            &inventory.files,
+            |entry| {
+                use std::io::{Read, Seek};
+                let mut retained =
+                    crate::graph_files::resolve_v1_inventory_entry_retained(root, entry)?;
+                retained.file.rewind().map_err(io_error)?;
+                let mut bytes = Vec::new();
+                retained
+                    .file
+                    .take(entry.byte_length + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(io_error)?;
+                Ok(bytes)
+            },
+        )?;
+        let edge_routes = if requested_route.is_none() {
+            admit_edge_route_paths(root, &inventory.files, table.as_ref(), false)?
+        } else {
+            BTreeMap::new()
+        };
+        let entries = resolve_versioned_property_entries_for_route(
+            root,
+            inventory.files,
+            requested_route,
+            table.as_ref(),
+        )?;
+        let mut admitted = Self::admit_entries(root, entries, requested_route, table.as_ref())?;
+        admitted.edge_routes = edge_routes;
+        Ok(admitted)
+    }
+
     /// Resolve one route without opening or hashing authenticated entries for
     /// unrelated routes in the pinned generation inventory.
     pub fn from_resolved_generation_for_route(
@@ -573,6 +705,7 @@ impl AuthenticatedPropertyInventory {
                 root_path: None,
                 generation_lease: Some(generation.clone()),
                 routes: BTreeMap::new(),
+                edge_routes: BTreeMap::new(),
                 schemas: BTreeMap::new(),
                 authority_bytes: 0,
                 authority_block_equivalents: 0,
@@ -591,12 +724,56 @@ impl AuthenticatedPropertyInventory {
         let mut admitted = match participant {
             crate::graph_files::GraphFilesParticipant::V1(_) => {
                 let root = generation.graph_tree_root();
-                let entries =
-                    resolve_v1_property_entries_for_route(&root, inventory.files, requested_route)?;
-                Self::admit_entries(&root, entries, requested_route)
+                let route_table = crate::route_component::authenticate_manifest_routes(
+                    inventory.format_version,
+                    &inventory.files,
+                    |entry| {
+                        let mut retained =
+                            crate::graph_files::resolve_v1_inventory_entry_retained(&root, entry)?;
+                        retained.file.rewind().map_err(io_error)?;
+                        let mut bytes = Vec::new();
+                        retained
+                            .file
+                            .take(entry.byte_length + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(io_error)?;
+                        Ok(bytes)
+                    },
+                )?;
+                let edge_routes = if requested_route.is_none() {
+                    admit_edge_route_paths(&root, &inventory.files, route_table.as_ref(), false)?
+                } else {
+                    BTreeMap::new()
+                };
+                let entries = resolve_versioned_property_entries_for_route(
+                    &root,
+                    inventory.files,
+                    requested_route,
+                    route_table.as_ref(),
+                )?;
+                let mut admitted =
+                    Self::admit_entries(&root, entries, requested_route, route_table.as_ref())?;
+                admitted.edge_routes = edge_routes;
+                Ok::<Self, GfError>(admitted)
             }
             crate::graph_files::GraphFilesParticipant::V2(_) => {
                 let root = generation.container_root();
+                let route_table = crate::route_component::authenticate_manifest_routes(
+                    inventory.format_version,
+                    &inventory.files,
+                    |entry| {
+                        crate::read_graph_object_by_digest(
+                            root,
+                            &entry.content_sha256,
+                            64 * 1024 * 1024,
+                        )
+                    },
+                )?;
+                let edge_routes = if requested_route.is_none() {
+                    admit_edge_route_paths(root, &inventory.files, route_table.as_ref(), true)?
+                } else {
+                    BTreeMap::new()
+                };
                 let entries = inventory
                     .files
                     .into_iter()
@@ -608,7 +785,10 @@ impl AuthenticatedPropertyInventory {
                         Ok((entry, relative.to_path_buf()))
                     })
                     .collect::<Result<Vec<_>, GfError>>()?;
-                Self::admit_entries(root, entries, requested_route)
+                let mut admitted =
+                    Self::admit_entries(root, entries, requested_route, route_table.as_ref())?;
+                admitted.edge_routes = edge_routes;
+                Ok::<Self, GfError>(admitted)
             }
         }?;
         admitted.generation_lease = Some(generation.clone());
@@ -626,9 +806,10 @@ impl AuthenticatedPropertyInventory {
                 (entry, relative)
             })
             .collect();
-        Self::admit_entries(root, entries, None)
+        Self::admit_entries(root, entries, None, None)
     }
 
+    #[cfg(test)]
     fn from_entries_at_root_for_route(
         root: &Path,
         entries: Vec<crate::GraphFileEntry>,
@@ -642,13 +823,14 @@ impl AuthenticatedPropertyInventory {
                 (entry, relative)
             })
             .collect();
-        Self::admit_entries(root, entries, Some((kind, route)))
+        Self::admit_entries(root, entries, Some((kind, route)), None)
     }
 
     fn admit_entries(
         root_path: &Path,
         entries: Vec<(crate::GraphFileEntry, PathBuf)>,
         requested_route: Option<(PropertyRouteKind, &str)>,
+        route_table: Option<&crate::route_component::RouteTable>,
     ) -> Result<Self, GfError> {
         let root = graphforge_filesystem::StableDirectory::open(root_path).map_err(io_error)?;
         #[cfg(test)]
@@ -656,7 +838,11 @@ impl AuthenticatedPropertyInventory {
         let mut routes: BTreeMap<(PropertyRouteKind, String), Vec<AuthenticatedPropertyFragment>> =
             BTreeMap::new();
         for (entry, physical_relative) in entries {
-            let parsed = parse_inventory_property_path(&entry.relative_path)?;
+            let semantic_path = match route_table {
+                Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+                None => entry.relative_path.clone(),
+            };
+            let parsed = parse_inventory_property_path(&semantic_path)?;
             if entry.role != crate::GraphFileRole::Properties {
                 if parsed.is_some() {
                     return Err(corrupt("property inventory entry has the wrong role"));
@@ -734,6 +920,7 @@ impl AuthenticatedPropertyInventory {
             root: Some(root),
             root_path: Some(root_path.to_path_buf()),
             routes,
+            edge_routes: BTreeMap::new(),
             schemas,
             authority_bytes: 0,
             authority_block_equivalents: 0,
@@ -1317,16 +1504,71 @@ fn inventory_entry_reaches_route(
     Ok(requested_route.is_none_or(|requested| (kind, route.as_str()) == requested))
 }
 
+fn admit_edge_route_paths(
+    root: &Path,
+    entries: &[crate::GraphFileEntry],
+    table: Option<&crate::route_component::RouteTable>,
+    cas: bool,
+) -> Result<BTreeMap<String, Vec<AdmittedEdgeFile>>, GfError> {
+    let mut routes = BTreeMap::<String, Vec<AdmittedEdgeFile>>::new();
+    for entry in entries {
+        if !entry.relative_path.starts_with("topology/edges/") {
+            continue;
+        }
+        if entry.role != crate::GraphFileRole::Topology {
+            return Err(corrupt("edge topology entry has the wrong role"));
+        }
+        let semantic = match table {
+            Some(table) => table.semantic_relative_path(&entry.relative_path)?,
+            None => crate::graph_files::legacy_inventory_logical_text(&entry.relative_path)?,
+        };
+        let route = crate::route_component::route_position(&semantic)?
+            .ok_or_else(|| corrupt("edge topology entry lacks relation route"))?;
+        let path = if cas {
+            crate::graph_object_path(root, &entry.content_sha256)?
+        } else {
+            crate::graph_files::resolve_v1_inventory_entry(root, entry)?
+        };
+        routes
+            .entry(route.to_owned())
+            .or_default()
+            .push(AdmittedEdgeFile {
+                path,
+                relative_path: entry.relative_path.clone(),
+            });
+    }
+    Ok(routes)
+}
+
+#[cfg(test)]
 fn resolve_v1_property_entries_for_route(
     root: &Path,
     entries: Vec<crate::GraphFileEntry>,
     requested_route: Option<(PropertyRouteKind, &str)>,
 ) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
+    resolve_versioned_property_entries_for_route(root, entries, requested_route, None)
+}
+
+fn resolve_versioned_property_entries_for_route(
+    root: &Path,
+    entries: Vec<crate::GraphFileEntry>,
+    requested_route: Option<(PropertyRouteKind, &str)>,
+    route_table: Option<&crate::route_component::RouteTable>,
+) -> Result<Vec<(crate::GraphFileEntry, PathBuf)>, GfError> {
     let mut selected = Vec::new();
     for mut entry in entries {
-        let canonical =
-            crate::graph_files::canonical_inventory_relative_text(&entry.relative_path)?;
-        if !inventory_entry_reaches_route(entry.role, &canonical, requested_route)? {
+        let canonical = match route_table {
+            Some(_) => {
+                crate::graph_files::wire_relative_path(&entry.relative_path)?;
+                entry.relative_path.clone()
+            }
+            None => crate::graph_files::legacy_inventory_logical_text(&entry.relative_path)?,
+        };
+        let semantic = match route_table {
+            Some(table) => table.semantic_relative_path(&canonical)?,
+            None => canonical.clone(),
+        };
+        if !inventory_entry_reaches_route(entry.role, &semantic, requested_route)? {
             continue;
         }
         // Resolve with the original spelling so a legacy backslash-authored
@@ -2004,6 +2246,51 @@ fn add_open_metrics(metrics: &mut PropertyOverlayMetrics, open: PropertyInventor
         .saturating_add(open.authentication_read_calls);
 }
 
+pub(crate) fn authenticated_property_inventory_for_rewrite_route(
+    project: &Path,
+    kind: PropertyRouteKind,
+    route: &str,
+    rewrite: &crate::RewriteBatch,
+) -> Result<AuthenticatedPropertyInventory, GfError> {
+    if project.join(crate::CURRENT_FILE).is_file() {
+        return authenticated_property_inventory_for_route(project, kind, route);
+    }
+    let (inventory, read_calls) = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let authority_bytes = inventory.total_byte_length;
+    let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
+        blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
+    });
+    let mut admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
+        project,
+        inventory,
+        Some((kind, route)),
+    )?;
+    admitted.authority_bytes = authority_bytes;
+    admitted.authority_block_equivalents = authority_block_equivalents;
+    admitted.authority_read_calls = read_calls;
+    Ok(admitted)
+}
+
+pub(crate) fn authenticated_property_inventory_for_rewrite(
+    project: &Path,
+    rewrite: &crate::RewriteBatch,
+) -> Result<AuthenticatedPropertyInventory, GfError> {
+    if project.join(crate::CURRENT_FILE).is_file() {
+        return authenticated_property_inventory(project);
+    }
+    let (inventory, read_calls) = crate::graph_files::capture_rewrite_baseline(project, rewrite)?;
+    let authority_bytes = inventory.total_byte_length;
+    let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
+        blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
+    });
+    let mut admitted =
+        AuthenticatedPropertyInventory::from_inventory_at_root(project, inventory, None)?;
+    admitted.authority_bytes = authority_bytes;
+    admitted.authority_block_equivalents = authority_block_equivalents;
+    admitted.authority_read_calls = read_calls;
+    Ok(admitted)
+}
+
 pub(crate) fn authenticated_property_inventory_for_route(
     project: &Path,
     kind: PropertyRouteKind,
@@ -2023,11 +2310,10 @@ pub(crate) fn authenticated_property_inventory_for_route(
     let authority_block_equivalents = inventory.files.iter().fold(0_u64, |blocks, entry| {
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
-    let mut admitted = AuthenticatedPropertyInventory::from_entries_at_root_for_route(
+    let mut admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
         project,
-        inventory.files,
-        kind,
-        route,
+        inventory,
+        Some((kind, route)),
     )?;
     admitted.authority_bytes = authority_bytes;
     admitted.authority_block_equivalents = authority_block_equivalents;
@@ -2053,7 +2339,7 @@ pub(crate) fn authenticated_property_inventory(
         blocks.saturating_add(entry.byte_length.div_ceil(64 * 1024))
     });
     let mut admitted =
-        AuthenticatedPropertyInventory::from_entries_at_root(project, inventory.files)?;
+        AuthenticatedPropertyInventory::from_inventory_at_root(project, inventory, None)?;
     admitted.authority_bytes = authority_bytes;
     admitted.authority_block_equivalents = authority_block_equivalents;
     admitted.authority_read_calls = authority_read_calls;
@@ -3498,6 +3784,94 @@ mod tests {
             "intermediate merge output must remain linear in input: {metrics:#?}"
         );
         assert!(budget.peak() <= 1024);
+    }
+
+    #[test]
+    fn mapped_route_admission_does_not_open_unrelated_missing_payload() {
+        let dir = TempDir::new().unwrap();
+        let mut table = crate::route_component::RouteTable::default();
+        let selected = table.insert("CON", 64 * 1024 * 1024, 100_000).unwrap();
+        let unrelated = table.insert("con", 64 * 1024 * 1024, 100_000).unwrap();
+        let relative = format!("properties/{selected}.parquet");
+        fs::create_dir_all(dir.path().join("properties")).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(
+                FixedSizeBinaryArray::try_from_iter(vec![vec![4; 16]].into_iter()).unwrap(),
+            )],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(dir.path().join(&relative)).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let payload = fs::read(dir.path().join(&relative)).unwrap();
+        let table_bytes = table.encode(64 * 1024 * 1024).unwrap();
+        fs::write(
+            dir.path().join(crate::route_component::TABLE_FILE),
+            &table_bytes,
+        )
+        .unwrap();
+        let entry = |relative_path: String, bytes: &[u8], role| crate::GraphFileEntry {
+            relative_path,
+            byte_length: bytes.len() as u64,
+            content_sha256: digest_hex(&Sha256::digest(bytes)),
+            role,
+        };
+        let inventory = crate::graph_files::inventory_from_entries_with_version(
+            vec![
+                entry(relative, &payload, crate::GraphFileRole::Properties),
+                entry(
+                    format!("properties/{unrelated}.parquet"),
+                    b"absent",
+                    crate::GraphFileRole::Properties,
+                ),
+                entry(
+                    crate::route_component::TABLE_FILE.into(),
+                    &table_bytes,
+                    crate::GraphFileRole::Other,
+                ),
+            ],
+            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION,
+        )
+        .unwrap();
+        let admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
+            dir.path(),
+            inventory.clone(),
+            Some((PropertyRouteKind::Node, "CON")),
+        )
+        .unwrap();
+        assert!(
+            admitted
+                .route_schema(PropertyRouteKind::Node, "CON")
+                .is_some()
+        );
+        assert!(
+            admitted
+                .route_schema(PropertyRouteKind::Node, "con")
+                .is_none()
+        );
+        assert_eq!(
+            admitted.open_metrics().property_authentication_bytes,
+            payload.len() as u64
+        );
+        assert!(
+            AuthenticatedPropertyInventory::from_inventory_at_root(
+                dir.path(),
+                inventory,
+                Some((PropertyRouteKind::Node, "con"))
+            )
+            .is_err()
+        );
     }
 
     #[test]

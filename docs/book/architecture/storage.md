@@ -217,18 +217,67 @@ authenticates an existing inventory once per publication sequence; individual
 updates cannot substitute a caller-owned cache and do not rescan all prior
 descriptors. Open resolves the bounded manifest and verifies every selected
 payload before exposing the generation. Ordinary API open and restore dispatch
-on the declared participant version: version 1 keeps its pinned-tree/copy
-behavior, while version 2 materializes authenticated CAS objects at the same
-workspace-relative paths and replays authoritative deltas into a distinct
-private workspace so immutable CAS hard links are never modified in place.
-Version 1
-expanded inventories remain readable and can be migrated without changing
-`CURRENT` until the complete version-2 generation is durable.
+on the declared participant version. Expanded inventories use version 1 for
+legacy raw routes and version 3 for mapped routes; compact CAS roots use
+version 2 for raw routes and version 4 for mapped routes. The descriptor and
+payload must agree. Immutable generations remain unchanged while a writable
+facade materializes an authenticated private workspace.
+
+### Semantic routes and portable filenames
+
+Node labels and edge relations are semantic UTF-8 identifiers, not filesystem
+components. Rust owns their translation at every node-property, edge-property,
+and topology-relation path boundary. A physical route component is `r-` followed
+by the 64 lowercase hexadecimal digits of SHA-256 over the exact semantic UTF-8
+bytes. Its length is always 66 bytes, including for long semantic names.
+
+The graph-owned `semantic-routes.json` control record reverses each component to
+its exact semantic route. It belongs to the authenticated graph-files inventory
+and travels with publication and portable export/import. Decoding verifies the
+table digest, canonical serialization, unique entries, component derivation,
+and resource budgets. Every physical route must resolve through the table;
+unreferenced table entries are rejected. A digest collision between distinct
+semantic routes is a typed refusal, never an overwrite. The table is bounded to
+64 MiB and 100,000 entries; exceeding a budget fails explicitly.
+
+No case folding or Unicode normalization changes a semantic identifier. Names
+such as `CON`, `AUX`, trailing-dot names, normalization variants, and literal
+`r-` prefixes retain their original meaning in public results and metadata.
+Readers use authenticated layout authority, never filename-prefix guessing.
+Legacy versions 1 and 2 cannot contain the reserved mapping record; mapped
+versions 3 and 4 require it. Older readers reject the new versions rather than
+interpreting an encoded component as a semantic name.
+
+Legacy migration operates only in an owned private workspace. It authenticates
+source identity and bytes, stages the encoded files and complete mapping in the
+same durable rewrite, and recovers that rewrite before reading route authority.
+Physical migration preserves graph UUIDs, ranks, values, and semantic generation
+counters. An authenticated legacy publication must be translated while copying
+into the private workspace, so Windows never needs to create an intermediate
+raw reserved filename. Published trees and CAS objects remain immutable.
+
+Mapping updates share the graph rewrite transaction. Writers authenticate the
+current mapping under the rewrite lock before extending it, and transformations
+that remove or rename physical routes rebuild the mapping from their emitted
+inventory. Path containment, no-follow opens, native identity, link-count,
+collision, and exact-inventory checks still apply to encoded paths.
+
+Construction checkpoint version 8 selects mapped output explicitly. Versions 6
+and 7 retain their original encoding when resumed; versions 7 and 8 use the
+same compact detail codec. Mapped construction publication combines the
+retained parent routes with newly emitted routes and verifies the complete
+mapping before installing the version-4 manifest. Legacy parent payloads can
+retain their authenticated CAS objects while their logical route paths change.
+
+Read sessions retain one admitted route inventory with their catalog and
+adjacency provider. Publishing a later generation replaces the facade's
+provider; an existing lazy stream keeps its original inventory and private
+index artifacts through completion.
 
 ### Immutable property snapshots
 
 Node and edge properties use `full-snapshot-v1` fragments under
-`properties/<route>/<generation>-<ordinal>.parquet` (fixed-width decimal identity) and the corresponding
+`properties/<component>/<generation>-<ordinal>.parquet` (fixed-width decimal identity) and the corresponding
 `edge_properties` tree. Each row is the complete property state for one UUID;
 an explicit tombstone deletes the whole row. Admission authenticates every
 canonical generation and ordinal named by the committed graph-files inventory.
@@ -557,8 +606,9 @@ Conventions:
   publish bounded delta segments; a full rebuild compacts them into sharded bases.
 - **Determinism (R-ADJ-2).** Full rebuild streams each typed edge file once; `out` entries
   sort by `(src_id, edge_id)` and `in` entries by `(dst_id, edge_id)` — the `edge_id`
-  tie-break makes shard bytes reproducible from `topology/` alone. `_all.{out,in}.csr.json` are
-  the same sorts over the union of all typed files plus `_exploratory.parquet`. The manifest's
+  tie-break makes shard bytes reproducible from `topology/` alone. The `_all` relation's
+  indexes use the same sorts over the union of typed and exploratory edges. Cache filenames
+  use portable route components; the manifest retains exact semantic relation names. The manifest's
   `built_at` is excluded from the determinism guarantee.
 - **Bounded build.** Projected Parquet batches feed sorted spill runs. Bounded-fan-in merge
   passes (64 runs by default) emit rows directly into hard-capped shard sinks; they never
@@ -609,8 +659,9 @@ Graph traversal reads only the topology layer. No property columns are read unle
 | `updated_at` | `Timestamp(Microseconds, UTC)` | |
 
 The first label in a node's creation pattern is its immutable **primary label**.
-`properties/<ENTITY>.parquet` continues to use that primary label as its file stem;
-adding secondary labels therefore cannot orphan or relocate properties.
+The property route continues to use that primary label, encoded through the
+semantic-route mapping for its physical path; adding secondary labels therefore
+cannot orphan or relocate properties.
 Unlabelled nodes route to `_untyped`. A v0.5 node participant must contain both
 fields with the frozen schema; an earlier development schema is unsupported.
 
@@ -690,7 +741,8 @@ manifest digests. If the ordinal facet is absent while current v3 is canonical,
 discovery returns a typed rebuild requirement. A present ordinal path must pass
 authenticated open and never falls back to v3 when malformed or substituted.
 
-New publications use a compact version-2 `graph/files` root. Payloads and
+New mapped publications use a compact version-4 `graph/files` root, retaining
+the version-2 radix representation with explicit mapped-route authority. Payloads and
 fixed-depth radix nodes live once in the project content-addressed object
 store; a generation stores only its root reference and logical totals. Updates
 copy at most one bounded SHA-256 nibble path and retain exact-path collision
@@ -700,13 +752,14 @@ descriptors before mutations become visible; they are acknowledged only after
 CURRENT advances. Reopen traverses the authenticated radix and hashes every
 selected payload object. Post-CURRENT GC traces every remaining generation
 root and defers while an optimistic attempt or CAS publication lease is live.
-Version-1 expanded inventories remain readable and are migrated under the same
-CAS publication lease before a writable facade publishes version 2.
+Legacy expanded and compact inventories remain readable. A writable facade
+migrates their raw routes in its private workspace before publishing the mapped
+layout under the CAS publication lease.
 
 The authoritative write census is executable: topology node and edge shards,
 node and edge properties, graph deltas, catalog records, extension-owned graph
 records, and the generation/runtime-catalog/runtime-label control files must
-all appear in the revision descriptor journal and resolve to the same v2
+all appear in the revision descriptor journal and resolve to the same authenticated
 logical inventory. Rebuildable adjacency and UUID-membership artifacts live
 under `.graphforge-cache/` and are rejected as graph authority. Parquet write
 sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
@@ -720,8 +773,10 @@ digests, ordering, duplicate references, wrong depth, and corrupt objects.
 
 ### Properties layer (warm path)
 
-**`properties/ENTITY_TYPE.parquet`** (legacy first fragment) and
-**`properties/ENTITY_TYPE/<generation>-<ordinal>.parquet`** (immutable construction fragments)
+**`properties/<component>.parquet`** (flat first fragment) and
+**`properties/<component>/<generation>-<ordinal>.parquet`** (immutable construction fragments).
+The mapped component resolves to the semantic entity type; legacy raw layouts
+use the entity type directly at the same route position.
 
 | Column | Arrow type | Notes |
 |---|---|---|

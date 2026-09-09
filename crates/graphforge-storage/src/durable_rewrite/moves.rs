@@ -137,65 +137,78 @@ pub(crate) fn stage(
     root_path: &Path,
     source_path: &Path,
     destination: &Path,
+    temporary_prefix: &str,
+) -> Result<(tempfile::NamedTempFile, SourceRetirement), GfError> {
+    with_rewrite_lock(root_path, |root| {
+        stage_retained(root_path, root, source_path, destination, temporary_prefix)
+    })
+}
+
+// The owned-layout caller retains the existing rewrite guard for this entire operation.
+pub(crate) fn stage_retained(
+    root_path: &Path,
+    root: &StableDirectory,
+    source_path: &Path,
+    destination: &Path,
+    temporary_prefix: &str,
 ) -> Result<(tempfile::NamedTempFile, SourceRetirement), GfError> {
     let parts = components(root_path, source_path)?;
     let destination_relative = canonical_relative(root_path, destination)?;
     if parts.join("/") == destination_relative {
         return Err(storage("rewrite move source equals destination"));
     }
-    with_rewrite_lock(root_path, |root| {
-        let mut source_parent = root.try_clone().map_err(storage)?;
-        for part in &parts[..parts.len() - 1] {
-            source_parent = source_parent
-                .open_child_directory(std::ffi::OsStr::new(part))
-                .map_err(storage)?;
-        }
-        let source = source_parent
-            .open_child_file(std::ffi::OsStr::new(parts.last().unwrap()))
+    let mut source_parent = root.try_clone().map_err(storage)?;
+    for part in &parts[..parts.len() - 1] {
+        source_parent = source_parent
+            .open_child_directory(std::ffi::OsStr::new(part))
             .map_err(storage)?;
-        let original = authenticated_file(&source)?;
-        authenticate(&source, &original)?;
-        let (destination_parent, name) =
-            retained_parent_at(root_path, root, &destination_relative)?;
-        match destination_parent.open_child_file(&name) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(storage(error)),
-            Ok(_) => return Err(storage("rewrite move destination already exists")),
-        }
-        let mut temporary = tempfile::Builder::new()
-            .prefix("move.")
-            .suffix(".tmp")
-            .tempfile_in(
-                destination
-                    .parent()
-                    .ok_or_else(|| storage("move destination has no parent"))?,
-            )
-            .map_err(storage)?;
-        let mut input = source.try_clone().map_err(storage)?;
-        input.rewind().map_err(storage)?;
-        std::io::copy(&mut input, &mut temporary).map_err(storage)?;
-        temporary.as_file().sync_all().map_err(storage)?;
-        authenticate(&source, &original)?;
-        let (bytes, digest) = hash_reader(temporary.as_file().try_clone().map_err(storage)?)?;
-        if bytes != original.bytes || digest != original.sha256 {
-            return Err(storage("rewrite move staged copy differs from source"));
-        }
-        source_parent.revalidate_named().map_err(storage)?;
-        destination_parent.revalidate_named().map_err(storage)?;
-        let root_id = root.identity();
-        let parent_id = source_parent.identity();
-        Ok((
-            temporary,
-            SourceRetirement {
-                components: parts.clone(),
-                root_volume: root_id.volume_serial,
-                root_file: hex(&root_id.file_id),
-                parent_volume: parent_id.volume_serial,
-                parent_file: hex(&parent_id.file_id),
-                original,
-            },
-        ))
-    })
+    }
+    let source = source_parent
+        .open_child_file(std::ffi::OsStr::new(parts.last().unwrap()))
+        .map_err(storage)?;
+    let original = authenticated_file(&source)?;
+    authenticate(&source, &original)?;
+    let (destination_parent, name) = retained_parent_at(root_path, root, &destination_relative)?;
+    match destination_parent.open_child_file(&name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(storage(error)),
+        Ok(_) => return Err(storage("rewrite move destination already exists")),
+    }
+    // Fixed-size graph-temp spelling remains recognizable to the owned
+    // workspace sweep without expanding a valid near-limit destination.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(temporary_prefix)
+        .suffix(".tmp")
+        .tempfile_in(
+            destination
+                .parent()
+                .ok_or_else(|| storage("move destination has no parent"))?,
+        )
+        .map_err(storage)?;
+    let mut input = source.try_clone().map_err(storage)?;
+    input.rewind().map_err(storage)?;
+    std::io::copy(&mut input, &mut temporary).map_err(storage)?;
+    temporary.as_file().sync_all().map_err(storage)?;
+    authenticate(&source, &original)?;
+    let (bytes, digest) = hash_reader(temporary.as_file().try_clone().map_err(storage)?)?;
+    if bytes != original.bytes || digest != original.sha256 {
+        return Err(storage("rewrite move staged copy differs from source"));
+    }
+    source_parent.revalidate_named().map_err(storage)?;
+    destination_parent.revalidate_named().map_err(storage)?;
+    let root_id = root.identity();
+    let parent_id = source_parent.identity();
+    Ok((
+        temporary,
+        SourceRetirement {
+            components: parts.clone(),
+            root_volume: root_id.volume_serial,
+            root_file: hex(&root_id.file_id),
+            parent_volume: parent_id.volume_serial,
+            parent_file: hex(&parent_id.file_id),
+            original,
+        },
+    ))
 }
 
 pub(super) fn validate(intent: &Intent) -> Result<(), GfError> {
@@ -809,5 +822,22 @@ mod tests {
             b"exact source bytes"
         );
         assert!(!root.path().join("properties/new").exists());
+    }
+    #[test]
+    fn valid_maximum_destination_component_does_not_expand_temporary_name() {
+        let root = fixture();
+        let source = root.path().join("properties/old");
+        let destination = root
+            .path()
+            .join("properties")
+            .join(format!("{}.parquet", "r".repeat(247)));
+        assert_eq!(destination.file_name().unwrap().len(), 255);
+        let mut batch = RewriteBatch::new();
+        batch
+            .stage_move(root.path(), &source, &destination)
+            .unwrap();
+        batch.commit_at(root.path()).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"exact source bytes");
+        assert!(!source.exists());
     }
 }

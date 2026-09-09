@@ -12,8 +12,7 @@ use graphforge_core::{OntologyMode, TypeId};
 use graphforge_ir::IrLiteral;
 use graphforge_storage::{
     GraphWriter, PropertyFragmentId, PropertyOverlayLimits, PropertyRouteKind, delete_nodes,
-    enumerate_property_fragments, remove_node_properties, set_node_properties,
-    visit_authenticated_property_snapshots,
+    remove_node_properties, set_node_properties, visit_authenticated_property_snapshots,
 };
 use graphforge_value::EntityTypeId;
 use sha2::{Digest, Sha256};
@@ -604,4 +603,22 @@ fn production_property_overlay_n_2n_4n_is_disk_growing_and_memory_bounded() {
             && pair[1].per_record_seeks == 0
     }));
     eprintln!("property-overlay-scale-evidence={evidence:#?}");
+}
+
+fn admitted_inventory(
+    root: &std::path::Path,
+) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(root, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
+fn enumerate_property_fragments(
+    root: &std::path::Path,
+    kind: graphforge_storage::PropertyRouteKind,
+    route: &str,
+) -> Result<Vec<graphforge_storage::property_overlay::PropertyFragment>, graphforge_storage::GfError>
+{
+    Ok(admitted_inventory(root).property_fragments(kind, route))
 }

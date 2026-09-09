@@ -54,8 +54,14 @@ impl GraphCatalog {
                     .map_err(GfError::from_plan_error)?
                     .schema(),
             );
-            snapshot.node_property_stems = crate::list_property_stems(dir);
-            snapshot.edge_property_stems = crate::list_edge_property_stems(dir);
+            snapshot.node_property_stems = inventory.discovered_routes(
+                crate::PropertyRouteKind::Node,
+                &crate::list_property_stems(dir),
+            );
+            snapshot.edge_property_stems = inventory.discovered_routes(
+                crate::PropertyRouteKind::Edge,
+                &crate::list_edge_property_stems(dir),
+            );
             let mut nodes: std::collections::BTreeSet<String> =
                 snapshot.node_property_stems.iter().cloned().collect();
             nodes.extend(snapshot.semantic_labels.values().cloned());

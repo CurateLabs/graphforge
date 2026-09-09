@@ -1,5 +1,5 @@
 {
-  "checksum": "7a4bf6809a93be5676332ba45a2e8d4de029ae879e07c4198b5c9034771daebe",
+  "checksum": "30f5fd15462196c741cda03c05604373758ae8a21e39b725b483719429012b26",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13208,6 +13208,10 @@
               "target": "sha2"
             },
             {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
@@ -13223,10 +13227,6 @@
             {
               "id": "parquet 58.4.0",
               "target": "parquet"
-            },
-            {
-              "id": "tempfile 3.27.0",
-              "target": "tempfile"
             },
             {
               "id": "tokio 1.53.1",

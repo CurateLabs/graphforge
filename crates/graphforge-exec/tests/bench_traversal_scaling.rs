@@ -217,18 +217,27 @@ async fn run_measured(
     (reached, snap)
 }
 
+fn admitted_inventory(
+    dir: &std::path::Path,
+) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
 fn persistent(dir: &Path) -> Arc<dyn AdjacencyProvider> {
-    Arc::new(PersistentAdjacencyProvider::new(
-        dir.to_path_buf(),
-        OntologyMode::Strict,
-    )) as Arc<dyn AdjacencyProvider>
+    Arc::new(
+        PersistentAdjacencyProvider::new(dir.to_path_buf(), OntologyMode::Strict)
+            .with_inventory(admitted_inventory(dir)),
+    ) as Arc<dyn AdjacencyProvider>
 }
 
 fn scan_build(dir: &Path) -> Arc<dyn AdjacencyProvider> {
-    Arc::new(ScanBuildAdjacencyProvider::new(
-        dir.to_path_buf(),
-        OntologyMode::Strict,
-    )) as Arc<dyn AdjacencyProvider>
+    Arc::new(
+        ScanBuildAdjacencyProvider::new(dir.to_path_buf(), OntologyMode::Strict)
+            .with_inventory(admitted_inventory(dir)),
+    ) as Arc<dyn AdjacencyProvider>
 }
 
 // ---------------------------------------------------------------------------

@@ -50,7 +50,13 @@ impl GraphForge {
                 "algorithm result {value_name:?} must be non-null {expected:?}"
             )));
         }
-        reject_property_collision(&self.dir, stem, property, &expected)?;
+        reject_property_collision(
+            &self.dir,
+            &self.property_inventory_for_session(),
+            stem,
+            property,
+            &expected,
+        )?;
 
         let known = persisted_node_uuids(&self.dir)?;
         let updates = algorithm_property_updates(
@@ -87,7 +93,7 @@ impl GraphForge {
                 self.ontology.clone(),
                 self.dir.clone(),
                 self.ontology_mode,
-                std::sync::Arc::clone(&self.adjacency_provider),
+                self.adjacency_provider_for_session(),
                 Some(std::sync::Arc::clone(&self.ordinal_identities)),
                 &self.session_resource_config(),
             )?;
@@ -229,11 +235,12 @@ fn persisted_node_uuids(dir: &std::path::Path) -> Result<HashSet<[u8; 16]>, GfEr
 
 fn reject_property_collision(
     dir: &std::path::Path,
+    inventory: &graphforge_storage::AuthenticatedPropertyInventory,
     stem: &str,
     property: &str,
     expected: &DataType,
 ) -> Result<(), GfError> {
-    let batches = graphforge_storage::read_properties(dir, stem)
+    let batches = graphforge_storage::read_properties_from_inventory(dir, inventory, stem)
         .map_err(|error| GfError::Storage(error.to_string()))?;
     for batch in batches {
         if let Ok(field) = batch.schema().field_with_name(property)

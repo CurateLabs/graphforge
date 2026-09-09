@@ -107,6 +107,8 @@ pub struct GraphManifestResolveEvidence {
     pub entries_examined: u64,
     /// Aggregate encoded bytes admitted for decoding.
     pub decoded_bytes: u64,
+    /// Authenticated route-table bytes read outside radix-node decoding.
+    pub authority_read_bytes: u64,
     /// Nonempty reads performed by a storage-backed resolver; zero for in-memory resolution.
     pub application_read_calls: u64,
     /// Aggregate node, child-reference, and entry work performed.
@@ -457,7 +459,12 @@ fn admit_work(
 }
 
 fn validate_root(root: &GraphFilesRootV2) -> Result<(), GfError> {
-    if root.format != GRAPH_FILES_V2_FORMAT || root.format_version != GRAPH_FILES_V2_VERSION {
+    if root.format != GRAPH_FILES_V2_FORMAT
+        || !matches!(
+            root.format_version,
+            GRAPH_FILES_V2_VERSION | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+        )
+    {
         return Err(validation("unsupported graph files v2 root contract"));
     }
     validate_digest(&root.root_node_sha256)

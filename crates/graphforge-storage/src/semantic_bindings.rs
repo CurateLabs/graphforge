@@ -228,6 +228,10 @@ impl SemanticStorageBindings {
         let source_inventory_sha256 =
             hex(Sha256::digest(crate::encode_inventory(&source_inventory)?).into());
         let retained_rows_scanned = scan_retained_migration_rows(pinned_graph_root)?;
+        let authority = crate::graph_projection::TransformRoutes::from_inventory(
+            pinned_graph_root,
+            source_inventory.clone(),
+        )?;
         let mut projected = Self::project(next, None)?;
         let mut target_property_schemas = next
             .modules
@@ -266,7 +270,7 @@ impl SemanticStorageBindings {
                 .iter()
                 .find(|module| module.id.ontology_id == prior.symbol.module.ontology_id);
             let Some(next_module) = next_module else {
-                if binding_has_retained_data(prior, pinned_graph_root)? {
+                if binding_has_retained_data_with_authority(prior, pinned_graph_root, &authority)? {
                     return Err(corrupt("module removal would orphan retained data"));
                 }
                 operations.push(SemanticMigrationOperation::RemoveEmpty {
@@ -363,7 +367,7 @@ impl SemanticStorageBindings {
                 })
                 .flatten();
             let Some(next_index) = next_index else {
-                if binding_has_retained_data(prior, pinned_graph_root)? {
+                if binding_has_retained_data_with_authority(prior, pinned_graph_root, &authority)? {
                     return Err(corrupt("migration removal would orphan retained data"));
                 }
                 operations.push(SemanticMigrationOperation::RemoveEmpty {
@@ -472,7 +476,11 @@ impl SemanticStorageBindings {
                             && Some(candidate.storage_id) == target_owner_id
                     });
                     if let Some(prior_owner) = prior_owner
-                        && binding_has_retained_data(prior_owner, pinned_graph_root)?
+                        && binding_has_retained_data_with_authority(
+                            prior_owner,
+                            pinned_graph_root,
+                            &authority,
+                        )?
                     {
                         return Err(corrupt(
                             "non-null property addition requires a deterministic typed retained-data backfill",
@@ -650,27 +658,55 @@ impl SemanticStorageBindings {
             }
         }
 
+        let (inventory, _) = crate::capture_graph_files(graph_root)?;
+        let authority = crate::graph_projection::TransformRoutes::from_inventory(
+            graph_root,
+            inventory.clone(),
+        )?;
+        let logical_paths = inventory
+            .files
+            .iter()
+            .map(|entry| {
+                Ok((
+                    authority.semantic_path(&entry.relative_path)?,
+                    PathBuf::from(&entry.relative_path),
+                ))
+            })
+            .collect::<Result<Vec<_>, GfError>>()?;
         let mut route_moves = Vec::new();
+        let mut destinations = crate::route_component::RouteTable::default();
         for binding in &bindings.bindings {
-            let old = match binding.route_kind {
+            let (domain, name) = match binding.route_kind {
                 SemanticRouteKind::Entity => continue,
-                SemanticRouteKind::Relation => PathBuf::from("topology/edges")
-                    .join(format!("{}.parquet", binding.symbol.local_id)),
-                SemanticRouteKind::NodeProperty => PathBuf::from("properties").join(format!(
-                    "{}.parquet",
-                    binding.owner.as_ref().unwrap().local_id
-                )),
-                SemanticRouteKind::EdgeProperty => PathBuf::from("edge_properties").join(format!(
-                    "{}.parquet",
-                    binding.owner.as_ref().unwrap().local_id
-                )),
+                SemanticRouteKind::Relation => ("topology/edges", binding.symbol.local_id.as_str()),
+                SemanticRouteKind::NodeProperty => (
+                    "properties",
+                    binding.owner.as_ref().unwrap().local_id.as_str(),
+                ),
+                SemanticRouteKind::EdgeProperty => (
+                    "edge_properties",
+                    binding.owner.as_ref().unwrap().local_id.as_str(),
+                ),
             };
-            let new = binding
-                .physical_path(Path::new(""))
-                .expect("routed binding");
-            if graph_root.join(&old).exists() && !route_moves.iter().any(|(prior, _)| prior == &old)
-            {
-                route_moves.push((old, new));
+            let flat = format!("{domain}/{name}.parquet");
+            let prefix = format!("{domain}/{name}/");
+            for (logical, physical) in &logical_paths {
+                let destination = if logical == &flat {
+                    Some(format!("{domain}/{}.parquet", binding.route))
+                } else {
+                    logical
+                        .strip_prefix(&prefix)
+                        .map(|fragment| format!("{domain}/{}/{fragment}", binding.route))
+                };
+                if let Some(destination) = destination
+                    && !route_moves.iter().any(|(prior, _)| prior == physical)
+                {
+                    let encoded = crate::graph_projection::encode_transform_path(
+                        &destination,
+                        &mut destinations,
+                    )?;
+                    route_moves.push((physical.clone(), PathBuf::from(encoded)));
+                }
             }
         }
         route_moves.sort();
@@ -866,6 +902,7 @@ impl SemanticStorageBindings {
             .iter()
             .map(|(kind, symbol, owner)| lineage_key(*kind, symbol, owner.as_ref()))
             .collect::<BTreeSet<_>>();
+        let mut removal_authority = None;
         if let Some(previous) = previous {
             for removed in previous.bindings.iter().filter(|binding| {
                 !next_lineages.contains(&lineage_key(
@@ -877,7 +914,15 @@ impl SemanticStorageBindings {
                 let root = graph_root.ok_or_else(|| {
                     corrupt("semantic binding removal requires an exact pinned graph scan")
                 })?;
-                if binding_has_retained_data(removed, root)? {
+                if removal_authority.is_none() {
+                    removal_authority =
+                        Some(crate::graph_projection::TransformRoutes::capture(root)?);
+                }
+                if binding_has_retained_data_with_authority(
+                    removed,
+                    root,
+                    removal_authority.as_ref().expect("admitted above"),
+                )? {
                     return Err(corrupt(
                         "semantic binding removal would orphan retained data",
                     ));
@@ -1096,29 +1141,45 @@ impl SemanticStorageBindings {
         graph_root: &Path,
         inventory: Option<&crate::GraphFilesInventory>,
     ) -> Result<(), GfError> {
+        let captured = crate::capture_graph_files(graph_root)?.0;
+        let inventory = match inventory {
+            Some(inventory) => {
+                if inventory != &captured {
+                    return Err(corrupt(
+                        "semantic route inventory disagrees with the graph tree",
+                    ));
+                }
+                inventory
+            }
+            None => &captured,
+        };
+        let routes = semantic_fragment_inventory(graph_root, inventory)?;
         let expected = self
             .bindings
             .iter()
-            .map(|binding| semantic_route_fragments(binding, graph_root))
+            .map(|binding| Ok::<_, GfError>(binding_fragments(binding, &routes)))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
             .collect::<BTreeSet<_>>();
-        let inventory_paths = inventory.map(|inventory| {
-            inventory
-                .files
-                .iter()
-                .map(|entry| entry.relative_path.as_str())
-                .collect::<BTreeSet<_>>()
-        });
+        let inventory_paths = inventory
+            .files
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect::<BTreeSet<_>>();
         validate_no_unlisted_semantic_routes(graph_root, &expected)?;
+        for ((_, route), paths) in &routes {
+            if route.starts_with("s-") && paths.iter().any(|path| !expected.contains(path)) {
+                return Err(corrupt("unlisted opaque semantic route file is present"));
+            }
+        }
         for binding in &self.bindings {
-            for path in semantic_route_fragments(binding, graph_root)? {
+            for path in binding_fragments(binding, &routes) {
                 validate_semantic_route_fragment(
                     binding,
                     &path,
                     graph_root,
-                    inventory_paths.as_ref(),
+                    Some(&inventory_paths),
                     &self.composition_fingerprint,
                 )?;
             }
@@ -1238,26 +1299,57 @@ impl SemanticStorageBindings {
     }
 }
 
+type SemanticFragments = BTreeMap<(String, String), Vec<PathBuf>>;
+
+fn semantic_fragment_inventory(
+    root: &Path,
+    inventory: &crate::GraphFilesInventory,
+) -> Result<SemanticFragments, GfError> {
+    let authority =
+        crate::graph_projection::TransformRoutes::from_inventory(root, inventory.clone())?;
+    let mut routes = BTreeMap::<(String, String), Vec<PathBuf>>::new();
+    for entry in &inventory.files {
+        let logical = authority.semantic_path(&entry.relative_path)?;
+        if let Some(route) = semantic_route_from_wire(&logical) {
+            let domain = if logical.starts_with("topology/edges/") {
+                "topology/edges"
+            } else if logical.starts_with("edge_properties/") {
+                "edge_properties"
+            } else {
+                "properties"
+            };
+            let physical = crate::graph_files::resolve_v1_inventory_entry(root, entry)?;
+            routes
+                .entry((domain.to_owned(), route.to_owned()))
+                .or_default()
+                .push(physical);
+        }
+    }
+    Ok(routes)
+}
+
+fn binding_fragments(binding: &SemanticStorageBinding, routes: &SemanticFragments) -> Vec<PathBuf> {
+    let domain = match binding.route_kind {
+        SemanticRouteKind::Entity => return Vec::new(),
+        SemanticRouteKind::Relation => "topology/edges",
+        SemanticRouteKind::NodeProperty => "properties",
+        SemanticRouteKind::EdgeProperty => "edge_properties",
+    };
+    routes
+        .get(&(domain.to_owned(), binding.route.clone()))
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn semantic_route_fragments(
     binding: &SemanticStorageBinding,
     root: &Path,
 ) -> Result<Vec<PathBuf>, GfError> {
-    match binding.route_kind {
-        SemanticRouteKind::Entity => Ok(Vec::new()),
-        SemanticRouteKind::Relation => Ok(crate::mutator::edge_parquet_files(
-            root,
-            Some(&binding.route),
-        )?
-        .into_iter()
-        .map(|(_, path)| path)
-        .collect()),
-        SemanticRouteKind::NodeProperty => {
-            crate::mutator::property_parquet_files(root, "properties", &binding.route)
-        }
-        SemanticRouteKind::EdgeProperty => {
-            crate::mutator::property_parquet_files(root, "edge_properties", &binding.route)
-        }
-    }
+    let (inventory, _) = crate::capture_graph_files(root)?;
+    Ok(binding_fragments(
+        binding,
+        &semantic_fragment_inventory(root, &inventory)?,
+    ))
 }
 
 fn validate_no_unlisted_semantic_routes(
@@ -1371,7 +1463,8 @@ fn validate_semantic_route_fragment(
 }
 
 impl SemanticStorageBinding {
-    /// Exact physical path for routed data, or none for numeric entity bindings.
+    /// Legacy logical route path, or none for numeric entity bindings.
+    /// Mapped graph files must be resolved through their admitted route inventory.
     #[must_use]
     pub fn physical_path(&self, root: &Path) -> Option<PathBuf> {
         match self.route_kind {
@@ -1490,6 +1583,60 @@ pub fn require_atomic_legacy_migration(graph_root: &Path) -> Result<(), GfError>
 pub struct LegacyRouteMigration {
     completed: Vec<(PathBuf, PathBuf, PathBuf)>,
     committed: bool,
+    table: Option<LegacyTableRollback>,
+    backup_root: PathBuf,
+}
+
+struct LegacyTableRollback {
+    root: PathBuf,
+    previous: Vec<u8>,
+    installed: File,
+    digest: [u8; 32],
+}
+
+impl LegacyTableRollback {
+    fn still_owned(&self) -> bool {
+        use std::io::Read;
+        let Ok(root) = graphforge_filesystem::StableDirectory::open(&self.root) else {
+            return false;
+        };
+        let Ok(mut current) =
+            root.open_child_file(std::ffi::OsStr::new(crate::route_component::TABLE_FILE))
+        else {
+            return false;
+        };
+        let (Ok(actual), Ok(expected)) = (
+            graphforge_filesystem::file_identity(&current),
+            graphforge_filesystem::file_identity(&self.installed),
+        ) else {
+            return false;
+        };
+        if actual != expected || graphforge_filesystem::file_link_count(&current).ok() != Some(1) {
+            return false;
+        }
+        let mut bytes = Vec::new();
+        if current
+            .by_ref()
+            .take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return false;
+        }
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        digest == self.digest
+    }
+}
+
+fn replace_legacy_table(root: &Path, bytes: &[u8]) -> Result<(), GfError> {
+    let mut batch = crate::RewriteBatch::new();
+    batch.stage_named_control_bytes(
+        &root.join(crate::route_component::TABLE_FILE),
+        bytes,
+        "semantic-routes.json.",
+    )?;
+    crate::durable_rewrite::commit(batch, root, false, false, false, None)?;
+    Ok(())
 }
 
 impl LegacyRouteMigration {
@@ -1498,6 +1645,7 @@ impl LegacyRouteMigration {
         for (_, _, backup) in &self.completed {
             let _ = std::fs::remove_file(backup);
         }
+        let _ = std::fs::remove_dir(&self.backup_root);
         self.committed = true;
     }
 }
@@ -1505,12 +1653,139 @@ impl LegacyRouteMigration {
 impl Drop for LegacyRouteMigration {
     fn drop(&mut self) {
         if !self.committed {
-            for (old, new, backup) in self.completed.iter().rev() {
-                let _ = std::fs::remove_file(new);
-                let _ = std::fs::rename(backup, old);
+            if self
+                .table
+                .as_ref()
+                .is_some_and(|table| !table.still_owned())
+            {
+                return;
             }
+            for (old, new, backup) in self.completed.iter().rev() {
+                if backup.try_exists().unwrap_or(false) {
+                    let _ = std::fs::remove_file(new);
+                    let _ = std::fs::rename(backup, old);
+                }
+            }
+            if let Some(table) = &self.table {
+                let _ = replace_legacy_table(&table.root, &table.previous);
+            }
+            let _ = std::fs::remove_dir(&self.backup_root);
         }
     }
+}
+
+type PreparedLegacyRouteMoves<'a> = (
+    Vec<(String, String, &'a SemanticStorageBinding)>,
+    BTreeMap<String, String>,
+);
+
+fn prepare_legacy_route_moves<'a>(
+    graph_root: &Path,
+    route_moves: &[(PathBuf, PathBuf)],
+    bindings: &'a SemanticStorageBindings,
+) -> Result<PreparedLegacyRouteMoves<'a>, GfError> {
+    let (before, _) = crate::capture_graph_files(graph_root)?;
+    let authority =
+        crate::graph_projection::TransformRoutes::from_inventory(graph_root, before.clone())?;
+    let source_names = before
+        .files
+        .iter()
+        .map(|entry| {
+            Ok((
+                PathBuf::from(&entry.relative_path),
+                authority.semantic_path(&entry.relative_path)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, GfError>>()?;
+    let mut prepared = Vec::new();
+    let mut moves = BTreeMap::new();
+    for (old, new) in route_moves {
+        let logical_old = source_names
+            .get(old)
+            .ok_or_else(|| corrupt("legacy migration source is absent"))?;
+        let new_wire = new
+            .to_str()
+            .ok_or_else(|| corrupt("legacy destination is not UTF-8"))?
+            .replace('\\', "/");
+        let mut matched = None;
+        for binding in &bindings.bindings {
+            let domain = match binding.route_kind {
+                SemanticRouteKind::Entity => continue,
+                SemanticRouteKind::Relation => "topology/edges",
+                SemanticRouteKind::NodeProperty => "properties",
+                SemanticRouteKind::EdgeProperty => "edge_properties",
+            };
+            let component = crate::route_component::component(&binding.route);
+            let logical = if new_wire == format!("{domain}/{component}.parquet") {
+                Some(format!("{domain}/{}.parquet", binding.route))
+            } else {
+                new_wire
+                    .strip_prefix(&format!("{domain}/{component}/"))
+                    .map(|fragment| format!("{domain}/{}/{fragment}", binding.route))
+            };
+            if let Some(logical) = logical {
+                matched = Some((binding, logical));
+                break;
+            }
+        }
+        let (binding, logical_new) =
+            matched.ok_or_else(|| corrupt("legacy migration destination has no binding"))?;
+        if moves
+            .insert(logical_old.clone(), logical_new.clone())
+            .is_some()
+        {
+            return Err(corrupt("legacy migration repeats a source"));
+        }
+        prepared.push((logical_old.clone(), logical_new, binding));
+    }
+    Ok((prepared, moves))
+}
+
+fn rewrite_legacy_route(
+    backup: &Path,
+    new: &Path,
+    binding: &SemanticStorageBinding,
+    bindings: &SemanticStorageBindings,
+) -> Result<(), GfError> {
+    let builder = admitted_semantic_parquet(backup)?;
+    if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
+        return Err(corrupt("legacy migration column count exceeds limit"));
+    }
+    let mut metadata = builder.schema().metadata().clone();
+    metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), binding.route.clone());
+    if metadata.contains_key(crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY) {
+        metadata.insert(
+            crate::property_overlay::PROPERTY_ROUTE_KEY.into(),
+            binding.route.clone(),
+        );
+    }
+    metadata.insert(
+        SEMANTIC_COMPOSITION_METADATA_KEY.into(),
+        bindings.composition_fingerprint.clone(),
+    );
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        builder.schema().fields().clone(),
+        metadata,
+    ));
+    let mut writer = parquet::arrow::ArrowWriter::try_new(
+        File::create(new).map_err(|_| corrupt("legacy migration destination cannot open"))?,
+        schema,
+        None,
+    )
+    .map_err(|_| corrupt("legacy migration writer cannot be built"))?;
+    for batch in builder
+        .with_batch_size(8192)
+        .build()
+        .map_err(|_| corrupt("legacy migration reader cannot be built"))?
+    {
+        writer
+            .write(&batch.map_err(|_| corrupt("legacy migration batch is invalid"))?)
+            .map_err(|_| corrupt("legacy migration batch cannot be written"))?;
+    }
+    writer
+        .close()
+        .map_err(|_| corrupt("legacy migration output cannot close"))?;
+    Ok(())
 }
 
 /// Apply deterministic preflighted route moves and return a rollback guard.
@@ -1520,15 +1795,48 @@ pub fn apply_legacy_route_moves(
     route_moves: &[(PathBuf, PathBuf)],
     bindings: &SemanticStorageBindings,
 ) -> Result<LegacyRouteMigration, GfError> {
-    let mut completed = Vec::new();
-    for (old_relative, new_relative) in route_moves {
-        let old = graph_root.join(old_relative);
-        let new = graph_root.join(new_relative);
-        let binding = bindings
-            .bindings
-            .iter()
-            .find(|binding| binding.physical_path(Path::new("")).as_ref() == Some(new_relative))
-            .ok_or_else(|| corrupt("legacy migration destination has no binding"))?;
+    let (prepared, moves) = prepare_legacy_route_moves(graph_root, route_moves, bindings)?;
+    // Physical layout admission is its own committed, semantics-preserving unit.
+    // Rollback below restores this admitted baseline until semantic publication succeeds.
+    let prior_table = crate::route_component::owned::admit_owned_workspace(graph_root)?;
+    let previous_table = prior_table.encode(64 * 1024 * 1024)?;
+    let (inventory, _) = crate::capture_graph_files(graph_root)?;
+    let mut logical_to_physical = BTreeMap::new();
+    let mut output_table = crate::route_component::RouteTable::default();
+    for entry in &inventory.files {
+        if entry.relative_path == crate::route_component::TABLE_FILE {
+            continue;
+        }
+        let logical = prior_table.semantic_relative_path(&entry.relative_path)?;
+        crate::graph_projection::encode_transform_path(
+            moves.get(&logical).unwrap_or(&logical),
+            &mut output_table,
+        )?;
+        logical_to_physical.insert(
+            logical,
+            crate::graph_files::resolve_v1_inventory_entry(graph_root, entry)?,
+        );
+    }
+    let backup_root = graph_root.join(format!(
+        ".semantic-legacy-backups-{}",
+        graphforge_core::uuid::new_v7()
+    ));
+    std::fs::create_dir(&backup_root)
+        .map_err(|_| corrupt("legacy backup directory cannot be created"))?;
+    let mut migration = LegacyRouteMigration {
+        completed: Vec::new(),
+        committed: false,
+        table: None,
+        backup_root,
+    };
+    for (old_relative, new_relative, binding) in prepared {
+        let old = logical_to_physical
+            .get(&old_relative)
+            .cloned()
+            .ok_or_else(|| corrupt("legacy migration source is absent"))?;
+        let destination =
+            crate::graph_projection::encode_transform_path(&new_relative, &mut output_table)?;
+        let new = graph_root.join(destination);
         if new.exists() {
             return Err(corrupt("legacy migration destination already exists"));
         }
@@ -1537,68 +1845,45 @@ pub fn apply_legacy_route_moves(
             .ok_or_else(|| corrupt("legacy migration destination has no parent"))?;
         std::fs::create_dir_all(parent)
             .map_err(|_| corrupt("legacy migration destination cannot be created"))?;
-        let backup = old.with_extension("parquet.legacy-backup");
+        let backup = migration
+            .backup_root
+            .join(format!("{}.parquet", migration.completed.len()));
         if backup.exists() {
             return Err(corrupt("legacy migration backup already exists"));
         }
         if let Err(error) = std::fs::rename(&old, &backup) {
-            for (prior_old, prior_new, prior_backup) in completed.iter().rev() {
+            for (prior_old, prior_new, prior_backup) in migration.completed.iter().rev() {
                 let _ = std::fs::remove_file(prior_new);
                 let _ = std::fs::rename(prior_backup, prior_old);
             }
             return Err(corrupt(&format!("legacy migration rename failed: {error}")));
         }
-        let rewrite = (|| {
-            let builder = admitted_semantic_parquet(&backup)?;
-            if builder.schema().fields().len() > MAX_SEMANTIC_PARQUET_COLUMNS {
-                return Err(corrupt("legacy migration column count exceeds limit"));
-            }
-            let mut metadata = builder.schema().metadata().clone();
-            metadata.insert(SEMANTIC_ROUTE_METADATA_KEY.into(), binding.route.clone());
-            metadata.insert(
-                SEMANTIC_COMPOSITION_METADATA_KEY.into(),
-                bindings.composition_fingerprint.clone(),
-            );
-            let schema = std::sync::Arc::new(arrow::datatypes::Schema::new_with_metadata(
-                builder.schema().fields().clone(),
-                metadata,
-            ));
-            let mut writer = parquet::arrow::ArrowWriter::try_new(
-                File::create(&new)
-                    .map_err(|_| corrupt("legacy migration destination cannot open"))?,
-                schema,
-                None,
-            )
-            .map_err(|_| corrupt("legacy migration writer cannot be built"))?;
-            for batch in builder
-                .with_batch_size(8192)
-                .build()
-                .map_err(|_| corrupt("legacy migration reader cannot be built"))?
-            {
-                writer
-                    .write(&batch.map_err(|_| corrupt("legacy migration batch is invalid"))?)
-                    .map_err(|_| corrupt("legacy migration batch cannot be written"))?;
-            }
-            writer
-                .close()
-                .map_err(|_| corrupt("legacy migration output cannot close"))?;
-            Ok(())
-        })();
+        let rewrite = rewrite_legacy_route(&backup, &new, binding, bindings);
         if let Err(error) = rewrite {
             let _ = std::fs::remove_file(&new);
             let _ = std::fs::rename(&backup, &old);
-            for (prior_old, prior_new, prior_backup) in completed.iter().rev() {
+            for (prior_old, prior_new, prior_backup) in migration.completed.iter().rev() {
                 let _ = std::fs::remove_file(prior_new);
                 let _ = std::fs::rename(prior_backup, prior_old);
             }
             return Err(error);
         }
-        completed.push((old, new, backup));
+        migration.completed.push((old, new, backup));
     }
-    Ok(LegacyRouteMigration {
-        completed,
-        committed: false,
-    })
+    let bytes = output_table.encode(64 * 1024 * 1024)?;
+    replace_legacy_table(graph_root, &bytes)?;
+    let directory = graphforge_filesystem::StableDirectory::open(graph_root)
+        .map_err(|_| corrupt("legacy route table root cannot be retained"))?;
+    let installed = directory
+        .open_child_file(std::ffi::OsStr::new(crate::route_component::TABLE_FILE))
+        .map_err(|_| corrupt("legacy route table cannot be retained"))?;
+    migration.table = Some(LegacyTableRollback {
+        root: graph_root.to_path_buf(),
+        previous: previous_table,
+        installed,
+        digest: Sha256::digest(bytes).into(),
+    });
+    Ok(migration)
 }
 
 /// Materialize a complete private candidate graph tree without touching the
@@ -1620,6 +1905,10 @@ pub fn materialize_semantic_migration(
         return Err(corrupt("semantic migration batch bound is invalid"));
     }
     let (inventory, _) = crate::capture_graph_files(source_graph_root)?;
+    let source_routes = crate::graph_projection::TransformRoutes::from_inventory(
+        source_graph_root,
+        inventory.clone(),
+    )?;
     let inventory_sha256 = hex(Sha256::digest(crate::encode_inventory(&inventory)?).into());
     if inventory_sha256 != plan.source_inventory_sha256 {
         return Err(corrupt(
@@ -1716,16 +2005,23 @@ pub fn materialize_semantic_migration(
     std::fs::create_dir_all(&staging_graph_root)
         .map_err(|_| corrupt("semantic migration candidate cannot be created"))?;
     let result = (|| {
+        let mut output_table = crate::route_component::RouteTable::default();
         let mut files_materialized = 0_u64;
         let mut rows_rewritten = 0_u64;
         let mut max_batch_rows = 0_usize;
         for entry in &inventory.files {
             checkpoint()?;
+            if entry.relative_path == crate::route_component::TABLE_FILE {
+                continue;
+            }
             let source = crate::graph_files::resolve_v1_inventory_entry(source_graph_root, entry)?;
-            let relative =
-                crate::graph_files::canonical_inventory_relative_path(&entry.relative_path)?;
-            let old_route = semantic_route_from_relative(&relative);
-            let target_relative = migrated_semantic_relative(&relative, &route_moves);
+            let semantic = source_routes.semantic_path(&entry.relative_path)?;
+            let old_route = semantic_route_from_wire(&semantic);
+            let target_relative = migrated_semantic_wire(&semantic, &route_moves);
+            let target_relative = crate::graph_projection::encode_transform_path(
+                &target_relative,
+                &mut output_table,
+            )?;
             let target = staging_graph_root.join(target_relative);
             std::fs::create_dir_all(
                 target
@@ -1833,6 +2129,8 @@ pub fn materialize_semantic_migration(
                 .map_err(|_| corrupt("migration output cannot close"))?;
             files_materialized += 1;
         }
+        crate::graph_projection::install_transform_table(&staging_graph_root, &output_table)?;
+        files_materialized += 1;
         let (verified_source, _) = crate::capture_graph_files(source_graph_root)?;
         if hex(Sha256::digest(crate::encode_inventory(&verified_source)?).into())
             != plan.source_inventory_sha256
@@ -1910,6 +2208,36 @@ pub fn materialize_semantic_migration(
     Ok(evidence)
 }
 
+fn semantic_route_from_wire(relative: &str) -> Option<&str> {
+    let parts = relative.split('/').collect::<Vec<_>>();
+    let route = match parts.as_slice() {
+        ["topology", "edges", route]
+        | ["topology", "edges", route, _]
+        | ["properties" | "edge_properties", route]
+        | ["properties" | "edge_properties", route, _] => *route,
+        _ => return None,
+    };
+    Some(route.strip_suffix(".parquet").unwrap_or(route)).filter(|route| route.starts_with("s-"))
+}
+
+fn migrated_semantic_wire(relative: &str, route_moves: &BTreeMap<String, String>) -> String {
+    let Some(route) = semantic_route_from_wire(relative) else {
+        return relative.to_owned();
+    };
+    let Some(new) = route_moves.get(route) else {
+        return relative.to_owned();
+    };
+    let mut parts = relative.split('/').map(str::to_owned).collect::<Vec<_>>();
+    let index = if parts[0] == "topology" { 2 } else { 1 };
+    parts[index] = if parts.len() == index + 1 {
+        format!("{new}.parquet")
+    } else {
+        new.clone()
+    };
+    parts.join("/")
+}
+
+#[cfg(test)]
 fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
     let parts = relative
         .components()
@@ -1933,6 +2261,7 @@ fn semantic_route_from_relative(relative: &Path) -> Option<&str> {
         .filter(|route| route.starts_with("s-"))
 }
 
+#[cfg(test)]
 fn migrated_semantic_relative(relative: &Path, route_moves: &BTreeMap<String, String>) -> PathBuf {
     let Some(old_route) = semantic_route_from_relative(relative) else {
         return relative.to_path_buf();
@@ -2043,6 +2372,15 @@ fn binding_has_retained_data(
     binding: &SemanticStorageBinding,
     graph_root: &Path,
 ) -> Result<bool, GfError> {
+    let authority = crate::graph_projection::TransformRoutes::capture(graph_root)?;
+    binding_has_retained_data_with_authority(binding, graph_root, &authority)
+}
+
+fn binding_has_retained_data_with_authority(
+    binding: &SemanticStorageBinding,
+    graph_root: &Path,
+    authority: &crate::graph_projection::TransformRoutes,
+) -> Result<bool, GfError> {
     if binding.route_kind == SemanticRouteKind::Entity {
         use arrow::array::{Array, ListArray, UInt32Array};
         for path in crate::catalog::topology_node_files(graph_root)? {
@@ -2092,12 +2430,11 @@ fn binding_has_retained_data(
             .split_once(':')
             .map(|(_, property)| property)
             .ok_or_else(|| corrupt("removal property has no qualified column"))?;
-        let batches = if binding.route_kind == SemanticRouteKind::NodeProperty {
-            crate::catalog::read_properties(graph_root, &binding.route)
-        } else {
-            crate::catalog::read_edge_properties(graph_root, &binding.route)
-        }
-        .map_err(|_| corrupt("removal property overlay cannot be read"))?;
+        let batches = authority.property_batches(
+            graph_root,
+            &binding.route,
+            binding.route_kind == SemanticRouteKind::EdgeProperty,
+        )?;
         for batch in batches {
             let Some(values) = batch.column_by_name(column) else {
                 continue;
@@ -2109,12 +2446,12 @@ fn binding_has_retained_data(
         return Ok(false);
     }
     let paths = match binding.route_kind {
-        SemanticRouteKind::Relation => {
-            crate::mutator::edge_parquet_files(graph_root, Some(&binding.route))?
-                .into_iter()
-                .map(|(_, path)| path)
-                .collect::<Vec<_>>()
-        }
+        SemanticRouteKind::Relation => authority
+            .properties
+            .edge_files(Some(&binding.route))
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>(),
         SemanticRouteKind::Entity
         | SemanticRouteKind::NodeProperty
         | SemanticRouteKind::EdgeProperty => unreachable!("handled above"),
@@ -2707,6 +3044,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(evidence.plan_digest, first.plan_digest);
+        let source_after = crate::capture_graph_files(source.path()).unwrap().0;
+        assert_eq!(
+            hex(Sha256::digest(crate::encode_inventory(&source_after).unwrap()).into()),
+            first.source_inventory_sha256
+        );
+        let candidate_inventory = crate::capture_graph_files(&candidate).unwrap().0;
+        let table =
+            crate::graph_files::authenticate_route_table(&candidate, &candidate_inventory).unwrap();
+        table
+            .validate_paths(
+                candidate_inventory
+                    .files
+                    .iter()
+                    .map(|entry| entry.relative_path.as_str()),
+            )
+            .unwrap();
+        let routes = candidate_inventory
+            .files
+            .iter()
+            .map(|entry| table.semantic_relative_path(&entry.relative_path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(routes.iter().any(|path| {
+            path.starts_with(&format!("properties/{}/", renamed_entity.route))
+                || path == &format!("properties/{}.parquet", renamed_entity.route)
+        }));
+        assert!(!routes.iter().any(
+            |path| path.starts_with(&format!("properties/{}/", entity.route))
+                || path == &format!("properties/{}.parquet", entity.route)
+        ));
         first.bindings.validate_physical_routes(&candidate).unwrap();
         let batches = crate::catalog::read_properties(&candidate, &renamed_entity.route).unwrap();
         let schema = batches.first().unwrap().schema();
@@ -3207,8 +3573,7 @@ mod tests {
         assert!(admitted_semantic_parquet(&path).is_err());
     }
 
-    #[test]
-    fn unambiguous_legacy_routes_rewrite_with_metadata_and_reopen() {
+    fn legacy_migration_fixture() -> (tempfile::TempDir, CompiledComposition) {
         use std::collections::HashMap;
 
         let composition = compiled("1");
@@ -3241,6 +3606,13 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
+        drop(writer);
+        (dir, composition)
+    }
+
+    #[test]
+    fn unambiguous_legacy_routes_rewrite_with_metadata_and_reopen() {
+        let (dir, composition) = legacy_migration_fixture();
         let projection =
             SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path()).unwrap();
         assert!(!projection.route_moves.is_empty());
@@ -3258,6 +3630,125 @@ mod tests {
             .bindings
             .validate_physical_routes(dir.path())
             .unwrap();
+    }
+
+    #[test]
+    fn legacy_raw_layout_admission_is_preserved_after_semantic_rollback() {
+        let (dir, composition) = legacy_migration_fixture();
+        let mapped = crate::capture_graph_files(dir.path()).unwrap().0;
+        let table = crate::graph_files::authenticate_route_table(dir.path(), &mapped).unwrap();
+        // Produce an actual legacy raw layout; no inventory is relabeled.
+        for entry in &mapped.files {
+            if entry.relative_path == crate::route_component::TABLE_FILE {
+                continue;
+            }
+            let logical = table.semantic_relative_path(&entry.relative_path).unwrap();
+            if logical != entry.relative_path {
+                let source = dir.path().join(&entry.relative_path);
+                let destination = dir.path().join(logical);
+                std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                std::fs::rename(&source, &destination).unwrap();
+                let _ = std::fs::remove_dir(source.parent().unwrap());
+            }
+        }
+        std::fs::remove_file(dir.path().join(crate::route_component::TABLE_FILE)).unwrap();
+        let raw = crate::capture_graph_files(dir.path()).unwrap().0;
+        assert_eq!(
+            raw.format_version,
+            crate::graph_files::GRAPH_FILES_RECORD_VERSION
+        );
+        let projection =
+            SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path()).unwrap();
+        assert_eq!(crate::capture_graph_files(dir.path()).unwrap().0, raw);
+        drop(
+            apply_legacy_route_moves(dir.path(), &projection.route_moves, &projection.bindings)
+                .unwrap(),
+        );
+        let admitted = crate::capture_graph_files(dir.path()).unwrap().0;
+        assert_eq!(
+            admitted.format_version,
+            crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+        );
+        let table = crate::graph_files::authenticate_route_table(dir.path(), &admitted).unwrap();
+        table
+            .validate_paths(
+                admitted
+                    .files
+                    .iter()
+                    .map(|entry| entry.relative_path.as_str()),
+            )
+            .unwrap();
+        for prior in &raw.files {
+            if !prior.relative_path.ends_with(".parquet") {
+                continue;
+            }
+            let current = admitted
+                .files
+                .iter()
+                .find(|entry| {
+                    table.semantic_relative_path(&entry.relative_path).unwrap()
+                        == prior.relative_path
+                })
+                .unwrap();
+            assert_eq!(current.content_sha256, prior.content_sha256);
+            assert_eq!(current.byte_length, prior.byte_length);
+        }
+    }
+
+    #[test]
+    fn legacy_migration_rollback_restores_admitted_table_and_refuses_foreign_table() {
+        let (dir, composition) = legacy_migration_fixture();
+        let baseline = crate::capture_graph_files(dir.path()).unwrap().0;
+        let projection =
+            SemanticStorageBindings::project_legacy_unambiguous(&composition, dir.path()).unwrap();
+        assert_eq!(
+            crate::capture_graph_files(dir.path()).unwrap().0,
+            baseline,
+            "planning is read-only"
+        );
+        let migration =
+            apply_legacy_route_moves(dir.path(), &projection.route_moves, &projection.bindings)
+                .unwrap();
+        let transformed = crate::capture_graph_files(dir.path()).unwrap().0;
+        let table = crate::graph_files::authenticate_route_table(dir.path(), &transformed).unwrap();
+        table
+            .validate_paths(
+                transformed
+                    .files
+                    .iter()
+                    .map(|entry| entry.relative_path.as_str()),
+            )
+            .unwrap();
+        assert!(
+            transformed
+                .files
+                .iter()
+                .filter(|entry| entry.relative_path != crate::route_component::TABLE_FILE)
+                .all(|entry| !table
+                    .semantic_relative_path(&entry.relative_path)
+                    .unwrap()
+                    .contains("/KNOWS"))
+        );
+        drop(migration);
+        assert_eq!(crate::capture_graph_files(dir.path()).unwrap().0, baseline);
+
+        let migration =
+            apply_legacy_route_moves(dir.path(), &projection.route_moves, &projection.bindings)
+                .unwrap();
+        let table_path = dir.path().join(crate::route_component::TABLE_FILE);
+        let foreign = b"foreign replacement must be retained";
+        std::fs::rename(&table_path, dir.path().join("retained-table.outside-graph")).unwrap();
+        std::fs::write(&table_path, foreign).unwrap();
+        let files = migration
+            .completed
+            .iter()
+            .map(|(_, new, _)| (new.clone(), std::fs::read(new).unwrap()))
+            .collect::<Vec<_>>();
+        drop(migration);
+        assert_eq!(std::fs::read(&table_path).unwrap(), foreign);
+        for (path, bytes) in files {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -3326,9 +3817,14 @@ mod tests {
             .validate_physical_routes_with_inventory(dir.path(), Some(&inventory))
             .unwrap();
         let mut omitted = inventory.clone();
+        let authority =
+            crate::graph_projection::TransformRoutes::from_inventory(dir.path(), inventory.clone())
+                .unwrap();
         omitted.files.retain(|entry| {
-            entry.relative_path != format!("topology/edges/{}.parquet", relation.route)
+            authority.semantic_path(&entry.relative_path).unwrap()
+                != format!("topology/edges/{}.parquet", relation.route)
         });
+        assert_eq!(omitted.files.len() + 1, inventory.files.len());
         omitted.file_count = omitted.files.len() as u64;
         assert!(
             bindings
@@ -3462,14 +3958,18 @@ mod tests {
             .unwrap();
         second.flush().unwrap();
 
-        let fragments = crate::property_overlay::enumerate_property_fragments(
-            dir.path(),
-            crate::PropertyRouteKind::Node,
-            &entity.route,
-        )
-        .unwrap();
+        let inventory = crate::capture_graph_files(dir.path()).unwrap().0;
+        let fragments = semantic_fragment_inventory(dir.path(), &inventory)
+            .unwrap()
+            .remove(&("properties".to_owned(), entity.route.clone()))
+            .unwrap();
         assert_eq!(fragments.len(), 2);
-        let rows = crate::catalog::read_properties(dir.path(), &entity.route).unwrap();
+        let authority =
+            crate::graph_projection::TransformRoutes::from_inventory(dir.path(), inventory.clone())
+                .unwrap();
+        let rows = authority
+            .property_batches(dir.path(), &entity.route, false)
+            .unwrap();
         let names = rows[0]
             .column_by_name("name")
             .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>())
@@ -3483,7 +3983,6 @@ mod tests {
             .unwrap();
         for fragment in fragments {
             let relative = fragment
-                .path
                 .strip_prefix(dir.path())
                 .unwrap()
                 .to_str()

@@ -22,9 +22,7 @@ use parquet::file::properties::WriterProperties;
 use graphforge_core::uuid::{Uuid, new_v7};
 use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::io_stats;
-use graphforge_storage::{
-    GraphWriter, read_edges, read_edges_filtered, read_nodes, read_nodes_filtered,
-};
+use graphforge_storage::{GraphWriter, read_nodes, read_nodes_filtered};
 use graphforge_value::EntityTypeId;
 
 const TS: i64 = 1_700_000_000_000_000;
@@ -308,4 +306,35 @@ fn dense_selection_uses_shard_local_id_range_and_gaps_fall_back() {
     assert_eq!(fallback.node_dense_row_selection_reads, 0);
     assert_eq!(fallback.node_row_group_predicate_reads, 1);
     assert_eq!(fallback.node_metadata_fallbacks, 1);
+}
+
+fn admitted_inventory(
+    root: &std::path::Path,
+) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(root, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
+fn read_edges_filtered(
+    root: &std::path::Path,
+    route: &str,
+    mode: OntologyMode,
+    ids: &HashSet<u64>,
+) -> Result<Vec<arrow::record_batch::RecordBatch>, datafusion::error::DataFusionError> {
+    graphforge_storage::read_edges_filtered_from_inventory(
+        &admitted_inventory(root),
+        route,
+        mode,
+        ids,
+    )
+}
+
+fn read_edges(
+    root: &std::path::Path,
+    route: &str,
+    mode: OntologyMode,
+) -> Result<Vec<arrow::record_batch::RecordBatch>, datafusion::error::DataFusionError> {
+    graphforge_storage::read_edges_from_inventory(&admitted_inventory(root), route, mode)
 }

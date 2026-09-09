@@ -60,11 +60,9 @@ impl GraphReadContext {
             GraphReadTable::Edges(stem)
                 if stem == "_exploratory" && self.mode != OntologyMode::Exploratory =>
             {
-                Arc::new(graphforge_storage::UnionEdgeTable::open(&self.dir))
+                Arc::new(self.catalog.union_edge_table(&self.dir))
             }
-            GraphReadTable::Edges(stem) => {
-                Arc::new(graphforge_storage::TypedEdgeTable::open(&self.dir, stem))
-            }
+            GraphReadTable::Edges(stem) => Arc::new(self.catalog.edge_table(&self.dir, stem)),
             GraphReadTable::SemanticEdges(id) => {
                 self.catalog.semantic_edge_table(*id).ok_or_else(|| {
                     DataFusionError::Plan("GF_READ_RESOURCE_INCOMPATIBLE: semantic relation".into())

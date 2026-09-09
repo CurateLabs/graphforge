@@ -202,14 +202,15 @@ fn keep_mask<S: BuildHasher>(
 fn stage_rewrite_dropping<S: BuildHasher>(
     staged: &mut RewriteBatch,
     path: &Path,
+    source: &Path,
     schema: SchemaRef,
     key_col: &str,
     targets: &HashSet<[u8; 16], S>,
 ) -> Result<u64, GfError> {
     let read_path = match staged.staged_temp(path) {
         Some(tmp) => tmp.to_path_buf(),
-        None if !path.exists() => return Ok(0),
-        None => path.to_path_buf(),
+        None if !source.exists() => return Ok(0),
+        None => source.to_path_buf(),
     };
     let batches = read_parquet_or_empty(&read_path, schema.clone()).map_err(pq_err)?;
     let mut removed = 0u64;
@@ -482,22 +483,9 @@ pub fn stage_delete_nodes<S: BuildHasher>(
     if node_uuids.is_empty() {
         return Ok(0);
     }
-    // Immutable property history is never rewritten; whole-row tombstones
-    // suppress deleted entities before topology authority commits.
-    for route in crate::catalog::list_property_stems(dir) {
-        crate::writer::stage_property_tombstones(
-            staged,
-            dir,
-            crate::property_overlay::PropertyRouteKind::Node,
-            &route,
-            node_uuids,
-        )?;
-    }
-    let mut removed = 0_u64;
-    for path in node_parquet_files(dir)? {
-        removed = removed.saturating_add(stage_rewrite_nodes_dropping(staged, &path, node_uuids)?);
-    }
-    Ok(removed)
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
+    stage_delete_nodes_authenticated(staged, dir, &inventory, node_uuids)
 }
 
 /// Stage node deletion while binding every property tombstone to `inventory`.
@@ -547,21 +535,9 @@ pub fn stage_delete_edges<S: BuildHasher>(
     if edge_uuids.is_empty() {
         return Ok(0);
     }
-    let mut removed = 0u64;
-    for (_, path) in edge_parquet_files(dir, None)? {
-        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
-        removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
-    }
-    for route in crate::catalog::list_edge_property_stems(dir) {
-        crate::writer::stage_property_tombstones(
-            staged,
-            dir,
-            crate::property_overlay::PropertyRouteKind::Edge,
-            &route,
-            edge_uuids,
-        )?;
-    }
-    Ok(removed)
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
+    stage_delete_edges_authenticated(staged, dir, &inventory, edge_uuids)
 }
 
 /// Stage edge deletion while binding every property tombstone to `inventory`.
@@ -575,10 +551,41 @@ pub fn stage_delete_edges_authenticated<S: BuildHasher>(
     if edge_uuids.is_empty() {
         return Ok(0);
     }
+    let directory =
+        graphforge_filesystem::StableDirectory::open(dir).map_err(|error| io_err(&error))?;
+    let table = crate::route_component::owned::read_owned_layout_table(&directory)?;
     let mut removed = 0u64;
-    for (_, path) in edge_parquet_files(dir, None)? {
-        let schema = discover_parquet_schema_detailed(&path).map_err(pq_err)?;
-        removed += stage_rewrite_dropping(staged, &path, schema, "edge_uuid", edge_uuids)?;
+    for (route, source, relative) in inventory.edge_rewrite_files() {
+        let component = match &table {
+            Some(table) => {
+                let component = crate::route_component::component(route);
+                if table.route(&component)? != route {
+                    return Err(GfError::Storage(
+                        "owned edge route differs from admitted source".into(),
+                    ));
+                }
+                component
+            }
+            None => route.to_owned(),
+        };
+        let route_tail = relative.strip_prefix("topology/edges/").ok_or_else(|| {
+            GfError::Storage("admitted edge path has no topology namespace".into())
+        })?;
+        let destination = match route_tail.split_once('/') {
+            Some((_, fragment)) => dir.join("topology/edges").join(component).join(fragment),
+            None => dir
+                .join("topology/edges")
+                .join(format!("{component}.parquet")),
+        };
+        let schema = discover_parquet_schema_detailed(source).map_err(pq_err)?;
+        removed += stage_rewrite_dropping(
+            staged,
+            &destination,
+            source,
+            schema,
+            "edge_uuid",
+            edge_uuids,
+        )?;
     }
     let routes = inventory
         .routes(crate::PropertyRouteKind::Edge)
@@ -842,7 +849,26 @@ mod tests {
 
     /// Total rows across the batches of a (possibly absent) parquet file.
     fn row_count(dir: &Path, rel: &str) -> usize {
-        let path = dir.join(rel);
+        let physical = if let Some(route) = rel
+            .strip_prefix("topology/edges/")
+            .and_then(|value| value.strip_suffix(".parquet"))
+        {
+            let physical = format!(
+                "topology/edges/{}.parquet",
+                crate::route_component::component(route)
+            );
+            let table = crate::route_component::RouteTable::decode(
+                &std::fs::read(dir.join(crate::route_component::TABLE_FILE)).unwrap(),
+                64 * 1024 * 1024,
+                100_000,
+            )
+            .unwrap();
+            assert_eq!(table.semantic_relative_path(&physical).unwrap(), rel);
+            physical
+        } else {
+            rel.to_owned()
+        };
+        let path = dir.join(physical);
         let Some(schema) = discover_parquet_schema(&path) else {
             return 0;
         };
@@ -1135,6 +1161,49 @@ mod tests {
     }
 
     #[test]
+    fn mapped_reserved_delete_preserves_other_routes_and_reopens() {
+        let dir = TempDir::new().unwrap();
+        let (a, b, edge, retained) = (new_v7(), new_v7(), new_v7(), new_v7());
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        for (node, route) in [(a, "CON"), (b, "con")] {
+            writer
+                .create_node(node, EntityTypeId::ontology(TypeId(1)).unwrap())
+                .unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    Some(route),
+                    HashMap::from([("name".into(), IrLiteral::Str(route.into()))]),
+                )
+                .unwrap();
+        }
+        for (id, route, source) in [(edge, "AUX", a), (retained, "aux", b)] {
+            writer.create_edge(id, route, &source, &b).unwrap();
+            writer
+                .set_edge_properties(
+                    &id,
+                    Some(route),
+                    HashMap::from([("cost".into(), IrLiteral::Int(7))]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        assert_eq!(
+            delete_nodes_and_edges(dir.path(), &set(&[a]), &set(&[edge])).unwrap(),
+            (1, 1)
+        );
+        let reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
+        assert_eq!(logical_property_rows(dir.path(), "CON", false), 0);
+        assert_eq!(logical_property_rows(dir.path(), "AUX", true), 0);
+        assert_eq!(logical_property_rows(dir.path(), "con", false), 1);
+        assert_eq!(logical_property_rows(dir.path(), "aux", true), 1);
+        let rows = crate::read_node_property_rows(dir.path(), "con").unwrap();
+        assert_eq!(rows[&to_bytes(&b)]["name"], IrLiteral::Str("con".into()));
+        drop(reopened);
+    }
+
+    #[test]
     fn delete_nodes_drops_their_property_rows() {
         let dir = TempDir::new().unwrap();
         let (a, b) = (new_v7(), new_v7());
@@ -1190,14 +1259,15 @@ mod tests {
     fn edge_deletion_fails_closed_on_corrupt_topology_for_both_staging_paths() {
         let (dir, _a, _b, _c) = chain();
         let (captured, _) = crate::capture_graph_files(dir.path()).unwrap();
-        let inventory =
-            crate::AuthenticatedPropertyInventory::from_entries_at_root(dir.path(), captured.files)
-                .unwrap();
-        fs::write(
-            dir.path().join("topology/edges/KNOWS.parquet"),
-            b"not parquet",
+        let inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
+            dir.path(),
+            captured,
+            None,
         )
         .unwrap();
+        let paths = inventory.edge_files(Some("KNOWS"));
+        assert_eq!(paths.len(), 1);
+        fs::write(&paths[0].1, b"not parquet").unwrap();
         let target = set(&[new_v7()]);
 
         let mut ordinary = RewriteBatch::new();
