@@ -73,6 +73,23 @@ class LifecycleGrowthTests(unittest.TestCase):
     def test_declared_linear_and_fixed_policies(self):
         GROWTH.validate_growth(observations())
 
+    def test_published_radix_object_counts_keep_positive_linear_ceiling(self):
+        for owner in ("source-project-published", "imported-project-published"):
+            changed = observations()
+            # Real SCALE6/7/8 inventories: radix nodes 47/48/46 plus
+            # 25 fixed objects. Every graph inventory has 18 logical files.
+            for observation, count in zip(changed, (72, 73, 71), strict=True):
+                totals = observation["receipt"]["retained_owners"][owner]["totals"]
+                totals["logical_references"] = totals["physical_objects"] = count
+            GROWTH.validate_growth(changed)
+            for invalid in (0, -1, 577):
+                with self.subTest(owner=owner, invalid=invalid):
+                    refused = copy.deepcopy(changed)
+                    totals = refused[2]["receipt"]["retained_owners"][owner]["totals"]
+                    totals["logical_references"] = totals["physical_objects"] = invalid
+                    with self.assertRaises(ValueError):
+                        GROWTH.validate_growth(refused)
+
     def test_each_data_owner_rejects_flat_underreported_and_inflated_eof(self):
         for owner in GROWTH.DATA_OWNERS:
             for field in ("logical_bytes", "physical_logical_bytes"):
