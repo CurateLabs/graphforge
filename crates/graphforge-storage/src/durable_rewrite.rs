@@ -21,6 +21,8 @@ static PROCESS_REWRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use crate::filesystem_admission::{ProjectLifecycleMode, ProjectRootRequirement};
 use crate::staging::RewriteBatch;
 
+pub(crate) mod moves;
+
 const JOURNAL: &str = ".graphforge-rewrite-v1.json";
 const LOCK: &str = ".graphforge-rewrite.lock";
 const MAX_ENTRIES: usize = 16_384;
@@ -112,9 +114,11 @@ struct Entry {
     temporary_volume: u64,
     temporary_file: String,
     prior_destination: Option<AuthenticatedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<moves::SourceRetirement>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct AuthenticatedFile {
     volume: u64,
     file: String,
@@ -381,6 +385,7 @@ fn checksum(intent: &Intent) -> Result<String, GfError> {
             .entries
             .iter()
             .map(|e| Entry {
+                source: e.source.clone(),
                 destination: e.destination.clone(),
                 class: e.class,
                 temporary: e.temporary.clone(),
@@ -578,7 +583,7 @@ fn recover_locked(
     };
     let intent: Intent = serde_json::from_slice(&bytes)
         .map_err(|e| storage(format!("corrupt rewrite journal: {e}")))?;
-    if intent.version != 1
+    if !matches!(intent.version, 1 | 2)
         || intent.entries.len() > MAX_ENTRIES
         || checksum(&intent)? != intent.checksum
     {
@@ -624,8 +629,11 @@ fn recover_locked(
         .iter()
         .filter(|entry| entry.class == EntryClass::Data)
         .collect::<Vec<_>>();
+    for entry in &data {
+        moves::check(root_path, root, entry, true)?;
+    }
     for (index, entry) in data.iter().enumerate() {
-        install(root_path, root, entry)?;
+        moves::install_and_retire(root_path, root, entry)?;
         let boundary = if index == 0 {
             "rewrite.after_first_data_install"
         } else if index + 1 == data.len() {
@@ -801,6 +809,7 @@ fn validate_intent_for_platform(
     intent: &Intent,
     allow_legacy_windows: bool,
 ) -> Result<(), GfError> {
+    moves::validate(intent)?;
     let mut destinations = std::collections::HashSet::new();
     let mut temporaries = std::collections::HashSet::new();
     for entry in &intent.entries {
@@ -1068,7 +1077,7 @@ pub(crate) fn commit_with_participant(
     let transaction = Uuid::now_v7().simple().to_string();
     let root_identity = guard.directory.identity();
     let mut entries = Vec::new();
-    let mut staged = batch.into_staged();
+    let (mut staged, mut moves) = batch.into_staged();
     let generation_path = root.join("topology/generation.json");
     std::fs::create_dir_all(generation_path.parent().expect("generation has parent"))
         .map_err(storage)?;
@@ -1109,7 +1118,9 @@ pub(crate) fn commit_with_participant(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
         };
+        let source = moves.remove(destination);
         entries.push(Entry {
+            source,
             class: if ordinal == last {
                 EntryClass::GenerationAuthority
             } else {
@@ -1126,8 +1137,15 @@ pub(crate) fn commit_with_participant(
             prior_destination,
         });
     }
+    if !moves.is_empty() {
+        return Err(storage("rewrite move has no staged destination"));
+    }
     let mut intent = Intent {
-        version: 1,
+        version: if entries.iter().any(|entry| entry.source.is_some()) {
+            2
+        } else {
+            1
+        },
         state: IntentState::Preparing,
         transaction,
         root_volume: root_identity.volume_serial,
@@ -1139,6 +1157,9 @@ pub(crate) fn commit_with_participant(
         checksum: String::new(),
     };
     validate_intent(&intent)?;
+    for entry in &intent.entries {
+        moves::check(root, &guard.directory, entry, false)?;
+    }
     intent.checksum = checksum(&intent)?;
     if intent.auxiliary.as_ref().is_some_and(is_v4_ordinal_receipt) {
         // Recovery requires this stable lifecycle lock before it can install
@@ -1272,6 +1293,7 @@ mod tests {
             temporary_volume: 1,
             temporary_file: "02".to_owned(),
             prior_destination: None,
+            source: None,
         }
     }
 

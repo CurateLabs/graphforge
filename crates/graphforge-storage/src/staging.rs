@@ -120,6 +120,7 @@ pub struct RewriteBatch {
     /// `(staged temp, final destination)` in insertion = commit order.
     staged: Vec<(NamedTempFile, PathBuf)>,
     property_windows: BTreeMap<PropertyWindowKey, PendingPropertyWindow>,
+    moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,8 +144,44 @@ impl RewriteBatch {
         Self::default()
     }
 
+    /// Stage a contained file move in the durable rewrite transaction.
+    ///
+    /// The destination must be absent. The exact source is authenticated again
+    /// at commit and retired only after its staged copy is durably installed.
+    /// All paths must be absolute and contained beneath `project_root`.
+    ///
+    /// # Errors
+    /// Returns an error for changed, aliased, colliding or inadmissible paths.
+    pub fn stage_move(
+        &mut self,
+        project_root: &Path,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), GfError> {
+        if self.staged.iter().any(|(_, path)| path == destination) {
+            return Err(GfError::Storage(
+                "duplicate rewrite move destination".into(),
+            ));
+        }
+        let (temporary, retirement) =
+            crate::durable_rewrite::moves::stage(project_root, source, destination)?;
+        self.moves.insert(destination.to_owned(), retirement);
+        self.staged.push((temporary, destination.to_owned()));
+        Ok(())
+    }
+
+    fn refuse_move_replacement(&self, destination: &Path) -> Result<(), GfError> {
+        if self.moves.contains_key(destination) {
+            return Err(GfError::Storage(
+                "cannot replace an authenticated staged move".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Stage an authenticated control record in the same rename unit as graph data.
     pub(crate) fn stage_bytes(&mut self, final_path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+        self.refuse_move_replacement(final_path)?;
         let parent = final_path
             .parent()
             .ok_or_else(|| GfError::Storage("staged control record has no parent".into()))?;
@@ -167,6 +204,7 @@ impl RewriteBatch {
 
     /// Stage an existing file into this transaction using bounded block I/O.
     pub(crate) fn stage_file(&mut self, final_path: &Path, source: &Path) -> Result<(), GfError> {
+        self.refuse_move_replacement(final_path)?;
         let parent = final_path
             .parent()
             .ok_or_else(|| GfError::Storage("staged file has no parent".into()))?;
@@ -260,6 +298,7 @@ impl RewriteBatch {
         schema: SchemaRef,
         batch: &RecordBatch,
     ) -> Result<(), GfError> {
+        self.refuse_move_replacement(final_path)?;
         let tmp = stage_parquet_temp(final_path, schema, batch)?;
         if let Some(entry) = self.staged.iter_mut().find(|(_, p)| p == final_path) {
             entry.0 = tmp; // the replaced NamedTempFile is removed on drop
@@ -296,6 +335,7 @@ impl RewriteBatch {
         batch: &RecordBatch,
         mut normalize: impl FnMut(RecordBatch) -> Result<RecordBatch, GfError>,
     ) -> Result<u64, GfError> {
+        self.refuse_move_replacement(final_path)?;
         let read_path = self
             .staged_temp(final_path)
             .map_or_else(|| final_path.to_path_buf(), Path::to_path_buf);
@@ -379,6 +419,15 @@ impl RewriteBatch {
     /// graph authorities remain reserved for their generation-sealed paths.
     pub fn commit_at(self, project_root: &Path) -> Result<(), GfError> {
         let (root_handle, relative_destinations) = admit_commit_root(project_root, &self.staged)?;
+        if self
+            .moves
+            .values()
+            .any(crate::durable_rewrite::moves::SourceRetirement::is_reserved_authority)
+        {
+            return Err(GfError::Storage(
+                "reserved graph source must move through its sealed publication path".into(),
+            ));
+        }
         if let Some(root) = self
             .property_windows
             .values()
@@ -400,6 +449,10 @@ impl RewriteBatch {
             return Err(GfError::Storage(
                 "reserved graph authority must commit through its sealed publication path".into(),
             ));
+        }
+        if !self.moves.is_empty() {
+            crate::durable_rewrite::commit(self, project_root, false, false, false, None)?;
+            return Ok(());
         }
         self.commit_retained(&root_handle, &relative_destinations)
     }
@@ -587,8 +640,13 @@ impl RewriteBatch {
         std::mem::take(&mut self.property_windows)
     }
 
-    pub(crate) fn into_staged(self) -> Vec<(NamedTempFile, PathBuf)> {
-        self.staged
+    pub(crate) fn into_staged(
+        self,
+    ) -> (
+        Vec<(NamedTempFile, PathBuf)>,
+        BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
+    ) {
+        (self.staged, self.moves)
     }
 
     pub(crate) fn move_staged_destination_to_end(&mut self, destination: &Path) {
@@ -690,7 +748,7 @@ fn run_before_retained_install_hook() {
 #[cfg(not(test))]
 fn run_before_retained_install_hook() {}
 
-fn is_reserved_authority(relative: &Path) -> bool {
+pub(crate) fn is_reserved_authority(relative: &Path) -> bool {
     let components = relative
         .components()
         .filter_map(|component| match component {
