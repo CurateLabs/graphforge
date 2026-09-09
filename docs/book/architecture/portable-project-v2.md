@@ -251,7 +251,9 @@ canonical header order and PAX paths, exactly two end blocks, and the same
 no-replace publication. Until the final rename, neither representation exposes
 the requested destination. Cancellation, I/O failure, disk exhaustion, source
 mutation, or destination creation removes the private partial output and never
-overwrites an existing destination. Re-running an unchanged plan produces the
+overwrites an existing destination. The shared Rust filesystem primitive uses
+native no-replace rename on Unix and Windows; Windows publication never enables
+replacement or cross-volume copy. Re-running an unchanged plan produces the
 same package digest and bundle bytes; the two representations intentionally
 have distinct transport digests.
 

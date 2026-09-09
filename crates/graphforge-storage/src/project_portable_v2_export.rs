@@ -2275,34 +2275,8 @@ fn reject_destination(p: &Path) -> Result<(), ExportError> {
     }
     Ok(())
 }
-#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "redox"))]
 pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        stage,
-        rustix::fs::CWD,
-        destination,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )?;
-    Ok(())
-}
-#[cfg(windows)]
-pub(crate) fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
-    // Windows rename is non-replacing. The destination was also checked before
-    // staging; any intervening creation makes this operation fail closed.
-    fs::rename(stage, destination)
-}
-#[cfg(not(any(
-    target_vendor = "apple",
-    target_os = "linux",
-    target_os = "redox",
-    windows
-)))]
-pub(crate) fn publish_no_replace(_: &Path, _: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "atomic no-replace publication is unsupported on this platform",
-    ))
+    graphforge_filesystem::rename_no_replace(stage, destination)
 }
 fn parent(p: &Path) -> Result<(), ExportError> {
     fs::create_dir_all(p.parent().unwrap()).map_err(storage)
