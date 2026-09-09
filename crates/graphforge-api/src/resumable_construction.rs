@@ -1,5 +1,8 @@
 //! Public Rust facade for resumable, bounded, disk-owned graph construction.
 
+#[cfg(test)]
+mod codec_tests;
+
 use arrow::record_batch::RecordBatch;
 use graphforge_core::uuid::Uuid;
 use sha2::{Digest, Sha256};
@@ -777,7 +780,10 @@ mod tests {
     #[test]
     fn construction_application_reads_reconcile_and_scale_at_one_two_four() {
         let mut observations = Vec::new();
-        for scale in [1_024_usize, 2_048, 4_096] {
+        // Each node retains 16 identity bytes and at least 18 compact detail bytes.
+        // 4,096 rows therefore exceed 100,000 payload bytes before Parquet/control
+        // overhead; retain the same dominance threshold and every phase ceiling.
+        for scale in [4_096_usize, 8_192, 16_384] {
             let graph = GraphForge::new(None).unwrap();
             let mut session = graph.begin_graph_construction(Default::default()).unwrap();
             let ids = (0..scale).map(|_| Uuid::now_v7()).collect::<Vec<_>>();

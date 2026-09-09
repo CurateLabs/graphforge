@@ -36,9 +36,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::UuidIndexKind;
+use crate::construction_detail_codec::{DetailCodec, DetailValidator};
 use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -1288,7 +1289,7 @@ impl GraphConstructionSession {
             .clone()
             .ok_or_else(|| storage("publication requires encoded inventory authority"))?;
         let intent = ConstructionPublicationIntent {
-            format_version: FORMAT_VERSION,
+            format_version: self.checkpoint.format_version,
             operation_uuid: self.checkpoint.operation_uuid,
             project_identity: self.checkpoint.project_identity.clone(),
             session_identity: self.checkpoint.session_identity.clone(),
@@ -1404,6 +1405,7 @@ impl GraphConstructionSession {
         }
         let encoded = crate::graph_construction_encoding::encode(
             &self.root,
+            DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
             shape,
             generation,
             self.checkpoint.ontology_mode,
@@ -2076,6 +2078,34 @@ impl GraphConstructionSession {
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
+        Self::open_internal_with_format(
+            project_dir,
+            graph_source_dir,
+            operation_uuid,
+            parent_topology_generation,
+            ontology_mode,
+            semantic_authority,
+            budgets,
+            lifecycle_mode,
+            allocation,
+            FORMAT_VERSION,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn open_internal_with_format(
+        project_dir: &Path,
+        graph_source_dir: &Path,
+        operation_uuid: Uuid,
+        parent_topology_generation: u64,
+        ontology_mode: graphforge_core::OntologyMode,
+        semantic_authority: Option<ConstructionSemanticAuthority>,
+        budgets: GraphConstructionBudgets,
+        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
+        allocation: Option<&crate::StorageAllocationOperation>,
+        initial_format_version: u32,
+    ) -> Result<Self, GfError> {
+        DetailCodec::from_version(initial_format_version).map_err(storage)?;
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()
@@ -2114,13 +2144,6 @@ impl GraphConstructionSession {
             ));
         }
         let session_identity = root.identity();
-        cleanup_authenticated_control_temps(
-            &root,
-            operation_uuid,
-            project_identity,
-            session_identity,
-        )?;
-        cleanup_owned_artifact_temps(&root)?;
         // Authenticate private recovery authority before consulting the
         // mutable public pointer. A publishing/published replay resolves its
         // exact immutable parent and therefore remains recoverable after
@@ -2130,14 +2153,23 @@ impl GraphConstructionSession {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
         };
-        if let Some(checkpoint) = recovered_checkpoint.as_mut() {
-            if checkpoint.format_version != FORMAT_VERSION
+        if let Some(checkpoint) = recovered_checkpoint.as_mut()
+            && (DetailCodec::from_version(checkpoint.format_version).is_err()
                 || checkpoint.operation_uuid != operation_uuid
                 || !checkpoint.project_identity.matches(project_identity)
-                || !checkpoint.session_identity.matches(session_identity)
-            {
-                return Err(storage("checkpoint private authority changed"));
-            }
+                || !checkpoint.session_identity.matches(session_identity))
+        {
+            return Err(storage("checkpoint private authority changed"));
+        }
+        if let Some(checkpoint) = recovered_checkpoint.as_mut() {
+            cleanup_authenticated_control_temps(
+                &root,
+                operation_uuid,
+                project_identity,
+                session_identity,
+                checkpoint.format_version,
+            )?;
+            cleanup_owned_artifact_temps(&root)?;
             recover_publication(project_dir, &root, checkpoint)?;
         }
         let (parent_generation_uuid, parent_generation_manifest_sha256) =
@@ -2292,8 +2324,8 @@ impl GraphConstructionSession {
                 peak_catalog_identifier_bytes: parent_catalog.retained_identifier_bytes() as u64,
                 ..GraphConstructionEvidence::default()
             };
-            let initial = Checkpoint {
-                format_version: FORMAT_VERSION,
+            let mut initial = Checkpoint {
+                format_version: initial_format_version,
                 operation_uuid,
                 project_identity: project_identity.into(),
                 session_identity: session_identity.into(),
@@ -2324,6 +2356,15 @@ impl GraphConstructionSession {
                 base_work,
                 evidence,
             };
+            initial.format_version = initial_checkpoint_format(&root, project_identity, &initial)?;
+            cleanup_authenticated_control_temps(
+                &root,
+                operation_uuid,
+                project_identity,
+                session_identity,
+                initial.format_version,
+            )?;
+            cleanup_owned_artifact_temps(&root)?;
             install_control(&root, CHECKPOINT, &initial)?;
             initial
         };
@@ -2683,7 +2724,11 @@ impl GraphConstructionSession {
                 && receipt.input_sha256 == input_sha256
                 && receipt.schema_sha256 == schema_sha256
             {
-                let work = validate_receipt_artifacts(&self.root, &receipt)?;
+                let work = validate_receipt_artifacts(
+                    &self.root,
+                    &receipt,
+                    DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+                )?;
                 self.checkpoint.evidence.replay_validation_read_bytes = self
                     .checkpoint
                     .evidence
@@ -2739,7 +2784,7 @@ impl GraphConstructionSession {
         }
         let sequence = self.checkpoint.next_sequence;
         let mut intent = ChunkIntent {
-            format_version: FORMAT_VERSION,
+            format_version: self.checkpoint.format_version,
             operation_uuid: self.checkpoint.operation_uuid,
             project_identity: self.checkpoint.project_identity.clone(),
             session_identity: self.checkpoint.session_identity.clone(),
@@ -2830,17 +2875,19 @@ impl GraphConstructionSession {
             reject_cancelled(&mut cancelled)?;
         }
         intent.details = Some(match &arrays.details {
-            DetailRuns::Node(records) => write_fixed_run(
+            DetailRuns::Node(records) => write_run(
                 &self.root,
                 &format!("{stem}.node-details.run"),
                 records,
                 &mut self.checkpoint.evidence,
+                Some(DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?),
             )?,
-            DetailRuns::Edge(records) => write_fixed_run(
+            DetailRuns::Edge(records) => write_run(
                 &self.root,
                 &format!("{stem}.edge-details.run"),
                 records,
                 &mut self.checkpoint.evidence,
+                Some(DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?),
             )?,
         });
         replace_control(&self.root, INTENT, &intent)?;
@@ -2880,7 +2927,12 @@ impl GraphConstructionSession {
         let mut read_operations = 0_u64;
         for sequence in 0..self.checkpoint.next_sequence {
             let receipt = self.read_receipt(sequence)?;
-            validate_receipt_semantics(&receipt, sequence, self.checkpoint.budgets)?;
+            validate_receipt_semantics(
+                &receipt,
+                sequence,
+                self.checkpoint.budgets,
+                DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+            )?;
             if receipt.kind == ConstructionChunkKind::Node && saw_edge {
                 return Err(storage("node receipt follows edge receipt"));
             }
@@ -2889,7 +2941,11 @@ impl GraphConstructionSession {
                 return Err(storage("receipt journal chain is discontinuous"));
             }
             if authenticate_artifacts {
-                let work = validate_receipt_artifacts(&self.root, &receipt)?;
+                let work = validate_receipt_artifacts(
+                    &self.root,
+                    &receipt,
+                    DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+                )?;
                 account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
                 read_bytes = read_bytes
                     .checked_add(work.bytes)
@@ -2963,13 +3019,17 @@ impl GraphConstructionSession {
 
         let fan_in = self.checkpoint.budgets.merge_fan_in;
         let mut unified = FixedMergeAccumulator::new("merge-identities", fan_in, true);
-        let mut node_details = FixedMergeAccumulator::new("merge-node-details", fan_in, true);
-        let mut edge_details = FixedMergeAccumulator::new("merge-edge-details", fan_in, true);
+        let detail_codec =
+            DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?;
+        let mut node_details = FixedMergeAccumulator::new("merge-node-details", fan_in, true)
+            .with_detail_codec(detail_codec);
+        let mut edge_details = FixedMergeAccumulator::new("merge-edge-details", fan_in, true)
+            .with_detail_codec(detail_codec);
         let mut endpoints = FixedMergeAccumulator::new("merge-endpoints", fan_in, false);
         let mut row_groups: BTreeMap<(u8, String), RowMergeAccumulator> = BTreeMap::new();
         let mut catalog_authority = Sha256::new();
         let shape_intent = ShapeIntent {
-            format_version: FORMAT_VERSION,
+            format_version: self.checkpoint.format_version,
             operation_uuid: self.checkpoint.operation_uuid,
             project_identity: self.checkpoint.project_identity.clone(),
             session_identity: self.checkpoint.session_identity.clone(),
@@ -2993,7 +3053,11 @@ impl GraphConstructionSession {
             // digest in the merge consumers below. Parquet's range-oriented
             // decoder cannot establish a whole-file digest, so retain exactly
             // one explicit whole-file authentication pass for that artifact.
-            let mut work = authenticate_artifact(&self.root, &receipt.parquet)?;
+            let mut work = authenticate_artifact(
+                &self.root,
+                &receipt.parquet,
+                DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+            )?;
             account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
             let metadata_work = validate_parquet_metadata(&self.root, &receipt)?;
             account_cache_release(metadata_work.cache_release, &mut self.checkpoint.evidence)?;
@@ -3053,12 +3117,13 @@ impl GraphConstructionSession {
             match receipt.kind {
                 ConstructionChunkKind::Node => {
                     let name = format!("merge-node-source-{sequence:020}.run");
-                    copy_authenticated_run::<NODE_DETAIL_WIDTH>(
+                    copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
                         &self.root,
                         &receipt.details,
                         &name,
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
+                        Some(detail_codec),
                     )?;
                     node_details.push::<NODE_DETAIL_WIDTH>(
                         &self.root,
@@ -3069,12 +3134,13 @@ impl GraphConstructionSession {
                 }
                 ConstructionChunkKind::Edge => {
                     let detail = format!("merge-edge-source-{sequence:020}.run");
-                    copy_authenticated_run::<EDGE_DETAIL_WIDTH>(
+                    copy_authenticated_run_with_codec::<EDGE_DETAIL_WIDTH>(
                         &self.root,
                         &receipt.details,
                         &detail,
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
+                        Some(detail_codec),
                     )?;
                     edge_details.push::<EDGE_DETAIL_WIDTH>(
                         &self.root,
@@ -3163,6 +3229,7 @@ impl GraphConstructionSession {
             &staged_identities,
             node_details.as_deref(),
             edge_details.as_deref(),
+            detail_codec,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -3319,7 +3386,7 @@ impl GraphConstructionSession {
             &self.root,
             SHAPE_INTENT,
             &ShapeIntent {
-                format_version: FORMAT_VERSION,
+                format_version: self.checkpoint.format_version,
                 operation_uuid: self.checkpoint.operation_uuid,
                 project_identity: self.checkpoint.project_identity.clone(),
                 session_identity: self.checkpoint.session_identity.clone(),
@@ -3414,11 +3481,20 @@ impl GraphConstructionSession {
         match self.root.open_child_file(OsStr::new(&receipt_name)) {
             Ok(mut receipt_file) => {
                 let receipt: ConstructionChunkReceipt = decode_bounded(&mut receipt_file)?;
-                validate_receipt_semantics(&receipt, intent.sequence, self.checkpoint.budgets)?;
+                validate_receipt_semantics(
+                    &receipt,
+                    intent.sequence,
+                    self.checkpoint.budgets,
+                    DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+                )?;
                 if receipt != receipt_from_intent(&intent)? {
                     return Err(storage("recovered receipt differs from durable intent"));
                 }
-                let recovery_work = validate_receipt_artifacts(&self.root, &receipt)?;
+                let recovery_work = validate_receipt_artifacts(
+                    &self.root,
+                    &receipt,
+                    DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+                )?;
                 self.checkpoint.evidence.recovery_application_read_bytes = self
                     .checkpoint
                     .evidence
@@ -3478,7 +3554,12 @@ impl GraphConstructionSession {
                 .into_iter()
                 .flatten()
                 {
-                    let recovery_work = authenticate_artifact(&self.root, &artifact)?;
+                    let recovery_work = authenticate_artifact(
+                        &self.root,
+                        &artifact,
+                        DetailCodec::from_version(self.checkpoint.format_version)
+                            .map_err(storage)?,
+                    )?;
                     account_cache_release(
                         recovery_work.cache_release,
                         &mut self.checkpoint.evidence,
@@ -3506,6 +3587,8 @@ impl GraphConstructionSession {
                         &format!("{stem}.parquet"),
                         intent.kind,
                         intent.rows,
+                        DetailCodec::from_version(self.checkpoint.format_version)
+                            .map_err(storage)?,
                     )?;
                 }
                 if intent.identities.is_none() {
@@ -3514,6 +3597,8 @@ impl GraphConstructionSession {
                         &format!("{stem}.identities.run"),
                         intent.kind,
                         intent.rows,
+                        DetailCodec::from_version(self.checkpoint.format_version)
+                            .map_err(storage)?,
                     )?;
                 }
                 if intent.kind == ConstructionChunkKind::Edge && intent.endpoints.is_none() {
@@ -3522,6 +3607,8 @@ impl GraphConstructionSession {
                         &format!("{stem}.endpoints.run"),
                         intent.kind,
                         intent.rows,
+                        DetailCodec::from_version(self.checkpoint.format_version)
+                            .map_err(storage)?,
                     )?;
                 }
                 if intent.details.is_none() {
@@ -3537,6 +3624,8 @@ impl GraphConstructionSession {
                         ),
                         intent.kind,
                         intent.rows,
+                        DetailCodec::from_version(self.checkpoint.format_version)
+                            .map_err(storage)?,
                     )?;
                 }
             }
@@ -3551,7 +3640,12 @@ impl GraphConstructionSession {
             .open_child_file(OsStr::new(&receipt_name(sequence)))
             .map_err(storage)?;
         let receipt = decode_bounded(&mut file)?;
-        validate_receipt_semantics(&receipt, sequence, self.checkpoint.budgets)?;
+        validate_receipt_semantics(
+            &receipt,
+            sequence,
+            self.checkpoint.budgets,
+            DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
+        )?;
         if receipt.operation_uuid != self.checkpoint.operation_uuid
             || receipt.project_identity != self.checkpoint.project_identity
             || receipt.session_identity != self.checkpoint.session_identity
@@ -4362,6 +4456,16 @@ fn write_fixed_run<const N: usize>(
     records: &[[u8; N]],
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<ArtifactReceipt, GfError> {
+    write_run(root, name, records, evidence, None)
+}
+
+fn write_run<const N: usize>(
+    root: &StableDirectory,
+    name: &str,
+    records: &[[u8; N]],
+    evidence: &mut GraphConstructionEvidence,
+    codec: Option<DetailCodec>,
+) -> Result<ArtifactReceipt, GfError> {
     let temporary = artifact_temp(name);
     let file = root
         .create_replaceable_child_file(OsStr::new(&temporary))
@@ -4373,7 +4477,7 @@ fn write_fixed_run<const N: usize>(
     for group in records.chunks(records_per_block) {
         block.clear();
         for record in group {
-            block.extend_from_slice(record);
+            block.extend_from_slice(run_record_bytes(record, codec)?);
         }
         writer.write_all(&block).map_err(storage)?;
     }
@@ -4683,7 +4787,7 @@ fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), G
 }
 
 fn validate_shape_binding(intent: &ShapeIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
-    if intent.format_version != FORMAT_VERSION
+    if intent.format_version != checkpoint.format_version
         || intent.operation_uuid != checkpoint.operation_uuid
         || intent.project_identity != checkpoint.project_identity
         || intent.session_identity != checkpoint.session_identity
@@ -4730,7 +4834,7 @@ fn validate_publication_intent(
     )?;
     validate_sha256(&intent.shape_authority_sha256, "shape authority")?;
     validate_sha256(&intent.encoding_inventory_sha256, "encoding inventory")?;
-    if intent.format_version != FORMAT_VERSION
+    if intent.format_version != checkpoint.format_version
         || intent.operation_uuid != checkpoint.operation_uuid
         || intent.project_identity != checkpoint.project_identity
         || intent.session_identity != checkpoint.session_identity
@@ -5600,7 +5704,13 @@ fn unlink_shape_artifact(
 fn account_merge_read<const N: usize>(
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
-    let _ = N;
+    account_merge_read_bytes(evidence, N as u64)
+}
+
+fn account_merge_read_bytes(
+    evidence: &mut GraphConstructionEvidence,
+    _bytes: u64,
+) -> Result<(), GfError> {
     evidence.merge_read_records = evidence
         .merge_read_records
         .checked_add(1)
@@ -5611,13 +5721,20 @@ fn account_merge_read<const N: usize>(
 fn account_merge_write<const N: usize>(
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
+    account_merge_write_bytes(evidence, N as u64)
+}
+
+fn account_merge_write_bytes(
+    evidence: &mut GraphConstructionEvidence,
+    bytes: u64,
+) -> Result<(), GfError> {
     evidence.merge_written_records = evidence
         .merge_written_records
         .checked_add(1)
         .ok_or_else(|| storage("merge written record count overflows"))?;
     evidence.merge_written_bytes = evidence
         .merge_written_bytes
-        .checked_add(N as u64)
+        .checked_add(bytes)
         .ok_or_else(|| storage("merge written byte count overflows"))?;
     Ok(())
 }
@@ -6076,13 +6193,24 @@ fn convert_identity_run(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 fn copy_authenticated_run<const N: usize>(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
     output: &str,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    copy_authenticated_run_with_codec::<N>(root, receipt, output, cancelled, evidence, None)
+}
+
+#[allow(clippy::too_many_lines)] // Retain the existing coupled authentication/publication cleanup scope.
+fn copy_authenticated_run_with_codec<const N: usize>(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+    output: &str,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+    codec: Option<DetailCodec>,
 ) -> Result<(), GfError> {
     let input = root
         .open_child_file(OsStr::new(&receipt.name))
@@ -6150,14 +6278,15 @@ fn copy_authenticated_run<const N: usize>(
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let copied = (|| -> Result<(), GfError> {
-        while let Some(record) = read_fixed::<N>(&mut reader)? {
-            digest.update(record);
+        while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
+            let wire = run_record_bytes(&record, codec)?;
+            digest.update(wire);
             bytes = bytes
-                .checked_add(N as u64)
+                .checked_add(wire.len() as u64)
                 .ok_or_else(|| storage("bytes overflows"))?;
-            writer.write_all(&record).map_err(storage)?;
-            account_merge_read::<N>(evidence)?;
-            account_merge_write::<N>(evidence)?;
+            writer.write_all(wire).map_err(storage)?;
+            account_merge_read_bytes(evidence, wire.len() as u64)?;
+            account_merge_write_bytes(evidence, wire.len() as u64)?;
             reject_cancelled(cancelled)?;
         }
         if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
@@ -6295,6 +6424,7 @@ fn copy_authenticated_run<const N: usize>(
 /// logarithmic level rather than one name per accepted chunk.
 struct FixedMergeAccumulator {
     prefix: &'static str,
+    detail_codec: Option<DetailCodec>,
     fan_in: usize,
     reject_duplicates: bool,
     levels: Vec<Vec<String>>,
@@ -6319,12 +6449,18 @@ impl FixedMergeAccumulator {
     fn new(prefix: &'static str, fan_in: usize, reject_duplicates: bool) -> Self {
         Self {
             prefix,
+            detail_codec: None,
             fan_in,
             reject_duplicates,
             levels: Vec::new(),
             groups: Vec::new(),
             inputs: 0,
         }
+    }
+
+    fn with_detail_codec(mut self, codec: DetailCodec) -> Self {
+        self.detail_codec = Some(codec);
+        self
     }
 
     fn slot_count(&self) -> usize {
@@ -6369,6 +6505,7 @@ impl FixedMergeAccumulator {
                 &inputs,
                 &name,
                 self.reject_duplicates,
+                self.detail_codec,
                 cancelled,
                 evidence,
             )?;
@@ -6435,6 +6572,7 @@ impl FixedMergeAccumulator {
                     &inputs,
                     &output,
                     self.reject_duplicates,
+                    self.detail_codec,
                     cancelled,
                     evidence,
                 )?;
@@ -6461,6 +6599,7 @@ fn merge_fixed_group<const N: usize>(
     inputs: &[String],
     output: &str,
     reject_duplicates: bool,
+    codec: Option<DetailCodec>,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<ArtifactReceipt, GfError> {
@@ -6500,9 +6639,9 @@ fn merge_fixed_group<const N: usize>(
     let mut writer = BufWriter::with_capacity(BLOCK_BYTES, hashing);
     let mut heap = BinaryHeap::new();
     for (index, reader) in readers.iter_mut().enumerate() {
-        if let Some(record) = read_fixed::<N>(reader)? {
+        if let Some(record) = read_run_record::<N>(reader, codec)? {
             heap.push(Reverse((record, index)));
-            account_merge_read::<N>(evidence)?;
+            account_merge_read_bytes(evidence, run_record_bytes(&record, codec)?.len() as u64)?;
         }
     }
     let mut previous = None;
@@ -6514,15 +6653,16 @@ fn merge_fixed_group<const N: usize>(
         {
             return Err(storage("duplicate identity across construction runs"));
         }
-        writer.write_all(&record).map_err(storage)?;
-        account_merge_write::<N>(evidence)?;
+        let wire = run_record_bytes(&record, codec)?;
+        writer.write_all(wire).map_err(storage)?;
+        account_merge_write_bytes(evidence, wire.len() as u64)?;
         previous = Some(record);
         if evidence.merge_written_records.is_multiple_of(4096) {
             reject_cancelled(cancelled)?;
         }
-        if let Some(next) = read_fixed::<N>(&mut readers[index])? {
+        if let Some(next) = read_run_record::<N>(&mut readers[index], codec)? {
             heap.push(Reverse((next, index)));
-            account_merge_read::<N>(evidence)?;
+            account_merge_read_bytes(evidence, run_record_bytes(&next, codec)?.len() as u64)?;
         }
     }
     writer.flush().map_err(storage)?;
@@ -7431,11 +7571,32 @@ where
         catalog,
         Some(digest.to_owned()),
         ReadWork {
+            detail_records: 0,
             bytes,
             operations,
             cache_release: cache_release.evidence(),
         },
     ))
+}
+
+fn read_run_record<const N: usize>(
+    reader: &mut impl Read,
+    codec: Option<DetailCodec>,
+) -> Result<Option<[u8; N]>, GfError> {
+    match codec {
+        Some(codec) => codec.read(reader).map_err(storage),
+        None => read_fixed(reader),
+    }
+}
+
+fn run_record_bytes<const N: usize>(
+    record: &[u8; N],
+    codec: Option<DetailCodec>,
+) -> Result<&[u8], GfError> {
+    match codec {
+        Some(codec) => codec.bytes(record).map_err(storage),
+        None => Ok(record),
+    }
 }
 
 fn read_fixed<const N: usize>(reader: &mut impl Read) -> Result<Option<[u8; N]>, GfError> {
@@ -7456,6 +7617,7 @@ fn validate_staged_details(
     identities_name: &str,
     node_details_name: Option<&str>,
     edge_details_name: Option<&str>,
+    codec: DetailCodec,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(u64, u64), GfError> {
@@ -7490,40 +7652,27 @@ fn validate_staged_details(
         }
     }
     account_fixed_read_operations(&identities_counter, evidence)?;
-    let count = |name: Option<&str>, width: u64| -> Result<u64, GfError> {
-        let Some(name) = name else { return Ok(0) };
-        let bytes = root
-            .open_child_file(OsStr::new(name))
-            .map_err(storage)?
-            .metadata()
-            .map_err(storage)?
-            .len();
-        if bytes % width != 0 {
-            return Err(storage("truncated canonical detail run"));
-        }
-        Ok(bytes / width)
-    };
-    if count(node_details_name, NODE_DETAIL_WIDTH as u64)? != nodes
-        || count(edge_details_name, EDGE_DETAIL_WIDTH as u64)? != edges
-    {
-        return Err(storage("staged identity and detail domains disagree"));
-    }
-    validate_detail_domain::<NODE_DETAIL_WIDTH>(
+    let actual_nodes = validate_detail_domain::<NODE_DETAIL_WIDTH>(
         root,
         identities_name,
         node_details_name,
         0,
+        codec,
         cancelled,
         evidence,
     )?;
-    validate_detail_domain::<EDGE_DETAIL_WIDTH>(
+    let actual_edges = validate_detail_domain::<EDGE_DETAIL_WIDTH>(
         root,
         identities_name,
         edge_details_name,
         1,
+        codec,
         cancelled,
         evidence,
     )?;
+    if actual_nodes != nodes || actual_edges != edges {
+        return Err(storage("staged identity and detail domains disagree"));
+    }
     Ok((nodes, edges))
 }
 
@@ -7633,6 +7782,7 @@ fn validate_unified_and_details(
         identities_name,
         node_details_name,
         0,
+        DetailCodec::Legacy,
         cancelled,
         evidence,
     )?;
@@ -7641,6 +7791,7 @@ fn validate_unified_and_details(
         identities_name,
         edge_details_name,
         1,
+        DetailCodec::Legacy,
         cancelled,
         evidence,
     )?;
@@ -7668,11 +7819,12 @@ fn validate_detail_domain<const N: usize>(
     identities_name: &str,
     details_name: Option<&str>,
     kind: u8,
+    codec: DetailCodec,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
-) -> Result<(), GfError> {
+) -> Result<u64, GfError> {
     let Some(details_name) = details_name else {
-        return Ok(());
+        return Ok(0);
     };
     let (mut identities, identities_counter) =
         open_counted_fixed_reader(root, identities_name, evidence)?;
@@ -7682,7 +7834,7 @@ fn validate_detail_domain<const N: usize>(
         account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
     }
     let mut count = 0_u64;
-    while let Some(detail) = read_fixed::<N>(&mut details)? {
+    while let Some(detail) = codec.read::<N>(&mut details).map_err(storage)? {
         while identity
             .as_ref()
             .is_some_and(|item| item[17] == 1 || item[16] != kind || item[..16] < detail[..16])
@@ -7721,7 +7873,7 @@ fn validate_detail_domain<const N: usize>(
     account_fixed_read_operations(&details_counter, evidence)?;
     release_counted_reader_cache(&mut identities, evidence)?;
     release_counted_reader_cache(&mut details, evidence)?;
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -8030,6 +8182,7 @@ fn account_probe_work(
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ReadWork {
+    detail_records: u64,
     bytes: u64,
     operations: u64,
     cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
@@ -8039,8 +8192,9 @@ struct ReadWork {
 fn authenticate_artifact(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
+    codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
-    validate_artifact_name(receipt)?;
+    validate_artifact_name(receipt, codec)?;
     let file = root
         .open_child_file(OsStr::new(&receipt.name))
         .map_err(storage)?;
@@ -8053,7 +8207,7 @@ fn authenticate_artifact(
     }
     let releasing = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut reader = BufReader::with_capacity(BLOCK_BYTES, releasing);
-    let result = (|| -> Result<(u64, u64), GfError> {
+    let result = (|| -> Result<(u64, u64, u64), GfError> {
         let mut block = vec![0_u8; BLOCK_BYTES];
         let mut digest = Sha256::new();
         let mut bytes = 0_u64;
@@ -8069,6 +8223,11 @@ fn authenticate_artifact(
         } else {
             None
         };
+        let mut detail = width
+            .filter(|width| matches!(*width, NODE_DETAIL_WIDTH | EDGE_DETAIL_WIDTH))
+            .map(|width| DetailValidator::new(codec, width))
+            .transpose()
+            .map_err(storage)?;
         let mut pending = Vec::new();
         let mut previous: Option<Vec<u8>> = None;
         loop {
@@ -8083,7 +8242,9 @@ fn authenticate_artifact(
             operations = operations
                 .checked_add(1)
                 .ok_or_else(|| storage("operations overflows"))?;
-            if let Some(width) = width {
+            if let Some(detail) = detail.as_mut() {
+                detail.consume(&block[..count]).map_err(storage)?;
+            } else if let Some(width) = width {
                 pending.extend_from_slice(&block[..count]);
                 let complete = pending.len() / width * width;
                 for record in pending[..complete].chunks_exact(width) {
@@ -8133,10 +8294,16 @@ fn authenticate_artifact(
         if bytes != receipt.bytes || hex(&digest.finalize()) != receipt.sha256 {
             return Err(storage("artifact digest or size changed"));
         }
-        Ok((bytes, operations))
+        let records = detail
+            .as_ref()
+            .map(DetailValidator::finish)
+            .transpose()
+            .map_err(storage)?
+            .unwrap_or(0);
+        Ok((bytes, operations, records))
     })();
     let release = reader.get_mut().finish().map_err(storage);
-    let (bytes, operations) = match (result, release) {
+    let (bytes, operations, detail_records) = match (result, release) {
         (Ok(value), Ok(_)) => value,
         (Ok(_), Err(error)) => return Err(error),
         (Err(primary), Ok(_)) => return Err(primary),
@@ -8148,13 +8315,14 @@ fn authenticate_artifact(
     };
     let cache_release = reader.get_ref().tracker().evidence();
     Ok(ReadWork {
+        detail_records,
         bytes,
         operations,
         cache_release,
     })
 }
 
-fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
+fn validate_artifact_name(receipt: &ArtifactReceipt, codec: DetailCodec) -> Result<(), GfError> {
     let valid_suffix = receipt.name.ends_with(".parquet")
         || receipt.name.ends_with(".identities.run")
         || receipt.name.ends_with(".endpoints.run")
@@ -8182,12 +8350,14 @@ fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
     {
         return Err(storage("truncated endpoint run"));
     }
-    if receipt.name.ends_with(".node-details.run")
+    if codec == DetailCodec::Legacy
+        && receipt.name.ends_with(".node-details.run")
         && !receipt.bytes.is_multiple_of(NODE_DETAIL_WIDTH as u64)
     {
         return Err(storage("truncated node detail run"));
     }
-    if receipt.name.ends_with(".edge-details.run")
+    if codec == DetailCodec::Legacy
+        && receipt.name.ends_with(".edge-details.run")
         && !receipt.bytes.is_multiple_of(EDGE_DETAIL_WIDTH as u64)
     {
         return Err(storage("truncated edge detail run"));
@@ -8233,6 +8403,7 @@ fn validate_receipt_semantics(
     receipt: &ConstructionChunkReceipt,
     sequence: u64,
     budgets: GraphConstructionBudgets,
+    codec: DetailCodec,
 ) -> Result<(), GfError> {
     validate_chunk_id(&receipt.chunk_id)?;
     if receipt.sequence != sequence
@@ -8281,14 +8452,14 @@ fn validate_receipt_semantics(
     } else {
         EDGE_DETAIL_WIDTH
     };
-    if receipt.details.bytes / detail_width as u64 != receipt.rows {
-        return Err(storage("detail receipt semantics are inconsistent"));
-    }
-    validate_artifact_name(&receipt.parquet)?;
-    validate_artifact_name(&receipt.identities)?;
-    validate_artifact_name(&receipt.details)?;
+    codec
+        .validate_size(detail_width, receipt.rows, receipt.details.bytes)
+        .map_err(storage)?;
+    validate_artifact_name(&receipt.parquet, codec)?;
+    validate_artifact_name(&receipt.identities, codec)?;
+    validate_artifact_name(&receipt.details, codec)?;
     if let Some(endpoints) = &receipt.endpoints {
-        validate_artifact_name(endpoints)?;
+        validate_artifact_name(endpoints, codec)?;
     }
     Ok(())
 }
@@ -8296,13 +8467,19 @@ fn validate_receipt_semantics(
 fn validate_receipt_artifacts(
     root: &StableDirectory,
     receipt: &ConstructionChunkReceipt,
+    codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
     let mut work = ReadWork::default();
     for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
         .into_iter()
         .chain(receipt.endpoints.iter())
     {
-        let artifact_work = authenticate_artifact(root, artifact)?;
+        let artifact_work = authenticate_artifact(root, artifact, codec)?;
+        if artifact.name == receipt.details.name && artifact_work.detail_records != receipt.rows {
+            return Err(storage(
+                "detail receipt row count differs from authenticated records",
+            ));
+        }
         work.bytes = work
             .bytes
             .checked_add(artifact_work.bytes)
@@ -8405,6 +8582,7 @@ fn validate_parquet_shape(
         "Parquet shape",
     )?;
     Ok(ReadWork {
+        detail_records: 0,
         bytes: counter.bytes.load(Ordering::Relaxed),
         operations: counter.operations.load(Ordering::Relaxed),
         cache_release: cache_release.evidence(),
@@ -8452,6 +8630,7 @@ fn validate_parquet_metadata(
         "Parquet metadata",
     )?;
     Ok(ReadWork {
+        detail_records: 0,
         bytes: counter.bytes.load(Ordering::Relaxed),
         operations: counter.operations.load(Ordering::Relaxed),
         cache_release: cache_release.evidence(),
@@ -8483,11 +8662,8 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
     } else {
         EDGE_DETAIL_WIDTH
     };
-    let expected_detail_bytes = intent
-        .rows
-        .checked_mul(detail_width as u64)
-        .ok_or_else(|| storage("intent detail byte count overflow"))?;
-    if intent.format_version != FORMAT_VERSION
+    let codec = DetailCodec::from_version(checkpoint.format_version).map_err(storage)?;
+    if intent.format_version != checkpoint.format_version
         || intent.operation_uuid != checkpoint.operation_uuid
         || intent.project_identity != checkpoint.project_identity
         || intent.session_identity != checkpoint.session_identity
@@ -8530,7 +8706,9 @@ fn validate_intent(intent: &ChunkIntent, checkpoint: &Checkpoint) -> Result<(), 
                         "edge"
                     }
                 )
-                || artifact.bytes != expected_detail_bytes
+                || codec
+                    .validate_size(detail_width, intent.rows, artifact.bytes)
+                    .is_err()
         })
     {
         return Err(storage("durable intent is inconsistent with checkpoint"));
@@ -8566,7 +8744,7 @@ fn validate_checkpoint(
         .len()
         .checked_add(checkpoint.edge_schema_sha256.len())
         .ok_or_else(|| storage("checkpoint schema-group count overflow"))?;
-    if checkpoint.format_version != FORMAT_VERSION
+    if DetailCodec::from_version(checkpoint.format_version).is_err()
         || checkpoint.operation_uuid != operation
         || !checkpoint.project_identity.matches(project)
         || !checkpoint.session_identity.matches(session)
@@ -8647,11 +8825,74 @@ fn validate_checkpoint(
     Ok(())
 }
 
+/// A completed initial checkpoint temporary pins only the codec choice. It is
+/// never promoted: the ordinary writer creates the initial checkpoint after
+/// verifying the candidate against the current admitted parent and parameters.
+fn initial_checkpoint_format(
+    root: &StableDirectory,
+    project_identity: FileIdentity,
+    initial: &Checkpoint,
+) -> Result<u32, GfError> {
+    let mut selected = None;
+    for name in root.child_names().map_err(storage)? {
+        let Some(text) = name.to_str() else { continue };
+        if !text.starts_with(".checkpoint.json-") || !is_control_temp(text) {
+            continue;
+        }
+        let mut file = root.open_child_file(&name).map_err(storage)?;
+        let body = read_bounded_limit(&mut file, MAX_CONTROL_BYTES)?;
+        let Ok(candidate) = serde_json::from_slice::<Checkpoint>(&body) else {
+            continue;
+        };
+        if candidate.operation_uuid != initial.operation_uuid
+            || candidate.project_identity != initial.project_identity
+            || candidate.session_identity != initial.session_identity
+        {
+            continue;
+        }
+        if file_link_count(&file).map_err(storage)? != 1 {
+            return Err(storage("initial checkpoint temporary has unexpected links"));
+        }
+        validate_checkpoint(
+            &candidate,
+            initial.operation_uuid,
+            project_identity,
+            root.identity(),
+            initial.parent_topology_generation,
+            initial.ontology_mode,
+            initial.lifecycle_mode,
+            initial.semantic_authority_sha256.as_deref(),
+            initial.budgets,
+            initial.parent_catalog_sha256.as_deref(),
+            initial.parent_generation_uuid,
+            &initial.parent_generation_manifest_sha256,
+        )?;
+        if candidate.state != GraphConstructionState::Staging
+            || candidate.next_sequence != 0
+            || candidate.saw_edge
+            || candidate.last_receipt_sha256.is_some()
+            || candidate.publication_state.is_some()
+            || candidate.shape_authority_sha256.is_some()
+            || candidate.encoding_inventory_sha256.is_some()
+            || !candidate.node_schema_sha256.is_empty()
+            || !candidate.edge_schema_sha256.is_empty()
+        {
+            return Err(storage("checkpoint temporary is not initial authority"));
+        }
+        if selected.is_some_and(|version| version != candidate.format_version) {
+            return Err(storage("initial checkpoint temporary versions disagree"));
+        }
+        selected = Some(candidate.format_version);
+    }
+    Ok(selected.unwrap_or(initial.format_version))
+}
+
 fn cleanup_authenticated_control_temps(
     root: &StableDirectory,
     operation: Uuid,
     project: FileIdentity,
     session: FileIdentity,
+    format_version: u32,
 ) -> Result<(), GfError> {
     for name in root.child_names().map_err(storage)? {
         let Some(text) = name.to_str() else { continue };
@@ -8661,13 +8902,11 @@ fn cleanup_authenticated_control_temps(
         let mut file = root.open_child_file(&name).map_err(storage)?;
         let body = read_bounded_limit(&mut file, MAX_SHAPE_CONTROL_BYTES)?;
         let authenticated = serde_json::from_slice::<Checkpoint>(&body).is_ok_and(|value| {
-            value.format_version == FORMAT_VERSION
-                && value.operation_uuid == operation
+            value.operation_uuid == operation
                 && value.project_identity.matches(project)
                 && value.session_identity.matches(session)
         }) || serde_json::from_slice::<ChunkIntent>(&body).is_ok_and(|value| {
-            value.format_version == FORMAT_VERSION
-                && value.operation_uuid == operation
+            value.operation_uuid == operation
                 && value.project_identity.matches(project)
                 && value.session_identity.matches(session)
         }) || serde_json::from_slice::<ConstructionChunkReceipt>(&body)
@@ -8682,14 +8921,12 @@ fn cleanup_authenticated_control_temps(
                     && value.session_identity.matches(session)
             })
             || serde_json::from_slice::<ShapeIntent>(&body).is_ok_and(|value| {
-                value.format_version == FORMAT_VERSION
-                    && value.operation_uuid == operation
+                value.operation_uuid == operation
                     && value.project_identity.matches(project)
                     && value.session_identity.matches(session)
             })
             || serde_json::from_slice::<ConstructionPublicationIntent>(&body).is_ok_and(|value| {
-                value.format_version == FORMAT_VERSION
-                    && value.operation_uuid == operation
+                value.operation_uuid == operation
                     && value.project_identity.matches(project)
                     && value.session_identity.matches(session)
             })
@@ -8698,6 +8935,16 @@ fn cleanup_authenticated_control_temps(
                     && value.project_identity.matches(project)
                     && value.session_identity.matches(session)
             });
+        if authenticated {
+            // A complete intent can also deserialize as a versionless receipt.
+            // Pin its version before that structural overlap can authorize cleanup.
+            let control: serde_json::Value = serde_json::from_slice(&body).map_err(storage)?;
+            if let Some(version) = control.get("format_version")
+                && version.as_u64() != Some(u64::from(format_version))
+            {
+                return Err(storage("temporary control version differs from session"));
+            }
+        }
         if authenticated && file_link_count(&file).map_err(storage)? == 1 {
             let identity = file_identity(&file).map_err(storage)?;
             drop(file);
@@ -8935,6 +9182,7 @@ fn remove_unrecorded_artifact(
     name: &str,
     kind: ConstructionChunkKind,
     rows: u64,
+    codec: DetailCodec,
 ) -> Result<(), GfError> {
     let file = match root.open_child_file(OsStr::new(name)) {
         Ok(file) => file,
@@ -8990,10 +9238,13 @@ fn remove_unrecorded_artifact(
         let expected_bytes = expected_records
             .checked_mul(u64::try_from(width).map_err(storage)?)
             .ok_or_else(|| storage("unrecorded fixed run byte count overflow"))?;
-        if file.metadata().map_err(storage)?.len() != expected_bytes {
+        if !(codec == DetailCodec::Compact
+            && matches!(width, NODE_DETAIL_WIDTH | EDGE_DETAIL_WIDTH))
+            && file.metadata().map_err(storage)?.len() != expected_bytes
+        {
             return Err(storage("unrecorded fixed run row count changed"));
         }
-        validate_sorted_run(file, width)?;
+        validate_sorted_run(file, width, codec, expected_records)?;
     }
     unlink_writer_capability(root, name, None)?;
     root.unlink_child_if_identity(OsStr::new(name), identity)
@@ -9001,17 +9252,31 @@ fn remove_unrecorded_artifact(
     root.sync().map_err(storage)
 }
 
-fn validate_sorted_run(file: File, width: usize) -> Result<(), GfError> {
+fn validate_sorted_run(
+    file: File,
+    width: usize,
+    codec: DetailCodec,
+    expected_records: u64,
+) -> Result<(), GfError> {
     let releasing = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut reader = BufReader::with_capacity(BLOCK_BYTES, releasing);
     let mut block = vec![0_u8; BLOCK_BYTES];
     let mut pending = Vec::new();
     let mut previous: Option<Vec<u8>> = None;
+    let mut detail = if matches!(width, NODE_DETAIL_WIDTH | EDGE_DETAIL_WIDTH) {
+        Some(DetailValidator::new(codec, width).map_err(storage)?)
+    } else {
+        None
+    };
     let validated = (|| -> Result<(), GfError> {
         loop {
             let count = reader.read(&mut block).map_err(storage)?;
             if count == 0 {
                 break;
+            }
+            if let Some(detail) = detail.as_mut() {
+                detail.consume(&block[..count]).map_err(storage)?;
+                continue;
             }
             pending.extend_from_slice(&block[..count]);
             let complete = pending.len() / width * width;
@@ -9045,6 +9310,11 @@ fn validate_sorted_run(file: File, width: usize) -> Result<(), GfError> {
             }
             pending.drain(..complete);
         }
+        if let Some(detail) = detail.as_ref()
+            && detail.finish().map_err(storage)? != expected_records
+        {
+            return Err(storage("unrecorded detail row count changed"));
+        }
         if !pending.is_empty() {
             return Err(storage("unrecorded fixed run has truncated tail"));
         }
@@ -9074,7 +9344,12 @@ fn authenticated_receipt_artifact_count(
             .open_child_file(OsStr::new(&receipt_name(sequence)))
             .map_err(storage)?;
         let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
-        validate_receipt_semantics(&receipt, sequence, checkpoint.budgets)?;
+        validate_receipt_semantics(
+            &receipt,
+            sequence,
+            checkpoint.budgets,
+            DetailCodec::from_version(checkpoint.format_version).map_err(storage)?,
+        )?;
         if receipt.kind == ConstructionChunkKind::Node && saw_edge {
             return Err(storage("node receipt follows edge receipt"));
         }
@@ -9195,6 +9470,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    include!("construction_detail_tests.rs");
     use std::sync::Arc;
 
     use arrow::array::{BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray};
@@ -10937,12 +11213,13 @@ mod tests {
 
         inject_shape_cleanup_failures(true, true);
         let mut never_cancelled = || false;
-        let error = copy_authenticated_run::<NODE_DETAIL_WIDTH>(
+        let error = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
             &session.root,
             &receipt.details,
             "failed-details.run",
             &mut never_cancelled,
             &mut session.checkpoint.evidence,
+            Some(DetailCodec::from_version(session.checkpoint.format_version).unwrap()),
         )
         .unwrap_err()
         .to_string();
@@ -11027,12 +11304,13 @@ mod tests {
                 inject_shape_cleanup_failures(false, true);
             }
             inject_shape_publication_failure(point);
-            let error = copy_authenticated_run::<NODE_DETAIL_WIDTH>(
+            let error = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
                 &session.root,
                 &receipt.details,
                 &output,
                 &mut || false,
                 &mut session.checkpoint.evidence,
+                Some(DetailCodec::from_version(session.checkpoint.format_version).unwrap()),
             )
             .unwrap_err()
             .to_string();

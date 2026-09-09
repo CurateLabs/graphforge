@@ -107,3 +107,37 @@ of unknown Parquet schemas is not.
 | Encode each small mutation as Parquet | Reintroduces the rewrite amplification ADR 0019 was designed to avoid. |
 | Treat compiled ontology Parquet as source authority | Creates two competing ontology definitions and makes checksum mismatch ambiguous. |
 | Promise transparent pre-v1 migration | The old GFDR payload is not losslessly recoverable, and the compiled snapshot lacks an enforced format-version gate. |
+
+### Private construction detail runs retain session-bound codecs
+
+Construction checkpoints and intents bind the private detail codec. New sessions
+use version 7: a node record contains its 16-byte UUID, a one-byte UTF-8 byte
+length, and exactly that many label bytes; an edge record contains its edge,
+source and target UUIDs (48 bytes), the length byte and exact route bytes. Names
+remain nonempty and at most 255 bytes. Records are strictly ordered by UUID.
+There is no dictionary or substitution of runtime or ontology IDs for names.
+
+Version 6 sessions continue their original 272-byte node and 304-byte edge
+records, including zero-filled name padding, throughout append, resume, shaping
+and publication replay. The initial version is chosen before writing a new
+checkpoint; resume does not upgrade or relabel authenticated artifacts. Unknown
+versions and disagreement between a session and its controls fail closed.
+Incomplete, unauthenticated control temporaries retain the existing recovery
+policy and do not authorize deleting another writer's file.
+If no checkpoint was installed before a crash, a complete initial checkpoint
+temporary may select its codec only after matching the admitted parent, catalog,
+budgets and session identity. Its contents are not promoted. Conflicting or
+noninitial candidates are rejected.
+
+Both codecs use the same bounded merge fan-in and maximum in-memory record
+size. Compact byte counts come from actual encoded names; authenticated row
+counts come from decoding records, not dividing file size by a fixed width.
+Identity, endpoint, canonical Parquet, portable and published ordinal formats
+are unchanged.
+
+The equal-input regression uses 1,024 nodes and 1,024 edges in eight chunks per
+kind, crossing three merge levels with fan-in two. Detail EOF falls from 589,824
+to 74,752 bytes. Filesystem allocation and complete construction peak are
+measured separately because block rounding and concurrent representations also
+matter. This establishes a bounded representation improvement; it does not
+establish S26 capacity admission, which requires the shared host projection.
