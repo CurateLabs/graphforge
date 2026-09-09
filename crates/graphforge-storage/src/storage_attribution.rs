@@ -5,54 +5,32 @@ use std::fs::File;
 use std::path::Path;
 
 use graphforge_core::GfError;
+pub use graphforge_core::storage_receipt::{
+    ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
+};
+
+/// Strip private identities from a validated authenticated snapshot.
+pub fn storage_attribution_receipt_from_snapshot(
+    snapshot: &StorageAttributionSnapshot,
+) -> Result<StorageAttributionReceipt, GfError> {
+    snapshot.validate_for_qualification()?;
+    Ok(StorageAttributionReceipt {
+        contract: "graphforge-storage-attribution/1".to_owned(),
+        categories: snapshot.categories.clone(),
+        logical_references: snapshot.logical_references,
+        logical_bytes: snapshot.logical_bytes,
+        retained_logical_eof_bytes: snapshot.physical_logical_bytes,
+        allocated_physical_bytes: snapshot.allocated_bytes,
+        physical_objects: snapshot.physical_objects,
+    })
+}
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
     GraphConstructionEvidence, GraphFileEntry, GraphFilesParticipant, ResolvedProjectGeneration,
 };
-
-/// Exhaustive storage categories used by scale qualification evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactCategory {
-    /// Canonical node topology shards.
-    TopologyNodes,
-    /// Canonical edge topology shards and authoritative edge deltas.
-    TopologyEdges,
-    /// Node and edge property shards.
-    Properties,
-    /// UUID membership and surrogate reverse indexes.
-    UuidAndSurrogates,
-    /// Derived adjacency manifests and CSR shards.
-    Adjacency,
-    /// Runtime catalogs, generation participants, and compact-manifest nodes.
-    CatalogAndManifests,
-    /// Receipt-authenticated construction staging and spill artifacts.
-    ConstructionStaging,
-    /// One immutable portable export package.
-    PortablePackage,
-    /// The authoritative retained project produced by a clean import.
-    CleanImportedProject,
-    /// Unclassified retained graph artifact. Qualification must reject this.
-    Other,
-}
-
-impl ArtifactCategory {
-    /// Canonical category inventory, including zero-valued categories.
-    pub const ALL: [Self; 10] = [
-        Self::TopologyNodes,
-        Self::TopologyEdges,
-        Self::Properties,
-        Self::UuidAndSurrogates,
-        Self::Adjacency,
-        Self::CatalogAndManifests,
-        Self::ConstructionStaging,
-        Self::PortablePackage,
-        Self::CleanImportedProject,
-        Self::Other,
-    ];
-}
 
 /// Closed lifecycle-phase inventory for application-observed storage I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -301,21 +279,6 @@ fn shape_phase_totals(evidence: &GraphConstructionEvidence) -> Result<PhaseIoTot
     })
 }
 
-/// Reconciled totals for one artifact category.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactStorageTotals {
-    /// Logical references in the authenticated inventory.
-    pub logical_references: u64,
-    /// Sum of referenced logical bytes; shared objects count per reference.
-    pub logical_bytes: u64,
-    /// Distinct retained physical files, deduplicated by native identity.
-    pub physical_objects: u64,
-    /// Logical EOF bytes of distinct physical files.
-    pub physical_logical_bytes: u64,
-    /// Filesystem-allocated bytes of distinct physical files.
-    pub allocated_bytes: u64,
-}
-
 /// Safe context binding category evidence to native receipt and identity roots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactCategoryAuthorityContext {
@@ -370,74 +333,6 @@ pub struct StorageAttributionSnapshot {
     /// Native identity allocation partitioned by its authenticated category.
     #[serde(skip)]
     category_physical_identity_allocated_bytes: BTreeMap<ArtifactCategory, BTreeMap<String, u64>>,
-}
-
-/// Identity-free, closed storage evidence suitable for ordinary CLI output.
-///
-/// This receipt deliberately omits generation identities, native file identities,
-/// paths, and graph content. Every category is present, including truthful zeros.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StorageAttributionReceipt {
-    /// Versioned semantic contract for consumers of this receipt.
-    pub contract: String,
-    /// Every authenticated artifact category exactly once.
-    pub categories: BTreeMap<ArtifactCategory, ArtifactStorageTotals>,
-    /// Reconciled logical references across categories.
-    pub logical_references: u64,
-    /// Reconciled referenced logical bytes across categories.
-    pub logical_bytes: u64,
-    /// Logical EOF bytes of distinct retained physical files.
-    pub retained_logical_eof_bytes: u64,
-    /// Filesystem-allocated bytes of distinct retained physical files.
-    pub allocated_physical_bytes: u64,
-    /// Distinct retained physical files, deduplicated by native identity.
-    pub physical_objects: u64,
-}
-
-impl StorageAttributionReceipt {
-    /// Strip private identities from a validated authenticated snapshot.
-    pub fn from_snapshot(snapshot: &StorageAttributionSnapshot) -> Result<Self, GfError> {
-        snapshot.validate_for_qualification()?;
-        Ok(Self {
-            contract: "graphforge-storage-attribution/1".to_owned(),
-            categories: snapshot.categories.clone(),
-            logical_references: snapshot.logical_references,
-            logical_bytes: snapshot.logical_bytes,
-            retained_logical_eof_bytes: snapshot.physical_logical_bytes,
-            allocated_physical_bytes: snapshot.allocated_bytes,
-            physical_objects: snapshot.physical_objects,
-        })
-    }
-
-    /// Recheck the public arithmetic without relying on stripped identities.
-    pub fn validate_reconciliation(&self) -> Result<(), GfError> {
-        if self.contract != "graphforge-storage-attribution/1"
-            || ArtifactCategory::ALL
-                .iter()
-                .any(|category| !self.categories.contains_key(category))
-            || self.categories.len() != ArtifactCategory::ALL.len()
-        {
-            return Err(validation(
-                "storage attribution receipt contract is incomplete",
-            ));
-        }
-        let mut total = ArtifactStorageTotals::default();
-        for category in ArtifactCategory::ALL {
-            add_totals(&mut total, &self.categories[&category])?;
-        }
-        if total.logical_references != self.logical_references
-            || total.logical_bytes != self.logical_bytes
-            || total.physical_objects != self.physical_objects
-            || total.physical_logical_bytes != self.retained_logical_eof_bytes
-            || total.allocated_bytes != self.allocated_physical_bytes
-        {
-            return Err(validation(
-                "storage attribution receipt totals do not reconcile",
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Exact native-identity union for the retained project container.
@@ -1995,7 +1890,7 @@ mod tests {
         assert_eq!(snapshot.physical_logical_bytes, 6);
         assert!(snapshot.allocated_bytes >= 6);
 
-        let receipt = StorageAttributionReceipt::from_snapshot(&snapshot).unwrap();
+        let receipt = storage_attribution_receipt_from_snapshot(&snapshot).unwrap();
         receipt.validate_reconciliation().unwrap();
         assert_eq!(receipt.retained_logical_eof_bytes, 6);
         assert_eq!(receipt.allocated_physical_bytes, snapshot.allocated_bytes);

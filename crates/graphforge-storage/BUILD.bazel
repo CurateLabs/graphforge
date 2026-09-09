@@ -9,7 +9,6 @@ package(default_visibility = ["//visibility:public"])
 _STORAGE_DEPS = [
     "//crates/graphforge-core:graphforge_core",
         "//crates/graphforge-value:graphforge_value",
-    "//crates/graphforge-discovery:graphforge_discovery",
     "//crates/graphforge-filesystem:graphforge_filesystem",
     "//crates/graphforge-ir:graphforge_ir",
     "//crates/graphforge-ontology:graphforge_ontology",
@@ -57,13 +56,6 @@ gf_rust_integration_test(
     deps = _STORAGE_DEPS,
 )
 
-gf_rust_integration_test(
-    name = "discovery_portable_v2",
-    srcs = ["tests/discovery_portable_v2.rs"],
-    crate = ":graphforge_storage",
-    compile_data = ["//tests/fixtures/portable-v2:ontology-only.manifest.json"],
-    deps = _STORAGE_DEPS,
-)
 
 gf_rust_integration_test(
     name = "filtered_read",
@@ -127,7 +119,6 @@ test_suite(
     name = "storage_integration_tests",
     tests = [
         ":adjacency_delta_write",
-        ":discovery_portable_v2",
         ":filtered_read",
         ":graph_delta_compaction",
         ":graph_delta_journal",

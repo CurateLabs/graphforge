@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 262,
-  "releaseSurfaceDigest": "63807d272b94a108adfa81956a92956bbd6ab3950ae3f73de1867367e89e1a34",
+  "releaseSurfaceCount": 266,
+  "releaseSurfaceDigest": "88063e340c9fe29d290dda9442a4e8aa8311d0515a3154ed69340b23c3bfc4ae",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -306,6 +306,9 @@
       "GraphImportSession.sessionUuid": "Node getter for the Rust session_uuid value object accessor."
     },
     "notExposedDefaults": {
+      "crate": "Rust discovery/repack orchestration remains a CLI/facade workflow; existing Node portable operations use their explicit adapters.",
+      "PortableV2ImportResult": "Exact native-allocation qualification is a Rust/CLI control receipt, not a new Node workflow.",
+      "PortableV2ExportFacadeResult": "The CLI identity-free receipt view preserves its existing contract; Node retains its established export result adapter.",
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphConstructionSession": "Resumable graph construction is not yet shipped through the Node product facade; all session operations remain explicitly Rust-only.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",

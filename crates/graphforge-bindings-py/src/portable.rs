@@ -226,6 +226,8 @@ fn selection_plan_json(plan: &graphforge_api::PortableV2SelectionPlan) -> serde_
         "package_class": plan.package_class,
         "included": plan.included,
         "excluded": plan.excluded,
+        "projected": plan.projected,
+        "include_graph_tree": plan.includes_graph_tree(),
         "redactions": plan.redactions,
         "required_capabilities": plan.required_capabilities,
         "estimated_payload_bytes": plan.estimated_payload_bytes,

@@ -320,7 +320,7 @@ enum Command {
 #[serde(deny_unknown_fields)]
 struct StorageAttributionCommandReceipt {
     contract: &'static str,
-    storage: graphforge_storage::StorageAttributionReceipt,
+    storage: graphforge_api::StorageAttributionReceipt,
     reopen_agrees: bool,
 }
 
@@ -2683,7 +2683,7 @@ mod tests {
         assert_eq!(json["reopen_agrees"], true);
         assert_eq!(
             json["storage"]["categories"].as_object().unwrap().len(),
-            graphforge_storage::ArtifactCategory::ALL.len()
+            graphforge_api::ArtifactCategory::ALL.len()
         );
         fn assert_sanitized(value: &serde_json::Value) {
             match value {

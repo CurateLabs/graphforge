@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read as _;
 
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -13,121 +12,11 @@ use crate::{
     ResolvedProjectGeneration, WORKSPACE_CAPABILITY_ID, WORKSPACE_CONFIGURATION_FAMILY,
 };
 
-/// Stable semantic participant identity. Runtime catalog IDs and host paths are never selectors.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct PortableV2ParticipantId {
-    /// Owning portable capability contract.
-    pub capability_id: String,
-    /// Stable record-family contract.
-    pub record_family_id: String,
-}
-
-/// Built-in deterministic selection profiles.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PortableV2SelectionProfile {
-    /// Every committed participant and graph-tree payload.
-    Complete,
-    /// Authored/adopted ontology plus required schema participants.
-    OntologyOnly,
-    /// Whole graph/data components. Row or subgraph selection belongs to #786.
-    DataComponents,
-    /// Derived and repository artifact participants.
-    Artifacts,
-    /// Closed-schema portable settings only.
-    Settings,
-    /// Explicit stable identities.
-    Custom(Vec<PortableV2ParticipantId>),
-    /// Exact projected ontology module or bridge identities. The immutable
-    /// preview exposes the complete emitted composition closure.
-    OntologyComposition(Vec<PortableV2ExactIdentity>),
-}
-
-/// Selection planning request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableV2SelectionRequest {
-    /// Requested built-in or custom profile.
-    pub profile: PortableV2SelectionProfile,
-    /// Refuse any automatically required dependency instead of widening visibly.
-    pub strict: bool,
-}
-
-/// Stable reason for inclusion/exclusion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PortableV2SelectionReason {
-    /// Directly requested by profile or exact identity.
-    Requested,
-    /// Required ontology/schema closure.
-    RequiredSchemaAuthority,
-    /// Required exact multi-ontology composition closure.
-    RequiredOntologyComposition,
-    /// Not part of the requested profile.
-    ProfileExcluded,
-}
-
-/// Content-free preview row.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2SelectionEntry {
-    /// Stable semantic identity.
-    pub identity: PortableV2ParticipantId,
-    /// Canonical component kind.
-    pub kind: String,
-    /// Stable selection reason.
-    pub reason: PortableV2SelectionReason,
-    /// Exact committed payload bytes.
-    pub estimated_bytes: u64,
-    /// Manifest row count.
-    pub row_count: u64,
-}
-
-/// Exact ontology module or bridge emitted by composition projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2ProjectedSelectionEntry {
-    /// Projected component kind (`ontology` or `schema`).
-    pub kind: String,
-    /// Exact semantic identity addressable by callers.
-    pub identity: PortableV2ExactIdentity,
-    /// Stable component identity used by the portable manifest.
-    pub participant_id: String,
-    /// Whether this exact identity was directly requested or closure-added.
-    pub reason: PortableV2SelectionReason,
-    /// Exact canonical projected payload bytes.
-    pub estimated_bytes: u64,
-}
-
-/// Immutable deterministic preview consumed by both export representations.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2SelectionPlan {
-    /// Pinned source generation identity.
-    pub source_generation_uuid: String,
-    /// Pinned source generation manifest identity.
-    pub source_manifest_sha256: String,
-    /// Portable package class token.
-    pub package_class: String,
-    /// Included participants in canonical identity order.
-    pub included: Vec<PortableV2SelectionEntry>,
-    /// Excluded participants in canonical identity order.
-    pub excluded: Vec<PortableV2SelectionEntry>,
-    /// Exact projected ontology closure in canonical identity order.
-    pub projected: Vec<PortableV2ProjectedSelectionEntry>,
-    /// Explicit redaction reason codes; values are never retained.
-    pub redactions: Vec<String>,
-    /// Required portable capability contracts.
-    pub required_capabilities: Vec<String>,
-    /// Exact known participant bytes, excluding bounded control metadata.
-    pub estimated_payload_bytes: u64,
-    /// Stable digest over canonical content-free plan metadata.
-    pub selection_fingerprint: String,
-    pub(crate) include_graph_tree: bool,
-}
-
-impl PortableV2SelectionPlan {
-    pub(crate) fn includes(&self, capability: &str, family: &str) -> bool {
-        self.included.iter().any(|entry| {
-            entry.identity.capability_id == capability && entry.identity.record_family_id == family
-        })
-    }
-}
+pub use graphforge_core::portable::{
+    PortableV2ParticipantId, PortableV2ProjectedSelectionEntry, PortableV2SelectionEntry,
+    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionReason,
+    PortableV2SelectionRequest,
+};
 
 /// Resolve one bounded deterministic selection without retaining payload values.
 #[expect(
@@ -338,19 +227,20 @@ pub fn preview_portable_v2_selection(
     if total > limits.max_total_bytes {
         return Err(limit("selection bytes exceed limit"));
     }
-    let mut plan = PortableV2SelectionPlan {
-        source_generation_uuid: generation.generation_uuid().hyphenated().to_string(),
-        source_manifest_sha256: format!("sha256:{}", hex(generation.manifest_sha256())),
+    let include_graph_tree = included.iter().any(|entry| entry.kind == "graph-data");
+    let mut plan = PortableV2SelectionPlan::new(
+        generation.generation_uuid().hyphenated().to_string(),
+        format!("sha256:{}", hex(generation.manifest_sha256())),
         package_class,
-        include_graph_tree: included.iter().any(|entry| entry.kind == "graph-data"),
         included,
         excluded,
         projected,
-        redactions: Vec::new(),
+        Vec::new(),
         required_capabilities,
-        estimated_payload_bytes: total,
-        selection_fingerprint: String::new(),
-    };
+        total,
+        String::new(),
+        include_graph_tree,
+    );
     plan.selection_fingerprint = fingerprint(&plan)?;
     Ok(plan)
 }

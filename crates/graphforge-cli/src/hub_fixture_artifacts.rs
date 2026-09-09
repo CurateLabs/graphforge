@@ -3,12 +3,12 @@
 use graphforge_api::{
     GraphForge, OperationId, PortableV2ImportRequest, PortableVerifyRequest, verify_portable_v2,
 };
+use graphforge_api::{PortableV2Limits, PortableV2Mode, repack_verified_expanded_portable_v2};
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
     PORTABLE_V2_MEDIA_TYPE, PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet,
     RepositoryIdentity, RepositoryRef, Sha256Digest,
 };
-use graphforge_storage::{PortableV2Limits, PortableV2Mode, repack_verified_expanded_portable_v2};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -80,9 +80,11 @@ pub fn generate(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination.join("objects")).map_err(|error| error.to_string())?;
     let object_path = destination.join("objects").join(OBJECT_NAME);
     let exported = repack_verified_expanded_portable_v2(
-        source,
-        &object_path,
-        limits,
+        &graphforge_api::PortableV2RepackRequest {
+            source: source.to_path_buf(),
+            destination: object_path.clone(),
+            limits,
+        },
         &std::sync::atomic::AtomicBool::new(false),
     )
     .map_err(|error| error.to_string())?;

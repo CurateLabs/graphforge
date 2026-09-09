@@ -18,6 +18,7 @@ sha2 = { workspace = true }
 # which now lives there). See #716.
 
 [dev-dependencies]
+serde_json = { workspace = true }
 divan = { workspace = true }
 
 # Canonical encoding / fingerprint benchmarks (CodSpeed, simulation mode).

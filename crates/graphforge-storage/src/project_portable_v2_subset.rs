@@ -22,51 +22,10 @@ use crate::{
     PortableV2Limits, ResolvedProjectGeneration, capture_graph_files,
 };
 
-/// Stable UUID selector for one pinned generation.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct PortableV2GraphSelector {
-    /// Ordered node UUIDs (hyphenated).
-    pub node_uuids: Vec<String>,
-    /// Ordered edge UUIDs (hyphenated).
-    pub edge_uuids: Vec<String>,
-}
-
-/// Portable-v2 on-wire closure tokens.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PortableV2SubsetClosure {
-    /// Selected nodes plus edges whose endpoints are both selected.
-    InducedEdges,
-    /// Selected edges plus both endpoint nodes.
-    Referential,
-}
-
-/// Property projection/redaction for subset packages.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct PortableV2PropertyProjection {
-    /// Property field names excluded from payloads.
-    pub exclude: Vec<String>,
-}
-
-/// Subset planning request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PortableV2SubsetRequest {
-    /// Stable UUID selector.
-    pub selector: PortableV2GraphSelector,
-    /// Closure mode.
-    pub closure: PortableV2SubsetClosure,
-    /// Property projection.
-    pub projection: PortableV2PropertyProjection,
-}
-
-/// Content-free graph-subset receipt retained in the semantic manifest.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PortableV2GraphSubsetMeta {
-    /// Canonical content-free selector digest token.
-    pub selector: String,
-    /// On-wire closure token.
-    pub closure: String,
-}
+pub use graphforge_core::portable::{
+    PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
+    PortableV2SubsetClosure, PortableV2SubsetRequest,
+};
 
 /// Immutable subset preview consumed by planning and export.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -232,7 +191,7 @@ pub fn plan_graph_subset_portable_v2(
     let (inventory, inventory_participant) =
         capture_graph_files(staging.path()).map_err(storage)?;
     let mut selection = plan.selection.clone();
-    selection.include_graph_tree = false;
+    selection.set_include_graph_tree(false);
     selection.selection_fingerprint = fingerprint(&selection)?;
     let mut export = plan_selected_portable_v2(generation, &selection, limits)?;
     export.replace_graph_tree_with_subset(
@@ -309,19 +268,19 @@ fn build_subset_component_selection(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    Ok(PortableV2SelectionPlan {
-        source_generation_uuid: generation.generation_uuid().hyphenated().to_string(),
-        source_manifest_sha256: format!("sha256:{}", hex(generation.manifest_sha256())),
-        package_class: "graph-data-subset".into(),
+    Ok(PortableV2SelectionPlan::new(
+        generation.generation_uuid().hyphenated().to_string(),
+        format!("sha256:{}", hex(generation.manifest_sha256())),
+        "graph-data-subset".into(),
         included,
         excluded,
-        projected: Vec::new(),
-        redactions: redactions.iter().cloned().collect(),
+        Vec::new(),
+        redactions.iter().cloned().collect(),
         required_capabilities,
-        estimated_payload_bytes: total,
-        selection_fingerprint: String::new(),
-        include_graph_tree: true,
-    })
+        total,
+        String::new(),
+        true,
+    ))
 }
 
 fn subset_fingerprint(plan: &PortableV2SubsetPlan) -> Result<String, PortableV2Error> {

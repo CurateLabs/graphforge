@@ -32,26 +32,8 @@ const USTAR_MAX_ENTRY_BYTES: u64 = 0o77_777_777_777;
 /// Finite planner and streaming-writer budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Portable-v2 transport representation.
-pub enum PortableV2Output {
-    /// Closed BagIt-compatible directory.
-    Expanded,
-    /// Canonical uncompressed PAX/ustar stream.
-    Bundle,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Aggregate content-free progress observation.
-pub struct PortableV2ExportProgress {
-    /// Fully emitted entries.
-    pub entries_completed: usize,
-    /// Emitted source payload bytes.
-    pub bytes_completed: u64,
-    /// Planned entry count.
-    pub entries_total: usize,
-    /// Planned source payload bytes.
-    pub bytes_total: u64,
-}
+pub use graphforge_core::portable::{PortableV2ExportProgress, PortableV2Output};
+
 #[derive(Debug, Clone)]
 struct PlannedFile {
     source: PlannedSource,
@@ -901,7 +883,7 @@ pub fn plan_selected_portable_v2(
             &mut roots,
         )?;
     }
-    if selection.include_graph_tree
+    if selection.includes_graph_tree()
         && let Some(inv) = g.graph_files_inventory()?
     {
         let graph_authority = g.declared_graph_files_participant()?;

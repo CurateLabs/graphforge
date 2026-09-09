@@ -1,13 +1,13 @@
 //! End-to-end discovery selection into the storage-owned portable-v2 verifier.
 
+use graphforge_api::{
+    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
+    PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, verify_discovered_portable_v2,
+};
 use graphforge_discovery::{
     DISCOVERY_FORMAT, DiscoveryLimits, DiscoveryManifest, ObjectDescriptor, PORTABLE_V2_FORMAT,
     PortablePackageReference, ProtocolRequirement, ProtocolVersion, RefSet, RepositoryIdentity,
     RepositoryRef, Sha256Digest,
-};
-use graphforge_storage::{
-    DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch, DiscoveryPortableV2Request,
-    PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, verify_discovered_portable_v2,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -124,7 +124,7 @@ fn verify(
     refs: &RefSet,
     expected: &RepositoryIdentity,
     package: &tempfile::TempDir,
-) -> Result<graphforge_storage::DiscoveredPortableV2, DiscoveryPortableV2Error> {
+) -> Result<graphforge_api::DiscoveredPortableV2, DiscoveryPortableV2Error> {
     let manifest_json = serde_json::to_vec(manifest).unwrap();
     let refs_json = serde_json::to_vec(refs).unwrap();
     verify_discovered_portable_v2(&DiscoveryPortableV2Request {
@@ -143,7 +143,17 @@ fn verify(
 fn valid_discovery_maps_to_the_storage_verified_package() {
     let (package, package_digest) = package();
     let (manifest, refs, repository) = discovery(package_digest.clone());
-    let accepted = verify(&manifest, &refs, &repository, &package).unwrap();
+    let accepted = verify_discovered_portable_v2(&DiscoveryPortableV2Request {
+        manifest_json: &serde_json::to_vec(&manifest).unwrap(),
+        refs_json: &serde_json::to_vec(&refs).unwrap(),
+        expected_repository: &repository,
+        package: package.path(),
+        discovery_limits: DiscoveryLimits::default(),
+        portable_limits: PortableV2Limits::default(),
+        mode: PortableV2Mode::Full,
+        cancelled: None,
+    })
+    .unwrap();
     assert_eq!(accepted.repository, repository);
     assert_eq!(accepted.resolved_ref, "main");
     assert_eq!(accepted.immutable_version, digest('a').0);

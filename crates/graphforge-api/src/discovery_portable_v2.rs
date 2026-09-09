@@ -5,8 +5,9 @@
 //! and authenticity exclusively to [`crate::verify_portable_v2`]. A successful
 //! result is constructed only after both authorities agree.
 
-use crate::{
-    PortableV2Error, PortableV2Limits, PortableV2Mode, PortableV2Report, verify_portable_v2,
+use crate::{PortableVerifyRequest, verify_portable_v2};
+use graphforge_core::portable::{
+    PortableV2Error, PortableV2Limits, PortableV2Mode, PortableV2Report,
 };
 use graphforge_discovery::{
     DiscoveryError, DiscoveryLimits, DiscoveryManifest, RefSet, RepositoryIdentity,
@@ -115,9 +116,11 @@ pub fn verify_discovered_portable_v2(
         }
     })?;
     let report = verify_portable_v2(
-        request.package,
-        request.mode,
-        request.portable_limits,
+        &PortableVerifyRequest {
+            input: request.package.to_path_buf(),
+            mode: request.mode,
+            limits: request.portable_limits,
+        },
         request.cancelled,
     )
     .map_err(DiscoveryPortableV2Error::Portable)?;

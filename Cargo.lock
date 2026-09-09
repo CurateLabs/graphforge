@@ -2164,6 +2164,7 @@ dependencies = [
  "futures",
  "graphforge-core",
  "graphforge-cypher",
+ "graphforge-discovery",
  "graphforge-exec",
  "graphforge-filesystem",
  "graphforge-io",
@@ -2255,6 +2256,7 @@ version = "0.5.2"
 dependencies = [
  "codspeed-divan-compat",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "sha2",
  "thiserror 2.0.20",
@@ -2475,7 +2477,6 @@ dependencies = [
  "fs4 1.1.0",
  "futures",
  "graphforge-core",
- "graphforge-discovery",
  "graphforge-filesystem",
  "graphforge-ir",
  "graphforge-ontology",
