@@ -311,6 +311,35 @@ CSR, reopen/query, export/verify, clean import/reopen/query, corruption,
 cancellation, resource-limit, and interrupted-finalization drills. It validates
 the qualification phase inventory and bounds bytes, calls, objects, blocks, and
 fsyncs per phase rather than relying only on aggregate I/O.
+Its test-local allocation estimate does not prove the complete `lifecycle/2`
+ownership contract. The public certifier's ownership-growth regression runs
+SCALE6/7/8 fixtures through import, commit, reopen, export, verification, clean
+import, and reopen. Reopened counts must be exactly 64/128/256 nodes and
+1024/2048/4096 edges. These fixtures retain every generated edge as a distinct
+UUID-bearing record; their counts are not unique endpoint-pair counts.
+Ordered node and edge outputs keep the growth workload linear. The default
+SCALE1 regression retains its original one-hop and two-hop queries.
+At each size, the regression reconciles all 15 retained owner views and the
+complete retained allocation against an independent, quiescent filesystem
+inventory. Observed transient peak remains a separate writer measurement.
+Data-bearing logical-byte totals and complete retained/peak allocation must
+grow at both steps; adjacent slopes, normalized by live nodes plus live edges,
+must stay within a factor of two. The existing factor-of-two normalized upper
+ceiling also applies. Per-owner allocated bytes and object/reference counts may
+plateau at allocation or file boundaries. Empty owners stay empty, while lock
+and transaction inventories retain their fixed protocol costs. Comparisons use
+integer cross-products, not rounded ratios or constants fitted to the run.
+These small admission fixtures do not qualify a canonical S20 or S22 rung.
+
+Run the complete ownership-growth admission with the existing binaries:
+
+```bash
+python benchmarks/scripts/test-tiny-lifecycle-certification.py --growth \
+  --gf /path/to/gf --certify /path/to/graphforge-benchmark-certify \
+  --generator /path/to/graphforge-benchmark-graph500-generator \
+  --workspace-root /admitted-volume
+```
+
 Node canonical cost uses reopened live nodes; edge canonical, authoritative
 project, and lifecycle peak costs use reopened live edges. Ratios preserve raw
 integer numerators and denominators; rounded decimals are not evidence.

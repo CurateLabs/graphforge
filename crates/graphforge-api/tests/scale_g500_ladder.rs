@@ -7298,6 +7298,9 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
 
 #[test]
 fn equivalent_full_lifecycle_1x_2x_4x_has_bounded_metric_policies() {
+    // This fixture proves phase/category policies and recovery drills. Its
+    // PhaseJournal allocation estimate is not the complete lifecycle/2 owner
+    // proof; that proof runs through the public certification binaries.
     let mut failures = Vec::new();
     for axis in [LinearityAxis::Nodes, LinearityAxis::Edges] {
         let mut observations = Vec::new();
