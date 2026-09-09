@@ -1,5 +1,8 @@
 //! CLI surfaces for transactions, recovery evidence, and maintenance (#755).
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 use std::io::Write;
 
