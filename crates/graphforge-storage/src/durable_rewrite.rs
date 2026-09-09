@@ -433,7 +433,7 @@ fn publish_journal(root: &StableDirectory, intent: &Intent) -> Result<(), GfErro
         expected,
         std::ffi::OsStr::new(JOURNAL),
     )
-    .map_err(storage)?;
+    .map_err(|error| storage(format!("rewrite journal publication: {error}")))?;
     root.sync().map_err(storage)
 }
 
@@ -456,9 +456,18 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
             authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
             let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
             drop(temp);
+            let authority = if entry.destination == crate::route_component::TABLE_FILE {
+                "semantic routes"
+            } else if entry.class == EntryClass::GenerationAuthority {
+                "generation"
+            } else if entry.destination.starts_with("topology/uuid-membership/") {
+                "UUID membership"
+            } else {
+                "graph data"
+            };
             parent
                 .replace_child(&temporary, expected, &target)
-                .map_err(storage)?;
+                .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?;
             parent.sync().map_err(storage)?;
             authenticate_installed_destination(&parent, &target, entry)?;
         }

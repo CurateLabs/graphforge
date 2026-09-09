@@ -3014,10 +3014,21 @@ impl GraphWriter {
     /// Returns [`GfError::Storage`] on any I/O, Arrow, or Parquet failure.
     pub fn flush(&mut self) -> Result<(), GfError> {
         let mut staged = RewriteBatch::new();
-        self.flush_into(&mut staged)?;
+        self.flush_into(&mut staged).map_err(|error| match error {
+            GfError::Storage(message) => {
+                GfError::Storage(format!("graph flush staging: {message}"))
+            }
+            other => other,
+        })?;
         let pending = self.take_pending_delta();
-        if let Some(generation) =
-            self.commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())?
+        if let Some(generation) = self
+            .commit_topology_aware_with_uuid_index(staged, Vec::new(), Vec::new())
+            .map_err(|error| match error {
+                GfError::Storage(message) => {
+                    GfError::Storage(format!("graph flush commit: {message}"))
+                }
+                other => other,
+            })?
         {
             // A pure-append flush (only CREATEs reach `GraphWriter`): record the
             // delta segment so the adjacency index can serve the new edges

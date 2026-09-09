@@ -11,9 +11,8 @@ use graphforge_storage::{
     GraphFilesInventory, GraphWriter, ProjectCapability, ProjectGenerationRequest,
     ProjectStageOutcome, PropertyOverlayLimits, PropertyRouteKind, PropertySnapshotRow,
     capture_graph_files, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
-    empty_workspace_participants, encode_delta_run, encode_graph_delta_value,
-    enumerate_property_fragments, list_delta_runs, materialize_replayed_graph_tree,
-    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes,
+    empty_workspace_participants, encode_delta_run, encode_graph_delta_value, list_delta_runs,
+    materialize_replayed_graph_tree, open_or_initialize_project, publish_graph_delta, read_nodes,
     reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
     visit_authenticated_property_snapshots,
 };
@@ -321,19 +320,22 @@ fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output(
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
     let source_nodes =
         fs::read(generation.graph_tree_root().join("topology/nodes.parquet")).unwrap();
-    let source_edges = fs::read(
-        generation
-            .graph_tree_root()
-            .join("topology/edges/KNOWS.parquet"),
-    )
-    .unwrap();
+    let source_inventory =
+        graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(&generation)
+            .unwrap();
+    let source_edge = source_inventory.edge_files(Some("KNOWS"))[0].1.clone();
+    let edge_relative = source_edge
+        .strip_prefix(generation.graph_tree_root())
+        .unwrap()
+        .to_path_buf();
+    let source_edges = fs::read(&source_edge).unwrap();
 
     let mut observed_node_rejection = false;
     let mut observed_edge_rejection = false;
     for kibibytes in (256..=768).step_by(16) {
         let target = tempfile::tempdir().unwrap();
         let node_output = target.path().join("topology/nodes.parquet");
-        let edge_output = target.path().join("topology/edges/KNOWS.parquet");
+        let edge_output = target.path().join(&edge_relative);
         let result = materialize_replayed_graph_tree(
             &generation.graph_tree_root(),
             &inventory,
@@ -1191,4 +1193,30 @@ fn committed_checksum_valid_invalid_literal_values_preserve_authority() {
             "invalid shared literal must not mutate committed authority: {malformed}"
         );
     }
+}
+
+fn admitted_inventory(
+    root: &std::path::Path,
+) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(root, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
+fn enumerate_property_fragments(
+    root: &std::path::Path,
+    kind: graphforge_storage::PropertyRouteKind,
+    route: &str,
+) -> Result<Vec<graphforge_storage::property_overlay::PropertyFragment>, graphforge_storage::GfError>
+{
+    Ok(admitted_inventory(root).property_fragments(kind, route))
+}
+
+fn read_edges(
+    root: &std::path::Path,
+    route: &str,
+    mode: OntologyMode,
+) -> Result<Vec<arrow::record_batch::RecordBatch>, datafusion::error::DataFusionError> {
+    graphforge_storage::read_edges_from_inventory(&admitted_inventory(root), route, mode)
 }

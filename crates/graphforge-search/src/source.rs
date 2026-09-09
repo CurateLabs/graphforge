@@ -706,7 +706,18 @@ mod tests {
             .into_iter()
             .map(|path| std::fs::metadata(path).unwrap().len())
             .sum::<u64>();
-        let properties = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        let properties = graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+        .property_fragments(graphforge_storage::PropertyRouteKind::Node, "Person")
+        .into_iter()
+        .map(|fragment| fragment.path)
+        .collect::<Vec<_>>();
         assert_eq!(properties.len(), 2);
         let mut limits = TextSearchLimits::default();
         limits.source_bytes = node_bytes + std::fs::metadata(&properties[0]).unwrap().len();
@@ -752,7 +763,18 @@ mod tests {
             1
         );
 
-        let property_files = graphforge_storage::node_property_files(dir.path(), "Person").unwrap();
+        let property_files = graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+        .property_fragments(graphforge_storage::PropertyRouteKind::Node, "Person")
+        .into_iter()
+        .map(|fragment| fragment.path)
+        .collect::<Vec<_>>();
         assert_eq!(property_files.len(), 2);
         let expected_bytes = graphforge_storage::topology_node_files(dir.path())
             .unwrap()

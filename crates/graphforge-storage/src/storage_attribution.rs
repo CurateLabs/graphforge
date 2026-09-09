@@ -876,7 +876,10 @@ impl StorageAttributionSnapshot {
 /// Classify one authenticated graph inventory path.
 #[must_use]
 pub fn classify_graph_artifact(relative_path: &str) -> ArtifactCategory {
-    if relative_path == "topology/runtime_entity_label_encoding.json" {
+    if matches!(
+        relative_path,
+        "topology/runtime_entity_label_encoding.json" | "semantic-routes.json"
+    ) {
         return ArtifactCategory::CatalogAndManifests;
     }
     let path = Path::new(relative_path);
@@ -1523,7 +1526,13 @@ mod tests {
             classify_graph_artifact("topology/runtime_entity_label_encoding.json"),
             ArtifactCategory::CatalogAndManifests
         );
+        assert_eq!(
+            classify_graph_artifact("semantic-routes.json"),
+            ArtifactCategory::CatalogAndManifests
+        );
         for unknown in [
+            "semantic-routes.json/unknown",
+            "semantic-routes.json.tmp",
             "topology/runtime_entity_label_encoding.json/unknown",
             "topology/runtime_entity_label_encoding.json.tmp",
         ] {

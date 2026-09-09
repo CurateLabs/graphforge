@@ -516,6 +516,28 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    /// Return admitted immutable property fragments in oldest-to-newest order.
+    /// The caller must retain this inventory while using its physical paths.
+    #[must_use]
+    pub fn property_fragments(
+        &self,
+        kind: PropertyRouteKind,
+        route: &str,
+    ) -> Vec<PropertyFragment> {
+        let Some(root) = &self.root_path else {
+            return Vec::new();
+        };
+        self.routes
+            .get(&(kind, route.to_owned()))
+            .into_iter()
+            .flatten()
+            .map(|fragment| PropertyFragment {
+                id: fragment.id,
+                path: root.join(&fragment.physical_relative),
+            })
+            .collect()
+    }
+
     /// Canonical property routes admitted into this immutable snapshot.
     pub fn routes(&self, kind: PropertyRouteKind) -> impl Iterator<Item = &str> {
         self.routes

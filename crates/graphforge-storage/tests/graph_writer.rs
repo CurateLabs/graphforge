@@ -14,9 +14,8 @@ use graphforge_core::uuid::new_v7;
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
 use graphforge_storage::{
     EdgePropertyTable, GraphCatalog, GraphWriter, PropertyOverlayLimits, PropertyRouteKind,
-    PropertySnapshotRow, PropertyTable, delete_edges, enumerate_property_fragments,
-    read_topology_generation, remove_edge_properties, set_edge_properties_rewrite,
-    visit_authenticated_property_snapshots,
+    PropertySnapshotRow, PropertyTable, delete_edges, read_topology_generation,
+    remove_edge_properties, set_edge_properties_rewrite, visit_authenticated_property_snapshots,
 };
 
 /// Fixed timestamp so written Parquet is deterministic.
@@ -56,7 +55,11 @@ async fn strict_mode_round_trip_nodes_and_edges() {
 
     // Files landed where the reader expects them.
     assert!(dir.path().join("topology/nodes.parquet").exists());
-    assert!(dir.path().join("topology/edges/KNOWS.parquet").exists());
+    assert!(
+        admitted_inventory(dir.path()).edge_files(Some("KNOWS"))[0]
+            .1
+            .exists()
+    );
 
     // Reload. GraphCatalog registers `edges_<name>` from the runtime catalog's
     // relation types, so intern KNOWS first.
@@ -107,8 +110,8 @@ async fn exploratory_mode_routes_to_catch_all_files() {
 
     // Catch-all files exist.
     assert!(
-        dir.path()
-            .join("topology/edges/_exploratory.parquet")
+        admitted_inventory(dir.path()).edge_files(Some("_exploratory"))[0]
+            .1
             .exists()
     );
     assert_canonical_fragments(dir.path(), PropertyRouteKind::Node, "_untyped", 1);
@@ -343,7 +346,25 @@ fn assert_canonical_fragments(
             fragment.path.file_name().unwrap().to_str().unwrap(),
             fragment.id.file_name()
         );
-        assert_eq!(fragment.path.parent().unwrap().file_name().unwrap(), route);
+        let table: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("semantic-routes.json")).unwrap())
+                .unwrap();
+        let component = fragment
+            .path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let matches = table["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["component"].as_str() == Some(component))
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["route"].as_str(), Some(route));
     }
 }
 
@@ -984,4 +1005,22 @@ fn property_only_flush_does_not_bump_topology_generation() {
     // An empty flush stages nothing and must not bump either.
     w.flush().unwrap();
     assert_eq!(read_topology_generation(dir.path()).unwrap(), 1);
+}
+
+fn admitted_inventory(
+    root: &std::path::Path,
+) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(root, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
+fn enumerate_property_fragments(
+    root: &std::path::Path,
+    kind: graphforge_storage::PropertyRouteKind,
+    route: &str,
+) -> Result<Vec<graphforge_storage::property_overlay::PropertyFragment>, graphforge_storage::GfError>
+{
+    Ok(admitted_inventory(root).property_fragments(kind, route))
 }

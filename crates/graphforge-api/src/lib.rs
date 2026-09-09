@@ -2763,7 +2763,9 @@ fn property_inventory_for_hydrated_generation(
         .is_empty(),
         None => false,
     };
-    let admitted = if has_deltas {
+    // Snapshot-only generations have no graph-files inventory; hydration has
+    // authenticated their snapshot payload into this private workspace.
+    let admitted = if has_deltas || inventory.is_none() {
         let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
         graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
             generation,

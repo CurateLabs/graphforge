@@ -1456,7 +1456,18 @@ mod tests {
             )
             .unwrap();
         second.flush().unwrap();
-        let paths = graphforge_storage::node_property_files(dir.path(), LABEL).unwrap();
+        let paths = graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+        .property_fragments(graphforge_storage::PropertyRouteKind::Node, LABEL)
+        .into_iter()
+        .map(|fragment| fragment.path)
+        .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2);
         let before =
             capture_text_snapshot(dir.path(), TextSearchLimits::default(), || Ok(())).unwrap();
