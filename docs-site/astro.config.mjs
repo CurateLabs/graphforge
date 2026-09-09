@@ -300,6 +300,7 @@ export default defineConfig({
                   slug: 'adr/0025-storage-value-contract',
                 },
                 { label: '0026 Read plan resources', slug: 'adr/0026-read-plan-resources' },
+                { label: '0027 Native runtime boundary', slug: 'adr/0027-native-runtime-boundary' },
               ],
             },
           ],

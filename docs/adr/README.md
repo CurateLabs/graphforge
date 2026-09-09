@@ -32,6 +32,7 @@ are not retained in this tree.
 | 0024 | [Storage format exceptions for GFDR and compiled ontologies](0024-storage-format-exceptions.md) | `0024-storage-format-exceptions.md` |
 | 0025 | [Storage values have a compiler-independent contract](0025-storage-value-contract.md) | `0025-storage-value-contract.md` |
 | 0026 | [Read plans bind resources in execution](0026-read-plan-resources.md) | `0026-read-plan-resources.md` |
+| 0027 | [Native GraphForge execution boundary](0027-native-runtime-boundary.md) | `0027-native-runtime-boundary.md` |
 
 ## Numbering
 
