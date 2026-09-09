@@ -123,7 +123,7 @@ class SurfaceGateTests(unittest.TestCase):
         self.assertTrue(any("CheckpointView.rank is not called" in error for error in errors))
 
     def test_every_adjacency_read_has_exactly_one_visibility_guard(self) -> None:
-        source = (GATE.ROOT / "crates/graphforge-api/src/lib.rs").read_text()
+        source = (GATE.ROOT / "crates/graphforge-api/src/analyst.rs").read_text()
         calls = list(re.finditer(r"self\.adjacency_provider\.revalidate\(\);", source))
         self.assertEqual(len(calls), 12)
         for call in calls:

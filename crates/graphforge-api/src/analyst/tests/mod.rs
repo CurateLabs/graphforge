@@ -188,3 +188,13 @@ fn add_person_with_heuristic_value(
         )
         .unwrap()
 }
+
+fn expect_algorithm_execution(error: GfError) -> AlgorithmError {
+    assert_eq!(error.code(), "GF_EXECUTION");
+    let display = error.to_string();
+    let GfError::Algorithm(diagnostic) = error else {
+        panic!("expected typed algorithm diagnostic, got {error:?}");
+    };
+    assert_eq!(display, format!("execution error: {diagnostic}"));
+    diagnostic
+}

@@ -1,6 +1,14 @@
 //! Analyst invocation preparation and dispatch on the public facade.
 
-use crate::*;
+use crate::{
+    Algorithm, AnalyzeAlgorithm, AnalyzeOptions, CandidateReranker, ClusterAlgorithm,
+    ClusterOptions, Digest, DocumentEmbeddingProvider, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    FastRpOptions, GfError, GraphForge, GraphSageAggregator, GraphSageOptions, HashGnnOptions,
+    InvocationDescriptor, InvocationDescriptorError, InvocationError, InvocationParameter,
+    Node2VecOptions, NodeSelector, PathAlgorithm, PathsOptions, PortableV2OciRegistry,
+    ProviderExecutionRuntime, QueryEmbeddingProvider, RankOptions, SimilarAlgorithm,
+    SimilarOptions, insert_usize, invocation_descriptor,
+};
 
 impl GraphForge {
     /// Prepare a canonical, knowledge-neutral rank descriptor without running it.

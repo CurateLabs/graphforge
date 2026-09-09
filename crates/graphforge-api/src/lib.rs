@@ -3520,7 +3520,7 @@ fn result_metadata(
 mod tests {
     use super::*;
     use arrow::array::{
-        Array, FixedSizeBinaryArray, Int64Array, ListArray, StringArray, StructArray, UInt64Array,
+        Array, FixedSizeBinaryArray, Int64Array, ListArray, StringArray, StructArray,
     };
     use arrow::datatypes::DataType;
     use std::io::Read as _;
@@ -4946,16 +4946,6 @@ mod tests {
                 "{name} should be null for an absent optional entity"
             );
         }
-    }
-
-    fn expect_algorithm_execution(error: GfError) -> AlgorithmError {
-        assert_eq!(error.code(), "GF_EXECUTION");
-        let display = error.to_string();
-        let GfError::Algorithm(diagnostic) = error else {
-            panic!("expected typed algorithm diagnostic, got {error:?}");
-        };
-        assert_eq!(display, format!("execution error: {diagnostic}"));
-        diagnostic
     }
 
     #[test]
