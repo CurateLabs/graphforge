@@ -82,6 +82,10 @@ pub(crate) fn read_parquet_or_empty(
     if !path.exists() {
         return Ok(vec![RecordBatch::new_empty(schema)]);
     }
+    read_parquet_required(path)
+}
+
+fn read_parquet_required(path: &Path) -> Result<Vec<RecordBatch>, DataFusionError> {
     let builder = admitted_parquet(path)?;
     let file_schema = builder.schema().clone();
     let reader = builder.build().map_err(parquet_err)?;
@@ -244,6 +248,30 @@ pub fn read_edges(
     Ok(batches)
 }
 
+/// Read edge rows using the caller's explicit semantic route authority.
+pub fn read_edges_from_inventory(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_name: &str,
+    mode: OntologyMode,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if rel_name == "*" && matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        return read_edges_union_paths(inventory.edge_files(None), None, None, true);
+    }
+    let (route, schema) = match mode {
+        OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
+        OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
+    };
+    let mut batches = Vec::new();
+    for (_, path) in inventory.edge_files(Some(route)) {
+        batches.extend(read_parquet_required(&path)?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
+    crate::io_stats::record_edge_full_read(total_rows(&batches));
+    Ok(batches)
+}
+
 /// Count topology edge rows without materializing adjacency or the full graph.
 ///
 /// Used by unconstrained `count(r)` so a missing CSR index cannot charge O(E)
@@ -275,8 +303,34 @@ pub fn count_edge_rows(
             (mode == OntologyMode::Strict).then_some(rel_name)
         }
     };
+    count_edge_paths(
+        crate::mutator::edge_parquet_files(dir, relation)?,
+        rel_name,
+        mode,
+    )
+}
+
+/// Count admitted edge payload rows without decoding graph or adjacency data.
+pub fn count_edge_rows_from_inventory(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_name: &str,
+    mode: OntologyMode,
+) -> Result<u64, crate::GfError> {
+    let relation = match mode {
+        OntologyMode::Exploratory => Some("_exploratory"),
+        OntologyMode::Strict if rel_name != "*" => Some(rel_name),
+        _ => None,
+    };
+    count_edge_paths(inventory.edge_files(relation), rel_name, mode)
+}
+
+fn count_edge_paths(
+    paths: Vec<(String, PathBuf)>,
+    rel_name: &str,
+    mode: OntologyMode,
+) -> Result<u64, crate::GfError> {
     let mut total = 0_u64;
-    for (stem, path) in crate::mutator::edge_parquet_files(dir, relation)? {
+    for (stem, path) in paths {
         if mode == OntologyMode::Advisory
             && rel_name != "*"
             && stem != rel_name
@@ -378,6 +432,50 @@ pub fn read_edges_filtered(
     edge_ids: &std::collections::HashSet<u64>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     read_edges_filtered_observed(dir, rel_name, mode, edge_ids, None)
+}
+
+/// Filter edge rows using an explicitly admitted semantic route inventory.
+#[allow(clippy::implicit_hasher)]
+pub fn read_edges_filtered_from_inventory(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_name: &str,
+    mode: OntologyMode,
+    edge_ids: &std::collections::HashSet<u64>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    read_edges_filtered_observed_from_inventory(inventory, rel_name, mode, edge_ids, None)
+}
+
+/// Filter admitted edge rows with aggregate-only operator attribution.
+#[allow(clippy::implicit_hasher)]
+#[doc(hidden)]
+pub fn read_edges_filtered_observed_from_inventory(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_name: &str,
+    mode: OntologyMode,
+    edge_ids: &std::collections::HashSet<u64>,
+    observer: Option<&Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if rel_name == "*" && matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        return read_edges_union_paths(inventory.edge_files(None), Some(edge_ids), observer, true);
+    }
+    let (route, schema) = match mode {
+        OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
+        OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
+    };
+    let mut batches = Vec::new();
+    for (_, path) in inventory.edge_files(Some(route)) {
+        batches.extend(read_required_edge_filtered(
+            &path,
+            Arc::clone(&schema),
+            edge_ids,
+            observer,
+            None,
+        )?);
+    }
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
+    Ok(batches)
 }
 
 /// [`read_edges_filtered`] with optional aggregate-only operator attribution.
@@ -487,6 +585,54 @@ pub fn read_edges_filtered_projected_observed(
     Ok(batches)
 }
 
+/// Project and filter admitted edge fragments using their semantic route authority.
+#[allow(clippy::implicit_hasher)]
+pub fn read_edges_filtered_projected_from_inventory(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    rel_name: &str,
+    mode: OntologyMode,
+    edge_ids: &std::collections::HashSet<u64>,
+    projection: &[usize],
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if rel_name == "*" && matches!(mode, OntologyMode::Advisory | OntologyMode::Strict) {
+        // Union normalization synthesizes rel_type_name. Normalize first, then
+        // shape the result; individual typed files still avoid node reads.
+        return read_edges_union_paths(inventory.edge_files(None), Some(edge_ids), observer, true)
+            .and_then(|batches| {
+                project_batches_with_key(batches, &EXPLORATORY_EDGE_SCHEMA, projection, "edge_id")
+            });
+    }
+    let (stem, schema) = match mode {
+        OntologyMode::Exploratory => ("_exploratory", EXPLORATORY_EDGE_SCHEMA.clone()),
+        OntologyMode::Advisory | OntologyMode::Strict => (rel_name, TYPED_EDGE_SCHEMA.clone()),
+    };
+    if edge_ids.is_empty() {
+        return project_batches_with_key(Vec::new(), &schema, projection, "edge_id");
+    }
+    let mut batches = Vec::new();
+    for (_, path) in inventory.edge_files(Some(stem)) {
+        let file_schema = admitted_parquet(&path)?.schema().clone();
+        if file_schema.fields() != schema.fields() {
+            return Err(DataFusionError::Execution(format!(
+                "projected edge read requires canonical schema: {}",
+                path.display()
+            )));
+        }
+        batches.extend(read_required_edge_filtered(
+            &path,
+            schema.clone(),
+            edge_ids,
+            observer,
+            Some(projection),
+        )?);
+    }
+    if batches.is_empty() {
+        return project_batches_with_key(Vec::new(), &schema, projection, "edge_id");
+    }
+    Ok(batches)
+}
+
 /// Read the union of every relation's edges (#823): the "all relation types"
 /// read for an untyped traversal in a typed project. Enumerates every
 /// `topology/edges/*.parquet` (stem order, for deterministic adjacency/BFS),
@@ -500,22 +646,48 @@ fn read_edges_union(
     edge_ids: Option<&std::collections::HashSet<u64>>,
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let paths = crate::mutator::edge_parquet_files(dir, None)
+        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+    read_edges_union_paths(paths, edge_ids, observer, false)
+}
+
+fn read_edges_union_paths(
+    paths: Vec<(String, PathBuf)>,
+    edge_ids: Option<&std::collections::HashSet<u64>>,
+    observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    required: bool,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    if required && edge_ids.is_some_and(std::collections::HashSet::is_empty) {
+        return Ok(vec![RecordBatch::new_empty(
+            EXPLORATORY_EDGE_SCHEMA.clone(),
+        )]);
+    }
     let mut out = Vec::new();
-    for (stem, path) in crate::mutator::edge_parquet_files(dir, None)
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?
-    {
-        let schema = discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone());
-        let batches = if let Some(ids) = edge_ids {
-            read_parquet_filtered_u64(
-                &path,
-                schema,
-                "edge_id",
-                ids,
-                FilteredReadKind::Edge,
-                observer,
-            )?
+    for (stem, path) in paths {
+        let schema = if required {
+            admitted_parquet(&path)?.schema().clone()
         } else {
-            let b = read_parquet_or_empty(&path, schema)?;
+            discover_parquet_schema(&path).unwrap_or_else(|| TYPED_EDGE_SCHEMA.clone())
+        };
+        let batches = if let Some(ids) = edge_ids {
+            if required {
+                read_required_edge_filtered(&path, schema, ids, observer, None)?
+            } else {
+                read_parquet_filtered_u64(
+                    &path,
+                    schema,
+                    "edge_id",
+                    ids,
+                    FilteredReadKind::Edge,
+                    observer,
+                )?
+            }
+        } else {
+            let b = if required {
+                read_parquet_required(&path)?
+            } else {
+                read_parquet_or_empty(&path, schema)?
+            };
             crate::io_stats::record_edge_full_read(total_rows(&b));
             b
         };
@@ -919,6 +1091,36 @@ fn read_parquet_filtered_u64(
         observer,
         true,
         None,
+        false,
+    )
+}
+
+fn read_required_edge_filtered(
+    path: &Path,
+    schema: SchemaRef,
+    ids: &std::collections::HashSet<u64>,
+    observer: Option<&Arc<dyn crate::io_stats::FilteredReadObserver>>,
+    projection: Option<&[usize]>,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let projection = projection
+        .map(|indices| canonical_projection_with_key(&schema, indices, "edge_id"))
+        .transpose()?;
+    if ids.is_empty() {
+        return match projection {
+            Some(indices) => project_batches_with_key(Vec::new(), &schema, &indices, "edge_id"),
+            None => Ok(vec![RecordBatch::new_empty(schema)]),
+        };
+    }
+    read_parquet_filtered_u64_attempt(
+        path,
+        schema,
+        "edge_id",
+        ids,
+        FilteredReadKind::Edge,
+        observer,
+        true,
+        projection.as_deref(),
+        true,
     )
 }
 
@@ -988,6 +1190,7 @@ fn read_parquet_filtered_u64_projected(
         observer,
         true,
         Some(&projection),
+        false,
     )
 }
 
@@ -1001,6 +1204,7 @@ fn read_parquet_filtered_u64_attempt(
     observer: Option<&std::sync::Arc<dyn crate::io_stats::FilteredReadObserver>>,
     allow_dense_node_selection: bool,
     projection: Option<&[usize]>,
+    required: bool,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     use parquet::arrow::ProjectionMask;
     use parquet::arrow::arrow_reader::{
@@ -1035,7 +1239,11 @@ fn read_parquet_filtered_u64_attempt(
     let builder_row_groups = u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX);
     if total >= 0 && ids.len() as u64 * 2 > u64::try_from(total).unwrap_or(u64::MAX) {
         drop(builder);
-        let batches = read_parquet_or_empty(path, fallback_schema.clone())?;
+        let batches = if required {
+            read_parquet_required(path)?
+        } else {
+            read_parquet_or_empty(path, fallback_schema.clone())?
+        };
         // The fallback scanned the whole file before trimming, so record it as
         // a full read (its row count is the full file, not the trimmed result):
         // a fallback must not masquerade as a cheap filtered read.
@@ -1244,6 +1452,7 @@ fn read_parquet_filtered_u64_attempt(
                 observer,
                 false,
                 projection,
+                required,
             );
         }
     }
@@ -2311,6 +2520,48 @@ pub fn read_edge_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, 
     read_property_overlay(dir, stem, true)
 }
 
+/// Read edge properties using the caller's already admitted generation authority.
+pub fn read_edge_properties_from_inventory(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    route: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let mut batches = Vec::new();
+    visit_property_overlay_batched_with_inventory(
+        dir,
+        Some(inventory),
+        route,
+        true,
+        8_192,
+        |batch| {
+            batches.push(batch.clone());
+            Ok(true)
+        },
+    )?;
+    Ok(batches)
+}
+
+/// Read node properties using the caller's admitted route inventory.
+pub fn read_properties_from_inventory(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    route: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let mut batches = Vec::new();
+    visit_property_overlay_batched_with_inventory(
+        dir,
+        Some(inventory),
+        route,
+        false,
+        8_192,
+        |batch| {
+            batches.push(batch.clone());
+            Ok(true)
+        },
+    )?;
+    Ok(batches)
+}
+
 /// Read an authenticated newest-wins edge-property overlay while decoding
 /// only the requested property names plus the mandatory edge UUID key.
 #[doc(hidden)]
@@ -2321,6 +2572,30 @@ pub fn read_edge_properties_projected(
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     let selected = property_names.iter().cloned().collect();
     read_property_overlay_projected(dir, stem, true, Some(&selected))
+}
+
+/// Read selected edge properties through the caller's pinned route inventory.
+pub fn read_edge_properties_projected_from_inventory(
+    dir: &Path,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    route: &str,
+    property_names: &[String],
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let selected = property_names.iter().cloned().collect();
+    let mut batches = Vec::new();
+    visit_property_overlay_batched_projected(
+        dir,
+        Some(inventory),
+        route,
+        true,
+        8_192,
+        Some(&selected),
+        |batch| {
+            batches.push(batch.clone());
+            Ok(true)
+        },
+    )?;
+    Ok(batches)
 }
 
 /// Stems (relation names) of every `edge_properties/<stem>.parquet` under
@@ -2431,6 +2706,7 @@ impl TableProvider for TopologyNodeTable {
 #[derive(Debug, Clone)]
 pub struct TypedEdgeTable {
     dir: PathBuf,
+    inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
     rel_type_name: String,
     schema: SchemaRef,
 }
@@ -2450,8 +2726,19 @@ impl TypedEdgeTable {
         Self {
             dir: dir.to_path_buf(),
             rel_type_name: rel_type_name.to_owned(),
+            inventory: None,
             schema,
         }
+    }
+}
+
+impl TypedEdgeTable {
+    fn with_inventory(
+        mut self,
+        inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
+    ) -> Self {
+        self.inventory = inventory;
+        self
     }
 }
 
@@ -2472,8 +2759,12 @@ impl TableProvider for TypedEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragments = crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+        let paths = match &self.inventory {
+            Some(inventory) => inventory.edge_files(Some(&self.rel_type_name)),
+            None => crate::mutator::edge_parquet_files(&self.dir, Some(&self.rel_type_name))
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        };
+        let fragments = paths
             .into_iter()
             .map(|(_, path)| ParquetFragment::for_path(path, false))
             .collect();
@@ -2500,6 +2791,7 @@ impl TableProvider for TypedEdgeTable {
 #[derive(Debug, Clone)]
 pub struct UnionEdgeTable {
     dir: PathBuf,
+    inventory: Option<Arc<crate::AuthenticatedPropertyInventory>>,
 }
 
 impl UnionEdgeTable {
@@ -2508,6 +2800,7 @@ impl UnionEdgeTable {
     pub fn open(dir: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
+            inventory: None,
         }
     }
 }
@@ -2529,8 +2822,12 @@ impl TableProvider for UnionEdgeTable {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let fragments: Vec<ParquetFragment> = crate::mutator::edge_parquet_files(&self.dir, None)
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+        let paths = match &self.inventory {
+            Some(inventory) => inventory.edge_files(None),
+            None => crate::mutator::edge_parquet_files(&self.dir, None)
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?,
+        };
+        let fragments: Vec<ParquetFragment> = paths
             .into_iter()
             .map(|(stem, path)| ParquetFragment::for_union_edge(path, stem))
             .collect();
@@ -2913,7 +3210,6 @@ pub struct GraphCatalog {
     semantic_label_routes: HashMap<EntityTypeId, String>,
     semantic_label_names: HashMap<EntityTypeId, String>,
     semantic_composition_fingerprint: Option<String>,
-    semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
     semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>>,
 }
 
@@ -3006,7 +3302,10 @@ impl GraphCatalog {
                 if binding.route_kind == crate::SemanticRouteKind::Relation {
                     schema.register(
                         format!("edges_{}", binding.route),
-                        Arc::new(TypedEdgeTable::open(dir, &binding.route)),
+                        Arc::new(
+                            TypedEdgeTable::open(dir, &binding.route)
+                                .with_inventory(inventory.clone()),
+                        ),
                     );
                 }
             }
@@ -3014,7 +3313,7 @@ impl GraphCatalog {
             for rel_name in handle.relation_type_names() {
                 schema.register(
                     format!("edges_{rel_name}"),
-                    Arc::new(TypedEdgeTable::open(dir, rel_name)),
+                    Arc::new(TypedEdgeTable::open(dir, rel_name).with_inventory(inventory.clone())),
                 );
             }
         } else {
@@ -3028,17 +3327,20 @@ impl GraphCatalog {
             // scan a non-existent typed file and return 0 rows.
             schema.register(
                 "edges__exploratory",
-                Arc::new(TypedEdgeTable::open(dir, "_exploratory")),
+                Arc::new(
+                    TypedEdgeTable::open(dir, "_exploratory").with_inventory(inventory.clone()),
+                ),
             );
             for rel_name in runtime_catalog.relation_types() {
-                let typed_path = dir
-                    .join("topology")
-                    .join("edges")
-                    .join(format!("{rel_name}.parquet"));
-                if typed_path.exists() {
+                let has_typed = inventory
+                    .as_ref()
+                    .is_some_and(|inventory| !inventory.edge_files(Some(rel_name)).is_empty());
+                if has_typed {
                     schema.register(
                         format!("edges_{rel_name}"),
-                        Arc::new(TypedEdgeTable::open(dir, rel_name)),
+                        Arc::new(
+                            TypedEdgeTable::open(dir, rel_name).with_inventory(inventory.clone()),
+                        ),
                     );
                 }
             }
@@ -3048,7 +3350,9 @@ impl GraphCatalog {
         if !schema.table_exist("edges__exploratory") {
             schema.register(
                 "edges__exploratory",
-                Arc::new(TypedEdgeTable::open(dir, "_exploratory")),
+                Arc::new(
+                    TypedEdgeTable::open(dir, "_exploratory").with_inventory(inventory.clone()),
+                ),
             );
         }
 
@@ -3103,8 +3407,6 @@ impl GraphCatalog {
         let mut semantic_rel_routes = HashMap::new();
         let mut semantic_label_routes = HashMap::new();
         let mut semantic_label_names = HashMap::new();
-        let mut semantic_edge_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
-            HashMap::new();
         let mut semantic_edge_property_tables: HashMap<RelationTypeId, Arc<dyn TableProvider>> =
             HashMap::new();
         if let Some(bindings) = semantic {
@@ -3120,8 +3422,6 @@ impl GraphCatalog {
                         let id = RelationTypeId::decode(binding.storage_id)
                             .map_err(|e| DataFusionError::Plan(e.to_string()))?;
                         semantic_rel_routes.insert(id, binding.route.clone());
-                        semantic_edge_tables
-                            .insert(id, Arc::new(TypedEdgeTable::open(dir, &binding.route)));
                     }
                     crate::SemanticRouteKind::NodeProperty
                     | crate::SemanticRouteKind::EdgeProperty => {
@@ -3180,9 +3480,29 @@ impl GraphCatalog {
             semantic_label_names,
             semantic_composition_fingerprint: semantic
                 .map(|bindings| bindings.composition_fingerprint.clone()),
-            semantic_edge_tables,
             semantic_edge_property_tables,
         })
+    }
+
+    /// Retain the explicit generation authority for first-party physical readers.
+    #[must_use]
+    pub fn admitted_inventory(&self) -> Option<Arc<crate::AuthenticatedPropertyInventory>> {
+        self.lowering_property_inventory()
+    }
+
+    /// Relation provider pinned to this catalog's admitted route authority.
+    #[must_use]
+    pub fn edge_table(&self, dir: &Path, route: &str) -> TypedEdgeTable {
+        TypedEdgeTable::open(dir, route).with_inventory(self.lowering_property_inventory())
+    }
+
+    /// Union provider preserving semantic relation names from admitted authority.
+    #[must_use]
+    pub fn union_edge_table(&self, dir: &Path) -> UnionEdgeTable {
+        UnionEdgeTable {
+            dir: dir.to_path_buf(),
+            inventory: self.lowering_property_inventory(),
+        }
     }
 
     /// Node-property provider pinned to this catalog's generation authority.
@@ -3293,6 +3613,25 @@ impl GraphCatalog {
             };
             authority.tables.insert(name, table);
         }
+        let mut edge_routes = authority
+            .tables
+            .keys()
+            .filter_map(|name| name.strip_prefix("edges_").map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>();
+        edge_routes.extend(
+            inventory
+                .edge_files(None)
+                .into_iter()
+                .map(|(route, _)| route),
+        );
+        for route in edge_routes {
+            authority.tables.insert(
+                format!("edges_{route}"),
+                Arc::new(
+                    TypedEdgeTable::open(dir, &route).with_inventory(Some(Arc::clone(&inventory))),
+                ),
+            );
+        }
         authority.property_inventory = Some(inventory);
         Ok(())
     }
@@ -3348,7 +3687,14 @@ impl GraphCatalog {
     /// Registered authenticated provider for one semantic relation ID.
     #[must_use]
     pub fn semantic_edge_table(&self, id: RelationTypeId) -> Option<Arc<dyn TableProvider>> {
-        self.semantic_edge_tables.get(&id).cloned()
+        let route = self.semantic_rel_routes.get(&id)?;
+        self.schema
+            .authority
+            .read()
+            .expect("graph schema lock poisoned")
+            .tables
+            .get(&format!("edges_{route}"))
+            .cloned()
     }
 
     /// Registered authenticated property provider for one semantic relation ID.
@@ -3478,6 +3824,101 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn admitted_topology_requires_payload_except_empty_selection() {
+        let dir = TempDir::new().unwrap();
+        let node = graphforge_core::uuid::new_v7();
+        let mut writer = crate::GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        writer
+            .create_node(node, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_edge(graphforge_core::uuid::new_v7(), "CON", &node, &node)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        let inventory = catalog.admitted_inventory().unwrap();
+        let path = inventory.edge_files(Some("CON"))[0].1.clone();
+        std::fs::remove_file(&path).unwrap();
+        let ids = std::collections::HashSet::from([0]);
+        let empty = std::collections::HashSet::new();
+        for route in ["CON", "*"] {
+            assert!(read_edges_from_inventory(&inventory, route, OntologyMode::Strict).is_err());
+            assert!(
+                count_edge_rows_from_inventory(&inventory, route, OntologyMode::Strict).is_err()
+            );
+            assert!(
+                read_edges_filtered_from_inventory(&inventory, route, OntologyMode::Strict, &ids)
+                    .is_err()
+            );
+            assert!(
+                read_edges_filtered_projected_from_inventory(
+                    &inventory,
+                    route,
+                    OntologyMode::Strict,
+                    &ids,
+                    &[0],
+                    None
+                )
+                .is_err()
+            );
+            assert_eq!(
+                total_rows(
+                    &read_edges_filtered_from_inventory(
+                        &inventory,
+                        route,
+                        OntologyMode::Strict,
+                        &empty
+                    )
+                    .unwrap()
+                ),
+                0
+            );
+            let observer = Arc::new(Wave12Observer::default());
+            let observed: Arc<dyn crate::io_stats::FilteredReadObserver> = observer.clone();
+            let projected = read_edges_filtered_projected_from_inventory(
+                &inventory,
+                route,
+                OntologyMode::Strict,
+                &empty,
+                &[0],
+                Some(&observed),
+            )
+            .unwrap();
+            let schema = if route == "*" {
+                &EXPLORATORY_EDGE_SCHEMA
+            } else {
+                &TYPED_EDGE_SCHEMA
+            };
+            let expected = project_batches_with_key(Vec::new(), schema, &[0], "edge_id").unwrap();
+            assert_eq!(projected[0].schema(), expected[0].schema());
+            assert_eq!(total_rows(&projected), 0);
+            let filtered = read_edges_filtered_observed_from_inventory(
+                &inventory,
+                route,
+                OntologyMode::Strict,
+                &empty,
+                Some(&observed),
+            )
+            .unwrap();
+            assert_eq!(total_rows(&filtered), 0);
+            for counter in [
+                &observer.started,
+                &observer.scanned,
+                &observer.completed,
+                &observer.failed,
+                &observer.pruning,
+            ] {
+                assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+            }
+        }
+        assert_eq!(
+            total_rows(&read_parquet_or_empty(&path, TYPED_EDGE_SCHEMA.clone()).unwrap()),
+            0
+        );
+    }
+
+    #[test]
     fn catalog_parquet_admission_rejects_directory_and_bad_leading_magic() {
         let root = TempDir::new().unwrap();
         assert!(admitted_parquet(root.path()).is_err());
@@ -3515,6 +3956,111 @@ mod tests {
                 .success()
         );
         assert!(admitted_parquet(&fifo).is_err());
+    }
+
+    #[tokio::test]
+    async fn mapped_writer_reopen_and_catalog_refresh_preserve_semantic_routes() {
+        let dir = TempDir::new().unwrap();
+        let left = graphforge_core::uuid::new_v7();
+        let right = graphforge_core::uuid::new_v7();
+        let first_edge = graphforge_core::uuid::new_v7();
+        let mut writer = crate::GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        for node in [left, right] {
+            writer
+                .create_node(node, EntityTypeId::decode(0).unwrap())
+                .unwrap();
+        }
+        writer
+            .create_edge(first_edge, "CON", &left, &right)
+            .unwrap();
+        writer
+            .set_properties(
+                &left,
+                Some("con"),
+                HashMap::from([("rank".into(), graphforge_ir::IrLiteral::Int(7))]),
+            )
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &first_edge,
+                Some("CON"),
+                HashMap::from([("weight".into(), graphforge_ir::IrLiteral::Int(11))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let mut catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        catalog.refresh_property_inventory(dir.path()).unwrap();
+        let semantic_id = RelationTypeId::decode(0).unwrap();
+        catalog
+            .semantic_rel_routes
+            .insert(semantic_id, "CON".into());
+        let old = catalog.semantic_edge_table(semantic_id).unwrap();
+        let inventory = catalog.admitted_inventory().unwrap();
+        assert_eq!(
+            inventory
+                .routes(crate::PropertyRouteKind::Node)
+                .collect::<Vec<_>>(),
+            ["con"]
+        );
+        assert_eq!(
+            inventory
+                .routes(crate::PropertyRouteKind::Edge)
+                .collect::<Vec<_>>(),
+            ["CON"]
+        );
+        let node = read_properties(dir.path(), "con").unwrap();
+        let rank = node[0]
+            .column_by_name("rank")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(rank.null_count(), 0);
+        assert_eq!(rank.values().as_ref(), &[7]);
+        let edge = read_edge_properties_from_inventory(dir.path(), &inventory, "CON").unwrap();
+        let weight = edge[0]
+            .column_by_name("weight")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(weight.null_count(), 0);
+        assert_eq!(weight.values().as_ref(), &[11]);
+        let mut writer = crate::GraphWriter::open_at(dir.path(), OntologyMode::Strict, 2).unwrap();
+        writer.register_existing_node(left, 1).unwrap();
+        writer.register_existing_node(right, 2).unwrap();
+        writer
+            .create_edge(graphforge_core::uuid::new_v7(), "CON", &right, &left)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        catalog.refresh_property_inventory(dir.path()).unwrap();
+        let ctx = datafusion::prelude::SessionContext::new();
+        let direct = catalog
+            .schema("graph")
+            .unwrap()
+            .table("edges_CON")
+            .await
+            .unwrap()
+            .unwrap();
+        let semantic = catalog.semantic_edge_table(semantic_id).unwrap();
+        for (provider, expected) in [(old, 1), (direct, 2), (semantic, 2)] {
+            let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+                .await
+                .unwrap();
+            assert_eq!(total_rows(&batches), expected);
+            for batch in batches {
+                let ids = batch
+                    .column_by_name("edge_uuid")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                assert_eq!(ids.null_count(), 0);
+            }
+        }
     }
 
     #[test]

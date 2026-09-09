@@ -1307,6 +1307,7 @@ impl CreateRecorder {
 
 /// Everything the phases borrow from the session.
 pub(crate) struct PhaseEnv<'a> {
+    pub inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
     pub lowerer: &'a GraphPlanLowerer,
     pub exprs: &'a ExprArena,
     pub dir: &'a Path,
@@ -1990,8 +1991,13 @@ fn run_relationship_merge_phase(
             "node_id",
         )
         .ok_or_else(|| GfError::Plan("MERGE destination node has no node_id".into()))?;
-    let edge_batches = graphforge_storage::read_edges(env.dir, rel_name, env.mode)
-        .map_err(|e| GfError::Storage(e.to_string()))?;
+    let edge_batches = match &env.inventory {
+        Some(inventory) => {
+            graphforge_storage::read_edges_from_inventory(inventory, rel_name, env.mode)
+        }
+        None => graphforge_storage::read_edges(env.dir, rel_name, env.mode),
+    }
+    .map_err(|e| GfError::Storage(e.to_string()))?;
     let mut edge_rows = Vec::with_capacity(frontier.num_rows());
     let mut created = Vec::with_capacity(frontier.num_rows());
     let mut input_rows = Vec::with_capacity(frontier.num_rows());
@@ -2486,6 +2492,19 @@ fn scalar_struct_uuid(values: &StructArray, field: &str) -> Result<Option<[u8; 1
     Ok(Some(uuid))
 }
 
+fn count_deleted_properties(
+    env: &PhaseEnv<'_>,
+    targets: &HashSet<[u8; 16]>,
+    edge: bool,
+) -> Result<u64, GfError> {
+    match &env.inventory {
+        Some(inventory) => graphforge_storage::count_entity_properties_from_inventory(
+            env.dir, inventory, targets, edge,
+        ),
+        None => graphforge_storage::count_entity_properties(env.dir, targets, edge),
+    }
+}
+
 /// DELETE phase: collect targets from the frontier, enforce the openCypher
 /// incident-edge rule against committed **and** pending edges, cancel
 /// pending-created targets in the buffer, and queue committed targets for the
@@ -2586,7 +2605,7 @@ fn run_delete_phase(
     let committed_edges: HashSet<[u8; 16]> =
         edge_targets.difference(&pending_edges).copied().collect();
     ctx.mutation.counters.properties_removed +=
-        graphforge_storage::count_entity_properties(env.dir, &committed_edges, true)?;
+        count_deleted_properties(env, &committed_edges, true)?;
     ctx.mutation.counters.edges_deleted += edge_targets.len() as u64;
     ctx.writer.cancel_edges(&pending_edges);
     ctx.pending_edge_deletes.extend(&committed_edges);
@@ -2594,7 +2613,7 @@ fn run_delete_phase(
 
     // Nodes, likewise.
     ctx.mutation.counters.properties_removed +=
-        graphforge_storage::count_entity_properties(env.dir, &committed_nodes, false)?;
+        count_deleted_properties(env, &committed_nodes, false)?;
     ctx.mutation.counters.nodes_deleted += node_targets.len() as u64;
     ctx.writer.cancel_nodes(&pending_nodes);
     ctx.pending_node_deletes.extend(committed_nodes);
@@ -4141,6 +4160,7 @@ mod tests {
         params: &'a HashMap<String, IrLiteral>,
     ) -> PhaseEnv<'a> {
         PhaseEnv {
+            inventory: None,
             lowerer,
             exprs,
             dir,

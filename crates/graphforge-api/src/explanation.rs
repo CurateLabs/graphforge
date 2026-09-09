@@ -115,11 +115,12 @@ impl GraphForge {
             String::new()
         };
         let adjacency_provider = if execution_mode == self.ontology_mode {
-            Arc::clone(&self.adjacency_provider)
+            self.adjacency_provider_for_session()
         } else {
             Arc::new(crate::adjacency_provider_for_graph(
                 &self.dir,
                 execution_mode,
+                self.property_inventory_for_session(),
             )?)
         };
         let session =

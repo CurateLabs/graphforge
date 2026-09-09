@@ -16,6 +16,7 @@
 
 mod durable_rewrite;
 mod file_lock;
+mod route_component;
 pub use durable_rewrite::AuxiliaryReceipt;
 #[doc(hidden)]
 pub mod filesystem_admission;
@@ -72,6 +73,7 @@ pub mod graph_files;
 pub(crate) use graph_files::graph_files_root_participant;
 pub use graph_files::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_IO_BUFFER_BYTES,
+    GRAPH_FILES_MAPPED_RECORD_VERSION, GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
     GRAPH_FILES_RECORD_VERSION, GRAPH_FILES_V2_RECORD_VERSION, GRAPH_TREE_DIR, GraphFileEntry,
     GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence, GraphFilesOpenStrategy,
     GraphWorkspaceCheckpoint, GraphWorkspaceRestoration, capture_graph_files, decode_inventory,
@@ -402,14 +404,18 @@ pub use property_overlay::{
 pub mod catalog;
 pub use catalog::{
     AdmittedSourceFile, EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable,
-    TypedEdgeTable, UnionEdgeTable, count_edge_rows, list_edge_property_stems, list_property_stems,
-    node_property_files, node_property_source_files, node_property_source_fragments,
-    node_topology_present, read_edge_properties, read_edge_properties_projected, read_edges,
-    read_edges_filtered, read_edges_filtered_observed, read_edges_filtered_projected_observed,
-    read_nodes, read_nodes_filtered, read_nodes_filtered_observed,
-    read_nodes_filtered_projected_observed, read_properties, read_properties_batched,
-    topology_node_files, visit_node_fragments_admitted, visit_node_property_overlay_admitted,
-    visit_nodes_batched, visit_properties_batched, visit_property_fragments_admitted,
+    TypedEdgeTable, UnionEdgeTable, count_edge_rows, count_edge_rows_from_inventory,
+    list_edge_property_stems, list_property_stems, node_property_files, node_property_source_files,
+    node_property_source_fragments, node_topology_present, read_edge_properties,
+    read_edge_properties_from_inventory, read_edge_properties_projected,
+    read_edge_properties_projected_from_inventory, read_edges, read_edges_filtered,
+    read_edges_filtered_from_inventory, read_edges_filtered_observed,
+    read_edges_filtered_observed_from_inventory, read_edges_filtered_projected_from_inventory,
+    read_edges_filtered_projected_observed, read_edges_from_inventory, read_nodes,
+    read_nodes_filtered, read_nodes_filtered_observed, read_nodes_filtered_projected_observed,
+    read_properties, read_properties_batched, read_properties_from_inventory, topology_node_files,
+    visit_node_fragments_admitted, visit_node_property_overlay_admitted, visit_nodes_batched,
+    visit_properties_batched, visit_property_fragments_admitted,
 };
 
 pub mod runtime_entity_labels;
@@ -434,12 +440,13 @@ pub use schemas::{
 pub mod writer;
 pub use writer::{
     GraphWriter, GraphWriterLimits, NodePropertySetCounts, count_entity_properties,
-    decode_spatial_property_value, read_entity_properties, read_entity_property_keys,
-    read_node_property_rows, remove_edge_properties, remove_node_properties,
-    set_edge_properties_rewrite, set_node_properties, stage_property_tombstones_authenticated,
-    stage_remove_edge_properties, stage_remove_edge_properties_authenticated,
-    stage_remove_node_properties, stage_remove_node_properties_authenticated,
-    stage_set_edge_properties, stage_set_edge_properties_authenticated, stage_set_node_properties,
+    count_entity_properties_from_inventory, decode_spatial_property_value, read_entity_properties,
+    read_entity_property_keys, read_node_property_rows, read_node_property_rows_from_inventory,
+    remove_edge_properties, remove_node_properties, set_edge_properties_rewrite,
+    set_node_properties, stage_property_tombstones_authenticated, stage_remove_edge_properties,
+    stage_remove_edge_properties_authenticated, stage_remove_node_properties,
+    stage_remove_node_properties_authenticated, stage_set_edge_properties,
+    stage_set_edge_properties_authenticated, stage_set_node_properties,
     stage_set_node_properties_authenticated, stage_set_node_properties_authenticated_with_counts,
 };
 

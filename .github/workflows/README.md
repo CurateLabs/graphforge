@@ -85,7 +85,10 @@ only when the platform supports them.
   same Rust classification also runs native filesystem publication/admission
   tests on `blacksmith-4vcpu-windows-2025` and
   `blacksmith-12vcpu-macos-15`; Windows retains the existing project-root lock
-  tests. Linux Bazel CI cannot execute those host-specific contracts.
+  tests. Both native lanes also exercise mapped semantic routes, legacy CAS
+  translation, reserved-route adjacency/deletion, lazy stream isolation, and full
+  and projected portable export/import/reopen through the Rust facade. Linux
+  Bazel CI cannot execute those host-specific contracts.
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
   static-validation gates run only when their owned surfaces change. Shared
   GraphForge configuration and infrastructure contract fixtures run both IaC

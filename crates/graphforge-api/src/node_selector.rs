@@ -59,10 +59,11 @@ impl GraphForge {
         let mut observed = HashMap::new();
         let mut matches = HashSet::new();
         let mut scanned = 0usize;
-        for stem in graphforge_storage::list_property_stems(&self.dir) {
-            for (bytes, properties) in
-                graphforge_storage::read_node_property_rows(&self.dir, &stem)?
-            {
+        let inventory = self.property_inventory_for_session();
+        for stem in inventory.routes(graphforge_storage::PropertyRouteKind::Node) {
+            for (bytes, properties) in graphforge_storage::read_node_property_rows_from_inventory(
+                &self.dir, &inventory, stem,
+            )? {
                 scanned += 1;
                 if scanned > MAX_SELECTOR_ROWS {
                     return Err(validation("node selector property scan exceeds row limit"));
@@ -204,8 +205,13 @@ mod tests {
         Uuid::from_slice(column.value(0)).unwrap()
     }
 
+    #[track_caller]
     fn assert_validation<T>(result: Result<T, GfError>) {
-        assert!(matches!(result, Err(GfError::Validation(_))));
+        assert!(
+            matches!(&result, Err(GfError::Validation(_))),
+            "expected validation refusal; error={:?}",
+            result.as_ref().err()
+        );
     }
 
     #[test]
@@ -232,6 +238,29 @@ mod tests {
             uuid
         );
         assert_eq!(graph.resolve_node_selector(&property).unwrap(), uuid);
+    }
+
+    #[test]
+    fn reserved_label_property_selector_preserves_exact_match() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute("CREATE (:CON {name: 'Alice'}), (:con {name: 'Alice'})")
+            .unwrap();
+        let upper = graph
+            .resolve_node_selector(&NodeSelector::Match {
+                label: "CON".into(),
+                property: "name".into(),
+                value: PropValue::Str("Alice".into()),
+            })
+            .unwrap();
+        let lower = graph
+            .resolve_node_selector(&NodeSelector::Match {
+                label: "con".into(),
+                property: "name".into(),
+                value: PropValue::Str("Alice".into()),
+            })
+            .unwrap();
+        assert_ne!(upper, lower);
     }
 
     #[test]
@@ -270,6 +299,23 @@ mod tests {
             property: "name".into(),
             value: PropValue::Str("unique".into()),
         };
+        // Direct storage edits do not replace an already admitted facade view.
+        assert_eq!(other.resolve_node_selector(&duplicate).unwrap(), uuid);
+        // Explicitly admit the malformed workspace to test cross-route duplicate rejection.
+        let generation = other.generation_for_read().unwrap();
+        let (captured, _) = graphforge_storage::capture_graph_files(&other.dir).unwrap();
+        let inventory =
+            graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                &generation,
+                &other.dir,
+                captured,
+            )
+            .unwrap();
+        {
+            let mut authority = other.property_authority.lock().unwrap();
+            assert_eq!(Some(authority.generation_uuid), inventory.generation_uuid());
+            authority.inventory = std::sync::Arc::new(inventory);
+        }
         assert_validation(other.resolve_node_selector(&duplicate));
     }
 

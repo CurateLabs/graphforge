@@ -2518,8 +2518,9 @@ fn load_hashgnn_node_types(
     let selected = graph.node_uuids().collect::<HashSet<_>>();
     let mut values = BTreeMap::new();
     let mut kind = None;
-    for stem in graphforge_storage::list_property_stems(dir) {
-        for (uuid, row) in graphforge_storage::read_node_property_rows(dir, &stem)
+    for stem in graph.property_routes(dir, false) {
+        for (uuid, row) in graph
+            .node_property_rows(dir, &stem)
             .map_err(|error| GfError::Storage(error.to_string()))?
         {
             if !selected.contains(&uuid) {
@@ -2573,8 +2574,9 @@ fn load_hashgnn_relationship_types(
         .collect::<HashSet<_>>();
     let mut values = BTreeMap::new();
     let mut kind = None;
-    for stem in graphforge_storage::list_edge_property_stems(dir) {
-        for batch in graphforge_storage::read_edge_properties(dir, &stem)
+    for stem in graph.property_routes(dir, true) {
+        for batch in graph
+            .edge_property_batches(dir, &stem)
             .map_err(|error| GfError::Storage(error.to_string()))?
         {
             let Some(uuids) = batch

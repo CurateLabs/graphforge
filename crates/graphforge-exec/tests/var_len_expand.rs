@@ -28,6 +28,15 @@ use graphforge_storage::{GraphWriter, TOPOLOGY_NODES_SCHEMA};
 
 use graphforge_exec::{AdjacencyProvider, ScanBuildAdjacencyProvider, VarLenExpandExec};
 
+fn admitted_inventory(
+    dir: &std::path::Path,
+) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+    graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+        .unwrap()
+        .admitted_inventory()
+        .unwrap()
+}
+
 /// Construct the exec node with a fresh scan-build provider over the node's
 /// project dir — the pre-index behavior these tests pin (the session-injected
 /// persistent provider is exercised by `tests/persistent_adjacency.rs`).
@@ -37,8 +46,10 @@ fn make_exec(
     node: &VarLenExpandNode,
     input: Arc<dyn ExecutionPlan>,
 ) -> Arc<VarLenExpandExec> {
-    let provider: Arc<dyn AdjacencyProvider> =
-        Arc::new(ScanBuildAdjacencyProvider::new(dir.to_path_buf(), mode));
+    let provider: Arc<dyn AdjacencyProvider> = Arc::new(
+        ScanBuildAdjacencyProvider::new(dir.to_path_buf(), mode)
+            .with_inventory(admitted_inventory(dir)),
+    );
     Arc::new(VarLenExpandExec::new(
         node,
         input,

@@ -485,10 +485,15 @@ impl GraphForge {
             .expect("composition binding lock poisoned") =
             Some(std::sync::Arc::new(published_binding));
         self.ontology_mode = configuration.ontology_mode.execution_mode();
-        self.adjacency_provider = std::sync::Arc::new(crate::adjacency_provider_for_graph(
-            &self.dir,
-            self.ontology_mode,
-        )?);
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") =
+            std::sync::Arc::new(crate::adjacency_provider_for_graph(
+                &self.dir,
+                self.ontology_mode,
+                self.property_inventory_for_session(),
+            )?);
         Ok(CompositionChangeReceipt {
             project_generation_uuid: *self
                 .current_generation_uuid

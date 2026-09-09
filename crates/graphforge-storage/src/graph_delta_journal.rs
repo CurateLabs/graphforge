@@ -1530,6 +1530,10 @@ pub fn stage_base_graph_workspace(
 }
 
 pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphState, GfError> {
+    let inventory = crate::property_overlay::authenticated_property_inventory_for_rewrite(
+        graph_root,
+        &crate::RewriteBatch::new(),
+    )?;
     let mut state = ReconstructedGraphState::default();
     let node_batches = crate::catalog::read_nodes(graph_root)
         .map_err(|error| corrupt(format!("canonical node Parquet decode failed: {error}")))?;
@@ -1567,9 +1571,12 @@ pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphSta
         }
     }
 
-    let edge_batches =
-        crate::catalog::read_edges(graph_root, "*", graphforge_core::OntologyMode::Strict)
-            .map_err(|error| corrupt(format!("canonical edge Parquet decode failed: {error}")))?;
+    let edge_batches = crate::catalog::read_edges_from_inventory(
+        &inventory,
+        "*",
+        graphforge_core::OntologyMode::Strict,
+    )
+    .map_err(|error| corrupt(format!("canonical edge Parquet decode failed: {error}")))?;
     for batch in edge_batches {
         let edge_uuids = required_array::<FixedSizeBinaryArray>(&batch, "edge_uuid")?;
         let src_uuids = required_array::<FixedSizeBinaryArray>(&batch, "src_uuid")?;
@@ -1595,7 +1602,8 @@ pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphSta
         }
     }
 
-    for (stem, uuid, properties) in crate::writer::read_all_node_properties(graph_root)? {
+    for (stem, uuid, properties) in crate::writer::read_all_node_properties(graph_root, &inventory)?
+    {
         let uuid = Uuid::from_bytes(uuid).hyphenated().to_string();
         for (key, value) in properties {
             state
@@ -1606,7 +1614,8 @@ pub(crate) fn load_base_state(graph_root: &Path) -> Result<ReconstructedGraphSta
                 .insert((uuid.clone(), key), encode_typed_value(&value)?);
         }
     }
-    for (stem, uuid, properties) in crate::writer::read_all_edge_properties(graph_root)? {
+    for (stem, uuid, properties) in crate::writer::read_all_edge_properties(graph_root, &inventory)?
+    {
         let uuid = Uuid::from_bytes(uuid).hyphenated().to_string();
         for (key, value) in properties {
             state

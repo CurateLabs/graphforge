@@ -478,7 +478,9 @@ fn similar_projection(
         SimilarAlgorithm::Knn | SimilarAlgorithm::FilteredKnn | SimilarAlgorithm::Cosine
     );
     let mut graph = if matches!(by, SimilarAlgorithm::Knn | SimilarAlgorithm::Cosine) {
-        export_node_selection(dir, label)?
+        let mut selected = export_node_selection(dir, label)?;
+        selected.retain_inventory(provider.admitted_inventory());
+        selected
     } else {
         export_adjacency(
             provider,

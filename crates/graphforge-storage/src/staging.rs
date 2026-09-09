@@ -119,6 +119,7 @@ pub(crate) fn is_staged_temp_name(name: &std::ffi::OsStr) -> bool {
 pub struct RewriteBatch {
     /// `(staged temp, final destination)` in insertion = commit order.
     staged: Vec<(NamedTempFile, PathBuf)>,
+    pending_routes: crate::route_component::owned::PendingRoutes,
     property_windows: BTreeMap<PropertyWindowKey, PendingPropertyWindow>,
     moves: BTreeMap<PathBuf, crate::durable_rewrite::moves::SourceRetirement>,
 }
@@ -144,6 +145,18 @@ impl RewriteBatch {
         Self::default()
     }
 
+    pub(crate) fn route_component(&mut self, root: &Path, route: &str) -> Result<String, GfError> {
+        self.pending_routes.register(root, route)
+    }
+
+    pub(crate) fn prepare_registered_routes(
+        &mut self,
+        root_path: &Path,
+        root: &graphforge_filesystem::StableDirectory,
+    ) -> Result<Option<crate::route_component::owned::TablePrior>, GfError> {
+        std::mem::take(&mut self.pending_routes).prepare(root_path, root, self)
+    }
+
     /// Stage a contained file move in the durable rewrite transaction.
     ///
     /// The destination must be absent. The exact source is authenticated again
@@ -158,13 +171,51 @@ impl RewriteBatch {
         source: &Path,
         destination: &Path,
     ) -> Result<(), GfError> {
+        self.stage_move_with_prefix(project_root, source, destination, "move.parquet.")
+    }
+
+    pub(crate) fn stage_semantic_route_move(
+        &mut self,
+        project_root: &Path,
+        directory: &graphforge_filesystem::StableDirectory,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), GfError> {
         if self.staged.iter().any(|(_, path)| path == destination) {
             return Err(GfError::Storage(
                 "duplicate rewrite move destination".into(),
             ));
         }
-        let (temporary, retirement) =
-            crate::durable_rewrite::moves::stage(project_root, source, destination)?;
+        let (temporary, retirement) = crate::durable_rewrite::moves::stage_retained(
+            project_root,
+            directory,
+            source,
+            destination,
+            "semantic-route-move.parquet.",
+        )?;
+        self.moves.insert(destination.to_owned(), retirement);
+        self.staged.push((temporary, destination.to_owned()));
+        Ok(())
+    }
+
+    fn stage_move_with_prefix(
+        &mut self,
+        project_root: &Path,
+        source: &Path,
+        destination: &Path,
+        temporary_prefix: &str,
+    ) -> Result<(), GfError> {
+        if self.staged.iter().any(|(_, path)| path == destination) {
+            return Err(GfError::Storage(
+                "duplicate rewrite move destination".into(),
+            ));
+        }
+        let (temporary, retirement) = crate::durable_rewrite::moves::stage(
+            project_root,
+            source,
+            destination,
+            temporary_prefix,
+        )?;
         self.moves.insert(destination.to_owned(), retirement);
         self.staged.push((temporary, destination.to_owned()));
         Ok(())
@@ -181,12 +232,38 @@ impl RewriteBatch {
 
     /// Stage an authenticated control record in the same rename unit as graph data.
     pub(crate) fn stage_bytes(&mut self, final_path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+        self.stage_control_bytes(final_path, bytes, None)
+    }
+
+    pub(crate) fn stage_named_control_bytes(
+        &mut self,
+        final_path: &Path,
+        bytes: &[u8],
+        prefix: &str,
+    ) -> Result<(), GfError> {
+        self.stage_control_bytes(final_path, bytes, Some(prefix))
+    }
+
+    fn stage_control_bytes(
+        &mut self,
+        final_path: &Path,
+        bytes: &[u8],
+        prefix: Option<&str>,
+    ) -> Result<(), GfError> {
         self.refuse_move_replacement(final_path)?;
         let parent = final_path
             .parent()
             .ok_or_else(|| GfError::Storage("staged control record has no parent".into()))?;
         std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
-        let mut temp = NamedTempFile::new_in(parent).map_err(|error| io_err(&error))?;
+        let mut temp = if let Some(prefix) = prefix {
+            tempfile::Builder::new()
+                .prefix(prefix)
+                .suffix(".tmp")
+                .tempfile_in(parent)
+        } else {
+            NamedTempFile::new_in(parent)
+        }
+        .map_err(|error| io_err(&error))?;
         let uuid_participant = final_path
             .components()
             .any(|component| component.as_os_str() == "uuid-membership");
@@ -450,7 +527,7 @@ impl RewriteBatch {
                 "reserved graph authority must commit through its sealed publication path".into(),
             ));
         }
-        if !self.moves.is_empty() {
+        if !self.moves.is_empty() || !self.pending_routes.is_empty() {
             crate::durable_rewrite::commit(self, project_root, false, false, false, None)?;
             return Ok(());
         }
@@ -509,6 +586,24 @@ impl RewriteBatch {
     #[cfg(test)]
     pub(crate) fn commit_unsealed_for_test(self) -> Result<(), GfError> {
         self.commit_unsealed()
+    }
+
+    pub(crate) fn retained_temporary_identities(
+        &self,
+    ) -> Result<BTreeMap<PathBuf, graphforge_filesystem::FileIdentity>, GfError> {
+        self.staged
+            .iter()
+            .map(|(file, _)| {
+                let identity = graphforge_filesystem::file_identity(file.as_file())
+                    .map_err(|error| io_err(&error))?;
+                if graphforge_filesystem::path_identity(file.path()).ok() != Some(identity) {
+                    return Err(GfError::Storage(
+                        "rewrite temporary identity changed".into(),
+                    ));
+                }
+                Ok((file.path().to_path_buf(), identity))
+            })
+            .collect()
     }
 
     /// The staged destination paths, in insertion (= commit) order.

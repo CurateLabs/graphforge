@@ -180,11 +180,11 @@ impl GraphForge {
                 == expected_generation;
             if still_prior {
                 crate::graph_snapshot::restore(&prior.bytes, &self.dir)?;
-                self.adjacency_provider.invalidate();
+                self.adjacency_provider_for_session().invalidate();
             }
             return Err(error);
         }
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         Ok(EdgeHandle::new(edge_uuid, rel_type))
     }
 }

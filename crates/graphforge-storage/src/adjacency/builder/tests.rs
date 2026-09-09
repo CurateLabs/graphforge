@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::GraphWriter;
-use crate::adjacency::tests::{BUILD_TS, write_diamond, write_multi_row_group_knows};
+use crate::adjacency::tests::{BUILD_TS, write_diamond};
 use crate::adjacency::{
     AdjacencyFreshnessState, collect_adjacency_groups, csr_from_entries, inspect_adjacency_index,
     manifest_path, read_csr, read_manifest, sharded_csr_exists, validate_adjacency_index,
@@ -240,7 +240,11 @@ fn empty_project_builds_union_pair_and_manifest() {
 fn tiny_chunk_rows_spill_build_matches_csr_from_entries() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
-    let (groups, union) = collect_adjacency_groups(dir.path()).unwrap();
+    let (groups, union) = collect_adjacency_groups(
+        dir.path(),
+        Some(&crate::adjacency::capture_adjacency_inventory(dir.path()).unwrap()),
+    )
+    .unwrap();
     let expected_knows_out = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::Out);
     let expected_knows_in = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::In);
     let expected_all_out = csr_from_entries(&union, Direction::Out);
@@ -393,5 +397,69 @@ fn spill_max_bytes_fails_closed_without_publishing_manifest() {
         !adjacency_dir(stage.path())
             .join(ADJACENCY_SPILL_DIR_NAME)
             .exists()
+    );
+}
+
+#[test]
+fn admitted_reserved_relations_build_portable_distinct_indexes() {
+    let source = TempDir::new().unwrap();
+    let artifacts = TempDir::new().unwrap();
+    let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, BUILD_TS).unwrap();
+    let a = new_v7();
+    let b = new_v7();
+    for node in [a, b] {
+        writer
+            .create_node(
+                node,
+                graphforge_value::EntityTypeId::ontology(TypeId(1)).unwrap(),
+            )
+            .unwrap();
+    }
+    let relations = ["CON", "con", r"AUX\edge"];
+    for relation in relations {
+        writer.create_edge(new_v7(), relation, &a, &b).unwrap();
+    }
+    writer.flush().unwrap();
+    drop(writer);
+    let inventory = crate::adjacency::capture_adjacency_inventory(source.path()).unwrap();
+    let options = AdjacencyBuildOptions {
+        chunk_rows: 1,
+        ..Default::default()
+    };
+    let (rows, metrics) = build_adjacency_index_from_inventory(
+        source.path(),
+        artifacts.path(),
+        Some(&inventory),
+        BUILD_TS,
+        &options,
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(metrics.source_rows, 3);
+    assert_eq!(rows.len(), 8);
+    let mut names = std::collections::BTreeSet::new();
+    for relation in relations {
+        for direction in [Direction::Out, Direction::In] {
+            let row = rows
+                .iter()
+                .find(|row| row.relation_type == relation && row.direction == direction)
+                .unwrap();
+            assert_eq!(row.edge_count, 1);
+            let path = csr_path(artifacts.path(), relation, direction);
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(name.is_ascii());
+            assert!(!name.contains('\\'));
+            assert!(names.insert(name.to_ascii_lowercase()));
+            assert_eq!(read_csr(&path).unwrap().edge_ids.len(), 1);
+        }
+    }
+    assert!(
+        crate::adjacency::validate_adjacency_index_from_inventory(
+            source.path(),
+            artifacts.path(),
+            Some(&inventory)
+        )
+        .unwrap()
+        .is_empty()
     );
 }

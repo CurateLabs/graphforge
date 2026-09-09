@@ -525,7 +525,7 @@ impl GraphForge {
             .lock()
             .expect("runtime catalog poisoned") =
             crate::load_runtime_catalog(&self.dir).map_err(MultiOntologyError::from)?;
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         Ok(ModuleMigrationReceipt {
             project_generation_uuid: expected_generation,
             composition_fingerprint: preview.plan.to_composition_fingerprint.clone(),

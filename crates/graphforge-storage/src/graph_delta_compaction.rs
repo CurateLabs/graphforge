@@ -844,12 +844,14 @@ mod crash_oracle_tests {
             .unwrap();
         second.flush().unwrap();
 
-        assert_eq!(
-            crate::mutator::edge_parquet_files(root.path(), Some("KNOWS"))
-                .unwrap()
-                .len(),
-            2
-        );
+        let (captured, _) = crate::capture_graph_files(root.path()).unwrap();
+        let inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
+            root.path(),
+            captured,
+            None,
+        )
+        .unwrap();
+        assert_eq!(inventory.edge_files(Some("KNOWS")).len(), 2);
         assert_eq!(canonical_topology_rows(root.path(), 1, 1, None).unwrap(), 4);
     }
 

@@ -395,7 +395,7 @@ impl GraphForge {
                     .runtime_catalog
                     .lock()
                     .expect("runtime catalog poisoned") = next_catalog;
-                self.adjacency_provider.invalidate();
+                self.adjacency_provider_for_session().invalidate();
                 debug_assert_eq!(batch.schema().as_ref(), composite_receipt_schema().as_ref());
                 Ok(batch)
             }
@@ -669,7 +669,7 @@ fn reconcile_workspace_to(
         .lock()
         .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir)?;
     graph.install_property_generation(generation)?;
-    graph.adjacency_provider.invalidate();
+    graph.adjacency_provider_for_session().invalidate();
     Ok(())
 }
 
@@ -780,8 +780,12 @@ fn build_validation_snapshot(
             }
         }
     }
-    for batch in graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
-        .map_err(|error| GfError::Storage(format!("failed to read edge topology: {error}")))?
+    for batch in graphforge_storage::read_edges_from_inventory(
+        &graph.property_inventory_for_session(),
+        "*",
+        graph.ontology_mode,
+    )
+    .map_err(|error| GfError::Storage(format!("failed to read edge topology: {error}")))?
     {
         let Some(column) = batch.column_by_name("edge_uuid") else {
             continue;
@@ -2343,6 +2347,19 @@ mod tests {
             })
             .unwrap();
 
+        let retained_sources = graph
+            .property_inventory_for_session()
+            .edge_files(None)
+            .into_iter()
+            .map(|(_, path)| {
+                let file = std::fs::File::open(&path).unwrap();
+                let identity = graphforge_filesystem::file_identity(&file).unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, identity, bytes)
+            })
+            .collect::<Vec<_>>();
+        assert!(!retained_sources.is_empty());
+
         let created_node = uuid7(205);
         let created_edge = uuid7(206);
         graph
@@ -2401,6 +2418,18 @@ mod tests {
                 knowledge: CompositeKnowledgeParticipants::default(),
             })
             .unwrap();
+
+        for (path, identity, bytes) in retained_sources {
+            assert_eq!(
+                graphforge_filesystem::file_identity(&std::fs::File::open(&path).unwrap()).unwrap(),
+                identity
+            );
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                bytes,
+                "deletion must preserve published input objects"
+            );
+        }
 
         let rows = graph
             .execute("MATCH (n:Person) RETURN n.node_uuid AS id")

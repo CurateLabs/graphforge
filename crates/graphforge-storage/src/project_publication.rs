@@ -1060,7 +1060,10 @@ fn stage_optional_graph_tree(
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
         || !matches!(
             files_participant.record_version,
-            crate::GRAPH_FILES_RECORD_VERSION | crate::GRAPH_FILES_V2_RECORD_VERSION
+            crate::GRAPH_FILES_RECORD_VERSION
+                | crate::GRAPH_FILES_V2_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION
+                | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
         )
         || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
@@ -1177,6 +1180,13 @@ fn verify_compact_graph_root(
                 MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
             )
         })?;
+    crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
+        crate::read_graph_object_by_digest(
+            container_root,
+            &entry.content_sha256,
+            MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+        )
+    })?;
     for entry in files {
         crate::verify_graph_object(container_root, &entry.content_sha256, entry.byte_length)?;
     }
@@ -1195,6 +1205,13 @@ fn verify_compact_graph_root_with_lease(
                 MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
             )
         })?;
+    crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
+        crate::graph_object_store::read_graph_object_by_digest_with_lease(
+            lease,
+            &entry.content_sha256,
+            MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+        )
+    })?;
     for entry in files {
         crate::graph_object_store::verify_graph_object_with_lease(
             lease,

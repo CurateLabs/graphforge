@@ -1290,7 +1290,11 @@ fn prepare_compact_import_graph_with_allocation(
             "graph tree requires a graph/files participant",
         ));
     };
-    if participant.participant.record_version != crate::GRAPH_FILES_V2_RECORD_VERSION {
+    if !matches!(
+        participant.participant.record_version,
+        crate::GRAPH_FILES_V2_RECORD_VERSION
+            | crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+    ) {
         return Ok(None);
     }
     let mut lease =
@@ -1306,13 +1310,29 @@ fn prepare_compact_import_graph_with_allocation(
     let mut remaining = entry_count.saturating_mul(2).saturating_add(1024);
     collect_portable_graph_paths(&directory, Path::new(""), &mut paths, &mut remaining)?;
     paths.sort();
-    let (root, _) = crate::graph_object_store::append_graph_files_v2(
-        &lease,
-        graph_tree,
-        &mut crate::graph_object_store::GraphManifestState::empty(),
-        &paths,
-        &[],
-    )
+    let (root, _) = if participant.participant.record_version
+        == crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+    {
+        let routes = crate::route_component::owned::read_owned_layout_table(&directory)
+            .map_err(|error| storage(&error))?
+            .ok_or_else(|| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidStructure,
+                    "mapped compact import requires route authority",
+                )
+            })?;
+        crate::graph_object_store::append_mapped_import_graph_files(
+            &lease, graph_tree, &paths, &routes,
+        )
+    } else {
+        crate::graph_object_store::append_graph_files_v2(
+            &lease,
+            graph_tree,
+            &mut crate::graph_object_store::GraphManifestState::empty(),
+            &paths,
+            &[],
+        )
+    }
     .map_err(|error| storage(&error))?;
     let bytes = crate::graph_manifest::encode_root(&root).map_err(|error| storage(&error))?;
     crate::project_publication::publish_atomic_bytes(
@@ -2090,9 +2110,18 @@ mod tests {
                     vec![Arc::new(ids) as ArrayRef, Arc::new(values)],
                 )
                 .unwrap();
-                let path = tree.join("properties/_untyped.parquet");
+                let table_path = tree.join(crate::route_component::TABLE_FILE);
+                let mut table = crate::route_component::RouteTable::decode(
+                    &fs::read(&table_path).unwrap(),
+                    64 * 1024 * 1024,
+                    100_000,
+                )
+                .unwrap();
+                let component = table.insert("_untyped", 64 * 1024 * 1024, 100_000).unwrap();
+                let path = tree.join(format!("properties/{component}.parquet"));
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 crate::graph_projection::write_parquet(&path, &batch).unwrap();
+                fs::write(table_path, table.encode(64 * 1024 * 1024).unwrap()).unwrap();
             });
             if let Some(expected_error) = expected_error {
                 let error = assert_identity_package_rejected(&package);

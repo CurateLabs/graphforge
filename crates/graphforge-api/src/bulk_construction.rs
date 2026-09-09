@@ -666,7 +666,7 @@ impl GraphForge {
                     .runtime_catalog
                     .lock()
                     .expect("runtime catalog poisoned") = next_catalog;
-                self.adjacency_provider.invalidate();
+                self.adjacency_provider_for_session().invalidate();
             }
             return Err(error.into());
         }
@@ -674,7 +674,7 @@ impl GraphForge {
             .runtime_catalog
             .lock()
             .expect("runtime catalog poisoned") = next_catalog;
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         Ok(node_receipt(
             &normalized.rows,
             operation_uuid,
@@ -1031,7 +1031,7 @@ impl GraphForge {
                     .runtime_catalog
                     .lock()
                     .expect("runtime catalog poisoned") = next_catalog;
-                self.adjacency_provider.invalidate();
+                self.adjacency_provider_for_session().invalidate();
             }
             return Err(error.into());
         }
@@ -1039,7 +1039,7 @@ impl GraphForge {
             .runtime_catalog
             .lock()
             .expect("runtime catalog poisoned") = next_catalog;
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         Ok(edge_receipt(
             &normalized.rows,
             operation_uuid,

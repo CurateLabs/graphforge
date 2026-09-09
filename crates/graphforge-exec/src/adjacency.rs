@@ -87,6 +87,25 @@ pub enum AdjacencyBacking {
 #[derive(Clone, Debug, Default)]
 pub struct Adjacency {
     inner: AdjacencyInner,
+    // Lazy shard readers must keep private files alive after provider replacement.
+    retained_root: Option<RetainedAdjacencyRoot>,
+}
+
+#[derive(Clone)]
+struct RetainedAdjacencyRoot(Arc<dyn AsRef<std::path::Path> + Send + Sync>);
+
+impl std::fmt::Debug for RetainedAdjacencyRoot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RetainedAdjacencyRoot")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsRef<std::path::Path> for RetainedAdjacencyRoot {
+    fn as_ref(&self) -> &std::path::Path {
+        self.0.as_ref().as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -554,6 +573,14 @@ fn merge_undirected_row<'a>(out: &NeighborRow<'a>, inbound: &NeighborRow<'a>) ->
 /// view is produced (scan-build now; disk-loaded CSR with scan fallback in
 /// #761) — consumers only see [`Adjacency`].
 pub trait AdjacencyProvider: Send + Sync {
+    /// Explicit graph authority for metadata reads accompanying this operation.
+    /// Legacy standalone providers have no admitted inventory.
+    fn admitted_inventory(
+        &self,
+    ) -> Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>> {
+        None
+    }
+
     /// The adjacency view for (`rel_type_name`, `direction`).
     ///
     /// `"*"` means all relation types (#823): the per-row `rel_type_name`
@@ -589,6 +616,56 @@ pub trait AdjacencyProvider: Send + Sync {
     /// manifest count so unconstrained `count(r)` cannot charge O(E) RSS.
     fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
         self.adjacency(rel_type_name, direction)?.edge_entry_count()
+    }
+}
+
+/// Operation-scoped adjacency view carrying already-admitted graph metadata.
+/// Adjacency lookup, repair, status and cardinality retain the underlying provider's behavior.
+pub struct AdmittedAdjacencyProvider<'a> {
+    provider: &'a dyn AdjacencyProvider,
+    inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+}
+
+impl<'a> AdmittedAdjacencyProvider<'a> {
+    /// Bind one operation to its already-authenticated graph inventory.
+    #[must_use]
+    pub fn new(
+        provider: &'a dyn AdjacencyProvider,
+        inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    ) -> Self {
+        Self {
+            provider,
+            inventory,
+        }
+    }
+}
+
+impl AdjacencyProvider for AdmittedAdjacencyProvider<'_> {
+    fn admitted_inventory(
+        &self,
+    ) -> Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>> {
+        Some(Arc::clone(&self.inventory))
+    }
+
+    fn adjacency(&self, relation: &str, direction: Direction) -> Result<Arc<Adjacency>, GfError> {
+        self.provider.adjacency(relation, direction)
+    }
+
+    fn repair_adjacency(
+        &self,
+        relation: &str,
+        direction: Direction,
+        error: GfError,
+    ) -> Result<Arc<Adjacency>, GfError> {
+        self.provider.repair_adjacency(relation, direction, error)
+    }
+
+    fn status(&self, relation: &str, direction: Direction) -> AdjacencyStatus {
+        self.provider.status(relation, direction)
+    }
+
+    fn edge_cardinality(&self, relation: &str, direction: Direction) -> Result<u64, GfError> {
+        self.provider.edge_cardinality(relation, direction)
     }
 }
 
@@ -679,17 +756,38 @@ impl<'a> AdjacencyReader<'a> {
 pub struct ScanBuildAdjacencyProvider {
     dir: PathBuf,
     mode: OntologyMode,
+    inventory: Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
 }
 
 impl ScanBuildAdjacencyProvider {
     /// A provider over the project at `dir` in ontology `mode`.
     #[must_use]
     pub fn new(dir: PathBuf, mode: OntologyMode) -> Self {
-        Self { dir, mode }
+        Self {
+            dir,
+            mode,
+            inventory: None,
+        }
+    }
+
+    /// Retain the graph inventory admitted by this provider's owner.
+    #[must_use]
+    pub fn with_inventory(
+        mut self,
+        inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    ) -> Self {
+        self.inventory = Some(inventory);
+        self
     }
 }
 
 impl AdjacencyProvider for ScanBuildAdjacencyProvider {
+    fn admitted_inventory(
+        &self,
+    ) -> Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>> {
+        self.inventory.clone()
+    }
+
     fn adjacency(
         &self,
         rel_type_name: &str,
@@ -704,8 +802,14 @@ impl AdjacencyProvider for ScanBuildAdjacencyProvider {
         } else {
             rel_type_name
         };
-        let batches = graphforge_storage::read_edges(&self.dir, read_name, self.mode)
-            .map_err(|e| GfError::Execution(e.to_string()))?;
+        let inventory = self.admitted_inventory();
+        let batches = match &inventory {
+            Some(inventory) => {
+                graphforge_storage::read_edges_from_inventory(inventory, read_name, self.mode)
+            }
+            None => graphforge_storage::read_edges(&self.dir, read_name, self.mode),
+        }
+        .map_err(|e| GfError::Execution(e.to_string()))?;
         build_from_edge_batches(rel_type_name, direction, &batches).map(Arc::new)
     }
 
@@ -714,7 +818,13 @@ impl AdjacencyProvider for ScanBuildAdjacencyProvider {
     }
 
     fn edge_cardinality(&self, rel_type_name: &str, direction: Direction) -> Result<u64, GfError> {
-        footer_edge_cardinality(&self.dir, rel_type_name, self.mode, direction)
+        footer_edge_cardinality(
+            &self.dir,
+            self.admitted_inventory().as_deref(),
+            rel_type_name,
+            self.mode,
+            direction,
+        )
     }
 }
 
@@ -722,11 +832,17 @@ impl AdjacencyProvider for ScanBuildAdjacencyProvider {
 /// each stored edge on both the out and in sides.
 fn footer_edge_cardinality(
     dir: &std::path::Path,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     rel_type_name: &str,
     mode: OntologyMode,
     direction: Direction,
 ) -> Result<u64, GfError> {
-    let rows = graphforge_storage::count_edge_rows(dir, rel_type_name, mode)?;
+    let rows = match inventory {
+        Some(inventory) => {
+            graphforge_storage::count_edge_rows_from_inventory(inventory, rel_type_name, mode)
+        }
+        None => graphforge_storage::count_edge_rows(dir, rel_type_name, mode),
+    }?;
     Ok(match direction {
         Direction::Out | Direction::In => rows,
         Direction::Undirected => rows.saturating_mul(2),
@@ -781,6 +897,7 @@ fn build_from_edge_batches(
         }
     }
     Ok(Adjacency {
+        retained_root: None,
         inner: if adj.is_empty() {
             AdjacencyInner::Empty
         } else {
@@ -837,7 +954,7 @@ enum IndexState {
 pub struct PersistentAdjacencyProvider {
     dir: PathBuf,
     /// Owned artifact root; a TempDir owner also removes it on provider drop.
-    rebuild_root: Option<Box<dyn AsRef<std::path::Path> + Send + Sync>>,
+    rebuild_root: Option<RetainedAdjacencyRoot>,
     /// Serialize initial loads/builds; row reads retain their independent views.
     load_lock: Mutex<()>,
     /// A graph reset can reuse generation numbers. Reject pre-reset manifests
@@ -867,6 +984,16 @@ impl PersistentAdjacencyProvider {
         }
     }
 
+    /// Retain the graph inventory admitted by this provider's owner.
+    #[must_use]
+    pub fn with_inventory(
+        mut self,
+        inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    ) -> Self {
+        self.scan = self.scan.with_inventory(inventory);
+        self
+    }
+
     /// Keep lazy builds and repairs outside the source graph workspace.
     /// Passing an owned temporary directory retains it for the provider's lifetime.
     /// Existing source indexes remain readable until a private rebuild succeeds.
@@ -875,25 +1002,27 @@ impl PersistentAdjacencyProvider {
         mut self,
         root: impl AsRef<std::path::Path> + Send + Sync + 'static,
     ) -> Self {
-        self.rebuild_root = Some(Box::new(root));
+        self.rebuild_root = Some(RetainedAdjacencyRoot(Arc::new(root)));
         self
     }
 
     fn index_root(&self) -> &std::path::Path {
         self.rebuild_root
-            .as_deref()
+            .as_ref()
             .map(AsRef::as_ref)
             .filter(|root| csr::manifest_path(root).is_file())
             .unwrap_or(&self.dir)
     }
 
     fn rebuild(&self, now: i64) -> Result<Vec<AdjacencyManifestRow>, GfError> {
-        let rows = csr::build_adjacency_index_into(
+        let (rows, _) = csr::build_adjacency_index_from_inventory(
             &self.dir,
             self.rebuild_root
-                .as_deref()
+                .as_ref()
                 .map_or(self.dir.as_path(), AsRef::as_ref),
+            self.admitted_inventory().as_deref(),
             now,
+            &csr::AdjacencyBuildOptions::default(),
             || Ok(()),
         )?;
         self.reset_pending.store(false, Ordering::SeqCst);
@@ -1067,12 +1196,15 @@ impl PersistentAdjacencyProvider {
         };
         match direction {
             Direction::Out => Ok(Adjacency {
+                retained_root: None,
                 inner: directed(csr::Direction::Out)?,
             }),
             Direction::In => Ok(Adjacency {
+                retained_root: None,
                 inner: directed(csr::Direction::In)?,
             }),
             Direction::Undirected => Ok(Adjacency {
+                retained_root: None,
                 inner: AdjacencyInner::Undirected {
                     out: Arc::new(directed(csr::Direction::Out)?),
                     inbound: Arc::new(directed(csr::Direction::In)?),
@@ -1190,7 +1322,8 @@ impl PersistentAdjacencyProvider {
         view
     }
 
-    fn cache_view(&self, stem: &str, direction: Direction, view: Adjacency) -> Arc<Adjacency> {
+    fn cache_view(&self, stem: &str, direction: Direction, mut view: Adjacency) -> Arc<Adjacency> {
+        view.retained_root.clone_from(&self.rebuild_root);
         self.cache_shared_view(stem, direction, Arc::new(view))
     }
 }
@@ -1234,6 +1367,12 @@ fn sharded_overlay_rows(
 }
 
 impl AdjacencyProvider for PersistentAdjacencyProvider {
+    fn admitted_inventory(
+        &self,
+    ) -> Option<Arc<graphforge_storage::AuthenticatedPropertyInventory>> {
+        self.scan.admitted_inventory()
+    }
+
     fn repair_adjacency(
         &self,
         rel_type_name: &str,
@@ -1380,6 +1519,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                     }) {
                         return footer_edge_cardinality(
                             &self.dir,
+                            self.scan.admitted_inventory().as_deref(),
                             rel_type_name,
                             self.scan.mode,
                             direction,
@@ -1400,7 +1540,13 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
                     }
                 })
             }
-            _ => footer_edge_cardinality(&self.dir, rel_type_name, self.scan.mode, direction),
+            _ => footer_edge_cardinality(
+                &self.dir,
+                self.scan.admitted_inventory().as_deref(),
+                rel_type_name,
+                self.scan.mode,
+                direction,
+            ),
         }
     }
 }
@@ -1409,6 +1555,7 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
 #[cfg(test)]
 fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
     Adjacency {
+        retained_root: None,
         inner: AdjacencyInner::Undirected {
             out: Arc::new(AdjacencyInner::Csr(Arc::new(out))),
             inbound: Arc::new(AdjacencyInner::Csr(Arc::new(inbound))),
@@ -1432,6 +1579,23 @@ mod tests {
     use graphforge_storage::GraphWriter;
 
     use super::*;
+
+    fn admitted_inventory(dir: &Path) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+        graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+            .unwrap()
+            .admitted_inventory()
+            .unwrap()
+    }
+
+    fn scan_provider(dir: PathBuf, mode: OntologyMode) -> ScanBuildAdjacencyProvider {
+        let inventory = admitted_inventory(&dir);
+        ScanBuildAdjacencyProvider::new(dir, mode).with_inventory(inventory)
+    }
+
+    fn persistent_provider(dir: PathBuf, mode: OntologyMode) -> PersistentAdjacencyProvider {
+        let inventory = admitted_inventory(&dir);
+        PersistentAdjacencyProvider::new(dir, mode).with_inventory(inventory)
+    }
 
     /// Fixed timestamp so written Parquet is deterministic.
     const TS: i64 = 1_700_000_000_000_000;
@@ -1457,8 +1621,7 @@ mod tests {
     fn out_in_undirected_strict() {
         let dir = TempDir::new().unwrap();
         let [a, b, _c, d] = write_diamond(dir.path());
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let out = provider.adjacency("KNOWS", Direction::Out).unwrap();
         // a has three outgoing entries: a→b, a→c, then the parallel a→b.
         assert_eq!(out.neighbors(a).unwrap().len(), 3);
@@ -1488,8 +1651,7 @@ mod tests {
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
         w.flush().unwrap();
 
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert_eq!(
             view.neighbors(ids[0]).unwrap().to_vec(),
@@ -1511,8 +1673,7 @@ mod tests {
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
         w.flush().unwrap();
 
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("*", Direction::Out).unwrap();
         assert_eq!(
             view.neighbors(ids[0]).unwrap().to_vec(),
@@ -1539,8 +1700,7 @@ mod tests {
         w.create_edge(new_v7(), "OWNS", &a, &c).unwrap();
         w.flush().unwrap();
 
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("*", Direction::Out).unwrap();
         // Both relations' edges appear (KNOWS a→b, OWNS a→c), unioned across the
         // two per-relation files — no longer the pre-#823 empty view.
@@ -1578,8 +1738,7 @@ mod tests {
         let edge_set: std::collections::HashSet<[u8; 16]> = incident.into_iter().collect();
         graphforge_storage::delete_nodes_and_edges(dir.path(), &node_set, &edge_set).unwrap();
 
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert!(
             view.neighbors(ids[1]).unwrap().is_empty(),
@@ -1595,8 +1754,7 @@ mod tests {
     #[test]
     fn absent_edges_dir_yields_empty_adjacency() {
         let dir = TempDir::new().unwrap();
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert!(view.is_empty());
         assert!(view.neighbors(1).unwrap().is_empty());
@@ -1622,8 +1780,7 @@ mod tests {
         }
         w.flush().unwrap();
 
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert_eq!(
             view.neighbors(hub_id).unwrap().to_vec(),
@@ -1637,8 +1794,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let _ids = write_diamond(dir.path());
         graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
-        let provider =
-            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         assert_eq!(
             provider.status("KNOWS", Direction::Out),
             AdjacencyStatus::Hit
@@ -1652,10 +1808,9 @@ mod tests {
         assert_eq!(undirected.backing(), AdjacencyBacking::CsrUndirected);
         assert_eq!(undirected.base_csr_entries_expanded(), 0);
 
-        let scanned =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict)
-                .adjacency("KNOWS", Direction::Out)
-                .unwrap();
+        let scanned = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict)
+            .adjacency("KNOWS", Direction::Out)
+            .unwrap();
         assert_eq!(
             out.as_ref(),
             scanned.as_ref(),
@@ -1685,8 +1840,7 @@ mod tests {
     #[test]
     fn scan_build_status_is_building() {
         let dir = TempDir::new().unwrap();
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         for direction in [Direction::Out, Direction::In, Direction::Undirected] {
             assert_eq!(
                 provider.status("KNOWS", direction),
@@ -1730,8 +1884,7 @@ mod tests {
             !csr::adjacency_dir(dir.path()).exists(),
             "diamond fixture must start without an adjacency index"
         );
-        let provider =
-            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         assert_eq!(
             provider.edge_cardinality("KNOWS", Direction::Out).unwrap(),
             6
@@ -1759,8 +1912,7 @@ mod tests {
             "fixture must publish sharded CSR payloads"
         );
 
-        let provider =
-            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         assert_eq!(
             provider.edge_cardinality("KNOWS", Direction::Out).unwrap(),
             expected
@@ -1799,8 +1951,7 @@ mod tests {
             let [src, ..] = write_diamond(dir.path());
             build_adjacency_index(dir.path(), TS).unwrap();
             assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
-            let provider =
-                PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+            let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
             let corrupt = provider.adjacency("KNOWS", Direction::Out).unwrap();
             assert!(corrupt.neighbors(src).is_err());
             assert_ne!(
@@ -1844,7 +1995,7 @@ mod tests {
         let artifacts = TempDir::new().unwrap();
         let artifact_path = artifacts.path().to_path_buf();
         let provider = Arc::new(
-            PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
+            persistent_provider(source.path().to_path_buf(), OntologyMode::Strict)
                 .with_rebuild_root(artifacts),
         );
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -1889,9 +2040,8 @@ mod tests {
             let before = graphforge_storage::capture_graph_files(source.path())
                 .unwrap()
                 .0;
-            let provider =
-                PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
-                    .with_rebuild_root(artifacts.path().to_path_buf());
+            let provider = persistent_provider(source.path().to_path_buf(), OntologyMode::Strict)
+                .with_rebuild_root(artifacts.path().to_path_buf());
             let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
             assert_eq!(reader.with_neighbors(src, |row| row.len()).unwrap(), 3);
             assert_eq!(reader.view.backing(), AdjacencyBacking::CsrNative);
@@ -1929,20 +2079,20 @@ mod tests {
         let source = TempDir::new().unwrap();
         let [src, ..] = write_diamond(source.path());
         let artifacts = TempDir::new().unwrap();
-        let provider =
-            PersistentAdjacencyProvider::new(source.path().to_path_buf(), OntologyMode::Strict)
-                .with_rebuild_root(artifacts);
+        let provider = persistent_provider(source.path().to_path_buf(), OntologyMode::Strict)
+            .with_rebuild_root(artifacts);
         let retained = provider.adjacency("KNOWS", Direction::Out).unwrap();
-        let corrupted_path = source.path().join("topology/edges/KNOWS.parquet");
+        let corrupted_path = provider
+            .admitted_inventory()
+            .unwrap()
+            .edge_files(Some("KNOWS"))[0]
+            .1
+            .clone();
         let original = std::fs::read(&corrupted_path).ok();
         assert!(
             provider
                 .reset_graph(|| {
-                    std::fs::write(
-                        source.path().join("topology/edges/KNOWS.parquet"),
-                        b"partial cleanup",
-                    )
-                    .unwrap();
+                    std::fs::write(&corrupted_path, b"partial cleanup").unwrap();
                     Err(GfError::Storage("cleanup failed".into()))
                 })
                 .is_err()
@@ -1987,13 +2137,16 @@ mod tests {
         let [src, ..] = write_diamond(dir.path());
         build_adjacency_index(dir.path(), TS).unwrap();
         assert!(overwrite_sharded_csr_payloads(dir.path()) > 0);
-        let provider =
-            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = persistent_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
         // Topology corruption makes the actual rebuild fail; it cannot be
         // hidden as a successful empty row or a successful scan fallback.
         std::fs::write(
-            dir.path().join("topology/edges/KNOWS.parquet"),
+            &provider
+                .admitted_inventory()
+                .unwrap()
+                .edge_files(Some("KNOWS"))[0]
+                .1,
             b"corrupt topology",
         )
         .unwrap();
@@ -2010,12 +2163,12 @@ mod tests {
     #[test]
     fn row_callback_borrows_high_degree_map_without_copying() {
         let dir = TempDir::new().unwrap();
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let entries: Vec<_> = (0..65_536).map(|id| (id, id + 1)).collect();
         let original = entries.as_ptr();
         let mut reader = AdjacencyReader::new(&provider, "KNOWS", Direction::Out).unwrap();
         reader.view = Arc::new(Adjacency {
+            retained_root: None,
             inner: AdjacencyInner::Map(HashMap::from([(1, entries)])),
         });
         let mut visits = 0;

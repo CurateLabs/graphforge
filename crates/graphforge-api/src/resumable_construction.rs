@@ -344,7 +344,7 @@ impl GraphConstructionSession<'_> {
             .uuid_membership_index
             .lock()
             .expect("UUID membership lock poisoned") = None;
-        self.graph.adjacency_provider.invalidate();
+        self.graph.adjacency_provider_for_session().invalidate();
         Ok(GraphConstructionPublicationReceipt {
             generation_uuid: published.generation_uuid,
             idempotent_replay: published.idempotent_replay,

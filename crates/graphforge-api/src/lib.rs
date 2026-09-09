@@ -102,6 +102,10 @@ mod import_session;
 mod invocation_descriptor;
 mod knowledge;
 mod maintenance;
+#[cfg(test)]
+mod mapped_portable_tests;
+#[cfg(test)]
+mod mapped_stream_tests;
 mod multi_ontology;
 mod mutation_transaction;
 #[cfg(test)]
@@ -477,7 +481,7 @@ pub struct GraphForge {
     /// Long-lived adjacency provider (#832): one per instance so loaded CSR
     /// views amortize across queries. Each session revalidates it (one
     /// generation read) at construction, and write paths invalidate it.
-    adjacency_provider: Arc<graphforge_exec::PersistentAdjacencyProvider>,
+    adjacency_provider: Arc<std::sync::RwLock<Arc<graphforge_exec::PersistentAdjacencyProvider>>>,
     /// Prevent adjacency readers from observing a staged directory swap.
     adjacency_visibility: Arc<std::sync::RwLock<()>>,
     /// Bounded worker state owned only by this exact embedded process.
@@ -668,14 +672,16 @@ impl GraphForge {
             resolved_generation,
             property_authority: Arc::new(Mutex::new(GenerationPropertyAuthority {
                 generation_uuid,
-                inventory: property_inventory,
+                inventory: Arc::clone(&property_inventory),
             })),
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(adjacency_provider_for_graph(&dir, ontology_mode)?),
+            adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(
+                adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?,
+            ))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -870,7 +876,8 @@ impl GraphForge {
         )?);
         let runtime = build_runtime(&resource_policy)?;
 
-        let adjacency_provider = adjacency_provider_for_graph(&dir, ontology_mode)?;
+        let adjacency_provider =
+            adjacency_provider_for_graph(&dir, ontology_mode, Arc::clone(&property_inventory))?;
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
@@ -878,14 +885,14 @@ impl GraphForge {
             resolved_generation,
             property_authority: Arc::new(Mutex::new(GenerationPropertyAuthority {
                 generation_uuid,
-                inventory: property_inventory,
+                inventory: Arc::clone(&property_inventory),
             })),
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
-            adjacency_provider: Arc::new(adjacency_provider),
+            adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(adjacency_provider))),
             adjacency_visibility: Arc::new(std::sync::RwLock::new(())),
             embedding_refresh_scheduler: Arc::new(Mutex::new(
                 embedding_refresh::initialize_embedding_refresh_scheduler(&dir)?,
@@ -980,6 +987,15 @@ impl GraphForge {
         }
     }
 
+    fn adjacency_provider_for_session(&self) -> Arc<graphforge_exec::PersistentAdjacencyProvider> {
+        Arc::clone(
+            &self
+                .adjacency_provider
+                .read()
+                .expect("adjacency provider lock poisoned"),
+        )
+    }
+
     fn property_inventory_for_session(
         &self,
     ) -> Arc<graphforge_storage::AuthenticatedPropertyInventory> {
@@ -1004,17 +1020,26 @@ impl GraphForge {
             )?,
         );
         let ordinal_replacement = ordinal_identity_handle(generation, &self.dir)?;
+        let adjacency_replacement = Arc::new(adjacency_provider_for_graph(
+            &self.dir,
+            self.ontology_mode,
+            Arc::clone(&replacement),
+        )?);
         *self
             .property_authority
             .lock()
             .expect("property authority lock poisoned") = GenerationPropertyAuthority {
             generation_uuid: generation.generation_uuid(),
-            inventory: replacement,
+            inventory: Arc::clone(&replacement),
         };
         *self
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned") = generation.generation_uuid();
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") = adjacency_replacement;
         self.ordinal_identities.replace(ordinal_replacement);
         Ok(())
     }
@@ -1494,9 +1519,13 @@ impl GraphForge {
         // must never fall back to `_untyped` host routing.
         let execution_mode = composition_mode.unwrap_or(self.ontology_mode);
         let adjacency_provider = if execution_mode == self.ontology_mode {
-            Arc::clone(&self.adjacency_provider)
+            self.adjacency_provider_for_session()
         } else {
-            Arc::new(adjacency_provider_for_graph(&self.dir, execution_mode)?)
+            Arc::new(adjacency_provider_for_graph(
+                &self.dir,
+                execution_mode,
+                self.property_inventory_for_session(),
+            )?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
@@ -1924,9 +1953,13 @@ impl GraphForge {
                 Self::composition_execution_mode(context)
             });
         let adjacency_provider = if execution_mode == self.ontology_mode {
-            Arc::clone(&self.adjacency_provider)
+            self.adjacency_provider_for_session()
         } else {
-            Arc::new(adjacency_provider_for_graph(&self.dir, execution_mode)?)
+            Arc::new(adjacency_provider_for_graph(
+                &self.dir,
+                execution_mode,
+                self.property_inventory_for_session(),
+            )?)
         };
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
@@ -2040,56 +2073,56 @@ impl GraphForge {
             ));
         }
 
-        let cleanup_result = self
-            .adjacency_provider
-            .reset_graph(|| -> Result<(), GfError> {
-                let entries = std::fs::read_dir(&self.dir).map_err(|e| {
-                    GfError::Storage(format!("failed to read in-memory project: {e}"))
-                })?;
-                let mut first_error = None;
+        let cleanup_result =
+            self.adjacency_provider_for_session()
+                .reset_graph(|| -> Result<(), GfError> {
+                    let entries = std::fs::read_dir(&self.dir).map_err(|e| {
+                        GfError::Storage(format!("failed to read in-memory project: {e}"))
+                    })?;
+                    let mut first_error = None;
 
-                for entry in entries {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(error) => {
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(error) => {
+                                first_error.get_or_insert_with(|| {
+                                    GfError::Storage(format!(
+                                        "failed to inspect in-memory project entry: {error}"
+                                    ))
+                                });
+                                continue;
+                            }
+                        };
+                        let path = entry.path();
+                        let file_type = match entry.file_type() {
+                            Ok(file_type) => file_type,
+                            Err(error) => {
+                                first_error.get_or_insert_with(|| {
+                                    GfError::Storage(format!(
+                                        "failed to inspect in-memory project entry {}: {error}",
+                                        path.display()
+                                    ))
+                                });
+                                continue;
+                            }
+                        };
+                        let result = if file_type.is_dir() && !file_type.is_symlink() {
+                            std::fs::remove_dir_all(&path)
+                        } else {
+                            std::fs::remove_file(&path)
+                        };
+                        if let Err(error) = result {
                             first_error.get_or_insert_with(|| {
                                 GfError::Storage(format!(
-                                    "failed to inspect in-memory project entry: {error}"
-                                ))
-                            });
-                            continue;
-                        }
-                    };
-                    let path = entry.path();
-                    let file_type = match entry.file_type() {
-                        Ok(file_type) => file_type,
-                        Err(error) => {
-                            first_error.get_or_insert_with(|| {
-                                GfError::Storage(format!(
-                                    "failed to inspect in-memory project entry {}: {error}",
+                                    "failed to remove in-memory project entry {}: {error}",
                                     path.display()
                                 ))
                             });
-                            continue;
                         }
-                    };
-                    let result = if file_type.is_dir() && !file_type.is_symlink() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
-                    if let Err(error) = result {
-                        first_error.get_or_insert_with(|| {
-                            GfError::Storage(format!(
-                                "failed to remove in-memory project entry {}: {error}",
-                                path.display()
-                            ))
-                        });
                     }
-                }
 
-                first_error.map_or(Ok(()), Err)
-            });
+                    first_error.map_or(Ok(()), Err)
+                });
 
         // These registries describe the fixture, not only its remaining files.
         // Reset them even when filesystem cleanup is partial so callers never
@@ -2099,7 +2132,7 @@ impl GraphForge {
             .lock()
             .expect("procedure registry lock")
             .clear();
-        self.adjacency_provider.invalidate();
+        self.adjacency_provider_for_session().invalidate();
         cleanup_result
     }
 
@@ -2229,8 +2262,15 @@ impl GraphForge {
             // reads by it (exploratory `_exploratory.parquet` vs typed
             // `topology/edges/<REL>.parquet`); rebuild it so the adjacency path
             // matches the new mode.
-            self.adjacency_provider =
-                Arc::new(adjacency_provider_for_graph(&self.dir, self.ontology_mode)?);
+            *self
+                .adjacency_provider
+                .write()
+                .expect("adjacency provider lock poisoned") =
+                Arc::new(adjacency_provider_for_graph(
+                    &self.dir,
+                    self.ontology_mode,
+                    self.property_inventory_for_session(),
+                )?);
         }
         Ok(())
     }
@@ -2725,10 +2765,10 @@ fn property_inventory_for_hydrated_generation(
     };
     let admitted = if has_deltas {
         let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
-        graphforge_storage::AuthenticatedPropertyInventory::from_materialized_generation(
+        graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
             generation,
             hydrated_root,
-            materialized.files,
+            materialized,
         )?
     } else {
         graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(generation)?
@@ -2771,8 +2811,10 @@ fn ordinal_identity_resolver(
 fn adjacency_provider_for_graph(
     dir: &Path,
     mode: OntologyMode,
+    inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<graphforge_exec::PersistentAdjacencyProvider, GfError> {
-    let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode);
+    let provider = graphforge_exec::PersistentAdjacencyProvider::new(dir.to_path_buf(), mode)
+        .with_inventory(inventory);
     // A pinned view must not mutate its generation. Writable workspaces also
     // have concurrent readers that enumerate graph files, so lazy build temps
     // must stay outside those trees. Each provider owns a unique cache root.
@@ -2781,6 +2823,14 @@ fn adjacency_provider_for_graph(
         .tempdir()
         .map_err(|error| GfError::Storage(format!("cannot create adjacency cache: {error}")))?;
     Ok(provider.with_rebuild_root(artifacts))
+}
+
+fn create_graph_workspace() -> Result<Arc<tempfile::TempDir>, GfError> {
+    tempfile::Builder::new()
+        .prefix("graphforge-graph-workspace-")
+        .tempdir()
+        .map(Arc::new)
+        .map_err(|error| GfError::Storage(format!("failed to create graph workspace: {error}")))
 }
 
 fn hydrate_graph_workspace(
@@ -2807,7 +2857,11 @@ fn hydrate_graph_workspace(
 
     if let Some(files) = files {
         validate_graph_files_snapshot(&files)?;
-        if files.record_version == graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION {
+        if matches!(
+            files.record_version,
+            graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+        ) {
             let inventory = generation
                 .graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
@@ -2855,27 +2909,13 @@ fn hydrate_graph_workspace(
                 graphforge_storage::pinned_open_evidence(&inventory),
             ));
         }
-        let workspace = Arc::new(
-            tempfile::Builder::new()
-                .prefix("graphforge-graph-workspace-")
-                .tempdir()
-                .map_err(|error| {
-                    GfError::Storage(format!("failed to create graph workspace: {error}"))
-                })?,
-        );
+        let workspace = create_graph_workspace()?;
         let evidence =
             graphforge_storage::materialize_graph_tree(&tree, &inventory, workspace.path())?;
         return Ok((workspace.path().to_path_buf(), workspace, evidence));
     }
 
-    let workspace = Arc::new(
-        tempfile::Builder::new()
-            .prefix("graphforge-graph-workspace-")
-            .tempdir()
-            .map_err(|error| {
-                GfError::Storage(format!("failed to create graph workspace: {error}"))
-            })?,
-    );
+    let workspace = create_graph_workspace()?;
     let mut evidence = graphforge_storage::GraphFilesOpenEvidence {
         strategy: graphforge_storage::GraphFilesOpenStrategy::Empty,
         ..graphforge_storage::GraphFilesOpenEvidence::default()
@@ -2905,6 +2945,8 @@ fn validate_graph_files_snapshot(
             files.record_version,
             graphforge_storage::GRAPH_FILES_RECORD_VERSION
                 | graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
         )
         || files.encoding != "json"
     {
@@ -3058,7 +3100,11 @@ pub(crate) fn rematerialize_graph_workspace(
         graphforge_storage::GRAPH_FILES_FAMILY,
     )? {
         validate_graph_files_snapshot(&files)?;
-        if files.record_version == graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION {
+        if matches!(
+            files.record_version,
+            graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION
+                | graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION
+        ) {
             let inventory = generation
                 .graph_files_inventory()?
                 .ok_or_else(|| GfError::Validation("compact graph root disappeared".into()))?;
@@ -3543,24 +3589,29 @@ mod tests {
         let lease = graphforge_storage::begin_graph_object_publication(project).unwrap();
         let mut state = graphforge_storage::GraphManifestState::empty();
         let (inventory, _) = graphforge_storage::capture_graph_files(workspace).unwrap();
+        let mapped =
+            inventory.format_version == graphforge_storage::GRAPH_FILES_MAPPED_RECORD_VERSION;
         let paths = inventory
             .files
             .into_iter()
             .map(|entry| PathBuf::from(entry.relative_path))
             .collect::<Vec<_>>();
-        let (root, _) =
+        let (mut root, _) =
             graphforge_storage::append_graph_files_v2(&lease, workspace, &mut state, &paths, &[])
                 .unwrap();
+        if mapped {
+            root.format_version = graphforge_storage::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION;
+        }
         let participant = ProjectParticipant {
             capability_id: graphforge_storage::GRAPH_CAPABILITY_ID.into(),
             capability_version: graphforge_storage::GRAPH_CAPABILITY_VERSION,
             record_family_id: graphforge_storage::GRAPH_FILES_FAMILY.into(),
-            record_version: graphforge_storage::GRAPH_FILES_V2_RECORD_VERSION,
+            record_version: root.format_version,
             encoding: ProjectParticipantEncoding::Json,
             schema_fingerprint: fingerprint(
                 CanonicalDomain::Schema,
                 CANONICAL_CONTRACT_VERSION,
-                b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length",
+                if mapped { b"graphforge-graph-files-root/4|root_node_sha256|logical_file_count|logical_byte_length|semantic-routes/1" } else { b"graphforge-graph-files-root/2|root_node_sha256|logical_file_count|logical_byte_length" },
             )
             .unwrap(),
             row_count: root.logical_file_count,
@@ -3845,7 +3896,14 @@ mod tests {
             .execute("MATCH (n:Person) RETURN n.name AS name")
             .expect("ordinary query over compact-root generation");
         assert_eq!(result.stats.rows_produced, 1);
-        assert_eq!(reopened.graph_open_evidence().files_copied, 0);
+        // Mutable route authority owns a private copy; immutable payloads stay shared.
+        assert_eq!(reopened.graph_open_evidence().files_copied, 1);
+        assert_eq!(
+            reopened.graph_open_evidence().bytes_copied,
+            std::fs::metadata(reopened.dir.join("semantic-routes.json"))
+                .unwrap()
+                .len()
+        );
         assert!(reopened.graph_open_evidence().files_reused > 0);
         assert!(!reopened.dir.join("files").exists());
         assert!(reopened.dir.join("topology").is_dir());
@@ -4259,7 +4317,7 @@ mod tests {
             .execute("CREATE (:Person)-[:KNOWS]->(:Person)")
             .unwrap();
         let retained = graph
-            .adjacency_provider
+            .adjacency_provider_for_session()
             .adjacency("KNOWS", graphforge_ir::Direction::Out)
             .unwrap();
         let generation =

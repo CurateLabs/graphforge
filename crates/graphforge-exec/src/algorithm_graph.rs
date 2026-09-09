@@ -112,6 +112,7 @@ pub(crate) struct AdjacencyGraph {
     /// Flat adjacency entries in CSR order.
     neighbor_edges: Vec<AlgorithmEdge>,
     node_vectors: HashMap<u64, Vec<f64>>,
+    inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
 }
 
 /// Build CSR neighbor arrays from `(node_id, edge)` pairs already sorted by
@@ -156,6 +157,55 @@ fn neighbor_csr_from_map(
 }
 
 impl AdjacencyGraph {
+    pub(crate) fn retain_inventory(
+        &mut self,
+        inventory: Option<std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory>>,
+    ) {
+        self.inventory = inventory;
+    }
+
+    pub(crate) fn property_routes(&self, dir: &Path, edge: bool) -> Vec<String> {
+        match &self.inventory {
+            Some(inventory) => inventory
+                .routes(if edge {
+                    graphforge_storage::PropertyRouteKind::Edge
+                } else {
+                    graphforge_storage::PropertyRouteKind::Node
+                })
+                .map(str::to_owned)
+                .collect(),
+            None if edge => graphforge_storage::list_edge_property_stems(dir),
+            None => graphforge_storage::list_property_stems(dir),
+        }
+    }
+
+    pub(crate) fn node_property_rows(
+        &self,
+        dir: &Path,
+        route: &str,
+    ) -> Result<HashMap<[u8; 16], HashMap<String, IrLiteral>>, GfError> {
+        match &self.inventory {
+            Some(inventory) => {
+                graphforge_storage::read_node_property_rows_from_inventory(dir, inventory, route)
+            }
+            None => graphforge_storage::read_node_property_rows(dir, route),
+        }
+    }
+
+    pub(crate) fn edge_property_batches(
+        &self,
+        dir: &Path,
+        route: &str,
+    ) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
+        match &self.inventory {
+            Some(inventory) => {
+                graphforge_storage::read_edge_properties_from_inventory(dir, inventory, route)
+            }
+            None => graphforge_storage::read_edge_properties(dir, route),
+        }
+        .map_err(storage_error)
+    }
+
     #[cfg(test)]
     pub(crate) fn malformed_for_defensive_tests(
         directed: bool,
@@ -177,6 +227,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            inventory: None,
         }
     }
 
@@ -410,6 +461,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            inventory: None,
         })
     }
 
@@ -533,6 +585,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            inventory: None,
         }
     }
 
@@ -567,6 +620,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            inventory: None,
         }
     }
 
@@ -632,6 +686,7 @@ impl AdjacencyGraph {
             neighbor_offsets,
             neighbor_edges,
             node_vectors: HashMap::new(),
+            inventory: None,
         }
     }
 
@@ -666,6 +721,7 @@ pub(crate) fn export_node_selection(
         neighbor_offsets: vec![0],
         neighbor_edges: Vec::new(),
         node_vectors: HashMap::new(),
+        inventory: None,
     })
 }
 
@@ -706,9 +762,17 @@ pub(crate) fn export_adjacency(
     }
     raw.sort_unstable();
 
-    let edge_uuids = selected_edge_uuids(dir, mode, selection.via, &edge_ids)?;
+    let inventory = provider.admitted_inventory();
+    let edge_uuids =
+        selected_edge_uuids(dir, mode, selection.via, &edge_ids, inventory.as_deref())?;
     let weights = match selection.weight {
-        Some(property) => selected_weights(dir, selection.via, property, &edge_uuids)?,
+        Some(property) => selected_weights(
+            dir,
+            selection.via,
+            property,
+            &edge_uuids,
+            inventory.as_deref(),
+        )?,
         None => HashMap::new(),
     };
 
@@ -751,6 +815,7 @@ pub(crate) fn export_adjacency(
         neighbor_offsets,
         neighbor_edges,
         node_vectors: HashMap::new(),
+        inventory,
     })
 }
 
@@ -767,9 +832,7 @@ pub(crate) fn load_node_vectors(
     validate_vector_shape(graph.node_ids.len(), 1)?;
     let mut values = HashMap::new();
     for stem in property_stems {
-        for (uuid, row) in
-            graphforge_storage::read_node_property_rows(dir, stem).map_err(storage_error)?
-        {
+        for (uuid, row) in graph.node_property_rows(dir, stem).map_err(storage_error)? {
             if !graph.node_id_by_uuid.contains_key(&uuid) {
                 continue;
             }
@@ -820,9 +883,10 @@ pub(crate) fn load_node_numeric_property(
     property: &str,
 ) -> Result<HashMap<u64, f64>, GfError> {
     let mut values = HashMap::new();
-    for stem in graphforge_storage::list_property_stems(dir) {
-        for (uuid, row) in
-            graphforge_storage::read_node_property_rows(dir, &stem).map_err(storage_error)?
+    for stem in graph.property_routes(dir, false) {
+        for (uuid, row) in graph
+            .node_property_rows(dir, &stem)
+            .map_err(storage_error)?
         {
             let Some(&node_id) = graph.node_id_by_uuid.get(&uuid) else {
                 continue;
@@ -908,9 +972,10 @@ pub(crate) fn load_node_feature_properties(
         .collect::<HashMap<_, _>>();
     for property in properties {
         let mut values = HashMap::new();
-        for stem in graphforge_storage::list_property_stems(dir) {
-            for (uuid, row) in
-                graphforge_storage::read_node_property_rows(dir, &stem).map_err(storage_error)?
+        for stem in graph.property_routes(dir, false) {
+            for (uuid, row) in graph
+                .node_property_rows(dir, &stem)
+                .map_err(storage_error)?
             {
                 if !graph.node_id_by_uuid.contains_key(&uuid) {
                     continue;
@@ -984,9 +1049,11 @@ pub(crate) fn load_node_partition_property(
     property: &str,
 ) -> Result<ResolvedPartitionMap, GfError> {
     let mut rows = Vec::new();
-    for stem in graphforge_storage::list_property_stems(dir) {
+    for stem in graph.property_routes(dir, false) {
         rows.extend(
-            graphforge_storage::read_node_property_rows(dir, &stem).map_err(storage_error)?,
+            graph
+                .node_property_rows(dir, &stem)
+                .map_err(storage_error)?,
         );
     }
     resolve_partition_rows(graph, property, rows)
@@ -1117,6 +1184,7 @@ fn selected_edge_uuids(
     mode: OntologyMode,
     via: &str,
     edge_ids: &HashSet<u64>,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<HashMap<u64, [u8; 16]>, GfError> {
     let mut out = HashMap::new();
     // An advisory ontology can be adopted after exploratory writes. Resolve a
@@ -1127,9 +1195,14 @@ fn selected_edge_uuids(
     } else {
         via
     };
-    for batch in graphforge_storage::read_edges_filtered(dir, read_name, mode, edge_ids)
-        .map_err(storage_error)?
-    {
+    let batches = match inventory {
+        Some(inventory) => graphforge_storage::read_edges_filtered_from_inventory(
+            inventory, read_name, mode, edge_ids,
+        ),
+        None => graphforge_storage::read_edges_filtered(dir, read_name, mode, edge_ids),
+    }
+    .map_err(storage_error)?;
+    for batch in batches {
         let ids = uint64(&batch, "edge_id")?;
         let uuids = fixed_binary(&batch, "edge_uuid")?;
         let relation_names = batch
@@ -1152,19 +1225,33 @@ fn selected_weights(
     via: &str,
     property: &str,
     edge_uuids: &HashMap<u64, [u8; 16]>,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<HashMap<[u8; 16], f64>, GfError> {
     let wanted: HashSet<[u8; 16]> = edge_uuids.values().copied().collect();
     if wanted.is_empty() {
         return Ok(HashMap::new());
     }
     let stems = if via == "*" {
-        graphforge_storage::list_edge_property_stems(dir)
+        match inventory {
+            Some(inventory) => inventory
+                .routes(graphforge_storage::PropertyRouteKind::Edge)
+                .map(str::to_owned)
+                .collect(),
+            None => graphforge_storage::list_edge_property_stems(dir),
+        }
     } else {
         vec![via.to_owned()]
     };
     let mut out = HashMap::new();
     for stem in stems {
-        for batch in graphforge_storage::read_edge_properties(dir, &stem).map_err(storage_error)? {
+        let batches = match inventory {
+            Some(inventory) => {
+                graphforge_storage::read_edge_properties_from_inventory(dir, inventory, &stem)
+            }
+            None => graphforge_storage::read_edge_properties(dir, &stem),
+        }
+        .map_err(storage_error)?;
+        for batch in batches {
             let uuids = fixed_binary(&batch, "edge_uuid")?;
             let values = batch.column_by_name(property).ok_or_else(|| {
                 GfError::Validation(format!("edge weight property {property:?} does not exist"))
@@ -1330,6 +1417,28 @@ mod tests {
         assert_eq!(exact_u64_as_f64(1_u64 << 53), Some((1_u64 << 53) as f64));
         assert_eq!(exact_u64_as_f64((1_u64 << 53) + 1), None);
         assert!(storage_error("sentinel").to_string().contains("sentinel"));
+    }
+
+    fn admitted_inventory(
+        dir: &std::path::Path,
+    ) -> std::sync::Arc<graphforge_storage::AuthenticatedPropertyInventory> {
+        graphforge_storage::GraphCatalog::open(dir, None, &graphforge_ir::RuntimeCatalog::new())
+            .unwrap()
+            .admitted_inventory()
+            .unwrap()
+    }
+
+    fn scan_provider(dir: std::path::PathBuf, mode: OntologyMode) -> ScanBuildAdjacencyProvider {
+        let inventory = admitted_inventory(&dir);
+        ScanBuildAdjacencyProvider::new(dir, mode).with_inventory(inventory)
+    }
+
+    fn persistent_provider(
+        dir: std::path::PathBuf,
+        mode: OntologyMode,
+    ) -> PersistentAdjacencyProvider {
+        let inventory = admitted_inventory(&dir);
+        PersistentAdjacencyProvider::new(dir, mode).with_inventory(inventory)
     }
 
     struct Fixture {
@@ -1526,8 +1635,7 @@ mod tests {
     #[test]
     fn node2vec_native_and_equivalent_resolved_projection_are_exactly_equal() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let native = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1652,8 +1760,7 @@ mod tests {
     #[test]
     fn direction_parallel_self_loop_and_uuid_round_trip() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
 
         let out = export_adjacency(
             &provider,
@@ -1704,8 +1811,7 @@ mod tests {
     #[test]
     fn label_filter_excludes_nonmatching_endpoints() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1725,10 +1831,86 @@ mod tests {
     }
 
     #[test]
+    fn mapped_algorithm_metadata_preserves_reserved_relation_and_weight() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        let source = new_v7();
+        let target = new_v7();
+        let edge = new_v7();
+        let label = EntityTypeId::decode(1).unwrap();
+        writer.create_node_with_labels(source, &[label]).unwrap();
+        writer.create_node_with_labels(target, &[label]).unwrap();
+        let edge_id = writer.create_edge(edge, "CON", &source, &target).unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("CON"),
+                HashMap::from([("cost".to_owned(), IrLiteral::Float(-2.5))]),
+            )
+            .unwrap();
+        for node in [&source, &target] {
+            writer
+                .set_properties(
+                    node,
+                    Some("AUX"),
+                    HashMap::from([
+                        ("score".to_owned(), IrLiteral::Float(7.0)),
+                        (
+                            "features".to_owned(),
+                            IrLiteral::List(vec![IrLiteral::Float(2.0), IrLiteral::Float(3.0)]),
+                        ),
+                    ]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        drop(writer);
+        let catalog = graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap();
+        let inventory = catalog.admitted_inventory().unwrap();
+        assert_eq!(
+            inventory
+                .routes(graphforge_storage::PropertyRouteKind::Edge)
+                .collect::<Vec<_>>(),
+            vec!["CON"]
+        );
+        let mut graph = export_node_selection(dir.path(), EntityTypeSelection::All).unwrap();
+        graph.retain_inventory(Some(std::sync::Arc::clone(&inventory)));
+        let routes = graph.property_routes(dir.path(), false);
+        assert_eq!(routes, vec!["AUX"]);
+        load_node_vectors(&mut graph, dir.path(), &routes, "features").unwrap();
+        assert_eq!(graph.node_ids().len(), 2);
+        for &node in graph.node_ids() {
+            assert_eq!(graph.node_vector(node), Some([2.0, 3.0].as_slice()));
+        }
+        let scores = load_node_numeric_property(&graph, dir.path(), "score").unwrap();
+        assert_eq!(scores.len(), 2);
+        assert!(scores.values().all(|value| *value == 7.0));
+        for relation in ["CON", "*"] {
+            let identities = selected_edge_uuids(
+                dir.path(),
+                OntologyMode::Strict,
+                relation,
+                &HashSet::from([edge_id]),
+                Some(&inventory),
+            )
+            .unwrap();
+            assert_eq!(identities, HashMap::from([(edge_id, to_bytes(&edge))]));
+            let weights =
+                selected_weights(dir.path(), relation, "cost", &identities, Some(&inventory))
+                    .unwrap();
+            assert_eq!(weights, HashMap::from([(to_bytes(&edge), -2.5)]));
+        }
+    }
+
+    #[test]
     fn selected_weights_preserve_negative_values() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1752,8 +1934,7 @@ mod tests {
     #[test]
     fn missing_weight_is_a_validation_error() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let error = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1770,8 +1951,7 @@ mod tests {
     #[test]
     fn empty_graph_keeps_a_valid_empty_mapping() {
         let dir = TempDir::new().unwrap();
-        let provider =
-            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             dir.path(),
@@ -1788,8 +1968,7 @@ mod tests {
     #[test]
     fn graph_native_vectors_load_by_uuid_in_topology_order() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1818,8 +1997,7 @@ mod tests {
     #[test]
     fn graphsage_feature_loader_preserves_property_order_and_is_atomic() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1857,8 +2035,7 @@ mod tests {
     #[test]
     fn graph_native_loaders_reject_conflicting_stems_and_ragged_features() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1882,6 +2059,8 @@ mod tests {
         )
         .unwrap();
 
+        // The mutation creates a new fixture snapshot; existing views stay pinned.
+        graph.retain_inventory(Some(admitted_inventory(fixture.dir.path())));
         for error in [
             load_node_vectors(
                 &mut graph,
@@ -1898,8 +2077,7 @@ mod tests {
         }
 
         let ragged = self::fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(ragged.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(ragged.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut ragged_graph = export_adjacency(
             &provider,
             ragged.dir.path(),
@@ -1919,6 +2097,7 @@ mod tests {
             )]),
         )
         .unwrap();
+        ragged_graph.retain_inventory(Some(admitted_inventory(ragged.dir.path())));
         let error = load_node_feature_properties(
             &mut ragged_graph,
             ragged.dir.path(),
@@ -1931,8 +2110,7 @@ mod tests {
     #[test]
     fn vector_loader_ignores_property_rows_for_unselected_nodes() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -1965,8 +2143,7 @@ mod tests {
     #[test]
     fn scalar_feature_loader_is_ordered_and_rejects_invalid_or_missing_values() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -2001,7 +2178,9 @@ mod tests {
     #[test]
     fn graph_native_partition_property_loads_without_knowledge_storage() {
         let fixture = fixture();
-        let graph = export_node_selection(fixture.dir.path(), EntityTypeSelection::All).unwrap();
+        let mut graph =
+            export_node_selection(fixture.dir.path(), EntityTypeSelection::All).unwrap();
+        graph.retain_inventory(Some(admitted_inventory(fixture.dir.path())));
         let mapping = load_node_partition_property(&graph, fixture.dir.path(), "side").unwrap();
         assert_eq!(mapping.iter().count(), fixture.uuids.len());
         assert_eq!(
@@ -2159,8 +2338,7 @@ mod tests {
     #[test]
     fn missing_and_ragged_vectors_fail_without_partial_attachment() {
         let fixture = fixture();
-        let provider =
-            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let provider = scan_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let mut graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -2196,6 +2374,7 @@ mod tests {
             )]),
         )
         .unwrap();
+        graph.retain_inventory(Some(admitted_inventory(fixture.dir.path())));
         assert!(matches!(
             load_node_vectors(
                 &mut graph,
@@ -2229,10 +2408,7 @@ mod tests {
             .unwrap();
         writer.flush().unwrap();
 
-        let provider = PersistentAdjacencyProvider::new(
-            fixture.dir.path().to_path_buf(),
-            OntologyMode::Strict,
-        );
+        let provider = persistent_provider(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
         let graph = export_adjacency(
             &provider,
             fixture.dir.path(),
@@ -2268,6 +2444,7 @@ mod tests {
                 neighbor_offsets,
                 neighbor_edges,
                 node_vectors: HashMap::new(),
+                inventory: None,
             }
         };
 

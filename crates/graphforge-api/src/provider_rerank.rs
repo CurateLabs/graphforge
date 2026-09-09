@@ -418,7 +418,12 @@ impl GraphForge {
         let (mut hits, status) = application.into_parts();
         hits.truncate(request.limit);
         let label_id = self.search_label_id(&request.label)?;
-        let batch = shape_search_output(&self.dir, label_id, &hits)?;
+        let batch = shape_search_output(
+            &self.dir,
+            &self.property_inventory_for_session(),
+            label_id,
+            &hits,
+        )?;
         Ok(ProviderRerankedFindResult { batch, status })
     }
 }

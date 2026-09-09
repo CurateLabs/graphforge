@@ -39,8 +39,9 @@ mod builder;
 pub use builder::{
     ADJACENCY_SPILL_DIR_NAME, AdjacencyBuildMetrics, AdjacencyBuildOptions,
     DEFAULT_ADJACENCY_CHUNK_ROWS, DEFAULT_ADJACENCY_MERGE_FAN_IN, build_adjacency_index,
-    build_adjacency_index_into, build_adjacency_index_into_with_metrics,
-    build_adjacency_index_into_with_options, build_adjacency_index_with_checkpoint,
+    build_adjacency_index_from_inventory, build_adjacency_index_into,
+    build_adjacency_index_into_with_metrics, build_adjacency_index_into_with_options,
+    build_adjacency_index_with_checkpoint,
 };
 
 use std::fs::File;
@@ -832,10 +833,15 @@ pub fn adjacency_dir(project_dir: &Path) -> PathBuf {
 }
 
 /// Path of the CSR file for (`relation_type`, `direction`):
-/// `indexes/adjacency/<REL_TYPE>.<dir>.csr`.
+/// `indexes/adjacency/<route-component>.<dir>.csr`.
+/// The manifest retains the exact semantic relation name.
 #[must_use]
 pub fn csr_path(project_dir: &Path, relation_type: &str, direction: Direction) -> PathBuf {
-    adjacency_dir(project_dir).join(format!("{relation_type}.{}.csr", direction.as_str()))
+    adjacency_dir(project_dir).join(format!(
+        "{}.{}.csr",
+        crate::route_component::component(relation_type),
+        direction.as_str()
+    ))
 }
 
 /// Path of `index_manifest.parquet` within `project_dir`.
@@ -1138,12 +1144,24 @@ pub const DEFAULT_ADJACENCY_BATCH_SIZE: usize = 8_192;
 ///
 /// Shared by the builder, validator, and inspector so none of them concatenate
 /// a full edge file into one Arrow record batch (#336).
+fn capture_adjacency_inventory(
+    root: &Path,
+) -> Result<crate::AuthenticatedPropertyInventory, GfError> {
+    let (inventory, _) = crate::capture_graph_files(root)?;
+    crate::AuthenticatedPropertyInventory::from_inventory_at_root(root, inventory, None)
+}
+
 fn for_each_adjacency_edge_file(
     project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
     batch_size: usize,
     on_batch: &mut dyn FnMut(&str, bool, &RecordBatch) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    for (stem, path) in crate::mutator::edge_parquet_files(project_dir, None)? {
+    let paths = match inventory {
+        Some(inventory) => inventory.edge_files(None),
+        None => crate::mutator::edge_parquet_files(project_dir, None)?,
+    };
+    for (stem, path) in paths {
         // An unreadable edge file must FAIL the build, not be skipped: a
         // manifest written without it would stamp the current generation and
         // make an index missing a relation's edges look fresh.
@@ -1221,6 +1239,7 @@ pub(crate) fn stream_projected_parquet_batches(
 #[allow(clippy::type_complexity)]
 fn collect_adjacency_groups(
     project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
 ) -> Result<
     (
         std::collections::BTreeMap<String, Vec<BuildEntry>>,
@@ -1228,12 +1247,13 @@ fn collect_adjacency_groups(
     ),
     GfError,
 > {
-    collect_adjacency_groups_with_batch_size(project_dir, DEFAULT_ADJACENCY_BATCH_SIZE)
+    collect_adjacency_groups_with_batch_size(project_dir, inventory, DEFAULT_ADJACENCY_BATCH_SIZE)
 }
 
 #[allow(clippy::type_complexity)]
 fn collect_adjacency_groups_with_batch_size(
     project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
     batch_size: usize,
 ) -> Result<
     (
@@ -1246,28 +1266,33 @@ fn collect_adjacency_groups_with_batch_size(
 
     let mut groups: BTreeMap<String, Vec<BuildEntry>> = BTreeMap::new();
     let mut union_out: Vec<BuildEntry> = Vec::new();
-    for_each_adjacency_edge_file(project_dir, batch_size, &mut |stem, exploratory, batch| {
-        let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
-        let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
-        let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
-        let rel_names = if exploratory {
-            Some(string_column(
-                named_column(batch, "rel_type_name")?,
-                "rel_type_name",
-            )?)
-        } else {
-            None
-        };
-        for i in 0..batch.num_rows() {
-            let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
-            union_out.push(entry);
-            let rel = rel_names.map_or(stem, |names| names.value(i));
-            if usable_stem(rel) {
-                groups.entry(rel.to_owned()).or_default().push(entry);
+    for_each_adjacency_edge_file(
+        project_dir,
+        inventory,
+        batch_size,
+        &mut |stem, exploratory, batch| {
+            let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
+            let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
+            let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
+            let rel_names = if exploratory {
+                Some(string_column(
+                    named_column(batch, "rel_type_name")?,
+                    "rel_type_name",
+                )?)
+            } else {
+                None
+            };
+            for i in 0..batch.num_rows() {
+                let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
+                union_out.push(entry);
+                let rel = rel_names.map_or(stem, |names| names.value(i));
+                if usable_stem(rel) {
+                    groups.entry(rel.to_owned()).or_default().push(entry);
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     Ok((groups, union_out))
 }
 // ---------------------------------------------------------------------------
@@ -1338,6 +1363,20 @@ pub fn validate_adjacency_index_against(
     source_project_dir: &Path,
     artifact_project_dir: &Path,
 ) -> Result<Vec<AdjacencyValidationIssue>, GfError> {
+    let inventory = capture_adjacency_inventory(source_project_dir)?;
+    validate_adjacency_index_from_inventory(
+        source_project_dir,
+        artifact_project_dir,
+        Some(&inventory),
+    )
+}
+
+/// Validate derived adjacency against explicitly admitted semantic routes.
+pub fn validate_adjacency_index_from_inventory(
+    source_project_dir: &Path,
+    artifact_project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+) -> Result<Vec<AdjacencyValidationIssue>, GfError> {
     let manifest = read_manifest(artifact_project_dir)?;
     if manifest.is_empty() {
         return Ok(Vec::new()); // no index ⇒ nothing to validate
@@ -1375,7 +1414,7 @@ pub fn validate_adjacency_index_against(
         });
     }
 
-    let (groups, union_out) = collect_adjacency_groups(source_project_dir)?;
+    let (groups, union_out) = collect_adjacency_groups(source_project_dir, inventory)?;
     for row in &manifest {
         let expected_entries: &[BuildEntry] = if row.relation_type == ALL_RELATIONS_STEM {
             &union_out
@@ -1430,8 +1469,17 @@ pub fn validate_adjacency_index_against(
 /// # Errors
 /// Returns a storage error only when canonical topology itself cannot be read.
 pub fn inspect_adjacency_index(project_dir: &Path) -> Result<AdjacencyInspection, GfError> {
+    let inventory = capture_adjacency_inventory(project_dir)?;
+    inspect_adjacency_index_from_inventory(project_dir, Some(&inventory))
+}
+
+/// Inspect derived adjacency against explicitly admitted semantic routes.
+pub fn inspect_adjacency_index_from_inventory(
+    project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+) -> Result<AdjacencyInspection, GfError> {
     let source_generation = crate::generation::read_topology_generation(project_dir)?;
-    let (_, mut source_entries) = collect_adjacency_groups(project_dir)?;
+    let (_, mut source_entries) = collect_adjacency_groups(project_dir, inventory)?;
     let source_fingerprint = entries_fingerprint(&mut source_entries);
     let Ok(manifest) = read_manifest(project_dir) else {
         return Ok(inspection_without_artifact(
@@ -1684,8 +1732,7 @@ pub(crate) fn usable_stem(rel: &str) -> bool {
     if rel == ALL_RELATIONS_STEM {
         return false;
     }
-    let mut comps = Path::new(rel).components();
-    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+    !rel.is_empty() && rel != "." && rel != ".." && !rel.contains('/')
 }
 
 /// Borrow a column by name, erroring on absence.
@@ -2314,7 +2361,13 @@ mod tests {
     #[test]
     fn csr_path_layout() {
         let p = csr_path(Path::new("/proj"), "WORKS_AT", Direction::In);
-        assert_eq!(p, Path::new("/proj/indexes/adjacency/WORKS_AT.in.csr"));
+        assert_eq!(
+            p,
+            Path::new("/proj/indexes/adjacency").join(format!(
+                "{}.in.csr",
+                crate::route_component::component("WORKS_AT")
+            ))
+        );
         assert_eq!(
             manifest_path(Path::new("/proj")),
             Path::new("/proj/indexes/adjacency/index_manifest.parquet")
@@ -2745,7 +2798,7 @@ mod tests {
     // Streaming / spill build (#336)
     // -----------------------------------------------------------------------
 
-    pub(super) fn write_multi_row_group_knows(dir: &Path, edges: &[(u64, u64, u64)]) {
+    pub(super) fn write_multi_row_group_knows(dir: &Path, edges: &[(u64, u64, u64)]) -> PathBuf {
         use parquet::arrow::ArrowWriter;
         use parquet::file::properties::WriterProperties;
 
@@ -2773,7 +2826,11 @@ mod tests {
         .unwrap();
         w.flush().unwrap();
 
-        let edges_path = dir.join("topology/edges/KNOWS.parquet");
+        drop(w);
+        let inventory = capture_adjacency_inventory(dir).unwrap();
+        let paths = inventory.edge_files(Some("KNOWS"));
+        assert_eq!(paths.len(), 1);
+        let edges_path = paths[0].1.clone();
         let schema = crate::schemas::TYPED_EDGE_SCHEMA.clone();
         let n = edges.len();
         let edge_uuid = arrow::array::FixedSizeBinaryArray::try_from_iter((0..n).map(|i| {
@@ -2810,6 +2867,7 @@ mod tests {
         let mut writer = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+        edges_path
     }
 
     #[test]
@@ -2817,8 +2875,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // 5 edges → 5 row groups with max_row_group_row_count=1.
         let edges = [(0, 1, 1), (0, 2, 2), (1, 3, 2), (2, 4, 3), (3, 5, 0)];
-        write_multi_row_group_knows(dir.path(), &edges);
-        let path = dir.path().join("topology/edges/KNOWS.parquet");
+        let path = write_multi_row_group_knows(dir.path(), &edges);
 
         let mut batches = 0usize;
         let mut rows = 0usize;
@@ -2858,8 +2915,7 @@ mod tests {
     fn arrow_uuid_concat_boundary_is_avoided_by_projection() {
         let dir = TempDir::new().unwrap();
         let edges: Vec<(u64, u64, u64)> = (0..64).map(|i| (i % 8, i + 1, (i + 1) % 8)).collect();
-        write_multi_row_group_knows(dir.path(), &edges);
-        let path = dir.path().join("topology/edges/KNOWS.parquet");
+        let path = write_multi_row_group_knows(dir.path(), &edges);
 
         // Full-schema eager path (what the old builder did) would concat UUID
         // columns to `edges.len()` values. The streaming path must not.

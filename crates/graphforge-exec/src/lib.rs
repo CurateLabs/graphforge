@@ -106,8 +106,8 @@ mod edge_count;
 mod ordered_one_hop;
 mod ordered_two_hop;
 pub use adjacency::{
-    Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, PersistentAdjacencyProvider,
-    ScanBuildAdjacencyProvider,
+    Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, AdmittedAdjacencyProvider,
+    PersistentAdjacencyProvider, ScanBuildAdjacencyProvider,
 };
 pub use algorithm_analyze::{
     analyze_algorithm, analyze_algorithm_with_compute, analyze_projection_fingerprint,
@@ -2645,9 +2645,21 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // the per-path relationship list (#709) — read lazily for the traversed
     // ids only (row-group pruning + row filter; an empty traversal never
     // opens the file).
-    let edge_batches =
-        graphforge_storage::read_edges_filtered(&cfg.dir, &cfg.rel_type_name, cfg.mode, &traversed)
-            .map_err(|e| exec_err(e.to_string()))?;
+    let edge_batches = match cfg.provider.admitted_inventory() {
+        Some(inventory) => graphforge_storage::read_edges_filtered_from_inventory(
+            &inventory,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+        ),
+        None => graphforge_storage::read_edges_filtered(
+            &cfg.dir,
+            &cfg.rel_type_name,
+            cfg.mode,
+            &traversed,
+        ),
+    }
+    .map_err(|e| exec_err(e.to_string()))?;
     let edge_records = build_edge_records(cfg, &edge_batches)?;
 
     // --- Read nodes; map node_id -> row index for destination columns. ---
@@ -2949,6 +2961,7 @@ fn build_edge_list_column(
     // then one array per property field (#755).
     let mut children: Vec<ArrayRef> = vec![edge_arr, src_arr, dst_arr, rel_arr];
     children.extend(build_edge_prop_children(
+        cfg.provider.admitted_inventory().as_deref(),
         &cfg.rel_type_name,
         &cfg.dir,
         &prop_fields,
@@ -2978,6 +2991,7 @@ fn build_edge_list_column(
 /// to exactly one relation), coalesced per field — NULL where the owning
 /// relation lacks the column, matching the lowering's nullable union schema.
 fn build_edge_prop_children(
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     rel_type_name: &str,
     dir: &Path,
     prop_fields: &[arrow::datatypes::FieldRef],
@@ -2998,7 +3012,13 @@ fn build_edge_prop_children(
     // (absent files contribute nothing). Typed traversals read one file; a
     // wildcard reads all of them, in the lowering's sorted-stem order.
     let stems: Vec<String> = if rel_type_name == "*" {
-        graphforge_storage::list_edge_property_stems(dir)
+        match inventory {
+            Some(inventory) => inventory
+                .routes(graphforge_storage::PropertyRouteKind::Edge)
+                .map(str::to_owned)
+                .collect(),
+            None => graphforge_storage::list_edge_property_stems(dir),
+        }
     } else {
         vec![rel_type_name.to_owned()]
     };
@@ -3008,9 +3028,16 @@ fn build_edge_prop_children(
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
     for stem in &stems {
-        let batches =
-            graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
-                .map_err(|e| exec_err(e.to_string()))?;
+        let batches = match inventory {
+            Some(inventory) => graphforge_storage::read_edge_properties_projected_from_inventory(
+                dir,
+                inventory,
+                stem,
+                &property_names,
+            ),
+            None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names),
+        }
+        .map_err(|e| exec_err(e.to_string()))?;
         if let Some(first) = batches.first() {
             prop_batches_by_rel.push(
                 concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,
@@ -3985,25 +4012,44 @@ fn expand_single_hop_chunk(
     if relationship_properties_required {
         edge_projection.push(0);
     }
-    let edge_batches = if required.is_some() {
-        graphforge_storage::read_edges_filtered_projected_observed(
-            &cfg.dir,
-            &cfg.rel_type_name,
-            cfg.mode,
-            &traversed,
-            &edge_projection,
-            edge_observer.as_ref(),
-        )
-    } else {
-        graphforge_storage::read_edges_filtered_observed(
-            &cfg.dir,
-            &cfg.rel_type_name,
-            cfg.mode,
-            &traversed,
-            edge_observer.as_ref(),
-        )
-    }
-    .map_err(|e| exec_err(e.to_string()))?;
+    let admitted_inventory = cfg.provider.admitted_inventory();
+    let edge_batches =
+        if let Some(inventory) = admitted_inventory.as_deref().filter(|_| required.is_some()) {
+            graphforge_storage::read_edges_filtered_projected_from_inventory(
+                inventory,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                &edge_projection,
+                edge_observer.as_ref(),
+            )
+        } else if required.is_some() {
+            graphforge_storage::read_edges_filtered_projected_observed(
+                &cfg.dir,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                &edge_projection,
+                edge_observer.as_ref(),
+            )
+        } else if let Some(inventory) = admitted_inventory.as_deref() {
+            graphforge_storage::read_edges_filtered_observed_from_inventory(
+                inventory,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                edge_observer.as_ref(),
+            )
+        } else {
+            graphforge_storage::read_edges_filtered_observed(
+                &cfg.dir,
+                &cfg.rel_type_name,
+                cfg.mode,
+                &traversed,
+                edge_observer.as_ref(),
+            )
+        }
+        .map_err(|e| exec_err(e.to_string()))?;
     drop(edge_permit);
     let edge_schema = edge_batches
         .first()
@@ -4184,6 +4230,7 @@ fn expand_single_hop_chunk(
         .map(|(_, field)| Arc::clone(field))
         .collect::<Vec<_>>();
     let demanded_property_columns = build_edge_prop_children(
+        cfg.provider.admitted_inventory().as_deref(),
         &cfg.rel_type_name,
         &cfg.dir,
         &demanded_property_fields,
@@ -4746,6 +4793,9 @@ fn unwind_explode(
 /// [`GraphForgeExtensionPlanner`].
 pub struct AdjacencyProviderExt(pub Arc<dyn AdjacencyProvider>);
 
+/// Mutable session ownership ends at planning: plans retain only a selected immutable provider.
+struct OwnedSessionAdjacency(RwLock<Arc<PersistentAdjacencyProvider>>);
+
 /// `SessionConfig` extension carrying the facade's exact generation-pinned
 /// ordinal identity authority.
 struct OrdinalIdentityResolverExt(pub Option<Arc<V4OrdinalIdentitySession>>);
@@ -4902,6 +4952,22 @@ impl QueryPlanner for GraphForgeQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
+        let mut pinned_state = session_state.clone();
+        if let Some(owner) = session_state
+            .config()
+            .get_extension::<OwnedSessionAdjacency>()
+        {
+            let provider: Arc<dyn AdjacencyProvider> = {
+                let current = owner.0.read().map_err(|_| {
+                    DataFusionError::Execution("session adjacency lock poisoned".into())
+                })?;
+                Arc::clone(&*current) as _
+            };
+            pinned_state
+                .config_mut()
+                .set_extension(Arc::new(AdjacencyProviderExt(provider)));
+        }
+        let session_state = &pinned_state;
         let (logical_plan, hydration) = read_resource::bind(logical_plan, session_state)?;
         let planner = DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
             GraphForgeExtensionPlanner,
@@ -5037,6 +5103,7 @@ pub struct ExecutionSession {
     /// invalidate its memoized state and loaded views — a same-session
     /// read → write → read must observe post-write adjacency.
     adjacency_provider: Arc<PersistentAdjacencyProvider>,
+    owned_adjacency: Option<Arc<OwnedSessionAdjacency>>,
     /// Differential-test strategy, absent from ordinary builds.
     #[cfg(feature = "differential-testing")]
     relational_fixed_hop_reference: bool,
@@ -5211,13 +5278,25 @@ impl ExecutionSession {
         // A facade-shared provider (#832) is revalidated here — once per
         // session — so its memoized state is as fresh as a per-query
         // provider's, while loaded views amortize across queries.
+        let owns_provider = shared_provider.is_none();
         let adjacency_provider = shared_provider.map_or_else(
-            || Arc::new(PersistentAdjacencyProvider::new(dir.clone(), mode)),
+            || {
+                let provider = PersistentAdjacencyProvider::new(dir.clone(), mode);
+                Arc::new(match catalog.admitted_inventory() {
+                    Some(inventory) => provider.with_inventory(inventory),
+                    None => provider,
+                })
+            },
             |p| {
                 p.revalidate();
                 p
             },
         );
+        let owned_adjacency = owns_provider.then(|| {
+            Arc::new(OwnedSessionAdjacency(RwLock::new(Arc::clone(
+                &adjacency_provider,
+            ))))
+        });
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
         let catalog = Arc::new(catalog);
         let mutation_health = mutation::MutationHealth::default();
@@ -5236,6 +5315,9 @@ impl ExecutionSession {
             )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
+        if let Some(owner) = &owned_adjacency {
+            config.set_extension(Arc::clone(owner));
+        }
         if !dir.as_os_str().is_empty() {
             config.set_extension(Arc::new(write_resource::GraphWriteContext {
                 resource: read_resource,
@@ -5295,9 +5377,34 @@ impl ExecutionSession {
             mode,
             semantic_composition_fingerprint,
             adjacency_provider,
+            owned_adjacency,
             #[cfg(feature = "differential-testing")]
             relational_fixed_hop_reference: false,
         }
+    }
+
+    fn refresh_adjacency_after_mutation(&self) -> Result<(), GfError> {
+        let Some(owner) = &self.owned_adjacency else {
+            self.adjacency_provider.invalidate();
+            return Ok(());
+        };
+        let inventory = self.catalog.admitted_inventory().ok_or_else(|| {
+            GfError::Storage("refreshed session lacks admitted graph inventory".into())
+        })?;
+        let private = tempfile::Builder::new()
+            .prefix("graphforge-session-adjacency-")
+            .tempdir()
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+        let provider = Arc::new(
+            PersistentAdjacencyProvider::new(self.dir.clone(), self.mode)
+                .with_inventory(inventory)
+                .with_rebuild_root(private),
+        );
+        *owner
+            .0
+            .write()
+            .map_err(|_| GfError::Storage("session adjacency lock poisoned".into()))? = provider;
+        Ok(())
     }
 
     /// Use the relational fixed-hop implementation as an independent test
@@ -5386,7 +5493,10 @@ impl ExecutionSession {
                 ..SideEffects::default()
             },
         ));
-        self.adjacency_provider.invalidate();
+        self.catalog
+            .refresh_property_inventory(&self.dir)
+            .map_err(GfError::from_execution_error)?;
+        self.refresh_adjacency_after_mutation()?;
         Ok(ExecutionResult {
             schema,
             batches,
@@ -5557,6 +5667,7 @@ impl ExecutionSession {
 
         // Phase loop: buffer every effect, then one staged commit.
         let env = write_driver::PhaseEnv {
+            inventory: self.catalog.admitted_inventory(),
             lowerer: &lowerer,
             exprs: &plan.exprs,
             dir: &resource.dir,

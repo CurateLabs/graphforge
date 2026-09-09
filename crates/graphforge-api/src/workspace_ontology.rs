@@ -192,10 +192,15 @@ impl GraphForge {
                 &catalog,
             )?;
         }
-        self.adjacency_provider = std::sync::Arc::new(crate::adjacency_provider_for_graph(
-            &self.dir,
-            self.ontology_mode,
-        )?);
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") =
+            std::sync::Arc::new(crate::adjacency_provider_for_graph(
+                &self.dir,
+                self.ontology_mode,
+                self.property_inventory_for_session(),
+            )?);
         Ok(())
     }
 
@@ -229,10 +234,15 @@ impl GraphForge {
         self.ontology = None;
         self.ontology_document = None;
         self.ontology_mode = OntologyMode::Exploratory;
-        self.adjacency_provider = std::sync::Arc::new(crate::adjacency_provider_for_graph(
-            &self.dir,
-            self.ontology_mode,
-        )?);
+        *self
+            .adjacency_provider
+            .write()
+            .expect("adjacency provider lock poisoned") =
+            std::sync::Arc::new(crate::adjacency_provider_for_graph(
+                &self.dir,
+                self.ontology_mode,
+                self.property_inventory_for_session(),
+            )?);
         Ok(())
     }
 }

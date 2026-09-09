@@ -31,7 +31,9 @@
       "visit_authenticated_property_snapshots"
     ],
     "property_overlay_module": [
-      "AuthenticatedPropertyInventory", "AuthenticatedPropertyInventory::from_materialized_generation",
+      "AuthenticatedPropertyInventory", "AuthenticatedPropertyInventory::edge_files",
+      "AuthenticatedPropertyInventory::from_materialized_generation",
+      "AuthenticatedPropertyInventory::from_materialized_inventory",
       "AuthenticatedPropertyInventory::from_resolved_generation",
       "AuthenticatedPropertyInventory::from_resolved_generation_for_route",
       "AuthenticatedPropertyInventory::generation_uuid", "AuthenticatedPropertyInventory::open_metrics",
