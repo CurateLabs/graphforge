@@ -124,9 +124,14 @@ class SurfaceGateTests(unittest.TestCase):
 
     def test_every_adjacency_read_has_exactly_one_visibility_guard(self) -> None:
         source = (GATE.ROOT / "crates/graphforge-api/src/analyst.rs").read_text()
-        calls = list(re.finditer(r"self\.adjacency_provider\.revalidate\(\);", source))
+        calls = list(
+            re.finditer(
+                r"let adjacency_provider = self\.adjacency_provider_for_session\(\);", source
+            )
+        )
         self.assertEqual(len(calls), 12)
         for call in calls:
+            self.assertRegex(source[call.end() :], r"^\s*adjacency_provider\.revalidate\(\);")
             prefix = source[max(0, call.start() - 240) : call.start()]
             self.assertEqual(prefix.count(".adjacency_visibility"), 1)
             self.assertRegex(
