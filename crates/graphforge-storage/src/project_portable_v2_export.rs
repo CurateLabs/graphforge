@@ -2142,7 +2142,11 @@ fn reject_windows_reparse_components(path: &Path) -> Result<(), ExportError> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
-        if current.as_os_str().is_empty() {
+        // A Windows prefix is not yet a filesystem root. In particular,
+        // canonicalize produces a verbatim disk prefix (\\?\C:) which cannot
+        // be queried until its following RootDir component has been appended.
+        // Check that root and every subsequent component normally.
+        if matches!(component, std::path::Component::Prefix(_)) || current.as_os_str().is_empty() {
             continue;
         }
         let metadata = fs::symlink_metadata(&current).map_err(storage)?;
@@ -2398,6 +2402,39 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_source_path_retains_no_follow_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("payload.json");
+        fs::write(&source, b"authenticated payload").unwrap();
+        let canonical = source.canonicalize().unwrap();
+        #[cfg(windows)]
+        assert!(matches!(
+            canonical.components().next(),
+            Some(std::path::Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+        ));
+        let mut total = 0;
+        let planned = inspect(
+            &canonical,
+            "data/payload.json",
+            PortableV2ExportLimits::default(),
+            &mut total,
+        )
+        .unwrap();
+        assert_eq!(total, 21);
+        assert_eq!(planned.length, 21);
+        assert_eq!(
+            planned.digest,
+            <[u8; 32]>::from(Sha256::digest(b"authenticated payload"))
+        );
+        let (mut file, _) = open_planned_source(&planned).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"authenticated payload");
+        assert!(open_source_no_follow(&root.path().join("missing.json")).is_err());
+    }
+
     use crate::open_or_initialize_project;
     use arrow::array::StringArray;
     use arrow::record_batch::RecordBatch;
