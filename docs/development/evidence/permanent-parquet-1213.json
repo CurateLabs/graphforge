@@ -1,0 +1,1751 @@
+{
+  "issue": 1213,
+  "phase": "shared permanent encoding policy",
+  "source_commit": "c16397d2cd7aeb01411f5cbb51c433154d3c3ef9",
+  "baseline_source_commit": "60ffdca983ed1ad4b2acd4edfe2605f3e85d6e7e",
+  "production_fixture": {
+    "compaction": {
+      "files": [
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11438,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "6426d5960374171a1ae07adcd54696a064ac5fcd8cab147da056e70a1ca41a2e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11430,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "54c2076e9ce5bf82791a4888d548542400945da301d08f484aac534197967186"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11453,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000002.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c7c54c037f5316d1b24d75f2acb73296cfe83072276993d82d76c2588e45af56"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11393,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000003.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8f6af7bdf0d304d7528070f9c4ec2b759bf67d37bc6ccee7a668090914ba582e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11521,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000004.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ff8805a86f110c945e8d6e50c60218f01b66f3140a49836224067b1fd553aa7"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13847,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000005.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "378d9e433031bbf86163b4985013cea81733caaad5d76aa3c6ec18df9c2d4ce4"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 12171,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000006.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ac4796b869fef81c40909d46d5512f1029500640060abf9d9a7b097cebe761a"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13081,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000007.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8c6e9847c29e81718d741368d4f07c8a9f4355026151121e5fdeb04ae245f587"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 1906,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000008.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "ebe7d7b6e22e677493b0155923e6c6344155080c24c0909779f37ccababadbbb"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11133,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "32fd469f57dd6bfa9f226a40d390d3e2b4462125c9947a61b629e5b8f5678860"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11140,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c24458d0f57d778bf1730b68bf8fdf9a20d69747c1b786e80225b8e78120316c"
+        },
+        {
+          "allocated_bytes": 20480,
+          "bytes": 18233,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000002-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 877,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "b107f70d13ccbacb91f4d4094f899f61bdb9929e97040d013190c0319d5a291b"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 1571,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000003-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "092ac7eb1328c45ef8c733e26820105a83ffa40f7fc61a2ce7d1460bf2cd7b00"
+        },
+        {
+          "allocated_bytes": 135168,
+          "bytes": 134981,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 1,
+            "first_inversion": null,
+            "last": 4097,
+            "prefix": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "rows": 4097
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22.parquet",
+          "row_groups": [
+            {
+              "rows": 4097,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 8
+                }
+              ]
+            }
+          ],
+          "sha256": "aea395166ad4b663296aebfc9dfc297fdb9f4891bf7ab770111fd2581e2534e7"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 1029,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes.parquet",
+          "row_groups": [],
+          "sha256": "4946d3f301537616c0b9c7a1491f04f08ef6ef4de6f38d91621e3efa0d47c310"
+        },
+        {
+          "allocated_bytes": 24576,
+          "bytes": 21659,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000000001-00000000000000001024.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "6a855197ee6494f49fd352521a707636938812f844af407bd7046fb715df902c"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2229,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000001025-00000000000000001025.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "460fb043cfaeaed1939a3e82c608c1bfe3b7760312254db67ae0249bc3e67b74"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2691,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/runtime_catalog.parquet",
+          "row_groups": [
+            {
+              "rows": 15,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 7
+                }
+              ]
+            }
+          ],
+          "sha256": "f5982012ffdf0e0fc6c00f231ce6001fd248d06db6661e7dd4d5e8465993a2d9"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 812,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/surrogate_tails.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "06c3d7d0ae09ea20dae5f1c76e257d42063068612841d1936fa4794b1a0834c6"
+        }
+      ],
+      "ownership": "generation_graph_tree",
+      "parquet_allocated_bytes": 335872,
+      "parquet_bytes": 303718,
+      "zstd_columns": 73,
+      "uncompressed_columns": 0
+    },
+    "compaction_ns": 504391277,
+    "compaction_report": "GraphDeltaCompactionReport { dry_run: false, input_generation_uuid: 9ca0e18c-69ad-8b6a-a5d6-6532bbb0fd79, output_generation_uuid: Some(00000000-0000-0000-0000-00000001d9da), input_runs: 1, compacted_runs: 1, retained_suffix_runs: 0, input_rows: 1, output_rows: 5122, input_bytes: 340, output_bytes: 467530, spill_bytes: 0, peak_memory_bytes: 898, elapsed_ms: 503, state_fingerprint: [177, 71, 160, 157, 78, 40, 213, 248, 180, 126, 157, 177, 105, 254, 1, 53, 138, 117, 115, 177, 52, 124, 86, 28, 111, 157, 46, 168, 123, 209, 24, 196], publication: Some(ProjectPublicationReceipt { transaction_uuid: 00000000-0000-0000-0000-00000001d9d9, generation_uuid: 00000000-0000-0000-0000-00000001d9da, generation_manifest_sha256: [78, 67, 223, 220, 44, 210, 105, 57, 37, 202, 9, 232, 226, 168, 45, 51, 59, 22, 132, 212, 71, 77, 3, 223, 13, 63, 170, 248, 167, 112, 100, 179], idempotent_replay: false }), cleanup: None }",
+    "construction": {
+      "files": [
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11438,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "6426d5960374171a1ae07adcd54696a064ac5fcd8cab147da056e70a1ca41a2e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11430,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "54c2076e9ce5bf82791a4888d548542400945da301d08f484aac534197967186"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11453,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000002.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c7c54c037f5316d1b24d75f2acb73296cfe83072276993d82d76c2588e45af56"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11393,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000003.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8f6af7bdf0d304d7528070f9c4ec2b759bf67d37bc6ccee7a668090914ba582e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11521,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000004.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ff8805a86f110c945e8d6e50c60218f01b66f3140a49836224067b1fd553aa7"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13847,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000005.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "378d9e433031bbf86163b4985013cea81733caaad5d76aa3c6ec18df9c2d4ce4"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 12171,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000006.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ac4796b869fef81c40909d46d5512f1029500640060abf9d9a7b097cebe761a"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13081,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000007.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8c6e9847c29e81718d741368d4f07c8a9f4355026151121e5fdeb04ae245f587"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 1906,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000008.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "ebe7d7b6e22e677493b0155923e6c6344155080c24c0909779f37ccababadbbb"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11133,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "32fd469f57dd6bfa9f226a40d390d3e2b4462125c9947a61b629e5b8f5678860"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11140,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c24458d0f57d778bf1730b68bf8fdf9a20d69747c1b786e80225b8e78120316c"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 51136,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 1,
+            "first_inversion": null,
+            "last": 1024,
+            "prefix": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000001024.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "36e122d4d9068ca6831ee98bd7d0cf4e92aac4fd0e5a40ae3a013873d7cbe923"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50442,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 1025,
+            "first_inversion": null,
+            "last": 2048,
+            "prefix": [
+              1025,
+              1026,
+              1027,
+              1028,
+              1029,
+              1030,
+              1031,
+              1032,
+              1033,
+              1034,
+              1035,
+              1036
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000001025-00000000000000002048.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "7bcba5232b94533f1a835e5ae30b3622d9ba12d21a5798f6c99a6fa843e26e96"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50734,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 2049,
+            "first_inversion": null,
+            "last": 3072,
+            "prefix": [
+              2049,
+              2050,
+              2051,
+              2052,
+              2053,
+              2054,
+              2055,
+              2056,
+              2057,
+              2058,
+              2059,
+              2060
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000002049-00000000000000003072.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "afcafebdd82cca1ff4aae9e1d6d64e48a9848a590c424a7698e3c1b7d0676c0b"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50611,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 3073,
+            "first_inversion": null,
+            "last": 4096,
+            "prefix": [
+              3073,
+              3074,
+              3075,
+              3076,
+              3077,
+              3078,
+              3079,
+              3080,
+              3081,
+              3082,
+              3083,
+              3084
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000003073-00000000000000004096.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "c3c96692b607746c2fa996a7e9296ee98db22f75a00bc2de758ade73d8c99642"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2841,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 4097,
+            "first_inversion": null,
+            "last": 4097,
+            "prefix": [
+              4097
+            ],
+            "rows": 1
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000004097-00000000000000004097.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "4b9842c66aed74336888fb776722aa8e846c892b4a0492956d3f41688a23dc0c"
+        },
+        {
+          "allocated_bytes": 24576,
+          "bytes": 21659,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000000001-00000000000000001024.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "6a855197ee6494f49fd352521a707636938812f844af407bd7046fb715df902c"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2229,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000001025-00000000000000001025.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "460fb043cfaeaed1939a3e82c608c1bfe3b7760312254db67ae0249bc3e67b74"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2571,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/runtime_catalog.parquet",
+          "row_groups": [
+            {
+              "rows": 10,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 7
+                }
+              ]
+            }
+          ],
+          "sha256": "9ecfe0159015a8ff31fea6843f44adc38ffffe41ec3a5631264c138832a25b5b"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 812,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/surrogate_tails.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "06c3d7d0ae09ea20dae5f1c76e257d42063068612841d1936fa4794b1a0834c6"
+        }
+      ],
+      "ownership": "cas",
+      "parquet_allocated_bytes": 389120,
+      "parquet_bytes": 353548,
+      "zstd_columns": 99,
+      "uncompressed_columns": 0
+    },
+    "mutation": {
+      "files": [
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11438,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "6426d5960374171a1ae07adcd54696a064ac5fcd8cab147da056e70a1ca41a2e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11430,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "54c2076e9ce5bf82791a4888d548542400945da301d08f484aac534197967186"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11453,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000002.parquet",
+          "row_groups": [
+            {
+              "rows": 511,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c7c54c037f5316d1b24d75f2acb73296cfe83072276993d82d76c2588e45af56"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11393,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000003.parquet",
+          "row_groups": [
+            {
+              "rows": 513,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8f6af7bdf0d304d7528070f9c4ec2b759bf67d37bc6ccee7a668090914ba582e"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11521,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000004.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ff8805a86f110c945e8d6e50c60218f01b66f3140a49836224067b1fd553aa7"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13847,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000005.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "378d9e433031bbf86163b4985013cea81733caaad5d76aa3c6ec18df9c2d4ce4"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 12171,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000006.parquet",
+          "row_groups": [
+            {
+              "rows": 528,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "9ac4796b869fef81c40909d46d5512f1029500640060abf9d9a7b097cebe761a"
+        },
+        {
+          "allocated_bytes": 16384,
+          "bytes": 13081,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000007.parquet",
+          "row_groups": [
+            {
+              "rows": 496,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "8c6e9847c29e81718d741368d4f07c8a9f4355026151121e5fdeb04ae245f587"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 1906,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "edge_properties/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000008.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "ebe7d7b6e22e677493b0155923e6c6344155080c24c0909779f37ccababadbbb"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11133,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "32fd469f57dd6bfa9f226a40d390d3e2b4462125c9947a61b629e5b8f5678860"
+        },
+        {
+          "allocated_bytes": 12288,
+          "bytes": 11140,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000001-00000000000000000001.parquet",
+          "row_groups": [
+            {
+              "rows": 512,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "c24458d0f57d778bf1730b68bf8fdf9a20d69747c1b786e80225b8e78120316c"
+        },
+        {
+          "allocated_bytes": 20480,
+          "bytes": 18233,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "properties/r-caf7594a72aef78670c886a56687e31c55908c136dc05830aca6ace2614f9395/00000000000000000002-00000000000000000000.parquet",
+          "row_groups": [
+            {
+              "rows": 877,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 1
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "b107f70d13ccbacb91f4d4094f899f61bdb9929e97040d013190c0319d5a291b"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 51136,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 1,
+            "first_inversion": null,
+            "last": 1024,
+            "prefix": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000001024.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "36e122d4d9068ca6831ee98bd7d0cf4e92aac4fd0e5a40ae3a013873d7cbe923"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50442,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 1025,
+            "first_inversion": null,
+            "last": 2048,
+            "prefix": [
+              1025,
+              1026,
+              1027,
+              1028,
+              1029,
+              1030,
+              1031,
+              1032,
+              1033,
+              1034,
+              1035,
+              1036
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000001025-00000000000000002048.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "7bcba5232b94533f1a835e5ae30b3622d9ba12d21a5798f6c99a6fa843e26e96"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50734,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 2049,
+            "first_inversion": null,
+            "last": 3072,
+            "prefix": [
+              2049,
+              2050,
+              2051,
+              2052,
+              2053,
+              2054,
+              2055,
+              2056,
+              2057,
+              2058,
+              2059,
+              2060
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000002049-00000000000000003072.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "afcafebdd82cca1ff4aae9e1d6d64e48a9848a590c424a7698e3c1b7d0676c0b"
+        },
+        {
+          "allocated_bytes": 53248,
+          "bytes": 50611,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 3073,
+            "first_inversion": null,
+            "last": 4096,
+            "prefix": [
+              3073,
+              3074,
+              3075,
+              3076,
+              3077,
+              3078,
+              3079,
+              3080,
+              3081,
+              3082,
+              3083,
+              3084
+            ],
+            "rows": 1024
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000003073-00000000000000004096.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "c3c96692b607746c2fa996a7e9296ee98db22f75a00bc2de758ade73d8c99642"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2841,
+          "codec_pairs": null,
+          "edge_id_order": {
+            "first": 4097,
+            "first_inversion": null,
+            "last": 4097,
+            "prefix": [
+              4097
+            ],
+            "rows": 1
+          },
+          "path": "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000004097-00000000000000004097.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 3
+                }
+              ]
+            }
+          ],
+          "sha256": "4b9842c66aed74336888fb776722aa8e846c892b4a0492956d3f41688a23dc0c"
+        },
+        {
+          "allocated_bytes": 24576,
+          "bytes": 21659,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000000001-00000000000000001024.parquet",
+          "row_groups": [
+            {
+              "rows": 1024,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "6a855197ee6494f49fd352521a707636938812f844af407bd7046fb715df902c"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2229,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/nodes/00000000000000001025-00000000000000001025.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 5
+                },
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE]",
+                  "columns": 1
+                }
+              ]
+            }
+          ],
+          "sha256": "460fb043cfaeaed1939a3e82c608c1bfe3b7760312254db67ae0249bc3e67b74"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 2691,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/runtime_catalog.parquet",
+          "row_groups": [
+            {
+              "rows": 15,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 7
+                }
+              ]
+            }
+          ],
+          "sha256": "49ac1b20c20b6963cebfe9222760734bbc71839a12109927382d799ffa9a00cf"
+        },
+        {
+          "allocated_bytes": 4096,
+          "bytes": 812,
+          "codec_pairs": null,
+          "edge_id_order": null,
+          "path": "topology/surrogate_tails.parquet",
+          "row_groups": [
+            {
+              "rows": 1,
+              "column_encoding_counts": [
+                {
+                  "codec": "ZSTD(ZstdLevel(1))",
+                  "encodings": "[PLAIN, RLE, RLE_DICTIONARY]",
+                  "columns": 2
+                }
+              ]
+            }
+          ],
+          "sha256": "06c3d7d0ae09ea20dae5f1c76e257d42063068612841d1936fa4794b1a0834c6"
+        }
+      ],
+      "ownership": "generation_graph_tree",
+      "parquet_allocated_bytes": 409600,
+      "parquet_bytes": 371901,
+      "zstd_columns": 102,
+      "uncompressed_columns": 0
+    },
+    "mutation_ns": 1320885812
+  },
+  "production_runtime": {
+    "elapsed_seconds": 12.99,
+    "user_seconds": 12.41,
+    "system_seconds": 0.83,
+    "peak_rss_kib": 159492,
+    "filesystem_input_512_byte_blocks": 50640,
+    "filesystem_output_512_byte_blocks": 85904,
+    "exit_status": 0
+  },
+  "production_syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 27329,
+        "bytes": 141332523
+      },
+      "pread64": {
+        "calls": 29663,
+        "bytes": 13585043
+      },
+      "write": {
+        "calls": 4192,
+        "bytes": 31955198
+      },
+      "fsync": {
+        "calls": 3109,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 980,
+        "bytes": 8232017
+      }
+    },
+    "read_bytes": 163149583,
+    "write_bytes": 40187215,
+    "errors": [],
+    "elapsed_seconds": 24.26
+  },
+  "production_workspace_observation": {
+    "command": [
+      "/home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2",
+      "permanent_publishing_policy_construction_mutation_and_compaction",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 7798784,
+    "sampled_path_logical_peak_bytes": 6440309,
+    "sampled_file_count_peak": 514,
+    "samples": 1274,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.016670843004249036,
+    "vanished_files_during_scan": 29,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "construction_parquet_logical_bytes": 409600,
+    "construction_parquet_allocated_bytes": 458752,
+    "mutation_parquet_logical_bytes": 425984,
+    "mutation_parquet_allocated_bytes": 491520,
+    "compaction_parquet_logical_bytes": 360448,
+    "compaction_parquet_allocated_bytes": 409600,
+    "topology_ladder_replay_memory_bytes": 2097152,
+    "topology_ladder_max_batch_rows": 7,
+    "topology_ladder_private_stream_bytes": 262144,
+    "private_stream_per_invocation_maximum_bytes": 67108864
+  },
+  "limitations": [
+    "CPU/RSS, syscall traces and workspace sampling are separate runs. OS I/O depends on cache state.",
+    "Production observations include public query, reopen, export, verify and clean import, startup and test output.",
+    "Workspace sampling misses unlinked open files and short-lived peaks; it is not a deterministic temporary-disk ceiling.",
+    "Paired profiles hold schema, dictionary and row-group settings fixed; they normalize actual production batches, not the mixed writer settings of the original files.",
+    "ArrowWriter.memory_size excludes native codec allocations and is not process RSS. Codec tests do not establish whole-publication admission.",
+    "Candidate fixture additionally checks pre-compaction authenticated inventory, output encodings and deterministic payload ceilings; printed output includes file digests. These small instrumentation differences are included in process/syscall observations.",
+    "No process-RSS or CPU-time admission guarantee is claimed. Native codec and decoder/encoder component reservations are tested independently.",
+    "Per-row-group column metadata is aggregated by codec and encoding list; exact decoded values and all individual column codecs are asserted by the public test."
+  ]
+}

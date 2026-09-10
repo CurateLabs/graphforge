@@ -451,6 +451,14 @@ Small fragments can grow with Zstd; the one-row dictionaries-on case grew from
 10,017 to 10,722 bytes. Wide replay-profile output fell from 502,549 to 26,794
 bytes; the narrow random replay profile fell from 1,576,490 to 1,119,732 bytes.
 
+The codec tradeoff is measurable even where storage improves. In the paired
+wide replay case, encoding elapsed time rose from 4.711 to 6.419 ms and decoding
+from 2.272 to 2.889 ms. For 65,537 narrow random rows, encoding rose from 36.107
+to 44.281 ms and decoding from 3.198 to 6.286 ms. These are single-run elapsed
+measurements, not CPU guarantees or benchmark distributions. The raw evidence
+retains per-profile results and whole-process user/system CPU observations;
+Zstd is selected for durable storage despite these measured codec costs.
+
 Deterministic codec-test ceilings are 2 MiB per output, 8 MiB combined temporary
 allocation per pair, and 8 MiB of `ArrowWriter::memory_size()`. The latter omits
 native codec allocation and completed metadata, so it is deliberately not used
@@ -494,3 +502,47 @@ acceptance, one-byte-below rejection, schema/full-width values, row order,
 row-count authority, cleanup and unchanged source bytes. Reader admission also
 covers seven one-row large-string pages, repeated values and batches spanning
 several tiny row groups, with rejection immediately below the computed bound.
+
+### Integrated result and regression gates
+
+Implementation source `c16397d2cd7aeb01411f5cbb51c433154d3c3ef9` was measured
+with the same prebuilt public fixture after other builds/tests finished.
+[`permanent-parquet-1213.json`](../../development/evidence/permanent-parquet-1213.json)
+retains actual column-codec/encoding counts, output inventories and process observations.
+
+| Published stage | Baseline Parquet bytes / allocated bytes | Shared policy bytes / allocated bytes |
+| --- | ---: | ---: |
+| Construction | 353,548 / 389,120 | 353,548 / 389,120 |
+| Mutation | 377,487 / 413,696 | 371,901 / 409,600 |
+| Compaction | 537,467 / 569,344 | 303,718 / 335,872 |
+
+Every published column uses Zstd (99 construction, 102 mutation and 73
+compaction columns). Changed compaction files retain dictionaries-off encoding
+and at most 8,192 rows per group. The public fixture enforces logical/allocated
+ceilings of 400/448 KiB for construction, 416/480 KiB for mutation and 352/400 KiB
+for compaction, in addition to exact values after reopen and portable round trips.
+
+The final process took 12.99 s elapsed, 12.41 s user and 0.83 s system, with
+159,492 KiB peak RSS, versus baseline 12.48/11.89/0.84 s and 156,284 KiB. Separate
+syscall observations fell from 179,612,114 to 163,149,583 read bytes and from
+42,717,623 to 40,187,215 write bytes; both had 3,109 successful fsync calls and
+no traced syscall errors. OS filesystem output fell from 90,752 to 85,904
+512-byte blocks; input remained 50,640 blocks. Sampled unique-inode workspace
+allocation fell from 8,749,056 to 7,798,784 bytes. These single-host observations
+include startup, queries, authentication, portable operations and test output;
+the candidate additionally inspects pre-compaction inventory and prints file
+digests. They are not CPU, RSS or temporary-disk guarantees. The separately
+bounded low-memory IPC stream is measured directly, since pathname sampling
+cannot see its unlinked file on Unix.
+
+Validation covers all 20 public publishing fixtures; 734 API unit tests; three
+public retained-data semantic-composition certification tests; ten compaction
+and 16 journal integration tests; and 20 replay-focused unit tests. The API
+fixtures inspect published knowledge, epistemic, provenance, vector, projection
+and restoration output, including the restoration `created_by` marker. Existing
+recovery, cancellation, active-snapshot, authentication and exact retry tests
+remain active. Targeted native Bazel certification/journal/compaction tests,
+workspace Clippy, formatting, fast pre-push and gate-registry checks passed.
+The full local storage aggregate passed 1,081 tests with two existing ignores;
+one unchanged test hardcodes `/tmp`, where this host's tmpfs fails filesystem
+admission. Required native Bazel CI remains the merge gate.
