@@ -1833,13 +1833,35 @@ fn configure_composite_ontology(root: &Path, source: &Path, declared_property: b
 
 #[test]
 fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
+    exercise_qualified_create_then_set(0);
+}
+
+fn exercise_qualified_create_then_set(constructed_nodes: usize) {
     use graphforge_api::{
         COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation as Mutation,
         CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
     };
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
-    drop(GraphForge::new(source.to_str()).unwrap());
+    let fixture = Fixture {
+        name: "qualified_composite_edge",
+        nodes: constructed_nodes,
+        edges: 129,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = if constructed_nodes == 0 {
+        drop(GraphForge::new(source.to_str()).unwrap());
+        (Vec::new(), Vec::new())
+    } else {
+        let (nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        (nodes, edges)
+    };
+    let prior_objects = cas_uuid_parent_objects(&source);
     configure_composite_ontology(root.path(), &source, true);
     let graph = GraphForge::new(source.to_str()).unwrap();
     let a = Uuid::now_v7();
@@ -1952,21 +1974,12 @@ fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
                 && binding.symbol.local_id == "NEW_TYPED"
         })
         .unwrap();
-    let fixture = Fixture {
-        name: "qualified_composite_edge",
-        nodes: 2,
-        edges: 1,
-        routes: 1,
-        identifiers: Identifiers::Random,
-        properties: false,
-        adjacency: false,
-        heterogeneous: false,
-    };
-    let nodes = [
+    nodes.extend([
         (a, "mixed:entity:NewNode".into(), None),
         (b, "mixed:entity:NewNode".into(), None),
-    ];
-    let edges = [(edge, a, b, relation.route.clone(), None, None)];
+    ]);
+    edges.push((edge, a, b, relation.route.clone(), None, None));
+    cas_uuid_assert_parent_objects(&source, &prior_objects);
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
     let imported = GraphForge::new(root.path().join("imported").to_str()).unwrap();
@@ -2946,5 +2959,356 @@ fn permanent_codec_pairs_cover_wide_nullable_and_full_width_values() {
             }
         }
         println!("PERMANENT_CODEC_PAIRS {result}");
+    }
+}
+
+type CasUuidParentObjects = Vec<(
+    graphforge_storage::GraphFileEntry,
+    graphforge_filesystem::FileIdentity,
+)>;
+
+fn cas_uuid_parent_objects(source: &Path) -> CasUuidParentObjects {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let Some(inventory) = selected.graph_files_inventory().unwrap() else {
+        return Vec::new();
+    };
+    if selected.declared_graph_files_inventory().unwrap().is_some() {
+        return Vec::new();
+    }
+    inventory
+        .files
+        .into_iter()
+        .map(|entry| {
+            let file = File::open(
+                graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap(),
+            )
+            .unwrap();
+            let identity = graphforge_filesystem::file_identity(&file).unwrap();
+            (entry, identity)
+        })
+        .collect()
+}
+
+fn cas_uuid_assert_parent_objects(source: &Path, objects: &CasUuidParentObjects) {
+    for (entry, identity) in objects {
+        let path = graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap();
+        let file = File::open(&path).unwrap();
+        assert_eq!(
+            graphforge_filesystem::file_identity(&file).unwrap(),
+            *identity
+        );
+        assert!(file.metadata().unwrap().permissions().readonly());
+        assert_eq!(
+            digest_hex(&std::fs::read(path).unwrap()),
+            entry.content_sha256
+        );
+    }
+}
+
+fn cas_uuid_node_surrogates(source: &Path) -> BTreeMap<Uuid, u64> {
+    use arrow::array::UInt64Array;
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let owned = selected.declared_graph_files_inventory().unwrap().is_some();
+    let mut ids = BTreeMap::new();
+    for entry in inventory.files.iter().filter(|entry| {
+        (entry.relative_path == "topology/nodes.parquet"
+            || entry.relative_path.starts_with("topology/nodes/"))
+            && entry.relative_path.ends_with(".parquet")
+    }) {
+        let path = if owned {
+            selected.graph_tree_root().join(&entry.relative_path)
+        } else {
+            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
+        };
+        for batch in ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap()
+        {
+            let batch = batch.unwrap();
+            let uuids = batch
+                .column_by_name("node_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let values = batch
+                .column_by_name("node_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(
+                    ids.insert(
+                        Uuid::from_slice(uuids.value(row)).unwrap(),
+                        values.value(row)
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+    ids
+}
+
+fn cas_uuid_hydration_budget(root: &Path, source: &Path) {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let owner = tempfile::tempdir_in(root).unwrap();
+    let workspace = owner.path().join("hydration-probe");
+    let evidence =
+        graphforge_storage::materialize_graph_objects(source, &inventory, &workspace).unwrap();
+    let mut control_bytes = 0;
+    let mut control_allocated = 0;
+    let mut shared_run_bytes = 0;
+    for entry in inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/uuid-membership/"))
+    {
+        let name = Path::new(&entry.relative_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let file = File::open(workspace.join(&entry.relative_path)).unwrap();
+        let object = File::open(
+            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap(),
+        )
+        .unwrap();
+        if matches!(name, "manifest.json" | "topology-receipt.json") {
+            assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
+            assert_ne!(
+                graphforge_filesystem::file_identity(&file).unwrap(),
+                graphforge_filesystem::file_identity(&object).unwrap()
+            );
+            control_bytes += entry.byte_length;
+            control_allocated += graphforge_filesystem::file_space_usage(&file)
+                .unwrap()
+                .allocated_bytes;
+        } else if name.starts_with("identities-v5") || name.starts_with("node-surrogates-v5") {
+            assert!(file.metadata().unwrap().permissions().readonly());
+            assert_eq!(
+                graphforge_filesystem::file_identity(&file).unwrap(),
+                graphforge_filesystem::file_identity(&object).unwrap()
+            );
+            shared_run_bytes += entry.byte_length;
+        }
+    }
+    assert!(control_bytes > 0 && shared_run_bytes > 0);
+    assert!(
+        control_bytes <= 2 * 1024,
+        "mutable control copy I/O: {control_bytes}"
+    );
+    assert!(
+        evidence.application_write_bytes <= 192 * 1024,
+        "all private hydration writes: {}",
+        evidence.application_write_bytes
+    );
+    assert_eq!(graphforge_storage::GRAPH_OBJECT_IO_BUFFER_BYTES, 64 * 1024);
+    assert!(
+        control_allocated <= 8 * 1024,
+        "two mutable controls: {control_allocated}"
+    );
+    println!(
+        "CAS_UUID_HYDRATION {}",
+        json!({"control_bytes":control_bytes,"control_allocated_bytes":control_allocated,"shared_immutable_run_bytes":shared_run_bytes,"materialization":format!("{evidence:?}")})
+    );
+}
+
+#[test]
+fn cas_uuid_canonical_create_after_construction_preserves_authorities() {
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "cas_uuid_mutation",
+            nodes: node_count,
+            edges: 129,
+            routes: 1,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (mut nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let prior_objects = cas_uuid_parent_objects(&source);
+        assert!(!prior_objects.is_empty());
+        cas_uuid_hydration_budget(root.path(), &source);
+        let base_ids = cas_uuid_node_surrogates(&source);
+        let mut high_water = *base_ids.values().max().unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let snapshot_query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+        let expected = graph.execute(snapshot_query).unwrap();
+        let old_stream = graph.execute_stream(snapshot_query).unwrap();
+        for step in 0..9 {
+            let score = 9_000_000 + step;
+            let result = graph
+                .execute(&format!(
+                    "CREATE (n:Node0 {{score: {score}}}) RETURN n.node_uuid"
+                ))
+                .unwrap();
+            let uuid = uuid_at(&result.batches[0], 0, 0);
+            let ids = cas_uuid_node_surrogates(&source);
+            assert!(ids[&uuid] > high_water);
+            high_water = ids[&uuid];
+            for (uuid, id) in &base_ids {
+                assert_eq!(ids[uuid], *id);
+            }
+            nodes.push((uuid, "Node0".into(), Some(score)));
+        }
+        graph
+            .execute("MATCH (n:Node0 {score: 9000000}) DELETE n")
+            .unwrap();
+        nodes.retain(|node| node.2 != Some(9_000_000));
+        let result = graph
+            .execute("CREATE (n:Node0 {score: 9000100}) RETURN n.node_uuid")
+            .unwrap();
+        let uuid = uuid_at(&result.batches[0], 0, 0);
+        assert!(cas_uuid_node_surrogates(&source)[&uuid] > high_water);
+        nodes.push((uuid, "Node0".into(), Some(9_000_100)));
+        verify_graph(&graph, fixture, &nodes, &edges);
+        use futures::TryStreamExt as _;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let batches: Vec<RecordBatch> = runtime.block_on(old_stream.try_collect()).unwrap();
+        // Each query has its own query_id schema metadata. Compare the exact
+        // fields and ordered values independently of execution batch boundaries.
+        let actual = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+        let expected =
+            arrow::compute::concat_batches(&expected.batches[0].schema(), &expected.batches)
+                .unwrap();
+        assert_eq!(actual.schema().fields(), expected.schema().fields());
+        assert_eq!(actual.columns(), expected.columns());
+        cas_uuid_assert_parent_objects(&source, &prior_objects);
+        drop(graph);
+        round_trip(root.path(), &source, fixture, &nodes, &edges);
+    }
+}
+
+#[test]
+fn cas_uuid_composite_create_after_construction_preserves_authorities() {
+    exercise_qualified_create_then_set(33);
+    exercise_qualified_create_then_set(4097);
+}
+
+#[test]
+fn cas_uuid_publication_fault_child() {
+    let Ok(source) = std::env::var("GF_CAS_UUID_FAULT_ROOT") else {
+        return;
+    };
+    let hook = std::env::var("GRAPHFORGE_PROJECT_FAILPOINT").unwrap();
+    let graph = GraphForge::new(Some(&source)).unwrap();
+    let result = graph.execute("CREATE (n:Node0 {score: 9000000}) RETURN n.node_uuid");
+    assert!(
+        hook.ends_with(".error"),
+        "crash hook was not reached: {hook}: {result:?}"
+    );
+    // A returned error after the private durable intent is reconciled by the
+    // UUID transaction's authenticated roll-forward, then published normally.
+    let reconciled = hook == "rewrite.after_durable_intent.error";
+    if reconciled {
+        result.unwrap();
+    } else {
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED", "{hook}: {error}");
+    }
+    let count = if reconciled || hook == "project.after_current_replace.error" {
+        34
+    } else {
+        33
+    };
+    assert_eq!(graph.node_count("Node0").unwrap(), count);
+}
+
+#[test]
+fn cas_uuid_publication_faults_recover_and_allow_retry() {
+    for boundary in [
+        "rewrite.before_intent",
+        "rewrite.after_durable_intent",
+        "project.before_current_replace",
+        "project.after_current_replace",
+    ] {
+        for returned_error in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let fixture = Fixture {
+                name: "cas_uuid_recovery",
+                nodes: 33,
+                edges: 129,
+                routes: 1,
+                identifiers: Identifiers::Random,
+                properties: true,
+                adjacency: false,
+                heterogeneous: false,
+            };
+            let (mut nodes, edges) = rows(fixture);
+            construct(&source, fixture, &nodes, &edges);
+            let prior_objects = cas_uuid_parent_objects(&source);
+            let before = graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid();
+            let hook = format!("{boundary}{}", if returned_error { ".error" } else { "" });
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cas_uuid_publication_fault_child", "--nocapture"])
+                .env("GF_CAS_UUID_FAULT_ROOT", &source)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", &hook)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if returned_error { 0 } else { 86 }),
+                "{hook}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let graph = GraphForge::new(source.to_str()).unwrap();
+            let after = graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid();
+            let published = boundary == "project.after_current_replace"
+                || (returned_error && boundary == "rewrite.after_durable_intent");
+            assert_eq!(before != after, published, "{hook}");
+            let result = graph
+                .execute("MATCH (n:Node0 {score: 9000000}) RETURN n.node_uuid")
+                .unwrap();
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                usize::from(published)
+            );
+            if published {
+                nodes.push((
+                    uuid_at(&result.batches[0], 0, 0),
+                    "Node0".into(),
+                    Some(9_000_000),
+                ));
+            }
+            verify_graph(&graph, fixture, &nodes, &edges);
+            let result = graph
+                .execute("CREATE (n:Node0 {score: 9000001}) RETURN n.node_uuid")
+                .unwrap();
+            nodes.push((
+                uuid_at(&result.batches[0], 0, 0),
+                "Node0".into(),
+                Some(9_000_001),
+            ));
+            verify_graph(&graph, fixture, &nodes, &edges);
+            cas_uuid_assert_parent_objects(&source, &prior_objects);
+            drop(graph);
+            round_trip(root.path(), &source, fixture, &nodes, &edges);
+        }
     }
 }

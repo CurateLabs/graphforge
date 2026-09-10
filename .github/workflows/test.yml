@@ -1015,6 +1015,8 @@ jobs:
           route_status=0
           cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib uuid_membership::tests::readonly_shared_runs_preserve_uuid_snapshot_authentication -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_object_store::tests::materialization_gives_mutable_uuid_controls_private_single_link_inodes -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib project_portable_v2_export::tests::canonical_source_path_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal -- --nocapture || route_status=1
@@ -1131,6 +1133,8 @@ jobs:
           route_status=0
           cargo test -p graphforge-storage --lib route_component::tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib uuid_membership::tests::owned_manifest_ -- --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib uuid_membership::tests::readonly_shared_runs_preserve_uuid_snapshot_authentication -- --exact --nocapture || route_status=1
+          cargo test -p graphforge-storage --lib graph_object_store::tests::materialization_gives_mutable_uuid_controls_private_single_link_inodes -- --exact --nocapture || route_status=1
           cargo test -p graphforge-storage --lib graph_files::tests::graph_file_copy_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib project_portable_v2_export::tests::canonical_source_path_ -- --nocapture || route_status=1
           cargo test -p graphforge-storage --lib project_portable_v2_import::tests::authenticated_cleanup_releases_handles_before_removal -- --nocapture || route_status=1

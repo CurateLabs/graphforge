@@ -546,3 +546,81 @@ workspace Clippy, formatting, fast pre-push and gate-registry checks passed.
 The full local storage aggregate passed 1,081 tests with two existing ignores;
 one unchanged test hardcodes `/tmp`, where this host's tmpfs fails filesystem
 admission. Required native Bazel CI remains the merge gate.
+
+## CAS UUID mutation ownership (#1228)
+
+The integrated publishing-contract census reproduced ordinary and qualified
+CREATE failures on a constructed CAS parent. Hydration shared the mutable v5
+UUID manifest and receipt, but mutation planning correctly required private
+control-file ownership. Those controls now use the existing authenticated,
+bounded private-copy path. Immutable identity and surrogate runs remain shared;
+retained reads accept extra links only while readonly, with unchanged named-file
+identity, manifest digest/generation and full-run/per-block authentication.
+Private construction ownership guards remain single-link. No encoding changes,
+compatibility format or generic writer abstraction are introduced.
+
+Public regressions exercise flat 33-node and sharded 4,097-node exploratory
+parents with 129 edges. Nine successive CREATEs, DELETE and another CREATE
+preserve prior UUID/surrogate mappings and never reuse the deleted surrogate.
+Qualified node/edge creation and property changes retain the constructed parent
+and semantic owners. Both paths check exact query values, reopen, export, full
+portable verification and clean import. An active pre-mutation stream retains
+its exact ordered values; all original CAS inode identities and digests remain
+unchanged. Adversarial tests reject writable shared runs, readonly-to-writable
+transitions, mutated blocks and extra manifest aliases. Unix replacement fails
+retained identity checks; Windows retained handles prevent replacement itself.
+
+Eight subprocess cases cover process exit and returned errors before private
+intent, after durable intent, before CURRENT and after CURRENT. A returned error
+after durable UUID intent is authenticated and rolled forward before normal
+publication; a process exit there leaves the selected parent intact. Tests
+assert these distinct outcomes, reopen exact selected data, perform another
+mutation and complete a portable round trip. Existing storage tests continue to
+cover cancellation and unfinished private artifact cleanup.
+
+The public hydration fixtures cap applicable mutable controls at 2 KiB logical and
+8 KiB allocated, all private hydration writes at 192 KiB, and the existing copy
+buffer at 64 KiB. Fresh construction has the manifest; the mutation receipt is
+created by the first topology mutation. The control-copy unit test exercises
+both. Immutable UUID payloads must have the original readonly CAS
+inode: zero payload copying or reencoding. The buffer is reused serially across
+files; control file size changes copy I/O and disk use, not this buffer size.
+These are fixture/component bounds, not a whole-process RSS guarantee. Existing
+v4 ordinal private artifacts remain included in total hydration writes; they
+are not attributed to this repair. The control-specific unit test checks exact
+read/write bytes, calls and file/directory synchronization counts.
+The existing 1x/2x/4x lifecycle qualification subtracts these exact authenticated
+control lengths before enforcing the ordinal-copy growth policy. On the fixed
+node / growing edge axis, decimal counts in control JSON may grow while ordinal
+copy bytes remain exactly fixed. The regression still rejects one unaccounted
+write byte and refuses absent or oversized control accounting.
+
+Source `ad7a867bc836bf3c7381f3a1f70a71914237b349` and raw observations are in
+[`cas-uuid-ownership-1228.json`](../../development/evidence/cas-uuid-ownership-1228.json).
+
+| Constructed nodes / edges | New control bytes / allocated | Shared immutable UUID bytes | All private hydration writes |
+|---|---:|---:|---:|
+| 33 / 129 | 1,429 / 4,096 | 3,810 | 4,093 |
+| 4,097 / 129 | 1,440 / 4,096 | 202,946 | 166,775 |
+
+The complete canonical fixture took 18.12 s elapsed, 15.91 s user and 2.30 s
+system, with 153,872 KiB peak RSS. Separate syscall tracing recorded 297,801,224
+read bytes, 38,792,187 write bytes and 8,052 successful fsync calls, with no
+traced errors. OS filesystem input/output were 39,592/101,216 512-byte blocks.
+A separate 1,317-sample scan observed 21,532,672 bytes of unique-inode workspace
+allocation (maximum sample interval 24.2 ms). This includes retained generations,
+private workspaces and portable artifacts; unlinked files and shorter peaks can
+be missed. These whole-fixture observations are not control-copy-only costs or
+process admission limits. The baseline fails its first CREATE, so there is no
+valid baseline runtime comparison and no performance improvement claim.
+
+Validation passed all 24 public publishing tests, 54 membership and 38
+object-store tests, the final writable-transition regression, and all 734 API
+unit cases (733 in the aggregate and the exact-control assertion after its
+focused update). Workspace Clippy, formatting, fast pre-push and gate-registry
+checks passed. Independent review corrected the Windows replacement test;
+required exact-head native CI remains the platform/merge authority.
+
+This ownership repair does not make same-name adoption atomic (#1229), define
+bound-composition removal (#1230), refresh a facade after compaction (#1231), or
+complete the canonical publishing-contract gate (#1221).

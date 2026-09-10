@@ -3906,14 +3906,20 @@ mod tests {
             .execute("MATCH (n:Person) RETURN n.name AS name")
             .expect("ordinary query over compact-root generation");
         assert_eq!(result.stats.rows_produced, 1);
-        // Mutable route authority owns a private copy; immutable payloads stay shared.
-        assert_eq!(reopened.graph_open_evidence().files_copied, 1);
-        assert_eq!(
-            reopened.graph_open_evidence().bytes_copied,
-            std::fs::metadata(reopened.dir.join("semantic-routes.json"))
-                .unwrap()
-                .len()
-        );
+        // Mutable route and UUID controls are private; immutable payloads stay shared.
+        let controls = [
+            "semantic-routes.json",
+            "topology/uuid-membership/manifest.json",
+            "topology/uuid-membership/topology-receipt.json",
+        ];
+        assert_eq!(reopened.graph_open_evidence().files_copied, 3);
+        let mut control_bytes = 0;
+        for relative in controls {
+            let file = std::fs::File::open(reopened.dir.join(relative)).unwrap();
+            assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
+            control_bytes += file.metadata().unwrap().len();
+        }
+        assert_eq!(reopened.graph_open_evidence().bytes_copied, control_bytes);
         assert!(reopened.graph_open_evidence().files_reused > 0);
         assert!(!reopened.dir.join("files").exists());
         assert!(reopened.dir.join("topology").is_dir());
