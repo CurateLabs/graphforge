@@ -9657,4 +9657,69 @@ mod tests {
         let declared = Field::new("declared", DataType::UInt64, false);
         assert!(decode_value(&wrong_dynamic, &declared, 0).is_err());
     }
+
+    #[test]
+    fn replay_zstd_context_memory_assessment() {
+        assert_eq!(
+            zstd::zstd_safe::version_string(),
+            "1.5.7",
+            "review the codec memory bound when upgrading Zstd"
+        );
+        let decompressor = zstd::zstd_safe::DCtx::create();
+        let mut active_decoder = zstd::zstd_safe::DCtx::create();
+        let mut reused = zstd::bulk::Compressor::new(1).unwrap();
+        let empty_compressor_bytes = reused.context_mut().sizeof();
+        let mut measurements = Vec::new();
+        let mut maximum_source = 0_usize;
+        for size in [
+            0, 1, 7, 16, 128, 512, 513, 1024, 4096, 16384, 16385, 32768, 32769, 65536, 131072,
+            262144, 1048576, 2097152, 0, 1, 16384, 513, 2097152, 7, 65536,
+        ] {
+            let input = (0..size)
+                .map(|index| {
+                    // Incompressible-looking deterministic data; workspace also checked
+                    // with a reusable context that has retained earlier allocations.
+                    let mut value = index as u64 + 0x9e37_79b9_7f4a_7c15;
+                    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    (value ^ (value >> 31)).to_le_bytes()[0]
+                })
+                .collect::<Vec<_>>();
+            let mut fresh = zstd::bulk::Compressor::new(1).unwrap();
+            let compressed = fresh.compress(&input).unwrap();
+            assert_eq!(zstd::bulk::decompress(&compressed, size).unwrap(), input);
+            let mut decoded = Vec::with_capacity(size);
+            active_decoder
+                .decompress(&mut decoded, &compressed)
+                .unwrap();
+            assert_eq!(decoded, input);
+            assert!(active_decoder.sizeof() <= 128 * 1024);
+            let reused_output = reused.compress(&input).unwrap();
+            assert_eq!(compressed, reused_output);
+            // Pinned Zstd1 fast strategy: fixed contexts/workspace, at most
+            // 32768 hash entries, and B + 11 * floor(B/4) token storage.
+            // Retained state is bounded by the lifetime maximum source size.
+            // The dormant DCtx is part of this encoder only, not an input reader.
+            maximum_source = maximum_source.max(size);
+            let block = maximum_source.min(128 * 1024);
+            let hash = maximum_source.max(64).next_power_of_two().min(16384) * 8;
+            let envelope = 128 * 1024 + hash + block + 11 * (block / 4);
+            assert!(fresh.context_mut().sizeof() + decompressor.sizeof() <= envelope);
+            assert!(reused.context_mut().sizeof() + decompressor.sizeof() <= envelope);
+
+            measurements.push(serde_json::json!({"source_bytes":size, "maximum_source_bytes":maximum_source, "sampled_envelope":envelope,
+                "compressed_len":compressed.len(), "compressed_capacity":compressed.capacity(),
+                "fresh_compressor_bytes":fresh.context_mut().sizeof(),
+                "reused_compressor_bytes":reused.context_mut().sizeof(),
+                "active_decoder_bytes":active_decoder.sizeof(), "decoded_capacity":decoded.capacity()}));
+        }
+        println!(
+            "REPLAY_ZSTD_MEMORY {}",
+            serde_json::json!({
+            "zstd_version":zstd::zstd_safe::version_string(),
+            "empty_compressor_bytes":empty_compressor_bytes,
+            "empty_decompressor_bytes":decompressor.sizeof(),
+            "measurements":measurements})
+        );
+    }
 }

@@ -2496,3 +2496,157 @@ fn exploratory_coalesced_routes_reject_oversized_encoding_before_publication() {
     let reopened = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&reopened, fixture, &nodes, &[]);
 }
+
+fn publishing_parquet_inventory(source: &Path) -> Value {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
+    let mut files = Vec::new();
+    let mut payload = 0_u64;
+    let mut allocated = 0_u64;
+    for entry in inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet"))
+    {
+        let path = if generation_owned {
+            selected.graph_tree_root().join(&entry.relative_path)
+        } else {
+            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
+        };
+        let input = File::open(&path).unwrap();
+        let physical = graphforge_filesystem::file_space_usage(&input)
+            .unwrap()
+            .allocated_bytes;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(input).unwrap();
+        let groups = reader.metadata().row_groups().iter().map(|group| {
+            json!({"rows":group.num_rows(),"columns":group.columns().iter().map(|column| {
+                json!({"path":column.column_path().string(),"codec":format!("{:?}", column.compression()),
+                    "encodings":format!("{:?}", column.encodings().collect::<Vec<_>>())})
+            }).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>();
+        let edge_order = if reader.schema().index_of("edge_id").is_ok() {
+            let ids = reader
+                .build()
+                .unwrap()
+                .flat_map(|batch| {
+                    let batch = batch.unwrap();
+                    batch
+                        .column_by_name("edge_id")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<arrow::array::UInt64Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
+                })
+                .collect::<Vec<_>>();
+            json!({"rows":ids.len(), "first":ids.first(), "last":ids.last(),
+                "first_inversion":ids.windows(2).position(|pair| pair[0] >= pair[1]),
+                "prefix":ids.iter().take(12).collect::<Vec<_>>()})
+        } else {
+            Value::Null
+        };
+        payload += entry.byte_length;
+        allocated += physical;
+        files.push(json!({"path":entry.relative_path,"bytes":entry.byte_length,
+            "allocated_bytes":physical,"row_groups":groups, "edge_id_order":edge_order}));
+    }
+    json!({"ownership":if generation_owned { "generation_graph_tree" } else { "cas" }, "parquet_bytes":payload,"parquet_allocated_bytes":allocated,"files":files})
+}
+
+#[test]
+fn permanent_publishing_policy_construction_mutation_and_compaction() {
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_policy",
+        nodes: 1025,
+        edges: 4097,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let construction = publishing_parquet_inventory(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let before = verify_graph(&graph, fixture, &nodes, &edges);
+    let started = Instant::now();
+    graph
+        .execute("MATCH (n) WHERE n.score IS NOT NULL SET n.score = n.score + 1")
+        .unwrap();
+    let mutation_ns = started.elapsed().as_nanos();
+    for node in &mut nodes {
+        node.2 = node.2.map(|score| score + 1);
+    }
+    let after = verify_graph(&graph, fixture, &nodes, &edges);
+    assert_ne!(before, after);
+    drop(graph);
+    let mutation = publishing_parquet_inventory(&source);
+    let portable = root.path().join("mutation-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+
+    println!(
+        "PUBLISHING_PRE_DELTA {}",
+        json!({"construction":construction, "mutation":mutation})
+    );
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: nodes[0].0,
+                property: "score".into(),
+                value: PropValue::Int(123),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    nodes[0].2 = Some(123);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let started = Instant::now();
+    let report = graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::from_u128(121305),
+                generation_uuid: Uuid::from_u128(121306),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    let compaction_ns = started.elapsed().as_nanos();
+    drop(graph);
+    let compaction = publishing_parquet_inventory(&source);
+    let portable = root.path().join("compaction-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+    println!(
+        "PERMANENT_PUBLISHING_POLICY {}",
+        json!({"construction":construction,
+        "mutation":mutation,"compaction":compaction,"mutation_ns":mutation_ns,
+        "compaction_ns":compaction_ns,"compaction_report":format!("{report:?}")})
+    );
+}

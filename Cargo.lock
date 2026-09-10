@@ -2496,6 +2496,7 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "wait-timeout",
+ "zstd",
 ]
 
 [[package]]
