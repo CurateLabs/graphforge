@@ -11515,6 +11515,19 @@ pub(crate) mod tests {
         let path = dir.path().join("edges.uuidx");
         assert_eq!(write_identity_records(&path, &records).unwrap(), 3);
         assert_eq!(fs::metadata(path).unwrap().len(), 2_097_137);
+        let edges = records.iter().map(|record| record.0).collect::<Vec<_>>();
+        let root = dir.path().join(INDEX_DIR);
+        fs::create_dir_all(&root).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let (_, _, _, planned) =
+            plan_uuid_membership_delta(&root, 0, 1, None, scratch.path(), &[], &edges, &[], &[])
+                .unwrap();
+        assert_eq!(planned.write_blocks, 3);
+        assert_eq!(planned.write_bytes, 2_097_137);
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
+        let appended = append_uuid_membership_delta(dir.path(), 1, &[], &edges).unwrap();
+        assert_eq!(appended.write_blocks, 3);
+        assert_eq!(appended.write_bytes, 2_097_137);
     }
 
     #[test]
