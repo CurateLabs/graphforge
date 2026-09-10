@@ -437,8 +437,14 @@ fn compaction_cli_preserves_typed_delta_graph_and_reports_work() {
     let root = tempfile::tempdir().unwrap();
     let graph = GraphForge::new(root.path().to_str()).unwrap();
     graph.execute("CREATE (:Base)").unwrap();
+    let created = graph.execute("CREATE (n) RETURN n.node_uuid").unwrap();
+    let ids = created.batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+        .unwrap();
+    let node = Uuid::from_slice(ids.value(0)).unwrap();
     drop(graph);
-    let node = Uuid::now_v7();
     graphforge_storage::publish_graph_delta(
         root.path(),
         &GraphDeltaPublishRequest {
@@ -446,29 +452,16 @@ fn compaction_cli_preserves_typed_delta_graph_and_reports_work() {
             generation_uuid: Uuid::now_v7(),
             run_uuid: Uuid::now_v7(),
             limits: GraphDeltaJournalLimits::default(),
-            operations: vec![
-                GraphDeltaOp {
-                    operation_uuid: Uuid::now_v7(),
-                    kind: GraphDeltaOpKind::UpsertNode,
-                    payload: GraphDeltaPayload::UpsertNodeV2 {
-                        node_uuid: node.to_string(),
-                        node_id: 2,
-                        type_ids: vec![],
-                        created_at_micros: 1_700_000_000_000_001,
-                        updated_at_micros: 1_700_000_000_000_001,
-                    },
+            operations: vec![GraphDeltaOp {
+                operation_uuid: Uuid::now_v7(),
+                kind: GraphDeltaOpKind::SetNodeProperty,
+                payload: GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: node.to_string(),
+                    property_stem: "_untyped".into(),
+                    key: "rank".into(),
+                    value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
                 },
-                GraphDeltaOp {
-                    operation_uuid: Uuid::now_v7(),
-                    kind: GraphDeltaOpKind::SetNodeProperty,
-                    payload: GraphDeltaPayload::SetNodeProperty {
-                        node_uuid: node.to_string(),
-                        property_stem: "_untyped".into(),
-                        key: "rank".into(),
-                        value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
-                    },
-                },
-            ],
+            }],
         },
     )
     .unwrap();

@@ -87,51 +87,42 @@ fn assert_small_write_property_evidence(view: &std::path::Path, src_uuid: &str) 
 }
 
 fn sample_ops() -> Vec<GraphDeltaOp> {
-    let edge = Uuid::now_v7();
-    let src = Uuid::now_v7();
-    let dst = Uuid::now_v7();
+    let src = Uuid::from_u128(5).to_string();
+    let edge = "00000000-0000-7000-8000-000000000003".to_owned();
     vec![
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNodeV2 {
-                node_uuid: src.hyphenated().to_string(),
-                node_id: 3,
-                type_ids: vec![EntityTypeId::decode(1).unwrap()],
-                created_at_micros: 1_700_000_000_000_001,
-                updated_at_micros: 1_700_000_000_000_001,
+            kind: GraphDeltaOpKind::RemoveNodeProperty,
+            payload: GraphDeltaPayload::RemoveNodeProperty {
+                node_uuid: src.clone(),
+                property_stem: "_untyped".into(),
+                key: "absent".into(),
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNodeV2 {
-                node_uuid: dst.hyphenated().to_string(),
-                node_id: 4,
-                type_ids: vec![EntityTypeId::decode(1).unwrap()],
-                created_at_micros: 1_700_000_000_000_002,
-                updated_at_micros: 1_700_000_000_000_002,
+            kind: GraphDeltaOpKind::RemoveEdgeProperty,
+            payload: GraphDeltaPayload::RemoveEdgeProperty {
+                edge_uuid: edge.clone(),
+                property_stem: "KNOWS".into(),
+                key: "absent".into(),
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertEdge,
-            payload: GraphDeltaPayload::UpsertEdgeV2 {
-                edge_uuid: edge.hyphenated().to_string(),
-                src_uuid: src.hyphenated().to_string(),
-                dst_uuid: dst.hyphenated().to_string(),
-                rel_type: "KNOWS".into(),
-                edge_id: 2,
-                src_id: 3,
-                dst_id: 4,
-                created_at_micros: 1_700_000_000_000_003,
+            kind: GraphDeltaOpKind::SetEdgeProperty,
+            payload: GraphDeltaPayload::SetEdgeProperty {
+                edge_uuid: edge,
+                property_stem: "KNOWS".into(),
+                key: "weight".into(),
+                value: encode_graph_delta_value(&IrLiteral::Float(0.5)).unwrap(),
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::SetNodeProperty,
             payload: GraphDeltaPayload::SetNodeProperty {
-                node_uuid: src.hyphenated().to_string(),
+                node_uuid: src,
                 property_stem: "_untyped".into(),
                 key: "rank".into(),
                 value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
@@ -163,6 +154,20 @@ fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize
         .create_node(second, EntityTypeId::decode(1).unwrap())
         .unwrap();
     writer.create_edge(edge, "KNOWS", &first, &second).unwrap();
+    writer
+        .create_node(Uuid::from_u128(5), EntityTypeId::decode(1).unwrap())
+        .unwrap();
+    writer
+        .create_node(Uuid::from_u128(6), EntityTypeId::decode(1).unwrap())
+        .unwrap();
+    writer
+        .create_edge(
+            Uuid::from_u128(7),
+            "KNOWS",
+            &Uuid::from_u128(5),
+            &Uuid::from_u128(6),
+        )
+        .unwrap();
     for _ in 0..extra_nodes {
         writer
             .create_node(Uuid::now_v7(), EntityTypeId::decode(1).unwrap())
@@ -225,26 +230,7 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
     for extra_nodes in [256, 512, 1_024] {
         let root = tempfile::tempdir().unwrap();
         publish_base_with_extra_nodes(root.path(), extra_nodes);
-        let mut operations = sample_ops();
-        let src_id = extra_nodes as u64 + 3;
-        let dst_id = src_id + 1;
-        if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut operations[0].payload {
-            *node_id = src_id;
-        }
-        if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut operations[1].payload {
-            *node_id = dst_id;
-        }
-        if let GraphDeltaPayload::UpsertEdgeV2 {
-            edge_id,
-            src_id: edge_src_id,
-            dst_id: edge_dst_id,
-            ..
-        } = &mut operations[2].payload
-        {
-            *edge_id = 2;
-            *edge_src_id = src_id;
-            *edge_dst_id = dst_id;
-        }
+        let operations = sample_ops();
         publish_graph_delta(
             root.path(),
             &GraphDeltaPublishRequest {
@@ -276,25 +262,25 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
         if extra_nodes == 1024 {
             assert!(
                 replay.temporary_decode_stream_bytes > 0,
-                "the 2 MiB phase-separated strategy must be exercised"
-            );
-            let direct = tempfile::tempdir().unwrap();
-            let (_, direct_evidence) = materialize_replayed_graph_tree(
-                &resolved.graph_tree_root(),
-                &inventory,
-                direct.path(),
-                GraphDeltaJournalLimits {
-                    max_batch_rows: 7,
-                    ..GraphDeltaJournalLimits::default()
-                },
-            )
-            .unwrap();
-            assert_eq!(direct_evidence.temporary_decode_stream_bytes, 0);
-            assert_eq!(
-                fs::read(target.path().join("topology/nodes.parquet")).unwrap(),
-                fs::read(direct.path().join("topology/nodes.parquet")).unwrap()
+                "the 2 MiB phase-separated topology scan must be exercised even for property replay"
             );
         }
+        let direct = tempfile::tempdir().unwrap();
+        let (_, direct_evidence) = materialize_replayed_graph_tree(
+            &resolved.graph_tree_root(),
+            &inventory,
+            direct.path(),
+            GraphDeltaJournalLimits {
+                max_batch_rows: 7,
+                ..GraphDeltaJournalLimits::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(direct_evidence.temporary_decode_stream_bytes, 0);
+        assert_eq!(
+            fs::read(target.path().join("topology/nodes.parquet")).unwrap(),
+            fs::read(direct.path().join("topology/nodes.parquet")).unwrap()
+        );
         println!(
             "REPLAY_STREAM_BUDGET nodes={} stream_bytes={} stream_allocated={}",
             extra_nodes + 4,
@@ -332,7 +318,7 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
 }
 
 #[test]
-fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output() {
+fn property_replay_topology_writer_admission_preserves_rejected_output() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
     publish_graph_delta(
@@ -429,6 +415,190 @@ fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output(
             .sum::<usize>(),
         2
     );
+}
+
+#[test]
+fn topology_payloads_reject_before_encoding_preparation_or_publication() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let parent = resolve_project_generation(root.path()).unwrap();
+    let before = snapshot_committed_files(root.path());
+    for operation in topology_ops() {
+        assert_eq!(
+            encode_delta_run(
+                1,
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                std::slice::from_ref(&operation),
+                GraphDeltaJournalLimits::default()
+            )
+            .unwrap_err()
+            .code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        let request = GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: vec![sample_ops().pop().unwrap(), operation],
+            limits: GraphDeltaJournalLimits::default(),
+        };
+        assert_eq!(
+            graphforge_storage::prepare_graph_delta(&parent, &request)
+                .err()
+                .unwrap()
+                .code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert_eq!(
+            publish_graph_delta(root.path(), &request)
+                .unwrap_err()
+                .code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert_eq!(snapshot_committed_files(root.path()), before);
+    }
+}
+
+#[test]
+fn topology_cannot_bypass_published_retry_or_mutate_direct_replay_state() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    let request = GraphDeltaPublishRequest {
+        transaction_uuid: Uuid::now_v7(),
+        generation_uuid: Uuid::now_v7(),
+        run_uuid: Uuid::now_v7(),
+        operations: sample_ops(),
+        limits: GraphDeltaJournalLimits::default(),
+    };
+    publish_graph_delta(root.path(), &request).unwrap();
+    let generation = resolve_project_generation(root.path()).unwrap();
+    let inventory = generation.graph_files_inventory().unwrap().unwrap();
+    let (base, _) =
+        reconstruct_graph_state(&generation.graph_tree_root(), &inventory, request.limits).unwrap();
+    let before = snapshot_committed_files(root.path());
+    for operation in topology_ops() {
+        let mut retry = request.clone();
+        retry.operations = vec![operation.clone()];
+        assert_eq!(
+            publish_graph_delta(root.path(), &retry).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert_eq!(snapshot_committed_files(root.path()), before);
+
+        let supported = sample_ops().pop().unwrap();
+        let encoded = encode_delta_run(
+            1,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &[supported],
+            request.limits,
+        )
+        .unwrap();
+        let mut run = decode_delta_run(&encoded, Some(1), request.limits).unwrap();
+        let mut record = run.records[0].clone();
+        record.operation_uuid = operation.operation_uuid;
+        record.op_sequence = 1;
+        record.kind = operation.kind;
+        record.payload = operation.payload.clone();
+        run.records.push(record);
+        for already_applied in [false, true] {
+            let mut state = base.clone();
+            if already_applied {
+                state.applied_operations.insert(
+                    operation.operation_uuid.to_string(),
+                    operation.payload.clone(),
+                );
+            }
+            let original = state.clone();
+            assert_eq!(
+                graphforge_storage::apply_delta_runs(
+                    &mut state,
+                    std::slice::from_ref(&run),
+                    request.limits
+                )
+                .unwrap_err()
+                .code(),
+                "GF_UNSUPPORTED_PROJECT_FORMAT"
+            );
+            assert_eq!(
+                state, original,
+                "a supported prefix must not be applied before topology refusal"
+            );
+        }
+        let bytes = run_with_mutated_payload(&sample_ops()[0], |payload| {
+            *payload = serde_json::to_value(&operation.payload).unwrap();
+        });
+        assert_eq!(
+            decode_delta_run(&bytes, Some(1), request.limits)
+                .unwrap_err()
+                .code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+    }
+}
+
+fn topology_ops() -> Vec<GraphDeltaOp> {
+    let node = "00000000-0000-7000-8000-000000000001".to_owned();
+    let edge = "00000000-0000-7000-8000-000000000003".to_owned();
+    [
+        (
+            GraphDeltaOpKind::UpsertNode,
+            GraphDeltaPayload::UpsertNode {
+                node_uuid: node.clone(),
+                type_ids: vec![],
+            },
+        ),
+        (
+            GraphDeltaOpKind::UpsertNode,
+            GraphDeltaPayload::UpsertNodeV2 {
+                node_uuid: node.clone(),
+                node_id: u64::MAX - 1,
+                type_ids: vec![EntityTypeId::decode(1).unwrap()],
+                created_at_micros: 1,
+                updated_at_micros: 2,
+            },
+        ),
+        (
+            GraphDeltaOpKind::DeleteNode,
+            GraphDeltaPayload::DeleteNode {
+                node_uuid: node.clone(),
+            },
+        ),
+        (
+            GraphDeltaOpKind::UpsertEdge,
+            GraphDeltaPayload::UpsertEdge {
+                edge_uuid: edge.clone(),
+                src_uuid: node.clone(),
+                dst_uuid: node.clone(),
+                rel_type: "OTHER".into(),
+            },
+        ),
+        (
+            GraphDeltaOpKind::UpsertEdge,
+            GraphDeltaPayload::UpsertEdgeV2 {
+                edge_uuid: edge.clone(),
+                src_uuid: node.clone(),
+                dst_uuid: node.clone(),
+                rel_type: "OTHER".into(),
+                edge_id: 1,
+                src_id: 1,
+                dst_id: 1,
+                created_at_micros: 1,
+            },
+        ),
+        (
+            GraphDeltaOpKind::DeleteEdge,
+            GraphDeltaPayload::DeleteEdge { edge_uuid: edge },
+        ),
+    ]
+    .into_iter()
+    .map(|(kind, payload)| GraphDeltaOp {
+        operation_uuid: Uuid::now_v7(),
+        kind,
+        payload,
+    })
+    .collect()
 }
 
 #[test]
@@ -533,11 +703,11 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
 
     let ops = sample_ops();
     let edge_uuid = match &ops[2].payload {
-        GraphDeltaPayload::UpsertEdgeV2 { edge_uuid, .. } => edge_uuid.clone(),
+        GraphDeltaPayload::SetEdgeProperty { edge_uuid, .. } => edge_uuid.clone(),
         _ => unreachable!(),
     };
     let src_uuid = match &ops[0].payload {
-        GraphDeltaPayload::UpsertNodeV2 { node_uuid, .. } => node_uuid.clone(),
+        GraphDeltaPayload::RemoveNodeProperty { node_uuid, .. } => node_uuid.clone(),
         _ => unreachable!(),
     };
     let receipt = publish_graph_delta(
@@ -635,37 +805,11 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
 }
 
 #[test]
-fn entity_delete_rewrites_each_affected_property_route_with_tombstones() {
+fn canonical_entity_delete_rewrites_each_affected_property_route_with_tombstones() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
     let node = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
     let edge = Uuid::parse_str("00000000-0000-7000-8000-000000000003").unwrap();
-    publish_graph_delta(
-        root.path(),
-        &GraphDeltaPublishRequest {
-            transaction_uuid: Uuid::now_v7(),
-            generation_uuid: Uuid::now_v7(),
-            run_uuid: Uuid::now_v7(),
-            operations: vec![
-                GraphDeltaOp {
-                    operation_uuid: Uuid::now_v7(),
-                    kind: GraphDeltaOpKind::DeleteEdge,
-                    payload: GraphDeltaPayload::DeleteEdge {
-                        edge_uuid: edge.hyphenated().to_string(),
-                    },
-                },
-                GraphDeltaOp {
-                    operation_uuid: Uuid::now_v7(),
-                    kind: GraphDeltaOpKind::DeleteNode,
-                    payload: GraphDeltaPayload::DeleteNode {
-                        node_uuid: node.hyphenated().to_string(),
-                    },
-                },
-            ],
-            limits: GraphDeltaJournalLimits::default(),
-        },
-    )
-    .unwrap();
     let generation = resolve_project_generation(root.path()).unwrap();
     let inventory = generation.graph_files_inventory().unwrap().unwrap();
     let view = tempfile::tempdir().unwrap();
@@ -677,6 +821,15 @@ fn entity_delete_rewrites_each_affected_property_route_with_tombstones() {
     )
     .unwrap();
 
+    assert_eq!(
+        graphforge_storage::delete_nodes_and_edges(
+            view.path(),
+            &std::collections::HashSet::from([*node.as_bytes()]),
+            &std::collections::HashSet::from([*edge.as_bytes()])
+        )
+        .unwrap(),
+        (1, 1)
+    );
     let scratch = tempfile::tempdir().unwrap();
     for (kind, route) in [
         (PropertyRouteKind::Node, "Person"),
@@ -870,8 +1023,8 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     );
 
     let mut conflicting = ops;
-    if let GraphDeltaPayload::UpsertEdgeV2 { rel_type, .. } = &mut conflicting[2].payload {
-        *rel_type = "OTHER".into();
+    if let GraphDeltaPayload::SetEdgeProperty { value, .. } = &mut conflicting[2].payload {
+        *value = encode_graph_delta_value(&IrLiteral::Float(3.5)).unwrap();
     }
     let err = publish_graph_delta(
         root.path(),
@@ -891,7 +1044,7 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
 // rather than failing an unrelated checksum or inventory check.
 fn run_with_raw_membership(raw: u32) -> Vec<u8> {
     run_with_mutated_payload(&sample_ops()[0], |payload| {
-        payload["type_ids"] = serde_json::json!([raw]);
+        *payload = serde_json::json!({"kind":"upsert_node_v2", "node_uuid":Uuid::from_u128(5).to_string(), "node_id":3, "type_ids":[raw], "created_at_micros":1, "updated_at_micros":1});
     })
 }
 
@@ -921,6 +1074,14 @@ fn run_with_mutated_payload(
     let mut framed = bytes[..PAYLOAD_LENGTH].to_vec();
     framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
     framed.extend_from_slice(&payload);
+    let kind: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    framed[RECORD_START + 22] = match kind["kind"].as_str().unwrap() {
+        "upsert_node" | "upsert_node_v2" => GraphDeltaOpKind::UpsertNode as u8,
+        "delete_node" => GraphDeltaOpKind::DeleteNode as u8,
+        "upsert_edge" | "upsert_edge_v2" => GraphDeltaOpKind::UpsertEdge as u8,
+        "delete_edge" => GraphDeltaOpKind::DeleteEdge as u8,
+        _ => operation.kind as u8,
+    };
     let checksum = Sha256::digest(&framed[RECORD_START..]);
     framed.extend_from_slice(&checksum);
     let checksum = Sha256::digest(&framed);
@@ -953,14 +1114,18 @@ fn snapshot_committed_files(root: &std::path::Path) -> BTreeMap<std::path::PathB
 
 #[test]
 fn committed_checksum_valid_invalid_memberships_reject_without_authority_mutation() {
-    // Control proves the hand-built frame is accepted before changing its identity.
-    decode_delta_run(
-        &run_with_raw_membership(1),
-        Some(1),
-        GraphDeltaJournalLimits::default(),
-    )
-    .unwrap();
-    for raw in [0x8000_0000, 0xc000_0000, u32::MAX] {
+    // Valid topology frames are unsupported; invalid identity domains still fail closed during decoding.
+    assert_eq!(
+        decode_delta_run(
+            &run_with_raw_membership(1),
+            Some(1),
+            GraphDeltaJournalLimits::default()
+        )
+        .unwrap_err()
+        .code(),
+        "GF_UNSUPPORTED_PROJECT_FORMAT"
+    );
+    for raw in [1, 0x8000_0000, 0xc000_0000, u32::MAX] {
         let root = tempfile::tempdir().unwrap();
         open_or_initialize_project(root.path()).unwrap();
         let graph = tempfile::tempdir().unwrap();
@@ -1006,11 +1171,25 @@ fn committed_checksum_valid_invalid_memberships_reject_without_authority_mutatio
             GraphDeltaJournalLimits::default(),
         )
         .unwrap_err();
-        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
-        assert!(
-            error.to_string().contains("payload decode failed"),
-            "{error}"
-        );
+        if raw == 1 {
+            assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
+        } else {
+            assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+            assert!(
+                error.to_string().contains("payload decode failed"),
+                "{error}"
+            );
+        }
+        let view = tempfile::tempdir().unwrap();
+        let replay_error = materialize_replayed_graph_tree(
+            &resolved.graph_tree_root(),
+            &inventory,
+            view.path(),
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(replay_error.code(), error.code());
+        assert_eq!(fs::read_dir(view.path()).unwrap().count(), 0);
         assert_eq!(
             snapshot_committed_files(root.path()),
             before,
@@ -1116,10 +1295,10 @@ fn legacy_v1_project_without_deltas_remains_readable() {
         .unwrap(),
         IrLiteral::Int(42)
     );
-    assert_eq!(state.node_ids.len(), 2);
-    assert_eq!(state.node_timestamps.len(), 2);
-    assert_eq!(state.edge_ids.len(), 1);
-    assert_eq!(state.edge_created_at.len(), 1);
+    assert_eq!(state.node_ids.len(), 4);
+    assert_eq!(state.node_timestamps.len(), 4);
+    assert_eq!(state.edge_ids.len(), 2);
+    assert_eq!(state.edge_created_at.len(), 2);
 }
 
 #[test]

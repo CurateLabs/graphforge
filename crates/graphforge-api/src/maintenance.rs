@@ -331,38 +331,31 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let graph = GraphForge::new(directory.path().to_str()).unwrap();
         graph.execute("CREATE (:Base)").unwrap();
+        let created = graph.execute("CREATE (n) RETURN n.node_uuid").unwrap();
+        let ids = created.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
+        let replayed_node = Uuid::from_slice(ids.value(0)).unwrap().to_string();
         drop(graph);
 
-        let replayed_node = Uuid::now_v7().hyphenated().to_string();
         graphforge_storage::publish_graph_delta(
             directory.path(),
             &GraphDeltaPublishRequest {
                 transaction_uuid: Uuid::now_v7(),
                 generation_uuid: Uuid::now_v7(),
                 run_uuid: Uuid::now_v7(),
-                operations: vec![
-                    GraphDeltaOp {
-                        operation_uuid: Uuid::now_v7(),
-                        kind: GraphDeltaOpKind::UpsertNode,
-                        payload: GraphDeltaPayload::UpsertNodeV2 {
-                            node_uuid: replayed_node.clone(),
-                            node_id: 2,
-                            type_ids: Vec::new(),
-                            created_at_micros: 1_700_000_000_000_001,
-                            updated_at_micros: 1_700_000_000_000_001,
-                        },
+                operations: vec![GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::SetNodeProperty,
+                    payload: GraphDeltaPayload::SetNodeProperty {
+                        node_uuid: replayed_node,
+                        property_stem: "_untyped".into(),
+                        key: "rank".into(),
+                        value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
                     },
-                    GraphDeltaOp {
-                        operation_uuid: Uuid::now_v7(),
-                        kind: GraphDeltaOpKind::SetNodeProperty,
-                        payload: GraphDeltaPayload::SetNodeProperty {
-                            node_uuid: replayed_node,
-                            property_stem: "_untyped".into(),
-                            key: "rank".into(),
-                            value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
-                        },
-                    },
-                ],
+                }],
                 limits: GraphDeltaJournalLimits::default(),
             },
         )

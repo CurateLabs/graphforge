@@ -5122,3 +5122,350 @@ fn ontology_promotion_bounds_changed_control_inventory() {
         );
     }
 }
+
+fn publishing_contract_verify(graph: &GraphForge, nodes: &[Node], edges: &[Edge]) -> String {
+    for (query, expected) in [
+        ("MATCH (n) RETURN count(n)", nodes.len()),
+        ("MATCH ()-[r]->() RETURN count(r)", edges.len()),
+    ] {
+        let result = graph.execute(query).unwrap();
+        assert_eq!(int_at(&result.batches[0], 0, 0), Some(expected as i64));
+    }
+    for route in 0..2 {
+        let label = format!("Node{route}");
+        let relation = format!("REL{route}");
+        verify_promoted_route(
+            graph,
+            &nodes
+                .iter()
+                .filter(|n| n.1 == label)
+                .cloned()
+                .collect::<Vec<_>>(),
+            &edges
+                .iter()
+                .filter(|e| e.3 == relation)
+                .cloned()
+                .collect::<Vec<_>>(),
+            &label,
+            &relation,
+        );
+    }
+    digest_hex(&serde_json::to_vec(&(nodes, edges)).unwrap())
+}
+
+#[test]
+fn publishing_contract_alternates_supported_paths_and_refuses_topology_journals() {
+    exercise_publishing_contract(33, false);
+}
+#[test]
+fn publishing_contract_flat_ontology() {
+    exercise_publishing_contract(33, true);
+}
+#[test]
+fn publishing_contract_sharded_exploratory() {
+    exercise_publishing_contract(4097, false);
+}
+#[test]
+fn publishing_contract_sharded_ontology() {
+    exercise_publishing_contract(4097, true);
+}
+
+fn exercise_publishing_contract(count: usize, typed: bool) {
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation as Mutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, GraphDeltaOp, GraphDeltaOpKind,
+        GraphDeltaPayload, GraphDeltaPublishRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_contract",
+        nodes: count,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let initial = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let inventory = initial.graph_files_inventory().unwrap().unwrap();
+    let node_shards = inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/nodes/"))
+        .count();
+    if count > 4096 {
+        assert!(
+            node_shards > 1,
+            "large fixture must use sharded node authority"
+        );
+    }
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    if typed {
+        graph
+            .adopt_ontology(promotion_request(root.path()))
+            .unwrap();
+    }
+    publishing_contract_verify(&graph, &nodes, &edges);
+    let initial_ids = cas_uuid_node_surrogates(&source);
+    let initial_edge_ids = publishing_edge_surrogates(&source);
+    let before = clear_publication_files(&source);
+    for payload in [
+        GraphDeltaPayload::UpsertNodeV2 {
+            node_uuid: nodes[0].0.to_string(),
+            node_id: initial_ids[&nodes[0].0],
+            type_ids: vec![],
+            created_at_micros: 1,
+            updated_at_micros: 2,
+        },
+        GraphDeltaPayload::UpsertEdgeV2 {
+            edge_uuid: edges[0].0.to_string(),
+            src_uuid: nodes[0].0.to_string(),
+            dst_uuid: Uuid::now_v7().to_string(),
+            rel_type: "REL1".into(),
+            edge_id: 1,
+            src_id: initial_ids[&nodes[0].0],
+            dst_id: u64::MAX,
+            created_at_micros: 1,
+        },
+        GraphDeltaPayload::DeleteNode {
+            node_uuid: nodes[0].0.to_string(),
+        },
+        GraphDeltaPayload::DeleteEdge {
+            edge_uuid: edges[0].0.to_string(),
+        },
+    ] {
+        let kind = match payload {
+            GraphDeltaPayload::UpsertNodeV2 { .. } => GraphDeltaOpKind::UpsertNode,
+            GraphDeltaPayload::UpsertEdgeV2 { .. } => GraphDeltaOpKind::UpsertEdge,
+            GraphDeltaPayload::DeleteNode { .. } => GraphDeltaOpKind::DeleteNode,
+            _ => GraphDeltaOpKind::DeleteEdge,
+        };
+        let error = graphforge_storage::publish_graph_delta(
+            &source,
+            &GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations: vec![GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind,
+                    payload,
+                }],
+                limits: Default::default(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
+        assert_eq!(clear_publication_files(&source), before);
+    }
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![
+                Mutation::SetNodeProperty {
+                    node_uuid: nodes[0].0,
+                    property: "score".into(),
+                    value: PropValue::Int(1221),
+                },
+                Mutation::RemoveNodeProperty {
+                    node_uuid: nodes[1].0,
+                    property: "score".into(),
+                },
+                Mutation::SetEdgeProperty {
+                    edge_uuid: edges[0].0,
+                    property: "weight".into(),
+                    value: PropValue::Int(1221),
+                },
+                Mutation::RemoveEdgeProperty {
+                    edge_uuid: edges[1].0,
+                    property: "text".into(),
+                },
+            ],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    assert!(
+        graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+            .unwrap()
+            .files
+            .iter()
+            .any(|entry| entry.relative_path.starts_with("deltas/")),
+        "fixture must exercise actual GFDR"
+    );
+    nodes[0].2 = Some(1221);
+    nodes[1].2 = None;
+    edges[0].4 = Some(1221);
+    edges[1].5 = None;
+    publishing_contract_verify(&graph, &nodes, &edges);
+    let report = graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(report.output_bytes <= 2 * 1024 * 1024);
+    assert!(
+        report.peak_memory_bytes <= 8 * 1024,
+        "logical replay accounting: {report:?}"
+    );
+    publishing_contract_verify(&graph, &nodes, &edges);
+    let created = graph
+        .execute("CREATE (n:Node0 {score: 91221}) RETURN n.node_uuid")
+        .unwrap();
+    let retired_uuid = uuid_at(&created.batches[0], 0, 0);
+    let retired_id = cas_uuid_node_surrogates(&source)[&retired_uuid];
+    graph
+        .execute("MATCH (n:Node0 {score: 91221}) DELETE n")
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let created = graph
+        .execute("CREATE (n:Node0 {score: 92221}) RETURN n.node_uuid")
+        .unwrap();
+    let created_uuid = uuid_at(&created.batches[0], 0, 0);
+    nodes.push((created_uuid, "Node0".into(), Some(92221)));
+    let ids = cas_uuid_node_surrogates(&source);
+    assert!(retired_id > *initial_ids.values().max().unwrap());
+    assert!(ids[&created_uuid] > retired_id);
+    for (uuid, id) in &initial_ids {
+        assert_eq!(ids[uuid], *id);
+    }
+    let edge_query = "MATCH (a:Node0 {score: 1221}), (b:Node0 {score: 92221}) CREATE (a)-[e:REL0 {weight: 1221001}]->(b) RETURN e.edge_uuid";
+    let result = graph.execute(edge_query).unwrap();
+    assert_eq!(result.stats.rows_produced, 1);
+    let retired_edge = uuid_at(&result.batches[0], 0, 0);
+    let retired_edge_id = publishing_edge_surrogates(&source)[&retired_edge];
+    graph
+        .execute("MATCH ()-[e:REL0 {weight: 1221001}]->() DELETE e")
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let result = graph
+        .execute(&edge_query.replace("1221001", "1221002"))
+        .unwrap();
+    let added_edge = uuid_at(&result.batches[0], 0, 0);
+    edges.push((
+        added_edge,
+        nodes[0].0,
+        created_uuid,
+        "REL0".into(),
+        Some(1221002),
+        None,
+    ));
+    let edge_ids = publishing_edge_surrogates(&source);
+    assert!(retired_edge_id > *initial_edge_ids.values().max().unwrap());
+    assert!(edge_ids[&added_edge] > retired_edge_id);
+    for (uuid, id) in &initial_edge_ids {
+        assert_eq!(edge_ids[uuid], *id);
+    }
+    publishing_contract_verify(&graph, &nodes, &edges);
+    drop(graph);
+    round_trip_checked(root.path(), &source, |graph| {
+        publishing_contract_verify(graph, &nodes, &edges)
+    });
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    let imported_before = cas_uuid_node_surrogates(&imported_path);
+    assert_eq!(imported_before, ids);
+    let created = imported
+        .execute("CREATE (n:Node0 {score: 93221}) RETURN n.node_uuid")
+        .unwrap();
+    let created_uuid = uuid_at(&created.batches[0], 0, 0);
+    nodes.push((created_uuid, "Node0".into(), Some(93221)));
+    assert!(cas_uuid_node_surrogates(&imported_path)[&created_uuid] > *ids.values().max().unwrap());
+    assert_eq!(publishing_edge_surrogates(&imported_path), edge_ids);
+    let result = imported.execute("MATCH (a:Node0 {score: 1221}), (b:Node0 {score: 93221}) CREATE (a)-[e:REL0 {weight: 1221003}]->(b) RETURN e.edge_uuid").unwrap();
+    let added_edge = uuid_at(&result.batches[0], 0, 0);
+    edges.push((
+        added_edge,
+        nodes[0].0,
+        created_uuid,
+        "REL0".into(),
+        Some(1221003),
+        None,
+    ));
+    assert!(
+        publishing_edge_surrogates(&imported_path)[&added_edge] > *edge_ids.values().max().unwrap()
+    );
+    publishing_contract_verify(&imported, &nodes, &edges);
+    drop(imported);
+    publishing_contract_verify(
+        &GraphForge::new(imported_path.to_str()).unwrap(),
+        &nodes,
+        &edges,
+    );
+    println!(
+        "PUBLISHING_CONTRACT {}",
+        json!({"nodes":count,"typed":typed,"routes":2,"compaction_output_bytes":report.output_bytes,"logical_replay_peak_bytes":report.peak_memory_bytes})
+    );
+}
+
+fn publishing_edge_surrogates(source: &Path) -> BTreeMap<Uuid, u64> {
+    use arrow::array::UInt64Array;
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let owned = selected.declared_graph_files_inventory().unwrap().is_some();
+    let mut ids = BTreeMap::new();
+    for entry in inventory.files.iter().filter(|entry| {
+        entry.relative_path.starts_with("topology/edges/")
+            && entry.relative_path.ends_with(".parquet")
+    }) {
+        let path = if owned {
+            selected.graph_tree_root().join(&entry.relative_path)
+        } else {
+            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
+        };
+        for batch in ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap()
+        {
+            let batch = batch.unwrap();
+            let uuids = batch
+                .column_by_name("edge_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let values = batch
+                .column_by_name("edge_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert!(
+                    ids.insert(
+                        Uuid::from_slice(uuids.value(row)).unwrap(),
+                        values.value(row)
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+    ids
+}

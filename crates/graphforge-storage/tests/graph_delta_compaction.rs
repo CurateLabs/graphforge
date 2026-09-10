@@ -21,47 +21,21 @@ use graphforge_value::EntityTypeId;
 use uuid::Uuid;
 
 fn sample_ops() -> Vec<GraphDeltaOp> {
-    let edge = Uuid::now_v7();
-    let src = Uuid::now_v7();
-    let dst = Uuid::now_v7();
-    vec![
-        GraphDeltaOp {
+    (1..=3)
+        .map(|id| GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNodeV2 {
-                node_uuid: src.hyphenated().to_string(),
-                node_id: 2,
-                type_ids: vec![EntityTypeId::decode(1).unwrap()],
-                created_at_micros: 1,
-                updated_at_micros: 1,
+            kind: GraphDeltaOpKind::SetNodeProperty,
+            payload: GraphDeltaPayload::SetNodeProperty {
+                node_uuid: Uuid::from_u128(id).to_string(),
+                property_stem: "Person".into(),
+                key: "value".into(),
+                value: graphforge_storage::encode_graph_delta_value(
+                    &graphforge_ir::IrLiteral::Str(Uuid::now_v7().to_string()),
+                )
+                .unwrap(),
             },
-        },
-        GraphDeltaOp {
-            operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNodeV2 {
-                node_uuid: dst.hyphenated().to_string(),
-                node_id: 3,
-                type_ids: vec![EntityTypeId::decode(1).unwrap()],
-                created_at_micros: 2,
-                updated_at_micros: 2,
-            },
-        },
-        GraphDeltaOp {
-            operation_uuid: Uuid::now_v7(),
-            kind: GraphDeltaOpKind::UpsertEdge,
-            payload: GraphDeltaPayload::UpsertEdgeV2 {
-                edge_uuid: edge.hyphenated().to_string(),
-                src_uuid: src.hyphenated().to_string(),
-                dst_uuid: dst.hyphenated().to_string(),
-                rel_type: "KNOWS".into(),
-                edge_id: 1,
-                src_id: 2,
-                dst_id: 3,
-                created_at_micros: 3,
-            },
-        },
-    ]
+        })
+        .collect()
 }
 
 fn publish_base(container: &std::path::Path) -> Uuid {
@@ -73,10 +47,17 @@ fn publish_base(container: &std::path::Path) -> Uuid {
         1_700_000_000_000_000,
     )
     .unwrap();
+    for id in 1..=3 {
+        writer
+            .create_node(Uuid::from_u128(id), EntityTypeId::decode(1).unwrap())
+            .unwrap();
+    }
     writer
-        .create_node(
-            Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
-            EntityTypeId::decode(1).unwrap(),
+        .create_edge(
+            Uuid::from_u128(4),
+            "KNOWS",
+            &Uuid::from_u128(1),
+            &Uuid::from_u128(2),
         )
         .unwrap();
     writer.flush().unwrap();
@@ -113,40 +94,7 @@ fn publish_base(container: &std::path::Path) -> Uuid {
     generation_uuid
 }
 
-fn publish_delta(container: &std::path::Path, mut ops: Vec<GraphDeltaOp>) -> [u8; 32] {
-    let resolved = resolve_project_generation(container).unwrap();
-    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
-    let (state, _) = reconstruct_graph_state(
-        &resolved.graph_tree_root(),
-        &inventory,
-        GraphDeltaJournalLimits::default(),
-    )
-    .unwrap();
-    let src_id = state.node_ids.values().copied().max().unwrap_or(0) + 1;
-    let dst_id = src_id + 1;
-    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[0].payload {
-        *node_id = src_id;
-    }
-    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[1].payload {
-        *node_id = dst_id;
-    }
-    if let GraphDeltaPayload::UpsertEdgeV2 {
-        edge_id,
-        src_id: edge_src_id,
-        dst_id: edge_dst_id,
-        ..
-    } = &mut ops[2].payload
-    {
-        *edge_id = state
-            .edge_ids
-            .values()
-            .map(|(edge_id, _, _)| *edge_id)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        *edge_src_id = src_id;
-        *edge_dst_id = dst_id;
-    }
+fn publish_delta(container: &std::path::Path, ops: Vec<GraphDeltaOp>) -> [u8; 32] {
     let receipt = publish_graph_delta(
         container,
         &GraphDeltaPublishRequest {

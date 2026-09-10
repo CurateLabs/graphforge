@@ -16,13 +16,15 @@ fn fixture(count: usize) -> Vec<GraphDeltaOp> {
     (0..count)
         .map(|index| GraphDeltaOp {
             operation_uuid: Uuid::from_u128(0x1000 + index as u128),
-            kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNodeV2 {
+            kind: GraphDeltaOpKind::SetNodeProperty,
+            payload: GraphDeltaPayload::SetNodeProperty {
                 node_uuid: Uuid::from_u128(0x2000 + index as u128).to_string(),
-                node_id: index as u64 + 1,
-                type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
-                created_at_micros: index as i64,
-                updated_at_micros: index as i64,
+                property_stem: "1".into(),
+                key: "rank".into(),
+                value: graphforge_storage::encode_graph_delta_value(
+                    &graphforge_ir::IrLiteral::Int(index as i64),
+                )
+                .unwrap(),
             },
         })
         .collect()
@@ -69,11 +71,11 @@ fn replay_merge_fingerprint(bencher: Bencher, operations: usize) {
     let mut second = fixture(operations);
     for (index, operation) in second.iter_mut().enumerate() {
         operation.operation_uuid = Uuid::from_u128(0x1_0000 + index as u128);
-        if let GraphDeltaPayload::UpsertNodeV2 {
-            updated_at_micros, ..
-        } = &mut operation.payload
-        {
-            *updated_at_micros += 1;
+        if let GraphDeltaPayload::SetNodeProperty { value, .. } = &mut operation.payload {
+            *value = graphforge_storage::encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(
+                index as i64 + 1,
+            ))
+            .unwrap();
         }
     }
     let encoded_first = encode_delta_run(
@@ -92,13 +94,22 @@ fn replay_merge_fingerprint(bencher: Bencher, operations: usize) {
         GraphDeltaJournalLimits::default(),
     )
     .unwrap();
+    let mut base = ReconstructedGraphState::default();
+    for index in 0..operations {
+        let node = Uuid::from_u128(0x2000 + index as u128).to_string();
+        base.nodes.insert(
+            node.clone(),
+            vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
+        );
+        base.node_ids.insert(node, index as u64 + 1);
+    }
     bencher.bench(|| {
         let limits = GraphDeltaJournalLimits::default();
         let runs = [
             decode_delta_run(&encoded_first, Some(1), limits).unwrap(),
             decode_delta_run(&encoded_second, Some(2), limits).unwrap(),
         ];
-        let mut state = ReconstructedGraphState::default();
+        let mut state = base.clone();
         let evidence = apply_delta_runs(&mut state, &runs, limits).unwrap();
         divan::black_box(evidence.state_fingerprint)
     });
@@ -111,7 +122,7 @@ fn transaction_classification(bencher: Bencher, count: usize) {
         divan::black_box(
             operations
                 .iter()
-                .filter(|op| matches!(op.kind, GraphDeltaOpKind::UpsertNode))
+                .filter(|op| matches!(op.kind, GraphDeltaOpKind::SetNodeProperty))
                 .count(),
         )
     });

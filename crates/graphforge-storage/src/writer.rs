@@ -324,6 +324,14 @@ pub(crate) fn write_replay_overlay_streaming(
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
 ) -> Result<ReplayNodeSpoolEvidence, GfError> {
+    if !overlay.nodes.is_empty() || !overlay.edges.is_empty() {
+        return Err(GfError::Project {
+            code: graphforge_core::ProjectErrorCode::UnsupportedProjectFormat,
+            message:
+                "GFDR supports property mutations only; topology requires canonical publication"
+                    .into(),
+        });
+    }
     let mut target_routes = crate::route_component::owned::admit_owned_workspace(target)?;
     let property_inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
         source,
@@ -7054,7 +7062,7 @@ mod tests {
     }
 
     #[test]
-    fn exploratory_replay_preserves_routes_and_full_width_ids_for_edge_changes() {
+    fn topology_overlay_refusal_preserves_routes_and_full_width_ids() {
         use crate::graph_delta_journal::{GraphDeltaJournalLimits, ReplayEdgeRow, ReplayOverlay};
         let base = TempDir::new().unwrap();
         let left = new_v7();
@@ -7115,63 +7123,43 @@ mod tests {
             )?;
             Ok(target)
         };
-        let target = apply(base.path(), &overlay).unwrap();
-        let actual = crate::graph_delta_journal::load_base_state(target.path()).unwrap();
-        assert_eq!(actual.node_ids, original.node_ids);
-        assert_eq!(actual.node_ids[&left.to_string()], left_id);
-        assert_eq!(actual.node_ids[&right.to_string()], right_id);
-        assert_eq!(
-            actual.edge_ids[&first.to_string()],
-            (first_id, right_id, left_id)
-        );
-        assert_eq!(
-            actual.edge_ids[&added.to_string()],
-            (first_id + 2, left_id, right_id)
-        );
-        assert_eq!(
-            actual.edges[&first.to_string()],
-            (right.to_string(), left.to_string(), "LIKES".into())
-        );
-        assert_eq!(
-            actual.edges[&added.to_string()],
-            (left.to_string(), right.to_string(), "KNOWS".into())
-        );
-        assert!(!actual.edges.contains_key(&deleted.to_string()));
-        let again = apply(target.path(), &ReplayOverlay::default()).unwrap();
-        assert_eq!(
-            crate::graph_delta_journal::load_base_state(again.path()).unwrap(),
-            actual
-        );
+        let error = apply(base.path(), &overlay).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
         assert_eq!(
             crate::graph_delta_journal::load_base_state(base.path()).unwrap(),
             original
         );
-        let mut changed = overlay.clone();
-        changed
+        assert_eq!(original.node_ids[&left.to_string()], left_id);
+        assert_eq!(original.node_ids[&right.to_string()], right_id);
+        assert_eq!(
+            original.edge_ids[&first.to_string()],
+            (first_id, left_id, right_id)
+        );
+        assert_eq!(
+            original.edges[&deleted.to_string()],
+            (left.to_string(), right.to_string(), "LIKES".into())
+        );
+        // A hand-built topology overlay must fail before creating any target
+        // authority, including for an existing edge with a changed surrogate.
+        overlay
             .edges
             .get_mut(&first.to_string())
             .unwrap()
             .as_mut()
             .unwrap()
             .edge_id += 1;
-        assert!(
-            apply(base.path(), &changed)
-                .unwrap_err()
-                .to_string()
-                .contains("edge surrogate changed")
-        );
-        let duplicate = new_v7();
-        let mut duplicated = overlay;
-        duplicated.edges.insert(
-            duplicate.to_string(),
-            Some(edge(duplicate, first_id + 2, "LIKES", false)),
-        );
-        assert!(
-            apply(base.path(), &duplicated)
-                .unwrap_err()
-                .to_string()
-                .contains("new edge surrogate is not monotonic")
-        );
+        let untouched = TempDir::new().unwrap();
+        let (inventory, _) = crate::capture_graph_files(base.path()).unwrap();
+        let error = write_replay_overlay_streaming(
+            base.path(),
+            &inventory,
+            untouched.path(),
+            &overlay,
+            Default::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
+        assert_eq!(fs::read_dir(untouched.path()).unwrap().count(), 0);
     }
 
     #[test]

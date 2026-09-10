@@ -405,15 +405,23 @@ immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
 only through the shared retention/GC oracle. They are
 distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
 
-Replay materializes only UUIDs touched by property operations or entity
-deletions; unchanged UUIDs remain in prior immutable fragments. During overlay
+GFDR admits only node/edge property set and removal. All node/edge topology
+upserts and deletes, including records with full-width identity metadata, fail
+with `GF_UNSUPPORTED_PROJECT_FORMAT`. Canonical publication owns topology.
+Admission checks precede preparation and transaction-retry shortcuts; decoding
+rejects persisted topology records, and direct in-memory replay prevalidates the
+complete input before changing caller state. Internal overlay writers refuse
+topology before creating target authority. No backward reader or migration is
+provided. See the [current publishing contract](#current-publishing-contract).
+
+Replay materializes only UUIDs touched by property operations; unchanged UUIDs remain in prior immutable fragments. During overlay
 construction the memory ceiling charges decoded runs, idempotency payloads,
 typed operation values, and the overlay simultaneously. Runs are released
 before materialization. Materialization then charges the retained overlay,
 node endpoint/identity authority, target references, baseline and output rows,
 Arrow arrays, and schema-width × row-group column metadata plus the active
-Parquet writer buffer. Replay writers disable dictionary encoding and
-compression variability and bound row groups by `max_batch_rows`. Legacy flat
+Parquet writer buffer. Replay writers use the shared permanent Zstd policy, retain their justified
+dictionary-off setting, and bound row groups by `max_batch_rows`. Flat
 generation-zero properties enter this same authenticated, sparse-fragment
 materialization path. `max_records_per_run` and `max_work_rows` independently
 bound mutation and physical work. Limit failures use the typed
@@ -967,3 +975,75 @@ The storage layer is transparent to all API surfaces.
 - [Architecture Refactor v0.5](refactor-v0.5.md) — UUID identity model, typed edge tables, project structure
 - [Execution Model](execution-model.md) — how providers connect to DataFusion
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Parquet-as-primary and provider strategy
+
+
+## Current publishing contract
+
+Rust owns publication behavior. The public facade selects the operation path;
+storage owns authenticated representations and atomic generation selection.
+A publishing path is complete only when the selected generation and the facade's
+readers agree. Table-valued data remains Arrow at the API and Parquet at rest;
+versioned GFDR is the explicit property-journal exception.
+
+Every applicable graph publisher preserves these authorities together:
+
+- Exact node/edge UUIDs, full-width surrogates, endpoint identity, global edge
+  identity uniqueness, and persistent consumed-ID high-water marks. Deletion
+  cannot make an ID available to a subsequent ordinary CREATE.
+- Complete typed or exploratory schemas, null/concrete property types, latest
+  values and tombstones; immutable primary routes and label memberships remain
+  distinct. Physical path components never substitute for semantic route names.
+- Authenticated graph-file ownership, route authorities, UUID membership,
+  ordinal receipts and applicable adjacency/search generations. Staging reads
+  the admitted inventory rather than discovering authority from filenames.
+- All graph, catalog, ontology/composition and other declared publication
+  participants. A graph-only update retains unrelated participants; changing
+  ontology cannot strand retained semantic bindings or reinterpret numeric IDs.
+- Parent conflict, operation identity, cancellation, active reader leases and
+  crash/returned-error recovery. CURRENT selects the complete old or new
+  generation. A returned error after selection must reconcile actual selected
+  authority; retries cannot install an unrelated private candidate.
+- `permanent_parquet::writer_properties` for every verified permanent Parquet
+  publisher. Per-path dictionary, row-group, streaming and memory settings remain
+  local. Replay and compaction retain the accepted codec; private IPC/spill,
+  portable containers and query sinks have separate contracts.
+
+| Producer → publisher → consumer | Operation boundary and applicable proof |
+| --- | --- |
+| Public construction → canonical graph generation → facade/reopen | Typed/exploratory topology and properties, sharded nodes, routes, all graph identity authorities and continuation tails. Construction, CAS ownership and publishing-budget facade regressions cover exact reopening and portable interchange. |
+| Ordinary Cypher/analyst mutation → MutationTransaction/GraphWriter → generation readers | Canonical topology and property mutation; complete participant publication. Public CREATE/DELETE/SET, active streams, fault recovery and next-ID tests apply. |
+| Composite property mutation → GFDR preparation → verified replay/compaction | Only the four property operations are admitted. Qualified/constructed ownership fixtures cover sparse latest values, removals, nulls, route identity and shared immutable base payloads. Canonical property publication remains available when eligibility requires it. |
+| Composite topology mutation → canonical GraphWriter publication → facade | Never GFDR. Qualified create and owner-routing regressions cover identities and subsequent property mutation. |
+| Storage GFDR APIs → framed runs → direct replay, open, checkpoint, compaction/import | All topology operations are unsupported, including checksum-valid records, duplicate operation IDs and matching transaction retries. Refusal precedes authority changes; direct replay leaves the entire supplied state unchanged. |
+| Public compaction → complete new generation → refreshed facade | Full verified property chain, same-facade subsequent mutation, exact retry, retained streams and imported continuation. Private hydration and selected permanent ownership are measured separately. |
+| Ontology adoption/clear and retained semantic transformations → workspace generation → prepared readers | Same-name promotion stages graph and ontology together; disjoint metadata-only adoption reuses payloads. Unsupported clear/type-ID reinterpretation refuses before selection. Existing semantic transformation and promotion lifecycle tests own applicable retained-data proofs. |
+| Graph/belief/portable projection → selected artifact → verifier/import | Exact selection and endpoint closure, schemas, routes and rebuilt applicable controls. An exported artifact is not a selected live generation; clean import must validate it before subsequent mutation. |
+| Portable clean import/checkpoint restoration → complete generation → facade | Complete participant authentication and corruption refusal, exact identities/properties and continuation. Persisted unsupported topology GFDR cannot be imported as supported current state. |
+| Catalog/vector/knowledge/epistemic/provenance/restore markers → declared participant → domain reader | Domain schemas, references, authentication and atomic participant ownership apply. These writers do not allocate graph topology IDs; graph ordering/tails are inapplicable to the participant payload itself. |
+
+Private accepted construction/merge streams, decoder spools, standalone ontology
+persistence without a graph publisher, external query sinks, and test/benchmark
+fixtures are not permanent graph publishers. They cannot establish production
+support for a topology journal operation.
+
+`permanent_storage_budgets::publishing_contract_alternates_supported_paths_and_refuses_topology_journals`
+checks flat/sharded, exploratory/ontology-promoted, two-route construction,
+actual property GFDR, compaction, canonical topology mutation, reopening,
+export/full verification, clean import and subsequent mutation. It compares
+UUIDs, routes, endpoints, nullable typed values and node allocation continuity.
+The neighboring compaction/promotion/owner fixtures add active snapshots,
+interrupted publication, cancellation, retries and full-width identity coverage.
+Storage journal tests additionally cover forged persisted records, direct-run
+bypasses, byte-preserving refusal, corruption and exact resource thresholds.
+
+The conformance work reuses the source-bound measurements and deterministic
+budgets from the [permanent-storage assessment](permanent-storage-assessment.md),
+including #1213 encoding, #1219 CAS replay, #1224 property ownership, #1231 facade
+refresh and #1229 promotion. Rejection creates no graph payload or publication;
+its fixture compares every retained file digest and allocation before/after.
+The added preflight is a constant-work discriminant check per operation and
+retains no second graph or decoded value collection. Existing replay work,
+metadata, batch and memory limits remain enforced. Logical counters do not
+claim process/native RSS bounds; sampled overlapping allocation is not a hard
+peak bound. Source-bound integrated S20/S22 accounting remains the epic's later
+measurement, not an outcome inferred from this contract test.
