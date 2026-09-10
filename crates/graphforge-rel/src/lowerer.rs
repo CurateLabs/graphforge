@@ -3670,10 +3670,10 @@ fn lower_var_len_expand(
     // forced nullable since an edge from a relation without the column is NULL
     // (the exec coalesces each edge's values from its own relation's file).
     let topology_names = ["edge_uuid", "src_uuid", "dst_uuid", "rel_type"];
-    let prop_fields: Vec<datafusion::arrow::datatypes::Field> = if rel_name == "*" {
+    let prop_fields: Vec<datafusion::arrow::datatypes::Field> = {
         let mut positions = std::collections::HashMap::<String, usize>::new();
         let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
-        for stem in dir_path.edge_property_stems.clone() {
+        for stem in edge_property_candidate_stems(dir_path, &rel_name) {
             let prop_table = edge_property_schema(dir_path, &stem);
             for f in prop_table.fields() {
                 if topology_names.contains(&f.name().as_str()) {
@@ -3691,14 +3691,6 @@ fn lower_var_len_expand(
             }
         }
         fields
-    } else {
-        let prop_table = edge_property_schema(dir_path, &rel_name);
-        prop_table
-            .fields()
-            .iter()
-            .filter(|f| !topology_names.contains(&f.name().as_str()))
-            .map(|f| f.as_ref().clone())
-            .collect()
     };
 
     // The output extends the input with the destination node's columns,
@@ -4060,12 +4052,7 @@ fn try_lower_provider_expand(
     let edge_fields: Vec<Arc<datafusion::arrow::datatypes::Field>> =
         edge_schema.fields().iter().cloned().collect();
     let base_names: HashSet<&str> = edge_fields.iter().map(|f| f.name().as_str()).collect();
-    let mut stems = if rel_name == "*" {
-        dir_path.edge_property_stems.clone()
-    } else {
-        vec![rel_name.clone()]
-    };
-    stems.sort();
+    let stems = edge_property_candidate_stems(dir_path, &rel_name);
     let mut positions = std::collections::HashMap::<String, usize>::new();
     let mut edge_prop_fields: Vec<Arc<datafusion::arrow::datatypes::Field>> = Vec::new();
     for stem in stems {
@@ -4356,10 +4343,9 @@ fn edge_property_read_source(
 ///
 /// Returns `scan` unchanged when:
 /// - there is no read directory (schema-only lowering),
-/// - `rel_ty` is `None` (a wildcard edge scan has no single relation file), or
 /// - the edge-property table has no columns beyond the `edge_uuid` join key.
 ///
-/// Otherwise it opens `edge_properties/<rel>.parquet`, LEFT-joins on `edge_uuid`
+/// Otherwise it reads selected property owners, LEFT-joins on `edge_uuid`
 /// (preserving edges with no property row yet), and re-qualifies each property
 /// column under the edge var alias so `var_<edge>.<prop>` resolves. The base
 /// topology columns are read from the edge `scan`'s own schema (typed and
@@ -4417,6 +4403,9 @@ fn join_edge_properties(
         };
         let registered = catalog.and_then(|catalog| catalog.semantic_edge_property_schema(rel_ty));
         push_source(rel_name.clone(), registered);
+        if rel_name != "_exploratory" && dir.edge_properties.contains_key("_exploratory") {
+            push_source("_exploratory".into(), None);
+        }
     } else {
         for stem in dir.edge_property_stems.clone() {
             push_source(stem, None);
@@ -4425,13 +4414,15 @@ fn join_edge_properties(
     if prop_sources.is_empty() {
         return Ok(scan);
     }
+    validate_edge_property_owner_types(&prop_sources)?;
 
     let wildcard = rel_ty.is_none();
     let mut joined = scan;
     let mut prop_refs: StdHashMap<String, Vec<DfExpr>> = StdHashMap::new();
     for (idx, (stem, prop_table, prop_cols)) in prop_sources.into_iter().enumerate() {
         let prop_alias = format!("{edge_alias}__eprops_{idx}");
-        let prop_src = edge_property_read_source(&stem, rel_ty, catalog, &prop_table);
+        let source_type = if stem == "_exploratory" { None } else { rel_ty };
+        let prop_src = edge_property_read_source(&stem, source_type, catalog, &prop_table);
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
             .map_unsupported_expr()?;
@@ -4441,7 +4432,7 @@ fn join_edge_properties(
         // relation-specific property file never contributes to another relation.
         let mut join_pred =
             col(format!("{edge_alias}.edge_uuid")).eq(col(format!("{prop_alias}.edge_uuid")));
-        if wildcard {
+        if wildcard && stem != "_exploratory" {
             join_pred = join_pred.and(col(format!("{edge_alias}.rel_type_name")).eq(lit(stem)));
         }
         joined = LogicalPlanBuilder::from(joined)
@@ -4492,6 +4483,51 @@ fn node_property_schema(
         .cloned()
         .unwrap_or_else(|| graphforge_ir::arrow_schema::PROPERTY_BASE_SCHEMA.clone())
 }
+fn validate_edge_property_owner_types(
+    prop_sources: &[(String, datafusion::arrow::datatypes::SchemaRef, Vec<String>)],
+) -> Result<(), LoweringError> {
+    // The relational reference must not silently coerce two concrete owner
+    // schemas where provider hydration would reject them. Null is absence.
+    let mut property_types = HashMap::new();
+    for (_, schema, names) in prop_sources {
+        for name in names {
+            let datatype = schema
+                .field_with_name(name)
+                .map_unsupported_expr()?
+                .data_type();
+            if datatype == &datafusion::arrow::datatypes::DataType::Null {
+                continue;
+            }
+            if let Some(prior) = property_types.insert(name, datatype)
+                && prior != datatype
+            {
+                return Err(LoweringError::UnsupportedExpr(
+                    "incompatible concrete edge property owner types".into(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// A named relation can have ordinary per-name properties and constructed
+// exploratory properties. These are current physical owners, not aliases.
+fn edge_property_candidate_stems(snapshot: &LoweringSnapshot, relation: &str) -> Vec<String> {
+    let mut stems = if relation == "*" {
+        snapshot.edge_property_stems.clone()
+    } else {
+        let mut candidates = vec![relation.to_owned()];
+        if relation != "_exploratory" && snapshot.edge_properties.contains_key("_exploratory") {
+            candidates.push("_exploratory".to_owned());
+        }
+        candidates
+    };
+    stems.sort();
+    stems.dedup();
+    stems
+}
+
 fn edge_property_schema(
     snapshot: &LoweringSnapshot,
     stem: &str,

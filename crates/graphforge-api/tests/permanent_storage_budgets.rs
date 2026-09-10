@@ -4056,6 +4056,137 @@ fn facade_compaction_faults_preserve_authority_and_allow_mutation() {
     }
 }
 
+// Both physical property owners contribute only by exact edge UUID. Keep the
+// named traversal oracle independent of wildcard reads and publication routing.
+fn verify_named_edge_property_owners(graph: &GraphForge, edges: &[Edge]) {
+    for relation in ["REL0", "REL1"] {
+        let mut paths = Vec::new();
+        let query =
+            format!("MATCH (a)-[r:{relation}*1..1]->(b) RETURN r, a.node_uuid, b.node_uuid");
+        for batch in graph
+            .execute(&query)
+            .unwrap_or_else(|error| panic!("{query}: {error}"))
+            .batches
+        {
+            let lists = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                let path = lists.value(row);
+                let edge = path
+                    .as_any()
+                    .downcast_ref::<arrow::array::StructArray>()
+                    .unwrap();
+                assert_eq!(edge.len(), 1);
+                let uuid = edge
+                    .column_by_name("edge_uuid")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                let weight = edge
+                    .column_by_name("weight")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let text = edge.column_by_name("text").unwrap();
+                let text = if text.logical_nulls().is_some_and(|nulls| nulls.is_null(0)) {
+                    None
+                } else if let Some(values) = text.as_any().downcast_ref::<StringArray>() {
+                    Some(values.value(0).to_owned())
+                } else {
+                    Some(
+                        text.as_any()
+                            .downcast_ref::<arrow::array::StringViewArray>()
+                            .expect("typed string property")
+                            .value(0)
+                            .to_owned(),
+                    )
+                };
+                paths.push((
+                    Uuid::from_slice(uuid.value(0)).unwrap(),
+                    uuid_at(&batch, 1, row),
+                    uuid_at(&batch, 2, row),
+                    relation.to_owned(),
+                    (!weight.is_null(0)).then(|| weight.value(0)),
+                    text,
+                ));
+            }
+        }
+        let mut expected = edges
+            .iter()
+            .filter(|edge| edge.3 == relation)
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort();
+        expected.sort();
+        assert_eq!(paths, expected, "{query}");
+        for (pattern, edge, filtered) in [
+            (format!("MATCH (a)-[r:{relation}]->(b)"), "r", false),
+            (
+                format!("MATCH (a)-[r:{relation}]->(b) WITH a, r, b MATCH (a)-[r:{relation}]->(b)"),
+                "r",
+                false,
+            ),
+            (
+                format!(
+                    "MATCH (a)-[r:{relation}]->(b) WHERE r.weight IS NOT NULL AND r.text IS NULL"
+                ),
+                "r",
+                true,
+            ),
+        ] {
+            let query = format!(
+                "{pattern} RETURN {edge}.edge_uuid, a.node_uuid, b.node_uuid, {edge}.weight, {edge}.text"
+            );
+            let mut actual = Vec::new();
+            for batch in graph
+                .execute(&query)
+                .unwrap_or_else(|error| panic!("{query}: {error}"))
+                .batches
+            {
+                for row in 0..batch.num_rows() {
+                    let text = batch.column(4);
+                    let text = if text.logical_nulls().is_some_and(|nulls| nulls.is_null(row)) {
+                        None
+                    } else if let Some(values) = text.as_any().downcast_ref::<StringArray>() {
+                        Some(values.value(row).to_owned())
+                    } else {
+                        Some(
+                            text.as_any()
+                                .downcast_ref::<arrow::array::StringViewArray>()
+                                .expect("typed string property")
+                                .value(row)
+                                .to_owned(),
+                        )
+                    };
+                    actual.push((
+                        uuid_at(&batch, 0, row),
+                        uuid_at(&batch, 1, row),
+                        uuid_at(&batch, 2, row),
+                        relation.to_owned(),
+                        int_at(&batch, 3, row),
+                        text,
+                    ));
+                }
+            }
+            let mut expected = edges
+                .iter()
+                .filter(|edge| {
+                    edge.3 == relation && (!filtered || (edge.4.is_some() && edge.5.is_none()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected, "{query}");
+        }
+    }
+}
+
 #[test]
 fn composite_constructed_edge_properties_preserve_authenticated_owner() {
     use futures::TryStreamExt;
@@ -4075,6 +4206,7 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         let (mut nodes, mut edges) = rows(fixture);
         construct(&source, fixture, &nodes, &edges);
         let mut graph = GraphForge::new(source.to_str()).unwrap();
+        verify_named_edge_property_owners(&graph, &edges);
         for with_properties in [true, false] {
             let properties = if with_properties {
                 " {weight: 3, text: 'ordinary'}"
@@ -4101,6 +4233,7 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         graph
             .execute("MATCH (a)-[r]->(b) RETURN r.edge_uuid, r.weight, r.text")
             .expect("mixed construction/ordinary properties before composite mutation");
+        verify_named_edge_property_owners(&graph, &edges);
         let ordinary = edges[129].0;
         let empty = edges[130].0;
         graph
@@ -4144,6 +4277,7 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         edges[0].4 = Some(19);
         edges[1].5 = None;
         verify_graph(&graph, fixture, &nodes, &edges);
+        verify_named_edge_property_owners(&graph, &edges);
         let published = publishing_parquet_inventory(&source);
         assert!(
             published["parquet_bytes"].as_u64().unwrap() <= 1024 * 1024,
@@ -4237,6 +4371,7 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
                 "{compacted}"
             );
             verify_graph(&graph, fixture, &nodes, &edges);
+            verify_named_edge_property_owners(&graph, &edges);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -4254,7 +4389,10 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
             assert_eq!(old, edges.iter().map(|edge| (edge.0, edge.4)).collect());
         }
         drop(graph);
-        round_trip(root.path(), &source, fixture, &nodes, &edges);
+        round_trip_checked(root.path(), &source, |graph| {
+            verify_named_edge_property_owners(graph, &edges);
+            verify_graph(graph, fixture, &nodes, &edges)
+        });
         let imported_path = root.path().join("imported");
         let imported = GraphForge::new(imported_path.to_str()).unwrap();
         let request = graphforge_api::CompositeTransactionRequest {
@@ -4292,11 +4430,16 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         edges[0].4 = Some(31);
         edges[130].4 = None;
         verify_graph(&imported, fixture, &nodes, &edges);
+        verify_named_edge_property_owners(&imported, &edges);
         drop(imported);
         verify_graph(
             &GraphForge::new(imported_path.to_str()).unwrap(),
             fixture,
             &nodes,
+            &edges,
+        );
+        verify_named_edge_property_owners(
+            &GraphForge::new(imported_path.to_str()).unwrap(),
             &edges,
         );
     }
@@ -4315,6 +4458,38 @@ fn composite_property_owner_scope_rejects_unnamed_public_edges() {
     );
     let count = graph.execute("MATCH (n) RETURN count(n)").unwrap();
     assert_eq!(int_at(&count.batches[0], 0, 0), Some(0));
+}
+
+#[test]
+fn named_edge_property_owners_refuse_incompatible_concrete_types() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "named_owner_type_conflict",
+        nodes: 3,
+        edges: 2,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .execute("CREATE (:Node0)-[:REL0 {weight: 'incompatible'}]->(:Node0)")
+        .unwrap();
+    for query in [
+        "MATCH ()-[r:REL0]->() RETURN r.weight",
+        "MATCH ()-[r:REL0*1..1]->() RETURN r",
+        "MATCH (a)-[r:REL0]->(b) WITH a, r, b MATCH (a)-[r:REL0]->(b) RETURN r.weight",
+    ] {
+        assert!(
+            graph.execute(query).is_err(),
+            "incompatible concrete owners must not be coerced: {query}"
+        );
+    }
 }
 
 #[test]
