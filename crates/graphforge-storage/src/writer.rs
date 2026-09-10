@@ -9248,7 +9248,7 @@ mod tests {
         assert!(matches!(
             error,
             GfError::Project {
-                code: ProjectErrorCode::TransactionConflict,
+                code: ProjectErrorCode::WriteConflict,
                 ..
             }
         ));
