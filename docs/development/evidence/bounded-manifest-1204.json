@@ -362,5 +362,15 @@
   ],
   "post_measurement_changes": [
     "Clippy-driven checked usize-to-u8 conversion for split depth, after the existing split_depth < 64 refusal; and a checked test-fixture ordinal conversion. No admitted-format or measured-workload behavior changes. Measurements remain attributed to the frozen source, not relabeled as final-head runs."
-  ]
+  ],
+  "build_profile": "Cargo test profile: unoptimized + debuginfo (both frozen executables)",
+  "candidate_build_command": "TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 CARGO_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195 CARGO_BUILD_JOBS=4 cargo test -p graphforge-api --test permanent_storage_budgets --no-run",
+  "host": {
+    "architecture": "x86_64",
+    "cpu_model": "AMD Ryzen 7 3800X 8-Core Processor",
+    "logical_cpus": 16,
+    "memory_total": "131786392 kB",
+    "native_allocation_block_bytes": 4096,
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+  }
 }
