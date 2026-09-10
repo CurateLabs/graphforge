@@ -132,11 +132,11 @@ impl GraphForge {
                 && !(current.generation_uuid() == request.generation_uuid
                     && current.transaction_uuid() == request.transaction_uuid
                     && current.parent_generation_uuid() == Some(expected_parent))
-                && !graphforge_storage::published_project_transaction(
+                && graphforge_storage::published_project_transaction(
                     &root,
                     request.transaction_uuid,
                 )?
-                .is_some_and(|receipt| receipt.generation_uuid == request.generation_uuid)
+                .is_none_or(|receipt| receipt.generation_uuid != request.generation_uuid)
             {
                 // A competing writer advanced CURRENT; this failed operation
                 // did not publish and must not change the facade's old view.

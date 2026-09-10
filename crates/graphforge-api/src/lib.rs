@@ -2009,14 +2009,18 @@ impl GraphForge {
         // stream is demand-driven and may outlive this call; holding the slot
         // for the full consumer lifetime would serialize all streaming clients.
         drop(admission);
-        Ok(Box::pin(WorkspacePinnedStream {
+        Ok(self.finish_public_stream(stream))
+    }
+
+    fn finish_public_stream(&self, stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
+        Box::pin(WorkspacePinnedStream {
             stream: self.graph_visibility.health.guard_stream(shape_stream(
                 stream,
                 self.ontology_mode,
                 self.ontology.as_ref(),
             )),
             _workspace: Arc::clone(&self.workspace_guard),
-        }))
+        })
     }
 
     /// Streaming query plus a [`RuntimeGuard`] that keeps the instance's
