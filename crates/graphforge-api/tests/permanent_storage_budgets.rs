@@ -5214,7 +5214,7 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
             edge.1 = uuid7(edge.1);
             edge.2 = uuid7(edge.2);
         }
-        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
         let graph_mutations = nodes
             .iter()
             .map(|(uuid, label, score)| Mutation::CreateNode {
