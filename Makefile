@@ -212,6 +212,7 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@echo "━━━ Bazelisk preflight + Cargo/Bazel drift ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
 	@python3 scripts/ci/cargo-bazel-drift-check.py
+	@cargo metadata --locked --manifest-path benchmarks/Cargo.toml --format-version 1 >/dev/null
 	@python3 scripts/ci/python-build-mode-check.py
 	@python3 scripts/ci/test-python-build-mode-check.py
 	@python3 scripts/ci/test-uuid-derivation-policy.py

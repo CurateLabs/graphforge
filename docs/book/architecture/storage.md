@@ -613,7 +613,8 @@ Within each shard this is the CSR structure in its idiomatic Arrow encoding — 
 two top-level columns because a RecordBatch requires equal column lengths. The list's offsets
 buffer **is** the CSR offsets array (length `node_count + 1`, `Int64`, starting at 0,
 monotone), and the flattened struct child **is** the targets array (length `edge_count`):
-neighbors of `node_id = i` are `targets[offsets[i]..offsets[i+1]]`, zero-copy on read.
+neighbors of `node_id = i` are `targets[offsets[i]..offsets[i+1]]`. The reader authenticates
+and decompresses one bounded Arrow batch, then copies its values into the shared shard cache.
 
 Conventions:
 
@@ -621,16 +622,48 @@ Conventions:
   array is never empty.
 - **Node with no neighbors**: an empty list (`offsets[i] == offsets[i+1]`).
 - The shard manifest records format/version, total node/edge counts, ordered boundaries,
-  per-shard counts, and SHA-256 checksums. A row may span consecutive shards when a
+  per-shard counts, encoded/decoded byte lengths, and SHA-256 checksums. A row may span consecutive shards when a
   high-degree vertex exceeds the configured hard edge cap; readers concatenate those
   fragments in deterministic `(key, edge_id)` order.
 - Logical CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count`
   have no entries. Empty interior rows need no physical shard bytes.
 - In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep a
   `ShardedCsrIndex` on a persisted hit and materialize only the requested logical row
-  from its bounded shard fragments. Legacy single-batch `.csr` files remain readable
-  and migrate on rebuild.
+  from its bounded shard fragments. Only current version 2 manifests and Zstd IPC shards
+  are admitted. Version 1 manifests and standalone legacy files have no compatibility reader
+  or migration path.
   Scan-build fallback still materializes a hash map for oracle parity.
+
+### Bounded CSR compression
+
+Every production shard publisher uses Arrow IPC Zstd (the pinned Arrow default
+compression level 3) with the existing full-width
+`UInt64` IDs and `Int64` offsets. The standard IPC raw-buffer marker is permitted
+when compression would expand a buffer; it is part of the current codec, not a
+legacy file fallback. Configured shard limits remain upper bounds and are capped
+at 1,048,576 rows and 1,048,576 edges. High-degree rows continue across shards;
+smaller configured limits retain their existing behavior.
+
+For admitted shard counts `N` and `E`, the seven decoded buffers total
+`D = 8*(N+1) + 16*E + ceil(N/8) + 3*ceil(E/8)` bytes, including validity bitmaps.
+The encoded file is capped at `D + 16,384` bytes. The manifest carries both exact
+encoded length and `D`; lookup and stable-shard reuse validate these counts, bound
+reads, authenticate SHA-256, then check the IPC footer/message and every buffer
+before Arrow allocates decoded arrays. Preflight requires the exact fixed schema,
+one batch, no dictionaries, zero null counts, matching field lengths, Zstd buffer
+compression, and one exact current Zstd frame with matching content size. Invalid
+schema declarations return an error before Arrow's schema converter is invoked.
+Decoded offsets must start at zero, remain monotone, and end at the edge count.
+
+Opening checks shard metadata without reading payloads. Cloned readers share one
+cache. On a miss, the prior cached CSR stays alive until the replacement fully
+validates. Resource accounting must include that old cache, the encoded file,
+Arrow's body buffer and decoded arrays, the new CSR vectors, parser/alignment
+allocations and the fixed Zstd decoder context. The pinned bulk Zstd decoder uses
+the supplied bounded destination rather than a separate streaming window buffer.
+`D` is a deterministic buffer-content bound, **not** a process RSS bound. Allocator
+overhead and other graph/query owners remain separate. A whole logical hub row can
+span many shards; only `row_chunk` bounds the returned row portion by its limit.
 
 ### Rebuild and versioning semantics
 
@@ -1135,3 +1168,43 @@ and separately sampled overlapping filesystem owners are reported with their
 measurement limits. The candidate point-in-time whole-project census includes
 21,979,136 allocated file bytes plus 1,257,472 directory bytes; no equivalent
 baseline census or whole-project reduction is claimed.
+
+
+### Bounded CSR allocation and cost evidence (#1205)
+
+The fixed eight-route public lifecycle fixture uses 4,097 nodes, 65,537 edges,
+random full-width identities and nullable properties. Frozen release executables
+compare the uncompressed current baseline with the bounded compressed writer;
+both produce the same semantic fingerprint through reopen, export, full
+verification and clean import.
+
+| Measurement | Uncompressed baseline | Bounded Zstd |
+|---|---:|---:|
+| Actual CSR payload bytes (18 shards) | 4,920,564 | 1,324,020 |
+| Actual CSR allocated bytes | 4,972,544 | 1,363,968 |
+| CSR metadata logical bytes | 10,329 | 11,431 |
+| Attributed permanent allocated bytes | 15,151,104 | 11,542,528 |
+| Whole-project file allocation, point census | 44,806,144 | 41,197,568 |
+| Whole-lifecycle process peak RSS, KiB | 220,400 | 238,252 |
+| Whole-lifecycle syscall read bytes | 2,309,281,609 | 2,098,377,656 |
+| Whole-lifecycle syscall write bytes | 357,447,042 | 328,689,815 |
+| Sampled overlapping workspace allocated peak | 89,038,848 | 74,625,024 |
+| Cold-probe direct CSR read bytes | 35,552,246 | 9,577,462 |
+| Cold-probe first-query median, seconds | 3.855 | 3.891 |
+
+Payload and allocation both meet the deterministic 70% reduction budget. The
+whole-lifecycle RSS increase is a measured cost, not a decoded-memory improvement.
+The cold probe executes exact 256-row two-hop public queries in three fresh
+processes, with four subsequent queries per facade. Its predeclared timing, RSS
+and syscall-I/O investigation thresholds pass; this is not a latency improvement
+claim or a noisy CI timing gate. Private-file cache advice does not guarantee OS
+cache eviction. Syscall traffic is not physical I/O.
+
+The workspace sampler deduplicates overlapping file owners by device/inode and
+includes project, staging and portable state. It excludes directory blocks and
+open-unlinked files and can miss short peaks; the largest observed sampling gaps
+are approximately 62 ms and 59 ms. These are sampled workspace peaks, not hard
+temporary-disk bounds. The separate point census includes retained generations.
+See [`bounded-csr-1205.json`](../../development/evidence/bounded-csr-1205.json)
+for frozen source/executable hashes, exact observations, commands, decoded bounds,
+CPU/I/O costs and limitations, including the superseded incomplete baseline trace.

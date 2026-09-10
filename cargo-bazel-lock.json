@@ -1,5 +1,5 @@
 {
-  "checksum": "594b6ba3c63b9701d278637b815cac9903f9c34e2906b60fd6018eb89b58575b",
+  "checksum": "4b33b0ec957be7243e5c68d59d42863c4a0d8132f2d574b0a365c0a587ed9702",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14056,6 +14056,10 @@
             {
               "id": "uuid 1.26.0",
               "target": "uuid"
+            },
+            {
+              "id": "zstd 0.13.3",
+              "target": "zstd"
             }
           ],
           "selects": {
@@ -14087,10 +14091,6 @@
             {
               "id": "wait-timeout 0.2.1",
               "target": "wait_timeout"
-            },
-            {
-              "id": "zstd 0.13.3",
-              "target": "zstd"
             }
           ],
           "selects": {}
@@ -34674,14 +34674,14 @@
     "ureq 3.4.0",
     "url 2.5.8",
     "uuid 1.26.0",
-    "windows-sys 0.61.2"
+    "windows-sys 0.61.2",
+    "zstd 0.13.3"
   ],
   "direct_dev_deps": [
     "codspeed-divan-compat 5.0.1",
     "cucumber 0.21.1",
     "insta 1.48.0",
-    "wait-timeout 0.2.1",
-    "zstd 0.13.3"
+    "wait-timeout 0.2.1"
   ],
   "unused_patches": []
 }

@@ -1,0 +1,1053 @@
+{
+  "issue": 1205,
+  "measurement_date_utc": "2026-09-10",
+  "host": {
+    "name": "OVHC-AGENCY",
+    "filesystem": "native ext4 /dev/md3",
+    "cpu": "AMD Ryzen 7 3800X, 16 logical CPUs",
+    "memory_kib": 131786392
+  },
+  "format": {
+    "manifest_version": 2,
+    "codec": "Arrow IPC Zstd, Arrow default compression level 3",
+    "maximum_shard_rows": 1048576,
+    "maximum_shard_edges": 1048576,
+    "decoded_buffer_content_bound": "8*(N+1)+16*E+ceil(N/8)+3*ceil(E/8)",
+    "encoded_file_bound": "decoded buffer content bound + 16384",
+    "native_bulk_decoder_observed_bytes": 95976,
+    "native_bulk_decoder_test_ceiling_bytes": 262144
+  },
+  "whole_lifecycle": {
+    "baseline": {
+      "provenance": {
+        "source": "c74a529ac9c60997c1343b9f36a074bef39173d8",
+        "executable": "/tmp/gf1205-baseline-release-bin",
+        "sha256": "ebf3962a815698d1b16e886dc6738f64a829896874478a55bce5385ca56894f9",
+        "profile": "release optimized; RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS and LLVM_PROFILE_FILE unset; no coverage instrumentation",
+        "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+        "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+      },
+      "command": "frozen executable --exact permanent_random_properties_eight_routes --nocapture --test-threads=1",
+      "fixture": {
+        "nodes": 4097,
+        "edges": 65537,
+        "routes": 8,
+        "random_ids": true,
+        "semantic_fingerprint": "1a4578d5b5d6c474b1fd9de5478fd2afe0f69e1456f3964d410bc6e0fd3e8b51"
+      },
+      "csr": {
+        "decode_elapsed_ns": [
+          468480,
+          6847344,
+          6241207
+        ],
+        "encode_elapsed_ns": [
+          844066,
+          7689554,
+          19788691
+        ],
+        "estimated_allocated_bytes_at_4096": [
+          4972544,
+          2351104,
+          1363968
+        ],
+        "largest_decoded_batch_array_bytes": 3322008,
+        "normalized_bytes_none_lz4_zstd": [
+          4920564,
+          2320564,
+          1324020
+        ],
+        "production_format_changed": false,
+        "shards": 18,
+        "source_bytes": 4920564
+      },
+      "permanent": {
+        "allocated_bytes": 15151104,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 5050368,
+            "logical_bytes": 4930893,
+            "logical_references": 37,
+            "physical_logical_bytes": 4930893,
+            "physical_objects": 37
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 212992,
+            "logical_bytes": 187022,
+            "logical_references": 8,
+            "physical_logical_bytes": 187022,
+            "physical_objects": 8
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 4337664,
+            "logical_bytes": 2576971,
+            "logical_references": 546,
+            "physical_logical_bytes": 2576971,
+            "physical_objects": 546
+          },
+          "topology_edges": {
+            "allocated_bytes": 3936256,
+            "logical_bytes": 3726446,
+            "logical_references": 65,
+            "physical_logical_bytes": 3726446,
+            "physical_objects": 65
+          },
+          "topology_nodes": {
+            "allocated_bytes": 102400,
+            "logical_bytes": 90021,
+            "logical_references": 5,
+            "physical_logical_bytes": 90021,
+            "physical_objects": 5
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1511424,
+            "logical_bytes": 1482397,
+            "logical_references": 12,
+            "physical_logical_bytes": 1482397,
+            "physical_objects": 12
+          }
+        },
+        "logical_bytes": 12993750,
+        "physical_logical_bytes": 12993750,
+        "physical_objects": 673
+      },
+      "whole_project": {
+        "deduplication": "device/inode",
+        "directory_allocated_bytes": 1466368,
+        "file_allocated_bytes": 44806144,
+        "file_logical_bytes": 31328040,
+        "scope": "recursive project including retained generations, caches and private state; point-in-time, not peak",
+        "unique_files": 4246
+      },
+      "process": {
+        "user_seconds": 9.63,
+        "system_seconds": 8.05,
+        "peak_rss_kib": 220400,
+        "filesystem_input_512byte_blocks": 1234328,
+        "filesystem_output_512byte_blocks": 816008
+      },
+      "syscall_io": {
+        "trace": "/tmp/gf1205-baseline-full.strace",
+        "read_bytes": 2309281609,
+        "write_bytes": 357447042,
+        "syscalls": {
+          "read": {
+            "calls": 216910,
+            "bytes": 1551382882,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 1335284,
+            "bytes": 693849287,
+            "errors": 0
+          },
+          "write": {
+            "calls": 19575,
+            "bytes": 293397602,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 24447,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 6650,
+            "bytes": 64049440,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwrite64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "writev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwritev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "scope": "successful syscall return bytes across process tree, including non-file descriptors; not physical disk I/O; copy/sendfile charge one read and one write"
+      },
+      "sampled_workspace": {
+        "command": [
+          "/tmp/gf1205-baseline-release-bin",
+          "--exact",
+          "permanent_random_properties_eight_routes",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "sampled_unique_inode_allocated_peak_bytes": 89038848,
+        "sampled_path_logical_peak_bytes": 71218161,
+        "sampled_file_count_peak": 5605,
+        "samples": 798,
+        "requested_poll_interval_seconds": 0.005,
+        "maximum_observed_sample_interval_seconds": 0.06176758895162493,
+        "vanished_files_during_scan": 567,
+        "exit_status": 0,
+        "limitations": [
+          "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+          "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+          "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+          "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+        ]
+      }
+    },
+    "candidate": {
+      "provenance": {
+        "source": "745f4a79cdbb4a6bcca09abdf50878d32006293b",
+        "executable": "/tmp/gf1205-candidate-release-bin",
+        "sha256": "8fd08dac0da8e0cb3a68a3e9eac928efa8f0fe1da5d0036f5d924bcb1db08dbb",
+        "profile": "release optimized; RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS and LLVM_PROFILE_FILE unset; no coverage instrumentation",
+        "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+        "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+      },
+      "command": "frozen executable --exact permanent_random_properties_eight_routes --nocapture --test-threads=1",
+      "fixture": {
+        "nodes": 4097,
+        "edges": 65537,
+        "routes": 8,
+        "random_ids": true,
+        "semantic_fingerprint": "1a4578d5b5d6c474b1fd9de5478fd2afe0f69e1456f3964d410bc6e0fd3e8b51"
+      },
+      "csr": {
+        "decode_elapsed_ns": [
+          445098,
+          6568933,
+          5775071
+        ],
+        "encode_elapsed_ns": [
+          1548500,
+          7247341,
+          18837035
+        ],
+        "estimated_allocated_bytes_at_4096": [
+          4972544,
+          2351104,
+          1363968
+        ],
+        "largest_decoded_batch_array_bytes": 1081784,
+        "normalized_bytes_none_lz4_zstd": [
+          4920564,
+          2320564,
+          1324020
+        ],
+        "production_format_changed": true,
+        "shards": 18,
+        "source_allocated_bytes_unix": 1363968,
+        "source_bytes": 1324020
+      },
+      "permanent": {
+        "allocated_bytes": 11542528,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 1441792,
+            "logical_bytes": 1335451,
+            "logical_references": 37,
+            "physical_logical_bytes": 1335451,
+            "physical_objects": 37
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 212992,
+            "logical_bytes": 187003,
+            "logical_references": 8,
+            "physical_logical_bytes": 187003,
+            "physical_objects": 8
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 4337664,
+            "logical_bytes": 2576971,
+            "logical_references": 546,
+            "physical_logical_bytes": 2576971,
+            "physical_objects": 546
+          },
+          "topology_edges": {
+            "allocated_bytes": 3936256,
+            "logical_bytes": 3726446,
+            "logical_references": 65,
+            "physical_logical_bytes": 3726446,
+            "physical_objects": 65
+          },
+          "topology_nodes": {
+            "allocated_bytes": 102400,
+            "logical_bytes": 90021,
+            "logical_references": 5,
+            "physical_logical_bytes": 90021,
+            "physical_objects": 5
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1511424,
+            "logical_bytes": 1482397,
+            "logical_references": 12,
+            "physical_logical_bytes": 1482397,
+            "physical_objects": 12
+          }
+        },
+        "logical_bytes": 9398289,
+        "physical_logical_bytes": 9398289,
+        "physical_objects": 673
+      },
+      "whole_project": {
+        "deduplication": "device/inode",
+        "directory_allocated_bytes": 1466368,
+        "file_allocated_bytes": 41197568,
+        "file_logical_bytes": 27732579,
+        "scope": "recursive project including retained generations, caches and private state; point-in-time, not peak",
+        "unique_files": 4246
+      },
+      "process": {
+        "user_seconds": 9.57,
+        "system_seconds": 7.84,
+        "peak_rss_kib": 238252,
+        "filesystem_input_512byte_blocks": 1234328,
+        "filesystem_output_512byte_blocks": 759664
+      },
+      "syscall_io": {
+        "trace": "/tmp/gf1205-candidate-full.strace",
+        "read_bytes": 2098377656,
+        "write_bytes": 328689815,
+        "syscalls": {
+          "read": {
+            "calls": 214544,
+            "bytes": 1358456139,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 1335284,
+            "bytes": 693849287,
+            "errors": 0
+          },
+          "write": {
+            "calls": 19572,
+            "bytes": 282617585,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 24447,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 6650,
+            "bytes": 46072230,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwrite64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "writev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwritev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "scope": "successful syscall return bytes across process tree, including non-file descriptors; not physical disk I/O; copy/sendfile charge one read and one write"
+      },
+      "sampled_workspace": {
+        "command": [
+          "/tmp/gf1205-candidate-release-bin",
+          "--exact",
+          "permanent_random_properties_eight_routes",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "sampled_unique_inode_allocated_peak_bytes": 74625024,
+        "sampled_path_logical_peak_bytes": 56842658,
+        "sampled_file_count_peak": 5605,
+        "samples": 827,
+        "requested_poll_interval_seconds": 0.005,
+        "maximum_observed_sample_interval_seconds": 0.0586216690717265,
+        "vanished_files_during_scan": 656,
+        "exit_status": 0,
+        "limitations": [
+          "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+          "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+          "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+          "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+        ]
+      }
+    }
+  },
+  "cold_public_query": {
+    "cost_thresholds": {
+      "scope": "Cold-read probe assessment only; recorded after baseline observations and before any candidate cold-read process. These are investigation thresholds, not noisy CI timing gates or hard RSS bounds. Whole-lifecycle measurements above were descriptive and are not retroactively preregistered.",
+      "storage_requirement": "existing issue #1205: payload and native allocated bytes at most 30% of historical uncompressed fixture",
+      "baseline_first_query_ns": [
+        3961126673,
+        3855093351,
+        3810072343
+      ],
+      "baseline_warm_query_ns": [
+        4135322267,
+        3740693056,
+        3634908329,
+        3865423498,
+        4114791613,
+        3730840427,
+        3675519561,
+        3659108425,
+        4099978418,
+        4112301295,
+        3609213194,
+        4440933975
+      ],
+      "baseline_max_rss_kib": 153296,
+      "largest_fixture_decoded_buffer_content_bytes": 1106468,
+      "maximum_first_query_median_ns": 4026147681,
+      "maximum_warm_query_median_ns": 4654779058.0,
+      "maximum_observed_rss_kib": 155714,
+      "read_write_syscall_ceiling_formula": "corresponding baseline trace bytes + 18 * 16,384 bytes",
+      "rationale": [
+        "Timing permits the observed baseline range plus20ms, over three times the existing all18-shard Zstd decode observation (~6ms), for decode/admission work. A larger change requires investigation.",
+        "RSS permits two additional largest admitted shard buffer sets plus the256KiB decoder-context test ceiling; it is an observed-cost threshold, not a proof about allocator or total process bounds.",
+        "I/O allows one full16KiB metadata allowance per18 shards; compression should reduce payload traffic.",
+        "Sampling, RSS and syscall counts retain their distinct scopes; no timing-only CI assertions are introduced."
+      ],
+      "maximum_read_bytes": 8176478393,
+      "maximum_write_bytes": 134680634
+    },
+    "baseline": {
+      "provenance": {
+        "source": "33a8570a47c3e10f13f39150a7631628518a3faf",
+        "core_source": "c74a529ac9c60997c1343b9f36a074bef39173d8",
+        "executable": "/tmp/gf1205-baseline-probe-bin",
+        "sha256": "a09778c74def1a17b4acffe9fb363afbbbf4dae200f3c72097629fce648c0879",
+        "harness_sha256": "ba23585ce246e3ad15c6137b25e3d20720ec4ab0f0b6b7bffc03e332634c0a10",
+        "profile": "release optimized, no coverage instrumentation; RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS/LLVM_PROFILE_FILE unset",
+        "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json"
+      },
+      "observations": [
+        {
+          "run": 0,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 31378473,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 741121046,
+            "query_elapsed_ns": [
+              3961126673,
+              4135322267,
+              3740693056,
+              3634908329,
+              3865423498
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-baseline-cold-0-time.txt"
+        },
+        {
+          "run": 1,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 31378473,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 702011283,
+            "query_elapsed_ns": [
+              3855093351,
+              4114791613,
+              3730840427,
+              3675519561,
+              3659108425
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-baseline-cold-1-time.txt"
+        },
+        {
+          "run": 2,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 31378473,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 757287137,
+            "query_elapsed_ns": [
+              3810072343,
+              4099978418,
+              4112301295,
+              3609213194,
+              4440933975
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-baseline-cold-2-time.txt"
+        }
+      ],
+      "trace_cache_advice": {
+        "unique_files": 4248,
+        "logical_bytes": 31378473,
+        "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+      },
+      "command": [
+        "/tmp/gf1205-baseline-probe-bin",
+        "--exact",
+        "csr_cold_public_query_probe",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "limitations": [
+        "Three separate read processes; each opens the facade then runs one first query and four same-facade repeats.",
+        "Cache advice applies only to private fixture files and is not a guaranteed cold OS cache.",
+        "Timing observations are not CI timing gates; process RSS includes runtime/facade/query owners.",
+        "Tracing is a separate run and is not used for latency claims."
+      ],
+      "process_observations": [
+        {
+          "user_seconds": 22.82,
+          "system_seconds": 8.64,
+          "peak_rss_kib": 153296,
+          "filesystem_input_512byte_blocks": 29728,
+          "filesystem_output_512byte_blocks": 417312
+        },
+        {
+          "user_seconds": 22.58,
+          "system_seconds": 8.69,
+          "peak_rss_kib": 152316,
+          "filesystem_input_512byte_blocks": 29728,
+          "filesystem_output_512byte_blocks": 417312
+        },
+        {
+          "user_seconds": 22.62,
+          "system_seconds": 8.63,
+          "peak_rss_kib": 152404,
+          "filesystem_input_512byte_blocks": 29728,
+          "filesystem_output_512byte_blocks": 417312
+        }
+      ],
+      "syscall_io": {
+        "trace": "/tmp/gf1205-baseline-cold.strace",
+        "read_bytes": 8176183481,
+        "write_bytes": 134385722,
+        "syscalls": {
+          "read": {
+            "calls": 1900978,
+            "bytes": 6471272917,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 3320189,
+            "bytes": 1692100676,
+            "errors": 0
+          },
+          "write": {
+            "calls": 25026,
+            "bytes": 121575834,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 1347,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 1330,
+            "bytes": 12809888,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwrite64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "writev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwritev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "csr_direct_read_bytes": 35552246,
+        "csr_copy_bytes": 4920564,
+        "csr_syscalls": {
+          "read": {
+            "calls": 702,
+            "bytes": 35552246,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 36,
+            "bytes": 4920564,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 36,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "unresolved_calls": 0,
+        "scope": "successful syscall return bytes across process tree, including non-file descriptors; copy/sendfile counted once as read and once as write; CSR classification from -yy descriptor paths including resumed calls; not physical I/O"
+      },
+      "first_query_median_ns": 3855093351,
+      "reused_facade_query_median_ns": 3803058277.0
+    },
+    "candidate": {
+      "provenance": {
+        "source": "5bc79c60406b774323112a0efa294f04163ae1c1",
+        "core_source": "745f4a79cdbb4a6bcca09abdf50878d32006293b",
+        "executable": "/tmp/gf1205-candidate-probe-bin",
+        "sha256": "56ea2e9354f92722a587b1abce98387092bf7eba31bde5e6d158d3874f1cfc67",
+        "harness_sha256": "ba23585ce246e3ad15c6137b25e3d20720ec4ab0f0b6b7bffc03e332634c0a10",
+        "profile": "release optimized, no coverage instrumentation; RUSTFLAGS/CARGO_ENCODED_RUSTFLAGS/LLVM_PROFILE_FILE unset",
+        "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json"
+      },
+      "observations": [
+        {
+          "run": 0,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 27783012,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 706412907,
+            "query_elapsed_ns": [
+              3949943567,
+              3608448999,
+              3870129140,
+              3812572610,
+              3637269764
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-candidate-cold-0-time.txt"
+        },
+        {
+          "run": 1,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 27783012,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 698168639,
+            "query_elapsed_ns": [
+              3672527253,
+              4008831941,
+              3603514454,
+              3589052965,
+              3828957506
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-candidate-cold-1-time.txt"
+        },
+        {
+          "run": 2,
+          "cache_advice": {
+            "unique_files": 4248,
+            "logical_bytes": 27783012,
+            "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+          },
+          "query": {
+            "cache_scope": "first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded",
+            "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+            "mode": "read",
+            "open_elapsed_ns": 669666149,
+            "query_elapsed_ns": [
+              3890587544,
+              3986468360,
+              3695447714,
+              3612397305,
+              3620677994
+            ],
+            "rows": 256
+          },
+          "time_file": "/tmp/gf1205-candidate-cold-2-time.txt"
+        }
+      ],
+      "trace_cache_advice": {
+        "unique_files": 4248,
+        "logical_bytes": 27783012,
+        "operation": "fsync and POSIX_FADV_DONTNEED on this private fixture only; advisory, not proof of OS eviction; executable/libraries unchanged"
+      },
+      "command": [
+        "/tmp/gf1205-candidate-probe-bin",
+        "--exact",
+        "csr_cold_public_query_probe",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "limitations": [
+        "Three separate read processes; each opens the facade then runs one first query and four same-facade repeats.",
+        "Cache advice applies only to private fixture files and is not a guaranteed cold OS cache.",
+        "Timing observations are not CI timing gates; process RSS includes runtime/facade/query owners.",
+        "Tracing is a separate run and is not used for latency claims."
+      ],
+      "process_observations": [
+        {
+          "user_seconds": 22.39,
+          "system_seconds": 8.78,
+          "peak_rss_kib": 152824,
+          "filesystem_input_512byte_blocks": 22680,
+          "filesystem_output_512byte_blocks": 410264
+        },
+        {
+          "user_seconds": 22.47,
+          "system_seconds": 8.86,
+          "peak_rss_kib": 152848,
+          "filesystem_input_512byte_blocks": 22680,
+          "filesystem_output_512byte_blocks": 410264
+        },
+        {
+          "user_seconds": 22.6,
+          "system_seconds": 8.73,
+          "peak_rss_kib": 153260,
+          "filesystem_input_512byte_blocks": 22680,
+          "filesystem_output_512byte_blocks": 410264
+        }
+      ],
+      "syscall_io": {
+        "trace": "/tmp/gf1205-candidate-cold.strace",
+        "read_bytes": 8149233915,
+        "write_bytes": 130790280,
+        "syscalls": {
+          "read": {
+            "calls": 1901324,
+            "bytes": 6447918793,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 3320189,
+            "bytes": 1692100676,
+            "errors": 0
+          },
+          "write": {
+            "calls": 25026,
+            "bytes": 121575834,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 1347,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 1330,
+            "bytes": 9214446,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwrite64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "writev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pwritev": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "csr_direct_read_bytes": 9577462,
+        "csr_copy_bytes": 1324020,
+        "csr_syscalls": {
+          "read": {
+            "calls": 310,
+            "bytes": 9577462,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 36,
+            "bytes": 1324020,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 36,
+            "bytes": 0,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "readv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "preadv": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          },
+          "sendfile": {
+            "calls": 0,
+            "bytes": 0,
+            "errors": 0
+          }
+        },
+        "unresolved_calls": 0,
+        "scope": "successful syscall return bytes across process tree, including non-file descriptors; copy/sendfile counted once as read and once as write; CSR classification from -yy descriptor paths including resumed calls; not physical I/O"
+      },
+      "first_query_median_ns": 3890587544,
+      "reused_facade_query_median_ns": 3666358739.0
+    },
+    "threshold_results": {
+      "first_query_median": true,
+      "reused_facade_median": true,
+      "observed_rss": true,
+      "syscall_reads": true,
+      "syscall_writes": true
+    },
+    "baseline_reconstruction": "c74a529ac9c60997c1343b9f36a074bef39173d8 plus identical edge_query_identities helper and csr_cold_public_query_probe from candidate 5bc79c60406b774323112a0efa294f04163ae1c1; harness SHA256 is recorded in both provenance objects. Local baseline-only commit 33a8570 is not a production change."
+  },
+  "limitations": [
+    "Whole-lifecycle timings are one descriptive pair, not preregistered thresholds or a claimed latency improvement.",
+    "Whole-lifecycle peak process RSS increases by 17852 KiB; decoded buffer bounds do not imply lower total RSS.",
+    "Arrow get_array_memory_size can count shared backing buffers repeatedly; its decrease is not a native-memory saving.",
+    "Syscall bytes are successful return bytes including copy operations, not physical disk I/O. Instrumented run timing is excluded.",
+    "Workspace peaks are sampled overlapping project/staging/portable owners, deduplicated by device/inode for allocated files; not temporary-only or hard bounds. Directories and open-unlinked files are excluded.",
+    "An earlier baseline trace omitted vector/copy syscalls and is superseded for complete I/O claims; it passed but is not used in comparisons.",
+    "Three cold-probe processes use private-file fsync/POSIX_FADV_DONTNEED advice; OS eviction is not guaranteed. Four subsequent queries per process reuse the facade.",
+    "Measurements use frozen executables before subprocess execution; no heavy builds overlapped measured runs. Baseline trace attribution parsing overlapped only the separate candidate byte-count trace."
+  ],
+  "reproduction": {
+    "build_environment": {
+      "TMPDIR": "admitted native filesystem temporary directory",
+      "CARGO_TARGET_DIR": "isolated native build directory",
+      "CARGO_BUILD_JOBS": "4",
+      "unset": [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "LLVM_PROFILE_FILE"
+      ]
+    },
+    "freeze": "Copy the built release test executable to a distinct immutable measurement path and record SHA256 before running any subprocess.",
+    "runtime": "/usr/bin/time -v FROZEN_EXECUTABLE --exact permanent_random_properties_eight_routes --nocapture --test-threads=1",
+    "syscall_trace": "strace -f -qq -s 0 -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync -o TRACE FROZEN_EXECUTABLE --exact permanent_random_properties_eight_routes --nocapture --test-threads=1",
+    "cold_prepare": "GF_CSR_PROBE_ROOT=PRIVATE_NATIVE_DIRECTORY GF_CSR_PROBE_MODE=prepare FROZEN_PROBE --exact csr_cold_public_query_probe --nocapture --test-threads=1",
+    "cold_read": "GF_CSR_PROBE_ROOT=PRIVATE_NATIVE_DIRECTORY GF_CSR_PROBE_MODE=read /usr/bin/time -v FROZEN_PROBE --exact csr_cold_public_query_probe --nocapture --test-threads=1",
+    "cold_trace": "Use the same syscall set plus -yy descriptor paths on a separate cold_read process, without using its instrumented timing as latency evidence.",
+    "cache_advice": "Before each of three read processes and the separate trace, fsync and POSIX_FADV_DONTNEED each unique regular file in the private fixture.",
+    "workspace_sampling": "Separate lifecycle run: recursively stat the private temporary workspace, deduplicate file allocation by (st_dev, st_ino), sum st_blocks*512, record elapsed intervals and peak; requested interval 5ms."
+  },
+  "validation": {
+    "cargo_fmt_all_check": "passed after final implementation edit",
+    "cargo_clippy_workspace_deny_warnings": "passed, including full pre-push rust-quality stage",
+    "make_pre_push_fast": "passed",
+    "make_gate_registry_check": "passed: validation and14 registry tests",
+    "native_adjacency": "cargo test -p graphforge-storage -p graphforge-exec --lib adjacency:: -- --nocapture: storage58 passed/1 existing ignored, exec18 passed; subsequent final codec7/7 passed",
+    "cargo_test_workspace": {
+      "outcome": "failed on existing hardcoded /tmp filesystem admission setup",
+      "storage": "1097 passed, 1 failed, 2 existing ignored",
+      "public_permanent_storage": "47 passed",
+      "ladder_accounting": "30 passed",
+      "fixed_hop": "17 passed, 2 existing release-only ignored",
+      "public_api_unit": "737 passed",
+      "public_api_bdd": "118 scenarios passed",
+      "opencypher": "3897 passed, zero regressions"
+    },
+    "make_pre_push": {
+      "outcome": "failed at rust-tests-coverage-native on the same existing filesystem setup",
+      "storage": "1096 passed, 1 failed, 2 existing ignored",
+      "prior_stages": "preflight, policy-static and rust-quality passed"
+    },
+    "local_failure": {
+      "test": "project_generation::tests::wave9_participant_inventory_rejects_links_and_special_files",
+      "source": "crates/graphforge-storage/src/project_generation.rs:2576",
+      "cause": "The unchanged fixture explicitly creates its root with tempdir_in(\"/tmp\"); this host rejects that filesystem with GF_UNSUPPORTED_FILESYSTEM cause=filesystem_class_unproven before the link/socket assertions. TMPDIR points to admitted native storage for other tests.",
+      "policy": "No skip, weakened assertion or successful full-gate claim. Exact-head required CI remains the merge authority."
+    },
+    "independent_review": "Implementation and measurement evidence reviewed independently; no outstanding verified finding.",
+    "initial_ci_failure": {
+      "run": 34527042473,
+      "head": "f8703d2abba573ad577c7eb243512f5ce321bf37",
+      "job": 103038520770,
+      "failure": "Windows read-only certifier cache cleanup command refused stale benchmarks/Cargo.lock under --locked before executing the test.",
+      "cause": "Moving zstd from a storage dev dependency to a normal dependency also requires its entry in the separate benchmark workspace lockfile.",
+      "reproduction": "cargo metadata --locked --offline --manifest-path benchmarks/Cargo.toml --format-version 1 failed before repair; passed after regeneration.",
+      "repair": "Regeneration adds only zstd to graphforge-storage dependencies in benchmarks/Cargo.lock. pre-push-fast now checks locked benchmark metadata before compilation.",
+      "measurement_impact": "No production-code or measured executable change. Initial failed CI is retained; a corrected-head complete CI run is required.",
+      "local_regression": "cargo test --locked --manifest-path benchmarks/Cargo.toml -p graphforge-benchmark-certify --lib tests::command_owned_cache_direct_files_preserve_read_only_inputs -- --exact --nocapture: 1 passed on native Linux; Windows execution remains a CI requirement.",
+      "fast_checks": "make pre-push-fast and make gate-registry-check pass after the repair.",
+      "complete_census": {
+        "independent_causes": 1,
+        "failed_jobs": [
+          103038520770,
+          103038520763
+        ],
+        "downstream_gate": "CI Gate failed because these required jobs failed.",
+        "linux_failure": "Bazel Bootstrap completed its authoritative Rust test step, then the real tiny/ownership-growth lifecycle producer refused the same stale benchmarks/Cargo.lock under --locked.",
+        "other_lanes": "All other applicable independent lanes passed, including concurrency, both bindings and macOS durability."
+      }
+    }
+  }
+}

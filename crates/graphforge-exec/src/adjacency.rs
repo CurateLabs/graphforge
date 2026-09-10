@@ -29,11 +29,9 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::Direction;
 use graphforge_storage::adjacency::{
-    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, CsrIndex, CsrRow, ShardedCsrIndex,
+    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, ShardedCsrIndex,
 };
-use graphforge_storage::adjacency_delta::{
-    CsrDeltaOverlay, DeltaSegment, overlay_delta_segments, read_delta_chain,
-};
+use graphforge_storage::adjacency_delta::{DeltaSegment, read_delta_chain};
 use graphforge_storage::generation::read_topology_generation;
 
 use crate::ValueAt;
@@ -113,14 +111,12 @@ enum AdjacencyInner {
     #[default]
     Empty,
     Map(HashMap<u64, Vec<(u64, u64)>>),
-    Csr(Arc<CsrIndex>),
     Sharded(Arc<ShardedCsrIndex>),
     ShardedOverlay {
         base: Arc<ShardedCsrIndex>,
         replaced: HashMap<u64, Vec<(u64, u64)>>,
         node_extent: u64,
     },
-    Overlay(CsrDeltaOverlay),
     Undirected {
         out: Arc<AdjacencyInner>,
         inbound: Arc<AdjacencyInner>,
@@ -138,7 +134,6 @@ pub struct NeighborRow<'a> {
 #[derive(Clone, Debug)]
 enum NeighborRowKind<'a> {
     Pairs(&'a [(u64, u64)]),
-    Csr(CsrRow<'a>),
     Owned(Vec<(u64, u64)>),
 }
 
@@ -146,12 +141,6 @@ impl<'a> NeighborRow<'a> {
     fn pairs(entries: &'a [(u64, u64)]) -> Self {
         Self {
             kind: NeighborRowKind::Pairs(entries),
-        }
-    }
-
-    fn csr(row: CsrRow<'a>) -> Self {
-        Self {
-            kind: NeighborRowKind::Csr(row),
         }
     }
 
@@ -166,7 +155,6 @@ impl<'a> NeighborRow<'a> {
     pub fn len(&self) -> usize {
         match &self.kind {
             NeighborRowKind::Pairs(entries) => entries.len(),
-            NeighborRowKind::Csr(row) => row.len(),
             NeighborRowKind::Owned(entries) => entries.len(),
         }
     }
@@ -182,7 +170,6 @@ impl<'a> NeighborRow<'a> {
     pub fn get(&self, index: usize) -> Option<(u64, u64)> {
         match &self.kind {
             NeighborRowKind::Pairs(entries) => entries.get(index).copied(),
-            NeighborRowKind::Csr(row) => row.get(index),
             NeighborRowKind::Owned(entries) => entries.get(index).copied(),
         }
     }
@@ -192,7 +179,6 @@ impl<'a> NeighborRow<'a> {
     pub fn to_vec(&self) -> Vec<(u64, u64)> {
         match &self.kind {
             NeighborRowKind::Pairs(entries) => entries.to_vec(),
-            NeighborRowKind::Csr(row) => row.iter().collect(),
             NeighborRowKind::Owned(entries) => entries.clone(),
         }
     }
@@ -351,19 +337,11 @@ impl AdjacencyInner {
         Ok(match self {
             Self::Empty => 0,
             Self::Map(map) => map.values().map(|row| row.len() as u64).sum(),
-            Self::Csr(csr) => csr.edge_count(),
             Self::Sharded(csr) => csr.edge_count(),
             Self::ShardedOverlay { base, replaced, .. } => {
                 let mut total = base.edge_count();
                 for (node, row) in replaced {
                     total = total - base.row_len(*node)? + row.len() as u64;
-                }
-                total
-            }
-            Self::Overlay(overlay) => {
-                let mut total = overlay.base.edge_count();
-                for (node, row) in &overlay.replaced {
-                    total = total - overlay.base.row(*node).len() as u64 + row.len() as u64;
                 }
                 total
             }
@@ -377,15 +355,10 @@ impl AdjacencyInner {
         Ok(match self {
             Self::Empty => 0,
             Self::Map(map) => map.get(&node_id).map_or(0, |row| row.len() as u64),
-            Self::Csr(csr) => csr.row(node_id).len() as u64,
             Self::Sharded(csr) => csr.row_len(node_id)?,
             Self::ShardedOverlay { base, replaced, .. } => match replaced.get(&node_id) {
                 Some(row) => row.len() as u64,
                 None => base.row_len(node_id)?,
-            },
-            Self::Overlay(overlay) => match overlay.row(node_id) {
-                graphforge_storage::adjacency_delta::OverlayRow::Base(row) => row.len() as u64,
-                graphforge_storage::adjacency_delta::OverlayRow::Replaced(row) => row.len() as u64,
             },
             Self::Undirected { out, inbound } => out
                 .degree(node_id)?
@@ -397,13 +370,9 @@ impl AdjacencyInner {
         match self {
             Self::Empty => true,
             Self::Map(map) => map.is_empty(),
-            Self::Csr(csr) => csr.edge_count() == 0,
             Self::Sharded(csr) => csr.edge_count() == 0,
             Self::ShardedOverlay { base, replaced, .. } => {
                 base.edge_count() == 0 && replaced.values().all(Vec::is_empty)
-            }
-            Self::Overlay(overlay) => {
-                overlay.base.edge_count() == 0 && overlay.replaced.values().all(Vec::is_empty)
             }
             Self::Undirected { out, inbound } => out.is_empty() && inbound.is_empty(),
         }
@@ -413,7 +382,6 @@ impl AdjacencyInner {
         Ok(match self {
             Self::Empty => NeighborRow::pairs(&[]),
             Self::Map(map) => NeighborRow::pairs(map.get(&node_id).map_or(&[], Vec::as_slice)),
-            Self::Csr(csr) => NeighborRow::csr(csr.row(node_id)),
             Self::Sharded(csr) => NeighborRow::owned(csr.row(node_id)?),
             Self::ShardedOverlay { base, replaced, .. } => {
                 NeighborRow::owned(match replaced.get(&node_id) {
@@ -421,12 +389,6 @@ impl AdjacencyInner {
                     None => base.row(node_id)?,
                 })
             }
-            Self::Overlay(overlay) => match overlay.row(node_id) {
-                graphforge_storage::adjacency_delta::OverlayRow::Base(row) => NeighborRow::csr(row),
-                graphforge_storage::adjacency_delta::OverlayRow::Replaced(entries) => {
-                    NeighborRow::pairs(entries)
-                }
-            },
             Self::Undirected { out, inbound } => {
                 merge_undirected_row(&out.neighbors(node_id)?, &inbound.neighbors(node_id)?)
             }
@@ -436,19 +398,15 @@ impl AdjacencyInner {
     fn backing(&self) -> AdjacencyBacking {
         match self {
             Self::Empty | Self::Map(_) => AdjacencyBacking::ScanHashMap,
-            Self::Csr(_) | Self::Sharded(_) => AdjacencyBacking::CsrNative,
-            Self::Overlay(_) | Self::ShardedOverlay { .. } => AdjacencyBacking::CsrOverlay,
+            Self::Sharded(_) => AdjacencyBacking::CsrNative,
+            Self::ShardedOverlay { .. } => AdjacencyBacking::CsrOverlay,
             Self::Undirected { .. } => AdjacencyBacking::CsrUndirected,
         }
     }
 
     fn base_csr_entries_expanded(&self) -> u64 {
         match self {
-            Self::Empty
-            | Self::Csr(_)
-            | Self::Sharded(_)
-            | Self::Overlay(_)
-            | Self::ShardedOverlay { .. } => 0,
+            Self::Empty | Self::Sharded(_) | Self::ShardedOverlay { .. } => 0,
             Self::Map(map) => u64::try_from(map.values().map(Vec::len).sum::<usize>()).unwrap_or(0),
             Self::Undirected { out, inbound } => out
                 .base_csr_entries_expanded()
@@ -458,7 +416,6 @@ impl AdjacencyInner {
 
     fn overlay_row_count(&self) -> u64 {
         match self {
-            Self::Overlay(overlay) => overlay.overlay_row_count(),
             Self::ShardedOverlay { replaced, .. } => {
                 u64::try_from(replaced.len()).unwrap_or(u64::MAX)
             }
@@ -475,9 +432,7 @@ impl AdjacencyInner {
             Self::Map(map) => map.keys().next().map_or(0, |_| {
                 map.keys().copied().max().map_or(0, |m| m.saturating_add(1))
             }),
-            Self::Csr(csr) => csr.node_count(),
             Self::Sharded(csr) => csr.node_count(),
-            Self::Overlay(overlay) => overlay.node_extent,
             Self::ShardedOverlay { node_extent, .. } => *node_extent,
             Self::Undirected { out, inbound } => out.node_extent().max(inbound.node_extent()),
         }
@@ -491,18 +446,8 @@ impl AdjacencyInner {
                     visit(node_id, NeighborRow::pairs(entries.as_slice()));
                 }
             }
-            Self::Csr(csr) => {
-                for node_id in 0..csr.node_count() {
-                    visit(node_id, NeighborRow::csr(csr.row(node_id)));
-                }
-            }
             Self::Sharded(csr) => {
                 for node_id in 0..csr.node_count() {
-                    visit(node_id, self.neighbors(node_id)?);
-                }
-            }
-            Self::Overlay(overlay) => {
-                for node_id in 0..overlay.node_extent {
                     visit(node_id, self.neighbors(node_id)?);
                 }
             }
@@ -1167,32 +1112,9 @@ impl PersistentAdjacencyProvider {
                     node_extent,
                 });
             }
-            // Legacy single-batch CSR migration path. A successful rebuild
-            // publishes sharded v1 files; old projects remain readable until
-            // that rebuild occurs.
-            let base = Arc::new(csr::read_csr(&path)?);
-            if deltas.is_empty() {
-                return Ok(AdjacencyInner::Csr(base));
-            }
-            // Torn-read count guard (#765): the base CSR must match the manifest
-            // row it was loaded against. If a concurrent compaction rewrote the
-            // CSR under this snapshot, the recorded counts differ and applying
-            // the chain would double-count — bail to a rebuild instead.
-            if let Some(row) = rows
-                .iter()
-                .find(|r| r.relation_type == stem && r.direction == d)
-                && (base.node_count() != row.node_count || base.edge_count() != row.edge_count)
-            {
-                return Err(GfError::Storage(
-                    "adjacency base CSR disagrees with manifest counts (torn read)".into(),
-                ));
-            }
-            let overlay = overlay_delta_segments(base, stem, d, deltas);
-            if overlay.replaced.is_empty() {
-                Ok(AdjacencyInner::Csr(overlay.base))
-            } else {
-                Ok(AdjacencyInner::Overlay(overlay))
-            }
+            Err(GfError::Storage(
+                "unsupported or missing current CSR shard manifest".into(),
+            ))
         };
         match direction {
             Direction::Out => Ok(Adjacency {
@@ -1553,12 +1475,21 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
 
 /// Undirected CSR pair without materializing a merged hash map (#340).
 #[cfg(test)]
-fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
+fn merge_undirected(out: csr::CsrIndex, inbound: csr::CsrIndex) -> Adjacency {
+    let root = Arc::new(tempfile::tempdir().unwrap());
+    let out_path = root.path().join("out.csr");
+    let in_path = root.path().join("in.csr");
+    csr::write_sharded_csr(&out_path, &out, 2).unwrap();
+    csr::write_sharded_csr(&in_path, &inbound, 2).unwrap();
     Adjacency {
-        retained_root: None,
+        retained_root: Some(RetainedAdjacencyRoot(root)),
         inner: AdjacencyInner::Undirected {
-            out: Arc::new(AdjacencyInner::Csr(Arc::new(out))),
-            inbound: Arc::new(AdjacencyInner::Csr(Arc::new(inbound))),
+            out: Arc::new(AdjacencyInner::Sharded(Arc::new(
+                ShardedCsrIndex::open(&out_path).unwrap(),
+            ))),
+            inbound: Arc::new(AdjacencyInner::Sharded(Arc::new(
+                ShardedCsrIndex::open(&in_path).unwrap(),
+            ))),
         },
     }
 }
@@ -1569,7 +1500,7 @@ fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
 
 #[cfg(test)]
 mod tests {
-    use graphforge_storage::adjacency::build_adjacency_index;
+    use graphforge_storage::adjacency::{CsrIndex, build_adjacency_index};
     use std::path::Path;
 
     use graphforge_core::uuid::{Uuid, new_v7, to_bytes};
@@ -1869,7 +1800,9 @@ mod tests {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("csr") {
                     continue;
                 }
-                std::fs::write(&path, b"corrupt-payload").unwrap();
+                let mut bytes = std::fs::read(&path).unwrap();
+                bytes[0] ^= 1;
+                std::fs::write(&path, bytes).unwrap();
                 overwritten += 1;
             }
         }
