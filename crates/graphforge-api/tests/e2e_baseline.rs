@@ -5557,3 +5557,87 @@ fn fixed_hop_new_endpoint_property_survives_write_and_reopen() {
         }
     }
 }
+
+fn exercise_empty_remove_frontier(edge: bool) {
+    let gf = GraphForge::new(None).unwrap();
+    gf.execute(
+        "CREATE (a:Probe {name:'left', score:1})-[:LINK {score:1}]->(:Probe {name:'right'})",
+    )
+    .unwrap();
+    let (pattern, target, read) = if edge {
+        (
+            "()-[r:LINK]->()",
+            "r",
+            "MATCH ()-[r:LINK]->() RETURN r.edge_uuid, r.score",
+        )
+    } else {
+        (
+            "(n:Probe)",
+            "n",
+            "MATCH (n:Probe {name:'left'}) RETURN n.node_uuid, n.score",
+        )
+    };
+    let before = rows(&gf, read);
+    for predicate in [
+        format!("{target}.score = 999"),
+        format!("{target}.score IS NULL AND {target}.score = 1"),
+    ] {
+        let query = format!("MATCH {pattern} WHERE {predicate} REMOVE {target}.score");
+        let result = rows(&gf, &query);
+        let removed = result.batches[0]
+            .column_by_name("properties_removed")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(removed.value(0), 0);
+        assert_eq!(rows(&gf, read).batches, before.batches);
+    }
+    let empty_return = rows(
+        &gf,
+        &format!(
+            "MATCH {pattern} WHERE {target}.score = 999 REMOVE {target}.score RETURN {target}.score"
+        ),
+    );
+    assert_eq!(empty_return.stats.rows_produced, 0);
+    rows(
+        &gf,
+        &format!("MATCH {pattern} WHERE {target}.score = 1 SET {target}.score = 2"),
+    );
+    assert_eq!(
+        read_int(
+            &gf,
+            &format!("MATCH {pattern} WHERE {target}.score = 2 RETURN {target}.score")
+        ),
+        Some(2)
+    );
+    let removed = rows(
+        &gf,
+        &format!("MATCH {pattern} WHERE {target}.score = 2 REMOVE {target}.score"),
+    );
+    assert_eq!(
+        removed.batches[0]
+            .column_by_name("properties_removed")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert_eq!(read_int(&gf, "MATCH (n:Probe) RETURN count(n)"), Some(2));
+    assert_eq!(
+        read_int(&gf, "MATCH ()-[r:LINK]->() RETURN count(r)"),
+        Some(1)
+    );
+}
+
+#[test]
+fn empty_remove_node_frontier_preserves_graph_and_following_writes() {
+    exercise_empty_remove_frontier(false);
+}
+
+#[test]
+fn empty_remove_edge_frontier_preserves_graph_and_following_writes() {
+    exercise_empty_remove_frontier(true);
+}
