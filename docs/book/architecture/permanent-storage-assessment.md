@@ -9,9 +9,18 @@ queries after reopen and after export → full verification → clean import.
 ## Reproduction
 
 The fixture is `crates/graphforge-api/tests/permanent_storage_budgets.rs`.
-The initial measurements below use main `345b01085d8566a492b9364eedbf0bb68d0a5a2c`
-plus that assessment fixture; the integrated baseline is recorded below when
-validation completes. Rust is 1.96.0 (`ac68faa20`), Arrow/Parquet 58.4.0.
+The integrated runtime source is `83a153f164faa2f7dc276e593719ec71e7e0bc9e`,
+based on merged lifecycle main `0539c8eed0be6c5de9b5a7ef83b265e5f3dc0f79`.
+All five tests passed on OVHC-AGENCY, Linux 7.0.0-30, process-root ext4.
+Rust is 1.96.0 (`ac68faa20`), Arrow/Parquet 58.4.0.
+[Raw aggregate evidence](../../development/evidence/permanent-storage-1196.json)
+records each numerator, denominator and semantic fingerprint. The standalone
+serial test binary took 449.10 seconds; `/usr/bin/time -v` measured 268,780 KiB
+maximum RSS, 397.56 user seconds and 31.65 system seconds. These include the
+entire construction/query/export/import assessment, not codec-only memory or CPU.
+The binary was built with `cargo test ... --no-run` before timing, so compilation
+is excluded. The initial pre-lifecycle baseline reproduced the same permanent
+bytes and exact semantic fingerprints.
 Run on an admitted native filesystem with 4096-byte allocation blocks:
 
 ```sh
@@ -46,7 +55,10 @@ categories are topology nodes 135,168; topology edges 7,307,264; properties
 5,488,640; UUID/surrogates 2,523,136; adjacency 5,050,368; manifests/catalog
 335,872. The executable report emits every category's logical bytes, physical
 logical bytes, allocated bytes, references and unique objects for every fixture.
-No graph values or UUIDs are included in that aggregate report.
+No graph values or UUIDs are included in that aggregate report. The indexed
+case has 37 adjacency references and 37 physical objects, establishing that its
+18 CSR shard files are physically distinct. The codec experiment sums shard-file
+bytes; the separate attribution report remains the authority for permanent allocation.
 
 ## Authority and access contracts
 
