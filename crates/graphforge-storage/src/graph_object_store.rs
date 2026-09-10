@@ -2492,7 +2492,11 @@ fn requires_single_link_materialization(relative_path: &str) -> bool {
     !name.contains('/')
         && (matches!(
             name,
-            "ordinal-v4-manifest.json" | "ordinal-v4-receipt.json" | "ordinal-v4.lock"
+            "manifest.json"
+                | "topology-receipt.json"
+                | "ordinal-v4-manifest.json"
+                | "ordinal-v4-receipt.json"
+                | "ordinal-v4.lock"
         ) || (!name.starts_with(".v4-")
             && crate::uuid_membership::is_exact_private_v4_name(name)))
 }
@@ -2506,7 +2510,7 @@ fn copy_single_link_materialized_object(
     entry: &crate::GraphFileEntry,
 ) -> Result<MaterializeIoEvidence, GfError> {
     let temporary_name = std::ffi::OsString::from(format!(
-        ".ordinal-v4-materialize-{}.tmp",
+        ".graph-control-materialize-{}.tmp",
         Uuid::new_v4().simple()
     ));
     let input = source
@@ -5126,9 +5130,17 @@ mod tests {
     }
 
     #[test]
-    fn materialization_gives_v4_ordinal_authority_private_single_link_inodes() {
+    fn materialization_gives_mutable_uuid_controls_private_single_link_inodes() {
         let root = tempfile::tempdir().unwrap();
         let files = [
+            (
+                "topology/uuid-membership/manifest.json",
+                &b"v5 manifest"[..],
+            ),
+            (
+                "topology/uuid-membership/topology-receipt.json",
+                &b"v5 receipt"[..],
+            ),
             ("topology/uuid-membership/ordinal-v4.lock", &b""[..]),
             (
                 "topology/uuid-membership/ordinal-v4-manifest.json",

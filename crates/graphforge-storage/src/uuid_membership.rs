@@ -2570,6 +2570,20 @@ pub(crate) struct ConstructionReferenceAuthenticationWork {
     pub(crate) referenced_payload_bytes: u64,
 }
 
+// Immutable authenticated runs may be shared by a hydrated CAS workspace.
+// Mutable manifests/receipts and private construction artifacts retain their
+// strict single-link rules. Digest/block and named-inode checks remain separate.
+fn retained_run_has_safe_links(file: &File) -> Result<bool, GfError> {
+    let links = graphforge_filesystem::file_link_count(file).map_err(storage_err)?;
+    Ok(links == 1
+        || links > 1
+            && file
+                .metadata()
+                .map_err(storage_err)?
+                .permissions()
+                .readonly())
+}
+
 impl AuthenticatedUuidIndexSnapshot {
     fn open_retained_file(&self, record: &FileRecord) -> Result<File, GfError> {
         let (held, expected) = self
@@ -2588,8 +2602,8 @@ impl AuthenticatedUuidIndexSnapshot {
         let mut file = held.try_clone().map_err(storage_err)?;
         let identity_changed =
             graphforge_filesystem::file_identity(&file).map_err(storage_err)? != expected;
-        let path_native_link_changed = self.cas_source_paths.is_none()
-            && graphforge_filesystem::file_link_count(&file).map_err(storage_err)? != 1;
+        let path_native_link_changed =
+            self.cas_source_paths.is_none() && !retained_run_has_safe_links(&file)?;
         if identity_changed || path_native_link_changed {
             return Err(storage_err("retained UUID run identity changed"));
         }
@@ -3071,7 +3085,7 @@ impl AuthenticatedUuidIndexSnapshot {
             ] {
                 let named = open_uuid_child_file(&self.root, std::ffi::OsStr::new(&record.name))?;
                 if graphforge_filesystem::file_identity(&named).map_err(storage_err)? != identity
-                    || graphforge_filesystem::file_link_count(&named).map_err(storage_err)? != 1
+                    || !retained_run_has_safe_links(&named)?
                 {
                     return Err(storage_err("UUID retained run identity changed"));
                 }
@@ -12234,6 +12248,127 @@ pub(crate) mod tests {
             index.lookup_node_surrogates(&[first, second]).unwrap().0,
             [Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn readonly_shared_runs_preserve_uuid_snapshot_authentication() {
+        for scenario in [
+            "valid",
+            "writable",
+            "made_writable",
+            "tampered",
+            "replaced",
+            "manifest_link",
+        ] {
+            let source = tempfile::tempdir().unwrap();
+            let aliases = tempfile::tempdir().unwrap();
+            let nodes = [(Uuid::from_u128(1), 1), (Uuid::from_u128(2), u64::MAX - 1)];
+            crate::generation::force_bump_topology_generation_for_test(source.path()).unwrap();
+            append_uuid_membership_delta(source.path(), 1, &nodes, &[]).unwrap();
+            let root = source.path().join(INDEX_DIR);
+            let mut snapshot =
+                AuthenticatedUuidIndexSnapshot::open_at_generation(source.path(), 1).unwrap();
+            let records = snapshot
+                .manifest
+                .runs
+                .iter()
+                .flat_map(|run| [run.identities.clone(), run.node_surrogates.clone()])
+                .collect::<Vec<_>>();
+            let record = records
+                .iter()
+                .find(|record| record.name.starts_with("identities-v5") && record.count > 0)
+                .unwrap();
+            let original_permissions = fs::metadata(root.join(&record.name)).unwrap().permissions();
+            for record in &records {
+                let path = root.join(&record.name);
+                fs::hard_link(&path, aliases.path().join(&record.name)).unwrap();
+                if scenario != "writable" {
+                    let mut permissions = fs::metadata(&path).unwrap().permissions();
+                    permissions.set_readonly(true);
+                    fs::set_permissions(&path, permissions).unwrap();
+                }
+            }
+            match scenario {
+                "valid" => {
+                    snapshot.revalidate().unwrap();
+                    snapshot.open_retained_file(record).unwrap();
+                    let (values, _) = snapshot
+                        .lookup_node_surrogates(&[nodes[0].0, nodes[1].0])
+                        .unwrap();
+                    assert_eq!(values, [Some(1), Some(u64::MAX - 1)]);
+                }
+                "writable" => {
+                    assert!(snapshot.revalidate().is_err());
+                    assert!(snapshot.open_retained_file(record).is_err());
+                }
+                "made_writable" => {
+                    snapshot.revalidate().unwrap();
+                    fs::set_permissions(
+                        aliases.path().join(&record.name),
+                        original_permissions.clone(),
+                    )
+                    .unwrap();
+                    assert!(snapshot.revalidate().is_err());
+                    assert!(snapshot.open_retained_file(record).is_err());
+                }
+                "tampered" => {
+                    let alias = aliases.path().join(&record.name);
+                    fs::set_permissions(&alias, original_permissions.clone()).unwrap();
+                    let mut writer = fs::OpenOptions::new().write(true).open(&alias).unwrap();
+                    writer.write_all(&[0xff]).unwrap();
+                    writer.sync_all().unwrap();
+                    drop(writer);
+                    let mut permissions = original_permissions.clone();
+                    permissions.set_readonly(true);
+                    fs::set_permissions(&alias, permissions).unwrap();
+                    // Metadata and inode still match. The retained read must
+                    // authenticate bytes, not trust readonly status alone.
+                    snapshot.revalidate().unwrap();
+                    let error = snapshot.lookup_node_surrogates(&[nodes[0].0]).unwrap_err();
+                    assert!(
+                        error.to_string().contains("block authentication"),
+                        "{error}"
+                    );
+                    assert!(
+                        AuthenticatedUuidIndexSnapshot::open_at_generation(source.path(), 1)
+                            .is_err()
+                    );
+                }
+                "replaced" => {
+                    let path = root.join(&record.name);
+                    let bytes = fs::read(&path).unwrap();
+                    let replacement = fs::rename(&path, root.join("held-original"));
+                    #[cfg(windows)]
+                    {
+                        // Stable retained handles intentionally omit
+                        // FILE_SHARE_DELETE: Windows prevents replacement.
+                        assert!(replacement.is_err());
+                        assert_eq!(fs::read(&path).unwrap(), bytes);
+                        snapshot.revalidate().unwrap();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        replacement.unwrap();
+                        fs::write(&path, bytes).unwrap();
+                        assert!(snapshot.revalidate().is_err());
+                    }
+                }
+                "manifest_link" => {
+                    fs::hard_link(root.join(MANIFEST), aliases.path().join(MANIFEST)).unwrap();
+                    assert!(snapshot.revalidate().is_err());
+                }
+                _ => unreachable!(),
+            }
+            // Restore this test's owned aliases so Windows cleanup can remove
+            // readonly files; production never mutates shared run permissions.
+            for record in &records {
+                fs::set_permissions(
+                    aliases.path().join(&record.name),
+                    original_permissions.clone(),
+                )
+                .unwrap();
+            }
+        }
     }
 
     #[test]
