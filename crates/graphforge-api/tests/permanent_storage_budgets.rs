@@ -4238,6 +4238,50 @@ fn composite_constructed_edge_properties_preserve_authenticated_owner() {
         }
         drop(graph);
         round_trip(root.path(), &source, fixture, &nodes, &edges);
+        let imported_path = root.path().join("imported");
+        let imported = GraphForge::new(imported_path.to_str()).unwrap();
+        let request = graphforge_api::CompositeTransactionRequest {
+            contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: graphforge_api::WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![
+                graphforge_api::CompositeGraphMutation::SetEdgeProperty {
+                    edge_uuid: edges[0].0,
+                    property: "weight".into(),
+                    value: graphforge_api::PropValue::Int(31),
+                },
+                graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
+                    edge_uuid: edges[130].0,
+                    property: "weight".into(),
+                },
+            ],
+            knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+        };
+        imported
+            .publish_composite_transaction(request.clone())
+            .unwrap();
+        let published = graphforge_storage::resolve_project_generation(&imported_path)
+            .unwrap()
+            .generation_uuid();
+        imported.publish_composite_transaction(request).unwrap();
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&imported_path)
+                .unwrap()
+                .generation_uuid(),
+            published
+        );
+        edges[0].4 = Some(31);
+        edges[130].4 = None;
+        verify_graph(&imported, fixture, &nodes, &edges);
+        drop(imported);
+        verify_graph(
+            &GraphForge::new(imported_path.to_str()).unwrap(),
+            fixture,
+            &nodes,
+            &edges,
+        );
     }
 }
 
