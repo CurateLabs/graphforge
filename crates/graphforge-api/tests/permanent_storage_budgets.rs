@@ -1451,20 +1451,29 @@ fn workspace_publication_preserves_constructed_cas_payloads() {
 
 #[test]
 fn composite_qualified_property_publishing_preserves_values() {
-    exercise_qualified_property_publication(true, 33);
+    exercise_qualified_property_publication(true, 33, false);
 }
 
 #[test]
 fn composite_qualified_undeclared_property_is_rejected_before_publication() {
-    exercise_qualified_property_publication(false, 33);
+    exercise_qualified_property_publication(false, 33, false);
 }
 
 #[test]
 fn composite_qualified_property_large_base_reuses_topology() {
-    exercise_qualified_property_publication(true, 4097);
+    exercise_qualified_property_publication(true, 4097, false);
 }
 
-fn exercise_qualified_property_publication(declared_property: bool, node_count: usize) {
+#[test]
+fn composite_qualified_mixed_graph_canonical_properties_preserve_values() {
+    exercise_qualified_property_publication(true, 33, true);
+}
+
+fn exercise_qualified_property_publication(
+    declared_property: bool,
+    node_count: usize,
+    mixed: bool,
+) {
     use graphforge_api::{
         COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
         CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
@@ -1477,8 +1486,8 @@ fn exercise_qualified_property_publication(declared_property: bool, node_count: 
     let source = root.path().join("source");
     let fixture = Fixture {
         name: "mixed_semantic_routes",
-        nodes: 0,
-        edges: 0,
+        nodes: if mixed { 33 } else { 0 },
+        edges: if mixed { 129 } else { 0 },
         routes: 1,
         identifiers: Identifiers::Random,
         properties: false,
@@ -1487,17 +1496,24 @@ fn exercise_qualified_property_publication(declared_property: bool, node_count: 
     };
     let (mut nodes, mut edges) = rows(fixture);
     drop(GraphForge::new(source.to_str()).unwrap());
+    if mixed {
+        construct(&source, fixture, &nodes, &edges);
+    }
     configure_composite_ontology(root.path(), &source, declared_property);
     let child_nodes = (0..node_count)
         .map(|row| (id(3, row, true), "NewNode".to_owned(), None))
         .collect::<Vec<_>>();
     let changed_node = child_nodes[0].0;
-    for (row, edge) in edges[..].iter_mut().enumerate() {
+    let parent_edges = edges.len();
+    let mut child_edges = edges.clone();
+    for (row, edge) in child_edges.iter_mut().enumerate() {
+        edge.0 = id(4, row, true);
         edge.3 = "NEW_TYPED".into();
         edge.1 = child_nodes[row % child_nodes.len()].0;
         edge.2 = child_nodes[(row + 1) % child_nodes.len()].0;
     }
-    construct(&source, fixture, &child_nodes, &edges[..]);
+    construct(&source, fixture, &child_nodes, &child_edges);
+    edges.extend(child_edges);
     nodes.extend(child_nodes.into_iter().map(|mut node| {
         node.1 = "mixed:entity:NewNode".into();
         node
@@ -1515,10 +1531,18 @@ fn exercise_qualified_property_publication(declared_property: bool, node_count: 
         })
         .unwrap();
     assert_eq!(relation.symbol.display(), "mixed:relation:NEW_TYPED");
-    for edge in &mut edges[..] {
+    for edge in &mut edges[parent_edges..] {
         edge.3.clone_from(&relation.route);
     }
-    let graph = GraphForge::new(source.to_str()).unwrap();
+    let options = graphforge_api::GraphForgeOptions {
+        write_mode: if mixed {
+            graphforge_api::ProjectWriteMode::OptimisticMultiWriter
+        } else {
+            graphforge_api::ProjectWriteMode::SingleWriter
+        },
+        ..Default::default()
+    };
+    let graph = GraphForge::new_with_options(source.to_str(), options).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let base = current.graph_files_inventory().unwrap().unwrap();
     assert!(current.declared_graph_files_inventory().unwrap().is_none());
@@ -1627,24 +1651,38 @@ fn exercise_qualified_property_publication(declared_property: bool, node_count: 
         )
         .unwrap()
         .len(),
-        1
+        usize::from(!mixed)
     );
     let latest = graph.execute(snapshot_query).unwrap();
     assert_eq!(int_at(&latest.batches[0], 1, 0), Some(124));
-    graph
-        .compact_graph_delta(
-            &GraphDeltaCompactionRequest {
-                transaction_uuid: Uuid::now_v7(),
-                generation_uuid: Uuid::now_v7(),
-                through_run_sequence: None,
-                limits: GraphDeltaCompactionLimits::default(),
-                cleanup_after_commit: false,
-                cleanup_policy: ProjectRetentionPolicy::default(),
-                cleanup_limits: ProjectRetentionLimits::default(),
-            },
-            None,
-        )
-        .unwrap();
+    let compaction = graph.compact_graph_delta(
+        &GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: GraphDeltaCompactionLimits::default(),
+            cleanup_after_commit: false,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        },
+        None,
+    );
+    if mixed {
+        assert!(
+            compaction
+                .unwrap_err()
+                .to_string()
+                .contains("requires at least one verified run")
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid(),
+            delta.generation_uuid()
+        );
+    } else {
+        compaction.unwrap();
+    }
     use futures::TryStreamExt as _;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1678,7 +1716,18 @@ fn exercise_qualified_property_publication(declared_property: bool, node_count: 
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
     for path in [&source, &root.path().join("imported")] {
-        let reopened = GraphForge::new(path.to_str()).unwrap();
+        let reopened = GraphForge::new_with_options(
+            path.to_str(),
+            graphforge_api::GraphForgeOptions {
+                write_mode: if mixed {
+                    graphforge_api::ProjectWriteMode::OptimisticMultiWriter
+                } else {
+                    graphforge_api::ProjectWriteMode::SingleWriter
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
             reopened
                 .execute(score_query)
