@@ -675,3 +675,81 @@ valid complete-runtime baseline comparison or performance improvement is
 claimed. Compression, dictionary, row-group and streaming policies remain
 unchanged. Same-name promotion (#1229), post-compaction facade refresh (#1231)
 and the canonical publishing-contract close gate (#1221) remain separate.
+
+## Facade authority after compaction (#1231)
+
+A successful storage compaction previously left the calling facade's private
+workspace and generation UUID at the old parent. Its next SET failed, and
+updating only the UUID would risk republishing the pre-compaction graph.
+Compaction now prepares a fresh private workspace and all authenticated reader
+state before installing the selected generation, runtime catalog and semantic
+bindings. Rust compaction takes `&mut self`; Python, Node and CLI remain thin
+callers. Independent publishers still require reopening a stale facade.
+
+The existing lifecycle admission and writer guards remain authoritative. The
+storage entrypoint checks the facade's expected parent before preparing replay.
+After an error immediately following CURRENT replacement, the authenticated
+manifest's transaction, generation and parent identify the committed operation
+even before its journal reaches Published. Normal transaction recovery then
+completes the receipt, making an immediate same-facade exact retry idempotent.
+Uncommitted errors leave the facade
+unchanged. A changed workspace administration contract is refused rather than
+silently replacing the facade's ontology configuration.
+
+Bare lazy streams retain their original private workspace. The inner reader
+and its identity handles drop before the last workspace owner, including on
+Windows where the identity capabilities deny deletion. Refresh drops old cached
+UUID membership handles before releasing the old workspace. No recovery epoch
+is incremented on a normal rotation, so old streams remain usable.
+
+Public fixtures cover 33 and 4,097 randomly identified nodes, 129 edges, two
+logical routes, 1,024-row construction shards, nullable properties and both CAS
+and adjacency-backed generation-owned publication. A separate mixed
+exploratory/qualified fixture performs same-facade qualified SET and CREATE
+after compaction, preserving route schemas and portable results. They exercise node SET and
+property removal, full compaction, exact retry, same-handle SET/CREATE/DELETE,
+non-reused surrogates, a partially consumed old stream, reopen, exact query,
+export, full verify and clean import. Current-format partial compaction remains
+an explicit refusal; the two-delta fixture verifies refusal followed by full
+compaction. Four subprocess cases distinguish crash recovery from same-handle
+continuation after returned errors before/after CURRENT replacement. Existing
+exploratory edge-property ownership work remains tracked by #1224.
+
+The CAS refresh reuses immutable payloads and copies existing private controls:
+4,093/166,775 bytes for the two sizes, with 38,546/741,133 application read bytes
+and 16 fsyncs. Its deterministic fixture ceilings are 192 KiB writes, 1 MiB
+reads, eight copied files and 16 fsyncs. The adjacency-backed path has actual
+generation-owned payloads and retains the existing streaming private-copy rule:
+59,655/790,203 writes, 59,934/790,482 reads and 74/96 fsyncs. Its separate ceilings
+are 1 MiB writes, 2 MiB reads, 64 copied files and 128 fsyncs. These ownership
+costs are not compression exceptions. Every inspected permanent Parquet column
+remains Zstd after compaction and subsequent mutation.
+
+Both paths cap fixture staged output and later Parquet payload at 1 MiB,
+reported logical compaction state at 4 KiB and reported spill at zero. The state
+report is not total process memory: it does not substitute for reader/native
+codec accounting or observed RSS. Existing bounded hydration and replay buffer
+policies are unchanged. Live snapshots can retain old private controls until
+their consumers release them; filesystem sampling must count overlapping
+owners and deduplicate shared immutable inodes.
+
+Source `269fa1dcb74db73555d0a79975c56b099dd34cb9` and raw observations are in
+[`facade-compaction-authority-1231.json`](../../development/evidence/facade-compaction-authority-1231.json).
+A frozen test executable ran `facade_compaction_ --nocapture --test-threads=1`
+for each separate observation. Untraced elapsed/user/system times were
+63.58/60.11/6.51 seconds and peak RSS was 160,248 KiB. Syscall tracing recorded
+697,969,055 successful read bytes, 126,544,483 successful write bytes and
+19,952 fsync calls; six `read` EAGAIN results remain explicit in the raw census.
+OS filesystem input/output were 140,976/306,752 512-byte blocks. These figures
+include construction, queries, authentication, fault subprocesses and portable
+operations, not only the refresh.
+
+The 4,819-sample scan observed 16,953,344 bytes of unique-inode allocation and
+14,558,966 path-logical bytes, with a maximum 23.1 ms interval and 74 vanished
+file races. Directory allocation, unlinked files and shorter-lived peaks are
+not established by this scan. The baseline fails the first post-compaction
+mutation, so there is no valid complete baseline runtime comparison or claimed
+speed improvement. Earlier diagnostic runs were excluded after adding immediate
+post-error retry coverage and fixing the measurement harness to retain a stable
+executable for its child processes. Required CI additionally runs the native
+Windows/macOS lifetime regression; #1221 retains the wider publication close gate.
