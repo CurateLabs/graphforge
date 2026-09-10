@@ -793,10 +793,10 @@ authenticated open and never falls back to v3 when malformed or substituted.
 
 New mapped publications use a compact version-4 `graph/files` root, retaining
 the version-2 radix representation with explicit mapped-route authority. Payloads and
-fixed-depth radix nodes live once in the project content-addressed object
+compressed node-v3 radix nodes live once in the project content-addressed object
 store; a generation stores only its root reference and logical totals. Updates
-copy at most one bounded SHA-256 nibble path and retain exact-path collision
-leaves, so publication never scans or recopies prior file metadata. The private
+copy a bounded SHA-256 nibble path and split or collapse bounded buckets,
+so publication never scans or recopies the entire prior file inventory. The private
 workspace commit boundary records revision-identified sealed and tombstone
 descriptors before mutations become visible; they are acknowledged only after
 CURRENT advances. Reopen traverses the authenticated radix and hashes every
@@ -1102,3 +1102,36 @@ superseded fixture attempts. No incomparable baseline improvement is claimed.
 This ledger maps ordinary implementation criteria to their existing tests. It
 adds no release-certification requirement and does not claim final capacity
 completion; integrated S20/S22 evidence remains under #1194.
+
+### Bounded manifest allocation evidence (#1204)
+
+The fixed heterogeneous #1196 workload (4,097 nodes, 65,537 edges, four routes)
+now publishes 352 exact manifest entries as 209 production objects occupying
+856,064 native allocated bytes. The immediately preceding current-format
+baseline used 483 objects and 1,978,368 bytes for the same entries: a
+1,122,304-byte (56.7%) reduction. Attributed permanent allocation falls from
+9,814,016 to 8,691,712 bytes. The historical #1196 baseline remains separately
+recorded at 544 entries / 750 objects / 3,072,000 bytes; its additional 192 edge
+payload references were removed by earlier work, not by bucket encoding.
+The deterministic acceptance ceiling is 1,536,000 manifest bytes on native
+4-KiB allocation storage.
+
+Frozen executable source `36360cb8` preserves the exact semantic fingerprint
+through real public construction, reopen/query, export, full verification and
+clean import. The publishing suite additionally exercises immediate mutation,
+retained streams, subsequent imported mutation, recovery, cancellation and
+retry. Maximum-field and corruption tests, exact eight-to-nine split/collapse
+and retained-root checks, and the 128/256/512-entry update ladder cover the
+manifest boundary directly.
+
+The source-bound resource record is
+[`bounded-manifest-1204.json`](../../development/evidence/bounded-manifest-1204.json).
+Its full-fixture CPU observations include the existing codec experiments and
+portable lifecycle; they are not a query-speed benchmark. Application syscall
+reads are 1,303,689,747 baseline versus 1,301,114,860 candidate bytes; writes are
+267,812,449 versus 267,870,503 bytes. Thus the physical allocation saving does
+not imply reduced write traffic in this workload. Process RSS, OS block I/O,
+and separately sampled overlapping filesystem owners are reported with their
+measurement limits. The candidate point-in-time whole-project census includes
+21,979,136 allocated file bytes plus 1,257,472 directory bytes; no equivalent
+baseline census or whole-project reduction is claimed.
