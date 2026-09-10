@@ -73,6 +73,11 @@ bytes; the separate attribution report remains the authority for permanent alloc
 
 ## Candidate decisions
 
+The maintainer explicitly waived backward compatibility on 2026-09-10 because
+GraphForge is pre-v1. The selected repairs do not require legacy codecs or
+migration machinery. Current-format authentication, active snapshots, exact
+semantics, recovery and bounded resource use remain required.
+
 Experiments rewrite identical Arrow batches and assert exact decoded equality.
 They do not publish a candidate production format. Normalized uncompressed
 Parquet matches measured source bytes in these fixtures, but codec comparisons
@@ -82,9 +87,9 @@ single-run exploratory observations, not performance acceptance thresholds.
 | Candidate | Quantified evidence and bounded follow-up | Tradeoffs and compatibility |
 | --- | --- | --- |
 | Parquet Zstd level 1 (#1202) | Random fixtures save 23–25% of Parquet bytes; sequential fixture saves 81.5%. Production follow-up must reproduce these fixture reductions and exact public round trips. | Lower storage/read I/O; additional encode/decode CPU. Keep bounded row groups, existing checksums and reader codec support. Level 3 is slightly worse for random fixtures. |
-| Remove membership reserved padding (#1203) | 69,634 actual records: 2,228,288→1,740,850 bytes, saving exactly 487,438 raw bytes; 73,730 records save 516,110. | This is a 25-byte candidate, not a narrower identifier. Requires versioned readers/writers and mixed legacy/new runs, full u64/kind/tombstone boundaries, recovery and bounded binary search. Physical savings depend on file rounding and migration overlap. |
-| Bounded manifest buckets (#1204) | Heterogeneous fixture: 750 node objects / 3,072,000 allocated bytes versus 238 candidate objects / estimated 974,848 bytes at 4 KiB. All 544 file entries resolve with SHA-authenticated lookup. | Fewer small-file reads/allocations; a lookup decodes up to eight entries. Production must bound serialized bytes as well as entry count, preserve legacy nodes, split/update/delete correctly, reject corruption and preserve active snapshots. Estimate excludes root metadata, history and migration overlap. |
-| CSR IPC compression (#1205) | 18 shards: 4,920,564 bytes uncompressed, 2,320,564 LZ4, 1,324,020 Zstd. Estimated allocated bytes: 4,972,544→1,363,968 with Zstd. Largest decoded batch arrays: 3,322,008 bytes (not process RSS). Exact schemas and values match. | Cold lookup gains lower read I/O but incurs decompression CPU and temporary buffers; warm decoded cache behavior remains similar. Preserve full u64 fields and shard boundaries; budget decode memory and support legacy IPC before changing writes. |
+| Remove membership reserved padding (#1203) | 69,634 actual records: 2,228,288→1,740,850 bytes, saving exactly 487,438 raw bytes; 73,730 records save 516,110. | This is a 25-byte candidate, not a narrower identifier. Requires consistent current-format readers/writers, full u64/kind/tombstone boundaries, recovery and bounded binary search. Physical savings depend on file rounding. |
+| Bounded manifest buckets (#1204) | Heterogeneous fixture: 750 node objects / 3,072,000 allocated bytes versus 238 candidate objects / estimated 974,848 bytes at 4 KiB. All 544 file entries resolve with SHA-authenticated lookup. | Fewer small-file reads/allocations; a lookup decodes up to eight entries. Production must bound serialized bytes as well as entry count, split/update/delete correctly, reject corruption and preserve active snapshots. Estimate excludes root metadata and history. |
+| CSR IPC compression (#1205) | 18 shards: 4,920,564 bytes uncompressed, 2,320,564 LZ4, 1,324,020 Zstd. Estimated allocated bytes: 4,972,544→1,363,968 with Zstd. Largest decoded batch arrays: 3,322,008 bytes (not process RSS). Exact schemas and values match. | Cold lookup gains lower read I/O but incurs decompression CPU and temporary buffers; warm decoded cache behavior remains similar. Preserve full u64 fields and shard boundaries; budget decode memory before changing writes. |
 | Delete repeated identity or directional indexes | No change: distinct access and recovery contracts remain in use. | No evidence that removal preserves bounded membership, reverse hydration or relation/union traversal. |
 
 ## Regression ceilings
