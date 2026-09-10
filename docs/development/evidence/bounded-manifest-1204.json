@@ -361,7 +361,8 @@
     "Historical #1196 and current baseline inventories differ due to prior merged payload fragmentation changes; the direct #1204 storage comparison uses identical current 352-entry inventories."
   ],
   "post_measurement_changes": [
-    "Clippy-driven checked usize-to-u8 conversion for split depth, after the existing split_depth < 64 refusal; and a checked test-fixture ordinal conversion. No admitted-format or measured-workload behavior changes. Measurements remain attributed to the frozen source, not relabeled as final-head runs."
+    "Clippy-driven checked usize-to-u8 conversion for split depth, after the existing split_depth < 64 refusal; and a checked test-fixture ordinal conversion. No admitted-format or measured-workload behavior changes. Measurements remain attributed to the frozen source, not relabeled as final-head runs.",
+    "The scale-accounting negative fixture now exceeds the 81-node per-path bound already present in the measured source, rather than the superseded 67-node bound. Its overcount rejection remains required."
   ],
   "build_profile": "Cargo test profile: unoptimized + debuginfo (both frozen executables)",
   "candidate_build_command": "TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 CARGO_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195 CARGO_BUILD_JOBS=4 cargo test -p graphforge-api --test permanent_storage_budgets --no-run",

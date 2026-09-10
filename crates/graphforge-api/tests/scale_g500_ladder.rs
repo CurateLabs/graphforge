@@ -6778,7 +6778,10 @@ fn cas_control_proof_accepts_path_variation_and_rejects_coherent_overcounts() {
             .contains("mandatory bootstrap")
     );
     let mut excessive = observations[0].clone();
-    let installed = 67 * excessive.canonical_artifact_objects + 2;
+    // Exceed the current 64-nibble path + 17-node local bucket split bound,
+    // including the one empty-root installation. Keep the negative case
+    // coherent with its I/O totals so it fails the structural ceiling itself.
+    let installed = 81 * excessive.canonical_artifact_objects + 2;
     let manifest = &mut excessive.cas_publication_io.manifest;
     manifest.installed_objects = installed;
     manifest.install_attempts = installed;
