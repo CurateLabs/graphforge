@@ -1240,6 +1240,46 @@ pub fn append_graph_files_v2(
     )
 }
 
+/// Prepare an authenticated canonical candidate while preserving its parent ownership.
+/// CAS parents reuse unchanged objects; generation-owned parents retain their
+/// existing graph-tree publication path. Keep the returned lease through CURRENT.
+///
+/// # Errors
+/// Rejects invalid inventories, route authority, or object publication failures.
+pub fn prepare_graph_files_replacement(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+    inventory: &GraphFilesInventory,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        Option<crate::GraphObjectPublicationLease>,
+    ),
+    GfError,
+> {
+    let mut files_participant = crate::graph_files::inventory_participant(
+        crate::graph_files::encode_inventory(inventory)?,
+        inventory.file_count,
+    )?;
+    let publication_lease = match parent.declared_graph_files_participant()? {
+        Some(crate::GraphFilesParticipant::V2(root)) => {
+            let lease = crate::begin_graph_object_publication(parent.container_root())?;
+            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
+                &lease,
+                root,
+                crate::GraphManifestLimits::default(),
+            )?;
+            let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
+                &lease, workspace, &mut state, inventory,
+            )?;
+            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
+            Some(lease)
+        }
+        _ => None,
+    };
+    Ok((files_participant, publication_lease))
+}
+
 /// Publish a private replay candidate using its authenticated route contract.
 pub(crate) fn replace_replayed_graph_files(
     lease: &GraphObjectPublicationLease,

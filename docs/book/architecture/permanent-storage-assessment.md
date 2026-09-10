@@ -252,3 +252,65 @@ workspace publication, and clearing authority for retained typed data can
 leave semantic bindings without their composition. Both are recorded under
 #1221 with public reproducers. This ownership-only repair does not claim those
 complete graph-contract failures are resolved.
+
+## Composite property ownership (#1224)
+
+Composite property operations now resolve physical owners during the existing
+validation scan. Nodes use their immutable primary identity, as ordinary Cypher
+mutation does; runtime nodes use `_untyped`, and qualified nodes use the retained
+semantic binding. Edges use the authenticated physical relation route (including
+logical relation names in exploratory storage). Same-request creates resolve the
+same qualified identities. Both canonical staging and GFDR encoding consume this
+operation plan, including optimistic conflict baselines. Qualified properties
+must resolve against their declared owner before publication; a missing or wrong
+owner never silently selects `_untyped`.
+
+A first write to an absent qualified property route uses canonical staging:
+GFDR carries values but cannot establish the route's semantic schema authority.
+The property inventory seeds that authority from authenticated property bindings,
+without decorating an existing malformed fragment. Canonical CAS replacement
+reuses the existing compaction object-difference helper and holds its publication
+lease through CURRENT. Later supported property updates use GFDR. Hydrated
+property and semantic validation share the authenticated materialized inventory;
+replay advances property/search counters so subsequent ordinary mutations cannot
+reuse a fragment generation. Optimistic CAS publication authenticates the final
+installed directory after promotion, before CURRENT.
+
+Five public fixtures at source `df3a707d` cover declared-property refusal,
+qualified create-then-set for nodes and edges, edge removal through portable
+import, qualified node GFDR/compaction at 33 and 4,097 nodes, and a mixed graph
+with 33 exploratory plus 33 qualified nodes and 129 edges of each kind through
+canonical optimistic publication. Exact values, active snapshots, reopen,
+export, full verification, clean import and later removals are checked. The
+mixed canonical fixture has no GFDR run and explicitly checks compaction refusal
+without changing CURRENT; actual mixed-edge GFDR compaction remains #1218's
+integration test. These are distinct proofs, not interchangeable substitutes.
+
+The first property write changes 4,393 Parquet bytes on both node-only sizes,
+and 4,494 bytes on the mixed graph. Each fixture enforces a 64 KiB changed-Parquet
+budget and exact reuse of unchanged topology payload inventory entries. No
+encoding defaults change in this repair. The owner maps retain only requested
+identities and same-request creates, and use existing binding/catalog authority.
+The existing validation snapshot still reads complete topology batches and
+retains full identity sets; this repair adds no second topology scan, but the
+whole transaction is **not** request-sized. Hydration, canonical staging,
+manifest capture, portable verification and import also retain their existing
+I/O and temporary-workspace costs. The changed-Parquet ceiling is not a bound on
+those costs, native codec memory, peak RSS or total temporary disk. Their
+cross-path admission and encoding-policy budgets remain #1213.
+
+The five prebuilt fixtures take 12.51 s elapsed (8.70 s user, 2.62 s system),
+with peak RSS 139,224 KiB and kernel input/output of 126,224/53,288 blocks of
+512 bytes on the admitted native ext4 host. These are source-bound observations,
+not portable resource ceilings; the separate syscall trace includes startup,
+query, verification, import and test output. Raw evidence and commands are in
+[`composite-property-ownership-1224.json`](../../development/evidence/composite-property-ownership-1224.json).
+
+Validation includes 734 API unit tests, 45 publication tests, the unequal-route
+property generation regression, production workspace Clippy and fast pre-push.
+The storage-wide run passed 1,074 tests with two existing ignored tests; its one
+failure is an unchanged test hard-coding `/tmp`, which is tmpfs on this host and
+fails filesystem admission before its hostile-file assertions. Required Bazel
+PR CI remains the merge authority. Composite topology creation on an already
+constructed CAS parent still exposes the UUID authority defect tracked in
+#1221; no authentication check was relaxed to admit that operation.

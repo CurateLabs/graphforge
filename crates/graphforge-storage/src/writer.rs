@@ -325,7 +325,17 @@ pub(crate) fn write_replay_overlay_streaming(
         true,
         &mut target_routes,
     )?;
-    replace_private_replay_route_table(target, &target_routes)
+    let node_properties_changed =
+        !overlay.node_properties.is_empty() || overlay.nodes.values().any(Option::is_none);
+    let properties_changed = node_properties_changed
+        || !overlay.edge_properties.is_empty()
+        || overlay.edges.values().any(Option::is_none);
+    replace_private_replay_route_table(
+        target,
+        &target_routes,
+        properties_changed,
+        node_properties_changed,
+    )
 }
 
 fn stream_replay_nodes(
@@ -1369,6 +1379,8 @@ fn stream_replay_property_route_with_table(
 fn replace_private_replay_route_table(
     target: &Path,
     table: &crate::route_component::RouteTable,
+    properties_changed: bool,
+    node_properties_changed: bool,
 ) -> Result<(), GfError> {
     let mut batch = RewriteBatch::new();
     batch.stage_named_control_bytes(
@@ -1376,7 +1388,17 @@ fn replace_private_replay_route_table(
         &table.encode(64 * 1024 * 1024)?,
         "semantic-routes.json.",
     )?;
-    crate::durable_rewrite::commit(batch, target, false, false, false, None)?;
+    // Replayed fragments advance their route generation. Publish the matching
+    // property high-water mark and invalidate node-property search state, so
+    // the next ordinary mutation cannot reuse an existing fragment generation.
+    crate::durable_rewrite::commit(
+        batch,
+        target,
+        false,
+        node_properties_changed,
+        properties_changed,
+        None,
+    )?;
     crate::capture_graph_files(target)?;
     Ok(())
 }
@@ -1395,7 +1417,7 @@ fn stream_replay_property_route(
     stream_replay_property_route_with_table(
         target, inventory, overlay, limits, edge, route, &mut table,
     )?;
-    replace_private_replay_route_table(target, &table)
+    replace_private_replay_route_table(target, &table, true, !edge)
 }
 
 type ReplayPropertyOperations =
@@ -6242,6 +6264,89 @@ mod tests {
     fn test_inventory(dir: &Path) -> crate::AuthenticatedPropertyInventory {
         let (files, _) = crate::capture_graph_files(dir).unwrap();
         crate::AuthenticatedPropertyInventory::from_inventory_at_root(dir, files, None).unwrap()
+    }
+
+    #[test]
+    fn replay_advances_property_authority_across_unequal_route_generations() {
+        let dir = TempDir::new().unwrap();
+        let a = new_v7();
+        let b = new_v7();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        for (uuid, route) in [(a, "Person"), (b, "Company")] {
+            writer
+                .create_node(uuid, EntityTypeId::decode(1).unwrap())
+                .unwrap();
+            writer
+                .set_properties(
+                    &uuid,
+                    Some(route),
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        for value in [2, 3] {
+            set_node_properties(
+                dir.path(),
+                "Person",
+                &HashMap::from([(
+                    to_bytes(&a),
+                    HashMap::from([("score".into(), IrLiteral::Int(value))]),
+                )]),
+            )
+            .unwrap();
+        }
+        let property_before = crate::generation::read_property_generation(dir.path()).unwrap();
+        let search_before = crate::generation::read_search_generation(dir.path()).unwrap();
+        let mut overlay = crate::graph_delta_journal::ReplayOverlay::default();
+        for (uuid, route, value) in [(a, "Person", 4), (b, "Company", 5)] {
+            overlay.node_properties.insert(
+                (uuid.to_string(), route.into(), "score".into()),
+                Some(IrLiteral::Int(value)),
+            );
+        }
+        let (inventory, _) = crate::capture_graph_files(dir.path()).unwrap();
+        let target = TempDir::new().unwrap();
+        for file in &inventory.files {
+            let destination = target.path().join(&file.relative_path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::copy(dir.path().join(&file.relative_path), destination).unwrap();
+        }
+        write_replay_overlay_streaming(
+            dir.path(),
+            &inventory,
+            target.path(),
+            &overlay,
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::generation::read_property_generation(target.path()).unwrap(),
+            property_before + 1
+        );
+        assert_eq!(
+            crate::generation::read_search_generation(target.path()).unwrap(),
+            search_before + 1
+        );
+        for (uuid, route, value) in [(a, "Person", 4), (b, "Company", 5)] {
+            assert_eq!(
+                read_node_props(target.path(), route)[&to_bytes(&uuid)]["score"],
+                IrLiteral::Int(value)
+            );
+            set_node_properties(
+                target.path(),
+                route,
+                &HashMap::from([(
+                    to_bytes(&uuid),
+                    HashMap::from([("score".into(), IrLiteral::Int(value + 10))]),
+                )]),
+            )
+            .unwrap();
+            assert_eq!(
+                read_node_props(target.path(), route)[&to_bytes(&uuid)]["score"],
+                IrLiteral::Int(value + 10)
+            );
+        }
     }
 
     #[test]

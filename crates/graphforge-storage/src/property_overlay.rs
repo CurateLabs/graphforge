@@ -632,6 +632,7 @@ impl AuthenticatedPropertyInventory {
         entries: Vec<crate::GraphFileEntry>,
     ) -> Result<Self, GfError> {
         let mut admitted = Self::from_entries_at_root(root, entries)?;
+        admitted.seed_semantic_property_schemas(generation)?;
         admitted.generation_lease = Some(generation.clone());
         Ok(admitted)
     }
@@ -643,6 +644,7 @@ impl AuthenticatedPropertyInventory {
         inventory: crate::GraphFilesInventory,
     ) -> Result<Self, GfError> {
         let mut admitted = Self::from_inventory_at_root(root, inventory, None)?;
+        admitted.seed_semantic_property_schemas(generation)?;
         admitted.generation_lease = Some(generation.clone());
         Ok(admitted)
     }
@@ -791,6 +793,7 @@ impl AuthenticatedPropertyInventory {
                 Ok::<Self, GfError>(admitted)
             }
         }?;
+        admitted.seed_semantic_property_schemas(generation)?;
         admitted.generation_lease = Some(generation.clone());
         Ok(admitted)
     }
@@ -932,6 +935,39 @@ impl AuthenticatedPropertyInventory {
             #[cfg(test)]
             mutation_barrier: Mutex::new(None),
         })
+    }
+
+    // A declared owner may not have a property payload yet. Its authenticated
+    // binding still owns the metadata of the first fragment we publish.
+    fn seed_semantic_property_schemas(
+        &mut self,
+        generation: &crate::ResolvedProjectGeneration,
+    ) -> Result<(), GfError> {
+        let Some(bindings) = crate::semantic_storage_bindings(generation)? else {
+            return Ok(());
+        };
+        for binding in &bindings.bindings {
+            let kind = match binding.route_kind {
+                crate::SemanticRouteKind::NodeProperty => PropertyRouteKind::Node,
+                crate::SemanticRouteKind::EdgeProperty => PropertyRouteKind::Edge,
+                _ => continue,
+            };
+            self.schemas
+                .entry((kind, binding.route.clone()))
+                .or_insert_with(|| {
+                    let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+                        kind.uuid_field(),
+                        arrow::datatypes::DataType::FixedSizeBinary(16),
+                        false,
+                    )]);
+                    Arc::new(crate::schemas::with_semantic_route_metadata(
+                        &schema,
+                        &binding.route,
+                        &bindings.composition_fingerprint,
+                    ))
+                });
+        }
+        Ok(())
     }
 
     /// Canonical logical schema authenticated across every fragment in a route.

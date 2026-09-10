@@ -1537,11 +1537,14 @@ impl ValidatedProjectGeneration {
         }
         let manifest_sha256 = make_generation_durable(staged)?;
         if let Some(lease) = graph_object_lease {
-            verify_optional_graph_tree_with_lease(
-                &staged.generation_root,
-                &staged.participants,
-                lease,
-            )?;
+            // Durability promotes optimistic attempts before the final CAS
+            // closure check. Authenticate the installed generation, not its
+            // former private attempt path.
+            let durable_root = staged
+                .root
+                .join(GENERATIONS_DIR)
+                .join(staged.generation_uuid.hyphenated().to_string());
+            verify_optional_graph_tree_with_lease(&durable_root, &staged.participants, lease)?;
             lease.revalidate_for_root(staged.parent.container_root())?;
         }
         replace_current(

@@ -807,8 +807,8 @@ impl GraphForge {
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
-        let property_inventory =
-            property_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
+        let (property_inventory, hydrated_inventory) =
+            property_and_graph_inventory_for_hydrated_generation(&resolved_generation, &dir)?;
         let ordinal_identities = ordinal_identity_resolver(&resolved_generation, &dir)?;
 
         let runtime_catalog = load_runtime_catalog(&dir)?;
@@ -834,8 +834,7 @@ impl GraphForge {
                 )
             })?;
             bindings.validate_against(context.composition())?;
-            let inventory = resolved_generation.graph_files_inventory()?;
-            bindings.validate_physical_routes_with_inventory(&dir, inventory.as_ref())?;
+            bindings.validate_physical_routes_with_inventory(&dir, Some(&hydrated_inventory))?;
         }
         let default_composition_context =
             match (default_composition_context, &semantic_storage_bindings) {
@@ -1014,11 +1013,7 @@ impl GraphForge {
         &self,
         generation: &ResolvedProjectGeneration,
     ) -> Result<(), GfError> {
-        let replacement = Arc::new(
-            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                generation,
-            )?,
-        );
+        let replacement = property_inventory_for_hydrated_generation(generation, &self.dir)?;
         let ordinal_replacement = ordinal_identity_handle(generation, &self.dir)?;
         let adjacency_replacement = Arc::new(adjacency_provider_for_graph(
             &self.dir,
@@ -2761,6 +2756,23 @@ fn property_inventory_for_hydrated_generation(
     generation: &ResolvedProjectGeneration,
     hydrated_root: &Path,
 ) -> Result<Arc<graphforge_storage::AuthenticatedPropertyInventory>, GfError> {
+    property_and_graph_inventory_for_hydrated_generation(generation, hydrated_root)
+        .map(|(properties, _)| properties)
+}
+
+// Hydration authenticates the published base and journal before deriving this
+// private inventory. Both property and semantic validation must use that same
+// effective graph, rather than compare replay output with the unchanged base.
+fn property_and_graph_inventory_for_hydrated_generation(
+    generation: &ResolvedProjectGeneration,
+    hydrated_root: &Path,
+) -> Result<
+    (
+        Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+        graphforge_storage::GraphFilesInventory,
+    ),
+    GfError,
+> {
     let inventory = generation.graph_files_inventory()?;
     let has_deltas = match inventory.as_ref() {
         Some(inventory) => !graphforge_storage::list_delta_runs(
@@ -2772,17 +2784,25 @@ fn property_inventory_for_hydrated_generation(
     };
     // Snapshot-only generations have no graph-files inventory; hydration has
     // authenticated their snapshot payload into this private workspace.
-    let admitted = if has_deltas || inventory.is_none() {
-        let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
-        graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
-            generation,
-            hydrated_root,
-            materialized,
-        )?
-    } else {
-        graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(generation)?
+    let (admitted, effective) = match inventory {
+        Some(inventory) if !has_deltas => (
+            graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
+                generation,
+            )?,
+            inventory,
+        ),
+        _ => {
+            let (materialized, _) = graphforge_storage::capture_graph_files(hydrated_root)?;
+            let admitted =
+                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                    generation,
+                    hydrated_root,
+                    materialized.clone(),
+                )?;
+            (admitted, materialized)
+        }
     };
-    Ok(Arc::new(admitted))
+    Ok((Arc::new(admitted), effective))
 }
 
 fn ordinal_identity_handle(
