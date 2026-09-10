@@ -32,6 +32,13 @@ pub(crate) fn hit(
     let Ok(active) = std::env::var(ACTIVE_ENV) else {
         return Ok(());
     };
+    // A subprocess may keep exercising the same facade after an injected
+    // publication error without also faulting its subsequent transactions.
+    if let Ok(target) = std::env::var("GRAPHFORGE_PROJECT_FAILPOINT_TRANSACTION")
+        && transaction_uuid.map(|uuid| uuid.to_string()).as_deref() != Some(target.as_str())
+    {
+        return Ok(());
+    }
     if active == name {
         std::process::exit(EXIT_CODE);
     }

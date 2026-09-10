@@ -8,7 +8,7 @@ use graphforge_storage::{
     GraphDeltaCompactionPolicy, GraphDeltaCompactionReport, GraphDeltaCompactionRequest,
     GraphDeltaCompactionStatus, GraphDeltaJournalLimits, ProjectCleanupReport,
     ProjectReachabilityReport, ProjectRetentionLimits, ProjectRetentionPolicy,
-    compact_graph_delta_with_mode, graph_delta_compaction_status_with_mode,
+    compact_graph_delta_for_parent_with_mode, graph_delta_compaction_status_with_mode,
     inspect_project_reachability_with_mode, preview_graph_delta_compaction_with_mode,
     preview_project_cleanup_with_mode,
 };
@@ -86,19 +86,105 @@ impl GraphForge {
         )
     }
 
-    /// Compact a contiguous verified delta prefix into a new Parquet generation.
+    /// Compact the verified delta chain into a new Parquet generation and
+    /// refresh this facade for subsequent reads and mutations. Existing streams
+    /// retain their original workspace. Current-format compaction requires the
+    /// full chain; a facade made stale by another publisher must be reopened.
     pub fn compact_graph_delta(
-        &self,
+        &mut self,
         request: &GraphDeltaCompactionRequest,
         cancellation: Option<&CancellationToken>,
     ) -> Result<GraphDeltaCompactionReport, GfError> {
-        let root = self.require_mutable_project_root()?;
-        compact_graph_delta_with_mode(
-            root,
+        let root = self.require_mutable_project_root()?.to_path_buf();
+        let visibility = std::sync::Arc::clone(&self.graph_visibility);
+        let _visibility = visibility.acquire(cancellation)?;
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        let parent = self.generation_for_read()?;
+        let expected_parent = *self
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+        if parent.generation_uuid() != expected_parent {
+            return Err(GfError::Project {
+                code: ProjectErrorCode::WriteConflict,
+                message: "project generation changed before facade compaction; reopen the facade"
+                    .into(),
+            });
+        }
+        let result = compact_graph_delta_for_parent_with_mode(
+            &root,
             request,
             cancellation.map(CancellationToken::flag),
             self.lifecycle_mode,
-        )
+            expected_parent,
+        );
+        // Storage stages privately. An unchanged CURRENT needs no restoration.
+        // After publication (including a returned error), refresh from actual
+        // durable authority rather than reinstalling the previous working tree.
+        let refresh = (|| {
+            let current = self.generation_for_read()?;
+            if current.generation_uuid() == expected_parent {
+                return Ok(());
+            }
+            if result.is_err()
+                && !(current.generation_uuid() == request.generation_uuid
+                    && current.transaction_uuid() == request.transaction_uuid
+                    && current.parent_generation_uuid() == Some(expected_parent))
+                && !graphforge_storage::published_project_transaction(
+                    &root,
+                    request.transaction_uuid,
+                )?
+                .is_some_and(|receipt| receipt.generation_uuid == request.generation_uuid)
+            {
+                // A competing writer advanced CURRENT; this failed operation
+                // did not publish and must not change the facade's old view.
+                return Ok(());
+            }
+            // CURRENT authenticates the manifest's transaction and parent even
+            // when the publication journal has not yet reached Published.
+            if crate::composite_publish::administrative_contract(&current)?
+                != crate::composite_publish::administrative_contract(&parent)?
+            {
+                return Err(GfError::Project {
+                    code: ProjectErrorCode::WriteConflict,
+                    message: "workspace authority changed during compaction; reopen the facade"
+                        .into(),
+                });
+            }
+            // Prepare a separate bounded workspace. Existing lazy streams keep
+            // their old paths and immutable identity handles, including on
+            // Windows where retained capabilities deliberately deny deletion.
+            let (dir, workspace, evidence) = crate::hydrate_graph_workspace(&current, false)?;
+            let prepared = self.prepare_generation_read_authority(&current, &dir)?;
+            let catalog = crate::load_runtime_catalog(&dir)?;
+            let bindings = graphforge_storage::semantic_storage_bindings(&current)?;
+            let old_workspace = std::mem::replace(&mut self.workspace_guard, workspace);
+            self.dir = dir;
+            self.graph_open_evidence = evidence;
+            self.install_prepared_generation_read_authority(current.generation_uuid(), prepared);
+            self.resolved_generation = current;
+            *self
+                .runtime_catalog
+                .lock()
+                .expect("runtime catalog poisoned") = catalog;
+            *self
+                .semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned") = bindings;
+            *self
+                .uuid_membership_index
+                .lock()
+                .expect("UUID membership index lock poisoned") = None;
+            drop(old_workspace);
+            Ok(())
+        })();
+        if let Err(error) = refresh {
+            self.graph_visibility.health.fail(&error);
+            return Err(error);
+        }
+        result
     }
 }
 
@@ -116,7 +202,7 @@ mod tests {
     #[test]
     fn facade_exposes_transaction_and_maintenance_ops() {
         let directory = TempDir::new().unwrap();
-        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        let mut graph = GraphForge::new(directory.path().to_str()).unwrap();
         let _ = graph.project_open_recovery();
         graph
             .inspect_project_reachability(
@@ -341,77 +427,37 @@ mod tests {
 
     #[test]
     fn in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode() {
-        use graphforge_storage::{
-            GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest,
-            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-        };
-
-        let graph = GraphForge::new(None).unwrap();
-        let root = graph.resolved_generation.container_root();
-        let workspace = tempfile::tempdir().unwrap();
-        let mut writer = graphforge_storage::GraphWriter::open_at(
-            workspace.path(),
-            graphforge_core::OntologyMode::Strict,
-            1_700_000_000_000_000,
-        )
-        .unwrap();
-        writer.flush().unwrap();
-        let (_, files) = graphforge_storage::capture_graph_files(workspace.path()).unwrap();
-        let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
-        participants.insert(0, files);
-        let base = ProjectGenerationRequest {
-            transaction_uuid: Uuid::now_v7(),
-            generation_uuid: Uuid::now_v7(),
-            capabilities: vec![
-                ProjectCapability {
-                    capability_id: "graph".into(),
-                    capability_version: 1,
-                },
-                ProjectCapability {
-                    capability_id: "workspace".into(),
-                    capability_version: 1,
-                },
-            ],
-            participants,
-        };
-        let ProjectStageOutcome::Staged(staged) =
-            graphforge_storage::stage_project_generation_with_graph_tree_mode(
-                root,
-                &base,
-                Some(workspace.path()),
-                graph.lifecycle_mode,
-            )
-            .unwrap()
-        else {
-            panic!("base publication unexpectedly replayed");
-        };
-        staged
-            .validate(|_| Ok(()), |_, _| Ok(()))
-            .unwrap()
-            .publish()
+        let mut graph = GraphForge::new(None).unwrap();
+        let created = graph
+            .execute("CREATE (n:Person) RETURN n.node_uuid")
             .unwrap();
-        graphforge_storage::publish_graph_delta_with_mode(
-            root,
-            &GraphDeltaPublishRequest {
-                transaction_uuid: Uuid::now_v7(),
-                generation_uuid: Uuid::now_v7(),
-                run_uuid: Uuid::now_v7(),
-                operations: vec![GraphDeltaOp {
-                    operation_uuid: Uuid::now_v7(),
-                    kind: GraphDeltaOpKind::UpsertNode,
-                    payload: GraphDeltaPayload::UpsertNodeV2 {
-                        node_uuid: Uuid::now_v7().hyphenated().to_string(),
-                        node_id: 1,
-                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
-                        created_at_micros: 1,
-                        updated_at_micros: 1,
-                    },
+        let ids = created.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
+        let node = Uuid::from_slice(ids.value(0)).unwrap();
+        graph
+            .publish_composite_transaction(crate::CompositeTransactionRequest {
+                contract_version: crate::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![crate::CompositeGraphMutation::SetNodeProperty {
+                    node_uuid: node,
+                    property: "score".into(),
+                    value: crate::PropValue::Int(7),
                 }],
-                limits: GraphDeltaJournalLimits::default(),
-            },
-            graph.lifecycle_mode,
-        )
-        .unwrap();
+                knowledge: crate::CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        *graph.uuid_membership_index.lock().unwrap() =
+            Some(graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap());
+        let old_dir = graph.dir.clone();
+        let snapshot = graph
+            .execute_stream("MATCH (n) RETURN n.node_uuid, n.score")
+            .unwrap();
         let request = GraphDeltaCompactionRequest {
             transaction_uuid: Uuid::now_v7(),
             generation_uuid: Uuid::now_v7(),
@@ -425,5 +471,10 @@ mod tests {
         let report = graph.compact_graph_delta(&request, None).unwrap();
 
         assert!(report.cleanup.is_some());
+        assert_ne!(graph.dir, old_dir);
+        assert!(graph.uuid_membership_index.lock().unwrap().is_none());
+        assert!(old_dir.exists(), "active stream retains old workspace");
+        drop(snapshot);
+        assert!(!old_dir.exists(), "last stream releases old workspace");
     }
 }

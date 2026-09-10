@@ -1072,7 +1072,7 @@ fn cas_construction_composite_mutation_and_compaction_preserve_values() {
         .filter(|entry| !(entry.capability_id == "graph" && entry.record_family_id == "files"))
         .collect::<Vec<_>>();
 
-    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let request = GraphDeltaCompactionRequest {
         transaction_uuid: Uuid::from_u128(121305),
@@ -1548,7 +1548,7 @@ fn exercise_qualified_property_publication(
         },
         ..Default::default()
     };
-    let graph = GraphForge::new_with_options(source.to_str(), options).unwrap();
+    let mut graph = GraphForge::new_with_options(source.to_str(), options).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let base = current.graph_files_inventory().unwrap().unwrap();
     assert!(current.declared_graph_files_inventory().unwrap().is_none());
@@ -2182,7 +2182,7 @@ fn exploratory_parent_construction_replays_and_compacts_exact_routes() {
         .unwrap();
     drop(graph);
     nodes[0].2 = Some(123);
-    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     graph
         .compact_graph_delta(
@@ -2321,7 +2321,7 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
     for edge in &mut edges[129..] {
         edge.3.clone_from(&relation.route);
     }
-    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let schemas = |source: &Path| {
         let selected = graphforge_storage::resolve_project_generation(source).unwrap();
@@ -2657,7 +2657,7 @@ fn permanent_publishing_policy_construction_mutation_and_compaction() {
         .unwrap();
     drop(graph);
     nodes[0].2 = Some(123);
-    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let before_compaction = graphforge_storage::resolve_project_generation(&source)
         .unwrap()
@@ -3610,6 +3610,405 @@ fn unbound_ontology_clear_recovers_and_retries_without_rewriting_payloads() {
             verify_graph(&graph, fixture, &expected, &edges);
             drop(graph);
             round_trip(root.path(), &source, fixture, &expected, &edges);
+        }
+    }
+}
+
+#[test]
+fn facade_compaction_refreshes_authority_and_preserves_lazy_snapshot() {
+    for nodes in [33, 4097] {
+        exercise_facade_compaction_refresh(nodes, false);
+    }
+}
+
+#[test]
+fn facade_compaction_rejects_partial_chain_then_refreshes_full_chain() {
+    for nodes in [33, 4097] {
+        exercise_facade_compaction_refresh(nodes, true);
+    }
+}
+
+fn exercise_facade_compaction_refresh(node_count: usize, multiple_deltas: bool) {
+    use futures::TryStreamExt as _;
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation as Mutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "facade_compaction_authority",
+        nodes: node_count,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let parent_objects = cas_uuid_parent_objects(&source);
+    let original_ids = cas_uuid_node_surrogates(&source);
+    let mut graph = GraphForge::new_with_options(
+        source.to_str(),
+        graphforge_api::GraphForgeOptions {
+            resource: graphforge_api::ExecutionResourcePolicy {
+                batch_size: Some(7),
+                target_partitions: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    if multiple_deltas {
+        graph.index_adjacency().unwrap();
+    }
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![
+                Mutation::SetNodeProperty {
+                    node_uuid: nodes[0].0,
+                    property: "score".into(),
+                    value: PropValue::Int(9),
+                },
+                Mutation::RemoveNodeProperty {
+                    node_uuid: nodes[1].0,
+                    property: "score".into(),
+                },
+            ],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    nodes[0].2 = Some(9);
+    nodes[1].2 = None;
+    verify_graph(&graph, fixture, &nodes, &edges);
+    if multiple_deltas {
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![Mutation::SetNodeProperty {
+                    node_uuid: nodes[2].0,
+                    property: "score".into(),
+                    value: PropValue::Int(7),
+                }],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        nodes[2].2 = Some(7);
+    }
+    let expected_snapshot = nodes
+        .iter()
+        .map(|row| (row.0, row.2))
+        .collect::<BTreeMap<_, _>>();
+    let mut snapshot = graph
+        .execute_stream("MATCH (n) RETURN n.node_uuid, n.score")
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let first = runtime.block_on(snapshot.try_next()).unwrap().unwrap();
+    assert!(first.num_rows() > 0 && first.num_rows() < node_count);
+    let mut request = GraphDeltaCompactionRequest {
+        transaction_uuid: Uuid::now_v7(),
+        generation_uuid: Uuid::now_v7(),
+        through_run_sequence: multiple_deltas.then_some(1),
+        limits: GraphDeltaCompactionLimits::default(),
+        cleanup_after_commit: false,
+        cleanup_policy: ProjectRetentionPolicy::default(),
+        cleanup_limits: ProjectRetentionLimits::default(),
+    };
+    let parent = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .generation_uuid();
+    let cancelled = graphforge_api::CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        graph
+            .compact_graph_delta(&request, Some(&cancelled))
+            .is_err()
+    );
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        parent
+    );
+    if multiple_deltas {
+        let error = graph.compact_graph_delta(&request, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires the full verified delta chain")
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+        verify_graph(&graph, fixture, &nodes, &edges);
+        request.through_run_sequence = None;
+    }
+    let report = graph.compact_graph_delta(&request, None).unwrap();
+    assert!(report.output_bytes <= 1024 * 1024, "{report:?}");
+    // This report accounts logical compaction state, not total process RSS.
+    assert!(report.peak_memory_bytes <= 4 * 1024, "{report:?}");
+    assert_eq!(report.spill_bytes, 0);
+    let compacted_parquet = publishing_parquet_inventory(&source);
+    let hydration = graph.graph_open_evidence();
+    let owned = compacted_parquet["ownership"] == "generation_graph_tree";
+    if owned {
+        // Generation-owned payloads cannot acquire extra immutable CAS links.
+        // Refresh retains the existing streaming private-copy ownership rule.
+        assert!(
+            hydration.application_read_bytes <= 2 * 1024 * 1024,
+            "{hydration:?}"
+        );
+        assert!(
+            hydration.application_write_bytes <= 1024 * 1024,
+            "{hydration:?}"
+        );
+        assert!(hydration.files_copied <= 64, "{hydration:?}");
+        assert!(hydration.fsync_calls <= 128, "{hydration:?}");
+    } else {
+        assert!(hydration.files_reused > 0);
+        assert!(
+            hydration.application_read_bytes <= 1024 * 1024,
+            "{hydration:?}"
+        );
+        assert!(
+            hydration.application_write_bytes <= 192 * 1024,
+            "{hydration:?}"
+        );
+        assert!(hydration.files_copied <= 8, "{hydration:?}");
+        assert!(hydration.fsync_calls <= 16, "{hydration:?}");
+    }
+    println!(
+        "FACADE_COMPACTION_REFRESH {}",
+        json!({"nodes":node_count,"multiple_deltas":multiple_deltas,"owned":owned,"hydration":format!("{hydration:?}"),"compaction":format!("{report:?}"),"parquet_bytes":compacted_parquet["parquet_bytes"]})
+    );
+    verify_graph(&graph, fixture, &nodes, &edges);
+    assert!(
+        graph
+            .compact_graph_delta(&request, None)
+            .unwrap()
+            .publication
+            .unwrap()
+            .idempotent_replay
+    );
+    graph.execute("MATCH (n:Node0) SET n.score = 11").unwrap();
+    for node in &mut nodes {
+        if node.1 == "Node0" {
+            node.2 = Some(11);
+        }
+    }
+    let created = graph
+        .execute("CREATE (n:Node0 {score: 9000}) RETURN n.node_uuid")
+        .unwrap();
+    let retired_uuid = uuid_at(&created.batches[0], 0, 0);
+    let retired_id = cas_uuid_node_surrogates(&source)[&retired_uuid];
+    graph
+        .execute("MATCH (n:Node0 {score: 9000}) DELETE n")
+        .unwrap();
+    let created = graph
+        .execute("CREATE (n:Node0 {score: 9001}) RETURN n.node_uuid")
+        .unwrap();
+    let created_uuid = uuid_at(&created.batches[0], 0, 0);
+    nodes.push((created_uuid, "Node0".into(), Some(9001)));
+    let current_ids = cas_uuid_node_surrogates(&source);
+    assert!(retired_id > *original_ids.values().max().unwrap());
+    assert!(current_ids[&created_uuid] > retired_id);
+    for (uuid, surrogate) in &original_ids {
+        assert_eq!(current_ids[uuid], *surrogate);
+    }
+    let mut retained = vec![first];
+    retained.extend(runtime.block_on(snapshot.try_collect::<Vec<_>>()).unwrap());
+    let mut actual = BTreeMap::new();
+    for batch in retained {
+        for row in 0..batch.num_rows() {
+            assert!(
+                actual
+                    .insert(uuid_at(&batch, 0, row), int_at(&batch, 1, row))
+                    .is_none()
+            );
+        }
+    }
+    assert_eq!(actual, expected_snapshot);
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let latest_parquet = publishing_parquet_inventory(&source);
+    assert!(latest_parquet["parquet_bytes"].as_u64().unwrap() <= 1024 * 1024);
+    cas_uuid_assert_parent_objects(&source, &parent_objects);
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+}
+
+fn facade_compaction_fault_request() -> graphforge_storage::GraphDeltaCompactionRequest {
+    graphforge_storage::GraphDeltaCompactionRequest {
+        transaction_uuid: Uuid::from_u128(0x1231_001),
+        generation_uuid: Uuid::from_u128(0x1231_002),
+        through_run_sequence: None,
+        limits: graphforge_storage::GraphDeltaCompactionLimits::default(),
+        cleanup_after_commit: false,
+        cleanup_policy: graphforge_storage::ProjectRetentionPolicy::default(),
+        cleanup_limits: graphforge_storage::ProjectRetentionLimits::default(),
+    }
+}
+
+#[test]
+fn facade_compaction_fault_child() {
+    use futures::TryStreamExt as _;
+    let Ok(source) = std::env::var("GF_FACADE_COMPACTION_ROOT") else {
+        return;
+    };
+    let mut graph = GraphForge::new(Some(&source)).unwrap();
+    let query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+    let exact_rows = |batches: Vec<RecordBatch>| {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                (0..batch.num_rows()).map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = exact_rows(graph.execute(query).unwrap().batches);
+    let stream = graph.execute_stream(query).unwrap();
+    let error = graph
+        .compact_graph_delta(&facade_compaction_fault_request(), None)
+        .unwrap_err();
+    assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+    assert_eq!(exact_rows(graph.execute(query).unwrap().batches), before);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        exact_rows(runtime.block_on(stream.try_collect::<Vec<_>>()).unwrap()),
+        before
+    );
+    // This transaction is outside the injected operation's scope. Success
+    // proves the same facade selected the committed compaction, when present.
+    graph.execute("MATCH (n:Node0) SET n.score = 31").unwrap();
+    graph.execute("CREATE (:Node0 {score: 9001})").unwrap();
+}
+
+#[test]
+fn facade_compaction_faults_preserve_authority_and_allow_mutation() {
+    for boundary in [
+        "project.before_current_replace",
+        "project.after_current_replace",
+    ] {
+        for returned_error in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let fixture = Fixture {
+                name: "facade_compaction_recovery",
+                nodes: 33,
+                edges: 129,
+                routes: 2,
+                identifiers: Identifiers::Random,
+                properties: true,
+                adjacency: false,
+                heterogeneous: false,
+            };
+            let (mut nodes, edges) = rows(fixture);
+            construct(&source, fixture, &nodes, &edges);
+            let graph = GraphForge::new(source.to_str()).unwrap();
+            graph
+                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                    context: graphforge_api::WriteContext {
+                        operation_uuid: OperationId(Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    graph_mutations: vec![
+                        graphforge_api::CompositeGraphMutation::SetNodeProperty {
+                            node_uuid: nodes[0].0,
+                            property: "score".into(),
+                            value: graphforge_api::PropValue::Int(9),
+                        },
+                    ],
+                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+                })
+                .unwrap();
+            nodes[0].2 = Some(9);
+            drop(graph);
+            let parent = graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid();
+            let objects = cas_uuid_parent_objects(&source);
+            let hook = format!("{boundary}{}", if returned_error { ".error" } else { "" });
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "facade_compaction_fault_child", "--nocapture"])
+                .env("GF_FACADE_COMPACTION_ROOT", &source)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", &hook)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINT_TRANSACTION",
+                    facade_compaction_fault_request()
+                        .transaction_uuid
+                        .to_string(),
+                )
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if returned_error { 0 } else { 86 }),
+                "{hook}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut graph = GraphForge::new(source.to_str()).unwrap();
+            if returned_error {
+                for node in &mut nodes {
+                    if node.1 == "Node0" {
+                        node.2 = Some(31);
+                    }
+                }
+                let created = graph
+                    .execute("MATCH (n:Node0 {score: 9001}) RETURN n.node_uuid")
+                    .unwrap();
+                nodes.push((
+                    uuid_at(&created.batches[0], 0, 0),
+                    "Node0".into(),
+                    Some(9001),
+                ));
+            } else {
+                assert_eq!(
+                    graphforge_storage::resolve_project_generation(&source)
+                        .unwrap()
+                        .generation_uuid()
+                        != parent,
+                    boundary == "project.after_current_replace"
+                );
+                for _ in 0..2 {
+                    graph
+                        .compact_graph_delta(&facade_compaction_fault_request(), None)
+                        .unwrap();
+                }
+            }
+            verify_graph(&graph, fixture, &nodes, &edges);
+            cas_uuid_assert_parent_objects(&source, &objects);
+            drop(graph);
+            round_trip(root.path(), &source, fixture, &nodes, &edges);
         }
     }
 }

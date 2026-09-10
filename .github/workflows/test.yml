@@ -1025,6 +1025,7 @@ jobs:
           cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
           cargo test -p graphforge-api --lib mapped_portable_tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-api --lib mapped_stream_tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-api --lib maintenance::tests::in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode -- --exact --nocapture || route_status=1
           exit "$route_status"
 
       - name: Cross-check Windows publication-kill results against the fault oracle
@@ -1143,6 +1144,7 @@ jobs:
           cargo test -p graphforge-storage --lib mutator::tests::mapped_reserved_delete_preserves_other_routes_and_reopens -- --exact --nocapture || route_status=1
           cargo test -p graphforge-api --lib mapped_portable_tests:: -- --nocapture || route_status=1
           cargo test -p graphforge-api --lib mapped_stream_tests:: -- --nocapture || route_status=1
+          cargo test -p graphforge-api --lib maintenance::tests::in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode -- --exact --nocapture || route_status=1
           exit "$route_status"
 
       - name: Cross-check macOS publication-kill results against the fault oracle

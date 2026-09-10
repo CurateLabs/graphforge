@@ -158,9 +158,9 @@ pub use graph_delta_compaction::{
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus,
     MAX_COMPACTION_CANCELLATION_CHECK_ROWS, MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES,
     MAX_COMPACTION_MEMORY_BYTES, MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES,
-    compact_graph_delta, compact_graph_delta_with_mode, graph_delta_compaction_status,
-    graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
-    preview_graph_delta_compaction_with_mode,
+    compact_graph_delta, compact_graph_delta_for_parent_with_mode, compact_graph_delta_with_mode,
+    graph_delta_compaction_status, graph_delta_compaction_status_with_mode,
+    preview_graph_delta_compaction, preview_graph_delta_compaction_with_mode,
 };
 
 pub mod project_generation;

@@ -6524,7 +6524,7 @@ impl GraphForge {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (*, transaction_uuid, generation_uuid, through_run_sequence=None, cleanup_after_commit=false, retained_ancestors=None, cancellation=None))]
     fn compact_graph_delta<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         transaction_uuid: &str,
         generation_uuid: &str,
