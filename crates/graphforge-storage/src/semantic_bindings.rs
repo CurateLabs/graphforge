@@ -1770,7 +1770,7 @@ fn rewrite_legacy_route(
     let mut writer = parquet::arrow::ArrowWriter::try_new(
         File::create(new).map_err(|_| corrupt("legacy migration destination cannot open"))?,
         schema,
-        None,
+        Some(crate::permanent_parquet::writer_properties().build()),
     )
     .map_err(|_| corrupt("legacy migration writer cannot be built"))?;
     for batch in builder
@@ -2098,7 +2098,7 @@ pub fn materialize_semantic_migration(
             let mut writer = parquet::arrow::ArrowWriter::try_new(
                 File::create(&target).map_err(|_| corrupt("migration output cannot be opened"))?,
                 schema.clone(),
-                None,
+                Some(crate::permanent_parquet::writer_properties().build()),
             )
             .map_err(|_| corrupt("migration writer cannot be built"))?;
             for batch in builder

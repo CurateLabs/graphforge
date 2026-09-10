@@ -476,7 +476,11 @@ gf_rust_integration_test(
 
 gf_rust_integration_test(
     name = "multi_ontology_certification",
-    srcs = ["tests/multi_ontology_certification.rs"],
+    srcs = [
+        "tests/multi_ontology_certification.rs",
+        "src/permanent_parquet_test_support.rs",
+    ],
+    crate_root = "tests/multi_ontology_certification.rs",
     crate = ":graphforge_api",
     data = _API_TEST_DATA + ["//tests/fixtures/multi-ontology-v1:certification_files"],
     rustc_env = {

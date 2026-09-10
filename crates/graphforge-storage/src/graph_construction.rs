@@ -6330,7 +6330,7 @@ fn build_runtime_catalog(
         root,
         output,
         &catalog.to_record_batch(),
-        Some(crate::graph_construction_encoding::permanent_parquet_properties()?),
+        Some(crate::permanent_parquet::writer_properties().build()),
         evidence,
     )?;
     record_shape_artifact_install(evidence, &receipt)?;

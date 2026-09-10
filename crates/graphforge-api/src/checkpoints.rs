@@ -3053,6 +3053,22 @@ mod tests {
                     actor_uuid: None,
                 })
                 .unwrap_or_else(|error| panic!("{shape}: {error:?}"));
+            crate::permanent_parquet_test_support::assert_participants(
+                directory.path(),
+                graphforge_storage::WORKSPACE_CAPABILITY_ID,
+            );
+            if matches!(shape, "knowledge" | "epistemic") {
+                crate::permanent_parquet_test_support::assert_participants(
+                    directory.path(),
+                    "knowledge",
+                );
+            }
+            if shape == "epistemic" {
+                crate::permanent_parquet_test_support::assert_participants(
+                    directory.path(),
+                    "epistemic",
+                );
+            }
             drop(graph);
 
             let reopened = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();

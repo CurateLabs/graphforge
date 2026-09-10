@@ -601,6 +601,12 @@ pub struct GraphDeltaReplayEvidence {
     pub estimated_replay_memory_bytes: u64,
     /// Hard Arrow row bound used by every streaming materialization reader.
     pub materialization_batch_row_bound: u64,
+    /// Private IPC bytes written and subsequently read once by the admitted
+    /// low-budget node decoder strategy. Zero for direct streaming.
+    pub temporary_decode_stream_bytes: u64,
+    /// Filesystem allocation of that one live private stream, measured before
+    /// consumption. This excludes the copied graph workspace and other files.
+    pub temporary_decode_stream_allocated_bytes: u64,
     /// Canonical reconstructed fingerprint.
     pub state_fingerprint: [u8; 32],
 }
@@ -1286,7 +1292,11 @@ pub fn materialize_replayed_graph_tree(
     if evidence.runs_replayed == 0 {
         return Ok((open_evidence, evidence));
     }
-    crate::writer::write_replay_overlay_streaming(graph_root, inventory, target, &overlay, limits)?;
+    let spool = crate::writer::write_replay_overlay_streaming(
+        graph_root, inventory, target, &overlay, limits,
+    )?;
+    evidence.temporary_decode_stream_bytes = spool.bytes;
+    evidence.temporary_decode_stream_allocated_bytes = spool.allocated_bytes;
     let deltas = target.join(GRAPH_DELTA_DIR);
     if deltas.exists() {
         fs::remove_dir_all(&deltas)

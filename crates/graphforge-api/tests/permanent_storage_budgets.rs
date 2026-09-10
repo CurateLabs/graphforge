@@ -2519,6 +2519,15 @@ fn publishing_parquet_inventory(source: &Path) -> Value {
             .unwrap()
             .allocated_bytes;
         let reader = ParquetRecordBatchReaderBuilder::try_new(input).unwrap();
+        for group in reader.metadata().row_groups() {
+            for column in group.columns() {
+                assert!(
+                    matches!(column.compression(), parquet::basic::Compression::ZSTD(_)),
+                    "permanent payload lost shared compression: {}",
+                    entry.relative_path
+                );
+            }
+        }
         let groups = reader.metadata().row_groups().iter().map(|group| {
             json!({"rows":group.num_rows(),"columns":group.columns().iter().map(|column| {
                 json!({"path":column.column_path().string(),"codec":format!("{:?}", column.compression()),
@@ -2564,7 +2573,7 @@ fn publishing_parquet_inventory(source: &Path) -> Value {
         };
         payload += entry.byte_length;
         allocated += physical;
-        files.push(json!({"path":entry.relative_path,"bytes":entry.byte_length,
+        files.push(json!({"path":entry.relative_path,"sha256":entry.content_sha256,"bytes":entry.byte_length,
             "allocated_bytes":physical,"row_groups":groups, "edge_id_order":edge_order,"codec_pairs":codec_pairs}));
     }
     json!({"ownership":if generation_owned { "generation_graph_tree" } else { "cas" }, "parquet_bytes":payload,"parquet_allocated_bytes":allocated,"files":files})
@@ -2637,6 +2646,11 @@ fn permanent_publishing_policy_construction_mutation_and_compaction() {
     nodes[0].2 = Some(123);
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
+    let before_compaction = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
     let started = Instant::now();
     let report = graph
         .compact_graph_delta(
@@ -2655,6 +2669,52 @@ fn permanent_publishing_policy_construction_mutation_and_compaction() {
     let compaction_ns = started.elapsed().as_nanos();
     drop(graph);
     let compaction = publishing_parquet_inventory(&source);
+    let changed = compaction["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|file| {
+            !before_compaction.files.iter().any(|before| {
+                file["path"].as_str() == Some(before.relative_path.as_str())
+                    && file["sha256"].as_str() == Some(before.content_sha256.as_str())
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !changed.is_empty(),
+        "compaction must encode permanent payloads"
+    );
+    for file in changed {
+        for group in file["row_groups"].as_array().unwrap() {
+            assert!(group["rows"].as_u64().unwrap() <= 8192);
+            for column in group["columns"].as_array().unwrap() {
+                assert!(
+                    !column["encodings"]
+                        .as_str()
+                        .unwrap()
+                        .contains("RLE_DICTIONARY")
+                );
+            }
+        }
+    }
+
+    // Deterministic published-payload ceilings; CPU/RSS/OS I/O remain measured
+    // observations, while replay admission and private-stream limits have
+    // separate exact boundary regressions.
+    for (name, inventory, logical_kib, allocated_kib) in [
+        ("construction", &construction, 400, 448),
+        ("mutation", &mutation, 416, 480),
+        ("compaction", &compaction, 352, 400),
+    ] {
+        assert!(
+            inventory["parquet_bytes"].as_u64().unwrap() <= logical_kib * 1024,
+            "{name} payload budget"
+        );
+        assert!(
+            inventory["parquet_allocated_bytes"].as_u64().unwrap() <= allocated_kib * 1024,
+            "{name} allocation budget"
+        );
+    }
     let portable = root.path().join("compaction-portable");
     std::fs::create_dir(&portable).unwrap();
     round_trip(&portable, &source, fixture, &nodes, &edges);

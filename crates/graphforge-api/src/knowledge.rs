@@ -2984,8 +2984,12 @@ pub(crate) fn snapshot_to_participant(
 }
 
 fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfError> {
-    let mut writer = ArrowWriter::try_new(Vec::new(), Arc::clone(schema), None)
-        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let mut writer = ArrowWriter::try_new(
+        Vec::new(),
+        Arc::clone(schema),
+        Some(graphforge_storage::permanent_parquet::writer_properties().build()),
+    )
+    .map_err(|error| GfError::Storage(error.to_string()))?;
     writer
         .write(batch)
         .map_err(|error| GfError::Storage(error.to_string()))?;
@@ -3729,6 +3733,7 @@ mod tests {
 
         let created = graph.create_assertion(request.clone()).unwrap();
         assert_eq!(created.stats.rows_produced, 1);
+        crate::permanent_parquet_test_support::assert_participants(root.path(), "knowledge");
         let cancelled = CancellationToken::new();
         cancelled.cancel();
         assert_eq!(

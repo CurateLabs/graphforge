@@ -703,7 +703,12 @@ pub(crate) fn write_parquet(path: &Path, batch: &RecordBatch) -> Result<(), GfEr
         .ok_or_else(|| validation("graph parquet target has no parent"))?;
     fs::create_dir_all(parent).map_err(storage)?;
     let file = File::create(path).map_err(storage)?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).map_err(storage)?;
+    let mut writer = ArrowWriter::try_new(
+        file,
+        batch.schema(),
+        Some(crate::permanent_parquet::writer_properties().build()),
+    )
+    .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
     writer.close().map_err(storage)?;
     Ok(())

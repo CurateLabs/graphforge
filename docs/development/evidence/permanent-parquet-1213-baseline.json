@@ -1,0 +1,735 @@
+{
+  "issue": 1213,
+  "phase": "current defaults before policy change",
+  "source_commit": "60ffdca983ed1ad4b2acd4edfe2605f3e85d6e7e",
+  "production_fixture": {
+    "nodes": 1025,
+    "edges": 4097,
+    "routes": 2,
+    "random_endpoints": true,
+    "heterogeneous_properties": true,
+    "actual_published_parquet": [
+      {
+        "stage": "construction",
+        "logical_bytes": 353548,
+        "allocated_bytes": 389120,
+        "zstd_columns": 99,
+        "uncompressed_columns": 0
+      },
+      {
+        "stage": "mutation",
+        "logical_bytes": 377487,
+        "allocated_bytes": 413696,
+        "zstd_columns": 92,
+        "uncompressed_columns": 10
+      },
+      {
+        "stage": "compaction",
+        "logical_bytes": 537467,
+        "allocated_bytes": 569344,
+        "zstd_columns": 52,
+        "uncompressed_columns": 21
+      }
+    ]
+  },
+  "production_runtime": {
+    "elapsed_seconds": 12.48,
+    "user_seconds": 11.89,
+    "system_seconds": 0.84,
+    "peak_rss_kib": 156284,
+    "filesystem_input_512_byte_blocks": 50640,
+    "filesystem_output_512_byte_blocks": 90752,
+    "exit_status": 0
+  },
+  "production_syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 27353,
+        "bytes": 155949734
+      },
+      "pread64": {
+        "calls": 22578,
+        "bytes": 14200336
+      },
+      "write": {
+        "calls": 4287,
+        "bytes": 33255579
+      },
+      "fsync": {
+        "calls": 3109,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 980,
+        "bytes": 9462044
+      }
+    },
+    "read_bytes": 179612114,
+    "write_bytes": 42717623,
+    "errors": [],
+    "elapsed_seconds": 23.17
+  },
+  "production_workspace_observation": {
+    "command": [
+      "/home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2",
+      "permanent_publishing_policy_construction_mutation_and_compaction",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 8749056,
+    "sampled_path_logical_peak_bytes": 7397803,
+    "sampled_file_count_peak": 514,
+    "samples": 1207,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.01462249900214374,
+    "vanished_files_during_scan": 28,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "paired_codec_runtime": {
+    "elapsed_seconds": 1.31,
+    "user_seconds": 1.27,
+    "system_seconds": 0.04,
+    "peak_rss_kib": 58604,
+    "filesystem_input_512_byte_blocks": 0,
+    "filesystem_output_512_byte_blocks": 24696,
+    "exit_status": 0
+  },
+  "paired_codec_syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 2468,
+        "bytes": 22262179
+      },
+      "pread64": {
+        "calls": 2,
+        "bytes": 1680
+      },
+      "write": {
+        "calls": 1642,
+        "bytes": 12610549
+      }
+    },
+    "read_bytes": 22263859,
+    "write_bytes": 12610549,
+    "errors": [],
+    "elapsed_seconds": 1.52
+  },
+  "limitations": [
+    "CPU/RSS, syscall traces and workspace sampling are separate runs. OS I/O depends on cache state.",
+    "Production observations include public query, reopen, export, verify and clean import, startup and test output.",
+    "Workspace sampling misses unlinked open files and short-lived peaks; it is not a deterministic temporary-disk ceiling.",
+    "Paired profiles hold schema, dictionary and row-group settings fixed; they normalize actual production batches, not the mixed writer settings of the original files.",
+    "ArrowWriter.memory_size excludes native codec allocations and is not process RSS. Codec tests do not establish whole-publication admission."
+  ],
+  "codec_pair_cases": [
+    {
+      "arrow_input_bytes": 4609,
+      "profiles": [
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10722,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 2280982,
+              "encode_ns": 6178583
+            },
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10722,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 1819293,
+              "encode_ns": 5250027
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 24576,
+          "profile": "construction",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10017,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 1574589,
+              "encode_ns": 3996974
+            },
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10722,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 1756112,
+              "encode_ns": 5126494
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 24576,
+          "profile": "canonical_staging",
+          "row_group_rows": 65536,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": false,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 9768,
+              "bytes": 9025,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 1243793,
+              "encode_ns": 2849253
+            },
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 9768,
+              "bytes": 9387,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 1364455,
+              "encode_ns": 3004195
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 24576,
+          "profile": "replay",
+          "row_group_rows": 8192,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10017,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 1534758,
+              "encode_ns": 3882031
+            },
+            {
+              "allocated_bytes": 12288,
+              "arrow_writer_peak_bytes": 2664704,
+              "bytes": 10722,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 1724422,
+              "encode_ns": 5045112
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 24576,
+          "profile": "other_permanent",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        }
+      ],
+      "rows": 1
+    },
+    {
+      "arrow_input_bytes": 610185,
+      "profiles": [
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 36864,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 34251,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 4599685,
+              "encode_ns": 17340049
+            },
+            {
+              "allocated_bytes": 36864,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 34251,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 4102225,
+              "encode_ns": 16906531
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 73728,
+          "profile": "construction",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 397312,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 395232,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 3408113,
+              "encode_ns": 13512168
+            },
+            {
+              "allocated_bytes": 36864,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 34251,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 4075585,
+              "encode_ns": 16803889
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 434176,
+          "profile": "canonical_staging",
+          "row_group_rows": 65536,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": false,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 503808,
+              "arrow_writer_peak_bytes": 551688,
+              "bytes": 502549,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 2271641,
+              "encode_ns": 4710967
+            },
+            {
+              "allocated_bytes": 28672,
+              "arrow_writer_peak_bytes": 551688,
+              "bytes": 26794,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 2889213,
+              "encode_ns": 6419048
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 532480,
+          "profile": "replay",
+          "row_group_rows": 8192,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 397312,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 395232,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 3280041,
+              "encode_ns": 13411216
+            },
+            {
+              "allocated_bytes": 36864,
+              "arrow_writer_peak_bytes": 3371970,
+              "bytes": 34251,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 4026594,
+              "encode_ns": 16644416
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 434176,
+          "profile": "other_permanent",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        }
+      ],
+      "rows": 257
+    },
+    {
+      "arrow_input_bytes": 1573144,
+      "profiles": [
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 1241088,
+              "arrow_writer_peak_bytes": 3583211,
+              "bytes": 1241030,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 12056712,
+              "encode_ns": 116289629
+            },
+            {
+              "allocated_bytes": 1241088,
+              "arrow_writer_peak_bytes": 3583211,
+              "bytes": 1241030,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 11965740,
+              "encode_ns": 116038864
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 2482176,
+          "profile": "construction",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 1703936,
+              "arrow_writer_peak_bytes": 3131006,
+              "bytes": 1703147,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 8156090,
+              "encode_ns": 101252562
+            },
+            {
+              "allocated_bytes": 1241088,
+              "arrow_writer_peak_bytes": 3131042,
+              "bytes": 1240628,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 11279937,
+              "encode_ns": 106788475
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 2945024,
+          "profile": "canonical_staging",
+          "row_group_rows": 65536,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": false,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 1576960,
+              "arrow_writer_peak_bytes": 261120,
+              "bytes": 1576490,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 3197669,
+              "encode_ns": 36107324
+            },
+            {
+              "allocated_bytes": 1122304,
+              "arrow_writer_peak_bytes": 261120,
+              "bytes": 1119732,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 6285506,
+              "encode_ns": 44280675
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 2699264,
+          "profile": "replay",
+          "row_group_rows": 8192,
+          "write_batch_rows": 127
+        },
+        {
+          "dictionary": true,
+          "outputs_current_candidate": [
+            {
+              "allocated_bytes": 1703936,
+              "arrow_writer_peak_bytes": 3583157,
+              "bytes": 1703451,
+              "codec": "UNCOMPRESSED",
+              "decode_ns": 7955966,
+              "encode_ns": 97091446
+            },
+            {
+              "allocated_bytes": 1241088,
+              "arrow_writer_peak_bytes": 3583211,
+              "bytes": 1241030,
+              "codec": "ZSTD(ZstdLevel(1))",
+              "decode_ns": 11292287,
+              "encode_ns": 106851136
+            }
+          ],
+          "pair_temporary_allocated_peak_bytes": 2945024,
+          "profile": "other_permanent",
+          "row_group_rows": 1048576,
+          "write_batch_rows": 127
+        }
+      ],
+      "rows": 65537
+    }
+  ],
+  "normalized_production_codec_pair_totals": {
+    "construction": {
+      "construction": {
+        "files": 20,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 353548,
+            "allocated_bytes": 389120,
+            "encode_ns": 47968445,
+            "decode_ns": 13818745,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 353548,
+            "allocated_bytes": 389120,
+            "encode_ns": 47932369,
+            "decode_ns": 13664503,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      },
+      "canonical_staging": {
+        "files": 20,
+        "dictionary": true,
+        "row_group_rows": 65536,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 514282,
+            "allocated_bytes": 561152,
+            "encode_ns": 40166099,
+            "decode_ns": 11972048,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 353548,
+            "allocated_bytes": 389120,
+            "encode_ns": 47764367,
+            "decode_ns": 13679176,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      },
+      "replay": {
+        "files": 20,
+        "dictionary": false,
+        "row_group_rows": 8192,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 610614,
+            "allocated_bytes": 655360,
+            "encode_ns": 23595804,
+            "decode_ns": 9456465,
+            "arrow_writer_peak_bytes": 124168
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 335122,
+            "allocated_bytes": 368640,
+            "encode_ns": 31759745,
+            "decode_ns": 11581560,
+            "arrow_writer_peak_bytes": 124168
+          }
+        ]
+      },
+      "other_permanent": {
+        "files": 20,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 514282,
+            "allocated_bytes": 561152,
+            "encode_ns": 40105989,
+            "decode_ns": 11931720,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 353548,
+            "allocated_bytes": 389120,
+            "encode_ns": 47621635,
+            "decode_ns": 13670812,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      }
+    },
+    "mutation": {
+      "construction": {
+        "files": 21,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 371901,
+            "allocated_bytes": 409600,
+            "encode_ns": 49242728,
+            "decode_ns": 14326423,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 371901,
+            "allocated_bytes": 409600,
+            "encode_ns": 49000800,
+            "decode_ns": 14206189,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      },
+      "canonical_staging": {
+        "files": 21,
+        "dictionary": true,
+        "row_group_rows": 65536,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 538310,
+            "allocated_bytes": 585728,
+            "encode_ns": 41576448,
+            "decode_ns": 12534720,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 371901,
+            "allocated_bytes": 409600,
+            "encode_ns": 48955879,
+            "decode_ns": 14215943,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      },
+      "replay": {
+        "files": 21,
+        "dictionary": false,
+        "row_group_rows": 8192,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 633594,
+            "allocated_bytes": 679936,
+            "encode_ns": 24594050,
+            "decode_ns": 9804565,
+            "arrow_writer_peak_bytes": 124168
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 352306,
+            "allocated_bytes": 389120,
+            "encode_ns": 32789601,
+            "decode_ns": 11951291,
+            "arrow_writer_peak_bytes": 124168
+          }
+        ]
+      },
+      "other_permanent": {
+        "files": 21,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 538310,
+            "allocated_bytes": 585728,
+            "encode_ns": 41221889,
+            "decode_ns": 12439258,
+            "arrow_writer_peak_bytes": 476208
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 371901,
+            "allocated_bytes": 409600,
+            "encode_ns": 49001192,
+            "decode_ns": 14234441,
+            "arrow_writer_peak_bytes": 476208
+          }
+        ]
+      }
+    },
+    "compaction": {
+      "construction": {
+        "files": 19,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 311481,
+            "allocated_bytes": 344064,
+            "encode_ns": 45045593,
+            "decode_ns": 13003200,
+            "arrow_writer_peak_bytes": 1113580
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 311481,
+            "allocated_bytes": 344064,
+            "encode_ns": 44736552,
+            "decode_ns": 12743021,
+            "arrow_writer_peak_bytes": 1113580
+          }
+        ]
+      },
+      "canonical_staging": {
+        "files": 19,
+        "dictionary": true,
+        "row_group_rows": 65536,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 504206,
+            "allocated_bytes": 548864,
+            "encode_ns": 38426038,
+            "decode_ns": 11035052,
+            "arrow_writer_peak_bytes": 1113580
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 311481,
+            "allocated_bytes": 344064,
+            "encode_ns": 44247174,
+            "decode_ns": 12712363,
+            "arrow_writer_peak_bytes": 1113580
+          }
+        ]
+      },
+      "replay": {
+        "files": 19,
+        "dictionary": false,
+        "row_group_rows": 8192,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 625761,
+            "allocated_bytes": 671744,
+            "encode_ns": 23033593,
+            "decode_ns": 8655021,
+            "arrow_writer_peak_bytes": 687888
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 295758,
+            "allocated_bytes": 331776,
+            "encode_ns": 29864270,
+            "decode_ns": 10800197,
+            "arrow_writer_peak_bytes": 687888
+          }
+        ]
+      },
+      "other_permanent": {
+        "files": 19,
+        "dictionary": true,
+        "row_group_rows": 1048576,
+        "outputs_current_candidate": [
+          {
+            "codec": "UNCOMPRESSED",
+            "bytes": 504206,
+            "allocated_bytes": 548864,
+            "encode_ns": 38272145,
+            "decode_ns": 11154565,
+            "arrow_writer_peak_bytes": 1113580
+          },
+          {
+            "codec": "ZSTD(ZstdLevel(1))",
+            "bytes": 311481,
+            "allocated_bytes": 344064,
+            "encode_ns": 44200006,
+            "decode_ns": 12698836,
+            "arrow_writer_peak_bytes": 1113580
+          }
+        ]
+      }
+    }
+  }
+}

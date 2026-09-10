@@ -376,3 +376,121 @@ formatting and gate-registry checks pass. Independent review verifies the
 retained #1224 property-generation repair and real mixed GFDR coverage. #1221
 still owns unsupported topology-journal authority and constructed-parent
 composite topology mutation; this repair does not broaden that support.
+
+## Permanent Parquet publishing policy (#1213)
+
+The production audit follows publication ownership, not temporary filenames.
+There are fourteen storage constructor sites and two API constructor sites.
+`permanent_parquet::writer_properties` selects Zstd level 1, Parquet V1,
+page statistics and offset indexes, 1 MiB page/dictionary targets, 20,000 page
+rows, 1,024-value write batches and 64-byte statistics/index truncation requests.
+These are explicit pinned Parquet 58 defaults, with the codec changed where
+necessary. Statistics truncation is a request: an unincrementable maximum can
+retain its original value. A footer identifies Zstd but does not encode its
+compression level; the shared builder establishes level 1.
+
+| Permanent producer | Publishing path | Retained resource/lifecycle choices |
+| --- | --- | --- |
+| `graph_construction_encoding::write_parquet` | Resumable topology, properties and controls | Existing bounded construction windows, cache advice and publication leases |
+| `graph_construction::write_parquet_with_properties` | Privately shaped runtime catalog, then published unchanged | Permanent caller explicitly supplies policy; accepted construction batches remain private |
+| `writer::stream_replay_nodes` | Canonical replay and compaction nodes | Dictionaries off, row groups at most `max_batch_rows`; bounded decoder strategy below |
+| `writer::stream_replay_edges` | Canonical replay and compaction edge routes | Dictionaries off, same row-group bound, authenticated physical route/schema |
+| `writer::open_replay_property_fragment` | Immutable property/tombstone fragments | Dictionaries off, chunk flushes, same row-group bound, route/generation metadata |
+| `staging::restage_append` | Mutation replacement later owned by `RewriteBatch` | 65,536-row groups; private file ownership and atomic replacement |
+| `staging::stage_parquet_temp` | Mutation and catalog replacement | Same row-group bound and publication lifecycle |
+| `staging::stage_parquet_batches_temp` | Streaming mutation replacement | Same row-group bound; separate reader/writer lifetime |
+| `graph_projection::write_parquet` | Belief and portable projected graph payloads/catalog | Existing collection/sort behavior; no new whole-process memory claim |
+| `semantic_bindings::rewrite_legacy_route` | Supported current-format route composition | Existing 8,192-row reader batches and semantic metadata |
+| `semantic_bindings::materialize_semantic_migration` | Supported current-format multi-ontology composition | Existing file/row/input-byte limits and cancellation checkpoints |
+| `vector_store::write_vector_snapshot` | Vector-search participant | Dimension, vector, cell and encoded-file limits; complete Arrow batch remains |
+| `project_checkpoints` restoration encoder | Restoration-transition participant | `graphforge-restoration-transition/1` creator marker and restoration lifecycle |
+| `runtime_entity_labels::persist_runtime_catalog` | Bulk/composite runtime catalog publication | Existing private staging and catalog authority |
+| API `knowledge::write_parquet` | Assertion/evidence/confidence/reasoning participants | Existing serialized-Vec ownership and atomic participant publication |
+| API `provenance::write_parquet` | Provenance participant | Existing serialized-Vec ownership and atomic participant publication |
+
+Separate writer implementations remain. The policy does not own files,
+leases, authentication, durability, recovery, cancellation or commit authority.
+No permanent writer has an uncompressed-policy exception. Current semantic
+composition remains included despite old function names containing “legacy” or
+“migration”; this change adds no compatibility or migration machinery.
+
+Private accepted construction chunks, shape/merge streams, the bounded replay
+IPC stream and test fixtures are excluded. The user-selected Parquet result
+sink in `graphforge-io` is an external result artifact, not a graph generation.
+Standalone ontology persistence has eight Parquet tables but no verified graph
+publication caller; it remains a separate public API, not a test fixture. The
+source audit found no production `SerializedFileWriter` constructor.
+
+### Baseline and paired experiments
+
+The baseline source is `60ffdca983ed1ad4b2acd4edfe2605f3e85d6e7e`.
+[`permanent-parquet-1213-baseline.json`](../../development/evidence/permanent-parquet-1213-baseline.json)
+records actual public construction, mutation, compaction, reopen, query, export,
+full verification and clean import. At 1,025 nodes and 4,097 random edges with
+heterogeneous properties, construction published 353,548 Parquet bytes; mutation
+published 377,487; compaction increased that to 537,467. The respective column
+codec counts were 99/0, 92/10 and 52/21 Zstd/uncompressed. This demonstrates the
+production regression rather than inferring it from a writer helper.
+
+That baseline process took 12.48 s elapsed, 11.89 s user and 0.84 s system,
+with 156,284 KiB peak RSS. Its separate syscall run read 179,612,114 bytes and
+wrote 42,717,623 bytes, including file-copy syscalls, startup, queries and portable
+operations. A third run sampled a peak of 8,749,056 allocated bytes across the
+workspace, deduplicating hard links. Sampling excludes unlinked open files and
+can miss short-lived peaks; it includes retained generations and portable
+artifacts, so it is neither an exact temporary-only peak nor an admission limit.
+
+Paired encodes retain each path's schema, dictionary and row-group settings,
+changing only the codec. Cases include a materialized one-row fragment, 257
+wide/nullable/heterogeneous rows with a 256 KiB string, and 65,537 random UUID /
+full-width integer rows crossing both replay and staging row-group boundaries.
+The independent pair-process run took 1.31 s elapsed, 1.27 s user and 0.04 s
+system, with 58,604 KiB peak RSS; its syscall run read 22,263,859 and wrote
+12,610,549 bytes. These are codec experiments, not whole-publication admission.
+Small fragments can grow with Zstd; the one-row dictionaries-on case grew from
+10,017 to 10,722 bytes. Wide replay-profile output fell from 502,549 to 26,794
+bytes; the narrow random replay profile fell from 1,576,490 to 1,119,732 bytes.
+
+Deterministic codec-test ceilings are 2 MiB per output, 8 MiB combined temporary
+allocation per pair, and 8 MiB of `ArrowWriter::memory_size()`. The latter omits
+native codec allocation and completed metadata, so it is deliberately not used
+as a replay memory proof. Timing/RSS/kernel-I/O observations are host-dependent;
+row, page, byte and explicit reservation ceilings provide repeatable regressions.
+
+### Replay resource composition
+
+The old estimate omitted native codecs, physical nested leaves, decoder page
+buffers and retained page indexes. Pinned Parquet 58/Zstd 1.5.7 source inspection
+and safe context-size measurements establish separate reservations for schemas,
+writer structures, completed metadata/indexes, active encoded chunks and native
+contexts. Decoder admission inspects authenticated raw page headers before
+allocating the decoder, includes compressed and decompressed buffers, and bounds
+returned values across pages and row-group boundaries. Variable/repeated leaves
+conservatively reserve the contributing row groups; this can refuse small reads
+from very large groups. These are allocation-component/logical estimates, not a
+process-RSS or allocator-fragmentation guarantee.
+
+Dictionaries remain disabled for replay. Below both page thresholds, no page is
+compressed during writes; row-group close consumes leaf writers sequentially.
+Only one compressor becomes active alongside the other dormant codec pairs.
+Larger groups reserve all active codec contexts. Completed compressed chunks
+remain charged until flush. Property decoder and encoder phases are separate,
+while metadata from previously flushed property chunks remains resident.
+
+The 2 MiB, seven-row topology replay fixture remains supported. When direct
+node decoding plus encoding does not fit but each separate phase does, replay
+selects a private uncompressed Arrow IPC stream **before** encoding. One
+self-deleting stream is capped at 64 MiB per replay invocation; cumulative writes
+are checked before reaching disk. Both phases are admitted independently.
+The normal direct strategy incurs no stream I/O. This is private staging, not
+an uncompressed permanent-output fallback.
+
+At 260 and 516 nodes the fixture uses direct replay. At 1,028 nodes the private
+stream is 207,496 bytes / 208,896 allocated bytes, below its deterministic
+256 KiB fixture ceiling. Successful replay writes and reads that stream once;
+its permanent node Parquet file is byte-for-byte identical to the direct
+strategy with the same seven-row bound. Separate tests cover exact byte-limit
+acceptance, one-byte-below rejection, schema/full-width values, row order,
+row-count authority, cleanup and unchanged source bytes. Reader admission also
+covers seven one-row large-string pages, repeated values and batches spanning
+several tiny row groups, with rejection immediately below the computed bound.

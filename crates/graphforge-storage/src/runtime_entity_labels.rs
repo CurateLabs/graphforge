@@ -109,9 +109,12 @@ pub fn persist_runtime_catalog(dir: &Path, catalog: &RuntimeCatalog) -> Result<(
     let batch = catalog.to_record_batch();
     let temporary = tempfile::NamedTempFile::new_in(&topology)
         .map_err(|error| storage_err(error.to_string()))?;
-    let mut writer =
-        parquet::arrow::ArrowWriter::try_new(temporary.as_file(), batch.schema(), None)
-            .map_err(|error| storage_err(error.to_string()))?;
+    let mut writer = parquet::arrow::ArrowWriter::try_new(
+        temporary.as_file(),
+        batch.schema(),
+        Some(crate::permanent_parquet::writer_properties().build()),
+    )
+    .map_err(|error| storage_err(error.to_string()))?;
     writer
         .write(&batch)
         .map_err(|error| storage_err(error.to_string()))?;
