@@ -1,0 +1,172 @@
+{
+  "issue": 1224,
+  "source_commit": "260445ceac30691e57b3162fbaf0ca31342d0703",
+  "executable_sha256": "c052e6507d0cf2aec266f88d455926807f8da9f534530d2bb3687f63a2c32028",
+  "baseline_source_commit": "c481cc1539b94b0dba7e9092b443408a331ae749",
+  "workload": "Public construction N33/N4097 E129/two routes; exact named fixed/variable, bound-edge constraints and nullable filters plus wildcard oracles throughout; ordinary CREATE adds four nodes and two edges (one without properties); composite edge SET/removal; exact fixed/variable Arrow queries; large-case compaction and retained stream; reopen/export/full verify/clean import; subsequent imported edge SET/removal, exact retry and second reopen.",
+  "command": [
+    "permanent_storage_budgets",
+    "composite_constructed_edge_properties_preserve_authenticated_owner",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "runtime": {
+    "elapsed_seconds": 36.3,
+    "user_seconds": 47.89,
+    "system_seconds": 2.6,
+    "peak_rss_kib": 158604,
+    "filesystem_input_512_byte_blocks": 32608,
+    "filesystem_output_512_byte_blocks": 300952,
+    "exit_status": 0
+  },
+  "common_fixture_comparison": {
+    "fixture": "exploratory_construction_groups_bounded_windows_by_physical_route",
+    "workload": "66 nodes /4097 edges /2 routes; deterministic SHA256-derived UUIDs; two public construction windows; exact wildcard queries, reopen/export/full verification/import. Fixture and assertions are unchanged across these executables.",
+    "runs": [
+      {
+        "variant": "main",
+        "source_commit": "c481cc1539b94b0dba7e9092b443408a331ae749",
+        "executable_sha256": "7fe0cb3e0ef12517bcfb6ebbe1f6c5cb9626f67c5e5532a8fc1cde76ba9e2b3f",
+        "runtime": {
+          "elapsed_seconds": 4.15,
+          "user_seconds": 3.11,
+          "system_seconds": 0.7,
+          "peak_rss_kib": 137996,
+          "filesystem_input_512_byte_blocks": 58328,
+          "filesystem_output_512_byte_blocks": 25360,
+          "exit_status": 0
+        }
+      },
+      {
+        "variant": "quadratic",
+        "source_commit": "a55ed14d3cb216d8cef98e2523d6824adf6f2f50",
+        "executable_sha256": "a034fc3d35c22a6640748317fac33e221fde7ee24971ac3f175700e5679ff6a4",
+        "runtime": {
+          "elapsed_seconds": 83.91,
+          "user_seconds": 82.89,
+          "system_seconds": 0.68,
+          "peak_rss_kib": 138984,
+          "filesystem_input_512_byte_blocks": 58328,
+          "filesystem_output_512_byte_blocks": 21040,
+          "exit_status": 0
+        }
+      },
+      {
+        "variant": "linear",
+        "source_commit": "260445ceac30691e57b3162fbaf0ca31342d0703",
+        "executable_sha256": "c052e6507d0cf2aec266f88d455926807f8da9f534530d2bb3687f63a2c32028",
+        "runtime": {
+          "elapsed_seconds": 3.96,
+          "user_seconds": 2.94,
+          "system_seconds": 0.68,
+          "peak_rss_kib": 140584,
+          "filesystem_input_512_byte_blocks": 58328,
+          "filesystem_output_512_byte_blocks": 21040,
+          "exit_status": 0
+        }
+      }
+    ],
+    "limitations": [
+      "Single serial untraced observation per executable, not a statistical benchmark; OS cache state is not controlled.",
+      "Main control runtime sources are c481cc15 plus a separate unused failing named-query test. The common wildcard fixture passes and is the only comparator here.",
+      "The superseded a55ed14d reader was never merged. Its repair is not claimed as an improvement over merged main.",
+      "These whole-fixture CPU/RSS/block-I/O observations include construction, validation and portable work, not isolated query operator timing."
+    ]
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 121262,
+        "bytes": 345494589
+      },
+      "pread64": {
+        "calls": 327866,
+        "bytes": 121428362
+      },
+      "write": {
+        "calls": 20098,
+        "bytes": 125294342
+      },
+      "fsync": {
+        "calls": 6212,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 2682,
+        "bytes": 15064249
+      }
+    },
+    "read_bytes": 481987200,
+    "write_bytes": 140358591,
+    "errors": [],
+    "elapsed_seconds": 72.93
+  },
+  "validation": {
+    "final_frozen_publishing_suite": {
+      "passed": 41,
+      "failed": 0
+    },
+    "property_overlay_unit_tests": {
+      "passed": 24,
+      "failed": 0
+    },
+    "compaction_integration_tests": {
+      "passed": 10,
+      "failed": 0
+    },
+    "superseded_run": "Initial broad API unit suite passed 737 tests; initial integration run was invalidated by executable replacement and then interrupted at the known quadratic large fixture. It is not green or performance evidence."
+  },
+  "workspace_observation": {
+    "command": [
+      "/tmp/gf1224-named-measure-bin",
+      "composite_constructed_edge_properties_preserve_authenticated_owner",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 10899456,
+    "sampled_path_logical_peak_bytes": 9268404,
+    "sampled_file_count_peak": 680,
+    "samples": 3020,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.020123091991990805,
+    "vanished_files_during_scan": 29,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "target_fixture_stored_rows": [
+      128,
+      256,
+      512
+    ],
+    "target_selections": [
+      "one UUID",
+      "all UUIDs"
+    ],
+    "snapshot_charge_calls_ceiling": "3 * stored_rows + 2 * target_count (includes independent test-only audit)",
+    "target_decoder_peak_rows": 2,
+    "combined_values_presence_metrics": "exact equality with one existing snapshot/presence reader",
+    "published_parquet_logical_bytes": 1048576,
+    "published_parquet_allocated_bytes": 2097152,
+    "compaction_output_bytes": 1048576,
+    "reported_compaction_logical_state_bytes": 16384,
+    "reported_compaction_spill_bytes": 0,
+    "existing_per_route_decoder_admission_bytes": 67108864
+  },
+  "limitations": [
+    "Merged-main named-query reproduction fails immediate exact values. There is no valid whole named-lifecycle baseline timing comparison and no claimed improvement against that failure. A separate unchanged common wildcard fixture supplies a valid main control.",
+    "Target decoder counters exclude the existing composite topology scan, publication, other query work and retained target values; route authentication work remains proportional to selected fragments.",
+    "Identity container counts are not allocator or RSS byte estimates. Decoder row-state counters and compaction logical-state estimates exclude whole-process memory; per-route decoder admission does not include all transaction maps.",
+    "The targeted reader still authenticates selected fragments and validates all row values before selected target decode to enforce tombstone/UUID correctness.",
+    "Runtime, syscall and sampled filesystem evidence use separate serial runs of a frozen executable. Whole-fixture observations include setup, all mutations, authentication, queries, persistence and portable work.",
+    "Filesystem sampling includes overlapping retained/project/private/portable files, deduplicates allocated inodes, and may miss unlinked files, directory allocation and shorter-lived peaks. It is not an exact temporary-only admission limit.",
+    "No compression, dictionary, row-group, streaming or lifecycle default changes. Inspected permanent Parquet must use the shared Zstd policy.",
+    "Earlier a55ed14d named-reader measurements are superseded by incremental retained-byte accounting. A separately frozen same-fixture comparison measures that internal repair; it is not a before/after improvement claim against merged main.",
+    "Decoder peaks exclude target snapshots, presence sets, projected value clones and Arrow outputs. Whole-process RSS includes overlapping owners; it is observed, not a hard bound."
+  ]
+}

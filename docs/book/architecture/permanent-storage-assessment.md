@@ -931,3 +931,82 @@ TMPDIR=/path/on/native-root /usr/bin/time -v /path/to/frozen-promotion-tests \
 cargo test -p graphforge-api --test ontology_adoption_retry
 cargo test -p graphforge-storage --lib reader_preparation_failure
 ```
+
+
+### Named traversal ownership follow-up (#1224)
+
+Named fixed and variable traversals now discover both the logical relationship
+property route and the authenticated `_exploratory` construction route. Ordinary
+and constructed edges of the same relation retain their separate current owners.
+Provider hydration reads requested values and tombstone-inclusive owner presence
+in one authenticated target read per candidate. Multiple owners refuse as
+`GF_PROJECT_CORRUPT`; tombstones never revive values. Unrelated named routes are
+not added to the candidate set. Already-bound traversal coverage exercises
+provider hydration followed by bound-edge constraints; the relational join is a
+differential-testing reference path, not the normal project execution path.
+
+Target batches use the existing canonical property encoder, preserving tagged
+scalars, temporal components and schema metadata. Null-only and empty selections
+have explicit Arrow handling. Direct tests cover those cases, tagged Null/Int/Str,
+negative timestamps and signed durations, while incompatible concrete owner types
+still refuse. Exact named queries and nullable filters extend the existing
+33/4,097-node public lifecycle through compaction, reopen, portable full
+verification/import, subsequent mutation and retry.
+
+The combined-reader test requires identical work counters to the existing single
+snapshot/presence read. Existing N/2N/4N targeted tests retain one result and at most
+two decoded rows while checking exact authentication and read accounting. These
+are decoder and selected-work budgets, not a complete query memory bound. Target
+snapshots, tombstone presence sets, projected value clones and Arrow output can
+overlap; the decoder's logical peak excludes these retained owners. Projection
+avoids cloning unrequested fields, but selected snapshots still contain their
+full property maps. Native process measurements must include that overlap.
+
+
+The named-reader review exposed quadratic memory-charge computation in the
+existing target decoder: each two-row batch serialized all retained property
+maps twice even when replay admission ignored that charge. Retained bytes are
+now accumulated once per accepted live UUID across fragments, with checked
+overflow and unchanged admission. A test-only independent sum verifies the
+counter. The N/2N/4N test now selects both one UUID and all 128/256/512 UUIDs;
+serialization calls must stay within `3 * stored_rows + 2 * targets`,
+including the test-only final audit. This deterministic CPU-work ceiling rejects
+the previous quadratic computation without timing thresholds.
+
+
+A frozen, unchanged common wildcard fixture (66 nodes, 4,097 edges, two routes,
+construction windows and portable round trip) completed on all three sources.
+Merged-main control `c481cc15` took 4.15 seconds elapsed / 3.11 seconds user CPU;
+the unmerged repeated-charge implementation `a55ed14d` took 83.91 / 82.89;
+linear accounting `260445ce` took 3.96 / 2.94. Peak RSS was respectively
+137,996 / 138,984 / 140,584 KiB. These are single serial observations with
+uncontrolled cache state, not statistical evidence of a speedup over main.
+They quantify removal of the introduced quadratic cost. The named-query
+correctness failure on main remains separate and supplies no valid full named
+lifecycle timing baseline.
+
+
+The complete named-query lifecycle was measured separately with frozen source
+`260445ce`: elapsed/user/system time 36.30/47.89/2.60 seconds, peak RSS 158,604 KiB,
+and OS input/output 32,608/300,952 512-byte blocks. A separate traced run recorded
+481,987,200 read bytes and 140,358,591 write bytes, including successful
+`copy_file_range` in both totals, with 6,212 fsync calls and no traced errors.
+These totals include the additional exact named queries throughout the lifecycle;
+they are not comparable to the earlier wildcard-only lifecycle timing.
+
+A third run sampled 10,899,456 peak allocated bytes after deduplicating shared
+inodes across retained/project/private/portable files. Its maximum observed
+sampling interval was 20.13 ms; unlinked open files, directory allocation and
+shorter-lived peaks can be missed. This is neither a temporary-only total nor a
+hard admission bound. Full provenance, process/native observations, decoder
+budgets and limitations are in
+[`named-edge-property-ownership-1224.json`](../../development/evidence/named-edge-property-ownership-1224.json).
+
+Final validation passed all 41 frozen public publishing tests, all 24
+property-overlay unit tests, ten compaction integration tests, workspace clippy,
+formatting, fast checks and gate registry validation. An earlier broad run passed
+737 API unit tests but its integration process was invalidated by concurrent
+executable replacement; it reported subprocess failures and was later interrupted
+at the superseded quadratic large fixture. That integration run is not green
+and contributes no performance evidence. All recovery cases passed in the final
+immutable executable run.
