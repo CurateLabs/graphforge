@@ -1,0 +1,111 @@
+{
+  "issue": 1230,
+  "source_commit": "f1cf815577d07a697ce1ad505aa3fd2cd6db1cb0",
+  "baseline_source_commit": "67412c498580ee60b23171a7bbd0b0617160ea94",
+  "workload": "Public construction N33 and N4097/E129, disjoint ontology adoption and composition publication, refusal before and after two qualified child nodes with nullable Int64 scores, repeated clear refusal, retained snapshot, exact graph/authority/file verification, reopen/export/full verify/clean import.",
+  "refusal_budgets": [
+    {
+      "changed_file_bytes": 0,
+      "new_allocated_bytes": 0,
+      "new_files": 0,
+      "nodes": 33,
+      "qualified_rows_present": false,
+      "retained_files": 137
+    },
+    {
+      "changed_file_bytes": 0,
+      "new_allocated_bytes": 0,
+      "new_files": 0,
+      "nodes": 33,
+      "qualified_rows_present": true,
+      "retained_files": 234
+    },
+    {
+      "changed_file_bytes": 0,
+      "new_allocated_bytes": 0,
+      "new_files": 0,
+      "nodes": 4097,
+      "qualified_rows_present": false,
+      "retained_files": 181
+    },
+    {
+      "changed_file_bytes": 0,
+      "new_allocated_bytes": 0,
+      "new_files": 0,
+      "nodes": 4097,
+      "qualified_rows_present": true,
+      "retained_files": 272
+    }
+  ],
+  "runtime": {
+    "elapsed_seconds": 9.83,
+    "user_seconds": 6.67,
+    "system_seconds": 1.77,
+    "peak_rss_kib": 136936,
+    "filesystem_input_512_byte_blocks": 140000,
+    "filesystem_output_512_byte_blocks": 46504,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 54654,
+        "bytes": 132196107
+      },
+      "pread64": {
+        "calls": 516,
+        "bytes": 177668
+      },
+      "write": {
+        "calls": 3475,
+        "bytes": 16648242
+      },
+      "fsync": {
+        "calls": 5862,
+        "bytes": 0
+      }
+    },
+    "read_bytes": 132373775,
+    "write_bytes": 16648242,
+    "errors": [],
+    "elapsed_seconds": 35.28
+  },
+  "workspace_observation": {
+    "command": [
+      "/home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2",
+      "bound_ontology_clear_refuses_before_publication_and_preserves_graph",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 6479872,
+    "sampled_path_logical_peak_bytes": 4873701,
+    "sampled_file_count_peak": 545,
+    "samples": 978,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.015292290016077459,
+    "vanished_files_during_scan": 27,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "refusal_new_durable_files": 0,
+    "refusal_changed_durable_file_bytes": 0,
+    "refusal_new_durable_file_allocated_bytes": 0,
+    "refusal_graph_reencoded_bytes": 0
+  },
+  "limitations": [
+    "The baseline erroneously accepts clear and publishes a project that cannot reopen; no valid complete baseline runtime or performance improvement comparison exists.",
+    "Timing/RSS and I/O are whole-fixture observations including setup, authentication, all-file SHA/allocation checks, queries and portable operations, not isolated clear costs or process admission limits.",
+    "Preflight reuses authenticated parent validation and reads participant metadata; zero rewrite does not mean zero authentication I/O.",
+    "Runtime, syscall and sampled workspace measurements use separate executions.",
+    "Durable-file equality excludes directory allocation and cannot alone detect short-lived files; source control flow independently establishes refusal before staging.",
+    "Workspace sampling includes retained and portable artifacts, can miss unlinked/short-lived peaks, and does not establish an exact temporary-only bound.",
+    "Existing encoding, streaming, dictionaries and row-group defaults are unchanged."
+  ]
+}
