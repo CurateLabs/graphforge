@@ -1002,6 +1002,13 @@ jobs:
             graph_object_store::tests::publication_and_gc_lifecycles_are_mutually_exclusive \
             -- --exact --nocapture
 
+      - name: Verify CAS-backed runtime catalog replacement on Windows
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --lib
+          runtime_entity_labels::tests::catalog_persistence_replaces_read_only_cas_aliases
+          -- --exact --nocapture
+
       - name: Verify mapped routes and portable lifecycle on Windows
         shell: bash
         run: |
@@ -1111,6 +1118,12 @@ jobs:
       - name: Run macOS exact filesystem primitive tests
         run: >-
           cargo test -p graphforge-filesystem --lib --no-fail-fast
+
+      - name: Verify CAS-backed runtime catalog replacement on macOS
+        run: >-
+          cargo test -p graphforge-storage --lib
+          runtime_entity_labels::tests::catalog_persistence_replaces_read_only_cas_aliases
+          -- --exact --nocapture
 
       - name: Verify mapped routes and portable lifecycle on macOS
         shell: bash

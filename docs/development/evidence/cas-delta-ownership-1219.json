@@ -84,6 +84,11 @@
     "api_resumable_surface_tests": 1,
     "workspace_clippy": "passed",
     "pre_push_fast": "passed",
-    "gate_registry": "passed"
+    "gate_registry": "passed",
+    "storage_catalog_cas_alias_test": 1,
+    "native_catalog_test_lanes": [
+      "Windows graphforge-storage Locks",
+      "macOS graphforge-storage Durability"
+    ]
   }
 }
