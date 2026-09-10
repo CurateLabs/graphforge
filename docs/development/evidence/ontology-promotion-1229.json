@@ -15,7 +15,7 @@
     "--nocapture",
     "--test-threads=1"
   ],
-  "source_note": "Frozen after runtime implementation. Later additions are storage callback-failure and API control-budget tests, not changes to the measured workload or runtime.",
+  "source_note": "Frozen successful-workload implementation recorded in b7197fdb. Later tests add reader-preparation/control-budget coverage. A subsequent correction restores GF_IDEMPOTENCY_CONFLICT only for conflicting retry requests; this branch is not exercised by the measured successful workload. Source hashes refer to the measured implementation, not that error-code correction.",
   "fixtures": [
     {
       "after": {
@@ -6015,5 +6015,6 @@
     "Sampled allocation can miss brief or unlinked-open files. The 4096-row promotion topology-batch cap and payload/control ceilings are deterministic; RSS and sampled workspace peaks are observations, not hard bounds.",
     "Runs are independent on the same host with warm caches and possible concurrent validation load; elapsed times are not comparative benchmarks.",
     "Earlier lifecycle and mixed-route diagnostics include incomplete implementations and fixture-oracle errors; they are not performance baselines."
-  ]
+  ],
+  "measured_implementation_commit": "b7197fdb6c27006eaa78bfd6dedc8a694a36fbef"
 }

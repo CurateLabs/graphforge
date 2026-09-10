@@ -881,11 +881,14 @@ lowerer's unsupported multi-table-union case; the promotion oracle uses the
 correctly labelled public queries required by #1229.
 
 [Source-bound resource evidence](../../development/evidence/ontology-promotion-1229.json)
-records the frozen executable digest, source hashes, complete Parquet inventories,
+records measured implementation `b7197fdb`, the frozen executable digest, source
+hashes, complete Parquet inventories,
 control-file inventories, CPU/RSS, selected syscall I/O and allocation sampling.
 The pre-repair baseline fails its first post-adoption query with unauthenticated
 ordinal authority. It is not a complete comparative performance baseline, and
-this correctness repair claims no speed or storage improvement from it.
+this correctness repair claims no speed or storage improvement from it. The
+subsequent conflicting-retry error-code correction affects a refusal branch
+outside this measured successful workload and has its own regression.
 
 | Mixed fixture | Before Parquet bytes | After Parquet bytes | Changed Parquet bytes | Changed non-Parquet graph bytes |
 | --- | ---: | ---: | ---: | ---: |

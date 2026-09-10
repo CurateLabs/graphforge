@@ -194,9 +194,10 @@ impl GraphForge {
             context.operation_uuid.0,
         )? {
             if receipt.generation_uuid != generation_uuid {
-                return Err(GfError::Validation(
-                    "ontology adoption operation identity conflict".into(),
-                ));
+                return Err(GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::TransactionConflict,
+                    message: "ontology adoption operation identity conflict".into(),
+                });
             }
             let current = self.generation_for_read()?;
             if current.generation_uuid()

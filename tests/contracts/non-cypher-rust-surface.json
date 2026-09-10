@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "c07b80a5bb8c6d907d1c02d0862702965c94730e21bd71302e0288ba2c7af4b1",
+  "public_method_digest": "3199148900ac01b875528b26e6d900423998dcaaa5cc40014c200e55400afc13",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -259,6 +259,7 @@
         "GraphForge.add_edge",
         "GraphForge.add_node",
         "GraphForge.adopt_ontology",
+        "GraphForge.adopt_ontology_cancellable",
         "GraphForge.clear_ontology",
         "GraphForge.labels",
         "GraphForge.node_count",
@@ -299,6 +300,10 @@
         {
           "path": "crates/graphforge-api/src/checkpoint_graph_diff.rs",
           "symbol": "extracts_uuid_ordered_logical_nodes_and_edges_from_pinned_generation"
+        },
+        {
+          "path": "crates/graphforge-api/tests/permanent_storage_budgets.rs",
+          "symbol": "ontology_promotion_cancellation_and_conflict_preserve_prior_view"
         }
       ]
     },

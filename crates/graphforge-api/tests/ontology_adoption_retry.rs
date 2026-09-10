@@ -139,3 +139,19 @@ fn typed_readoption_refuses_changed_identity_assignment_before_current() {
         assert_eq!(people(&reopened), expected);
     }
 }
+
+#[test]
+fn conflicting_adoption_retry_preserves_the_public_idempotency_error() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let mut graph = GraphForge::new(project.to_str()).unwrap();
+    let request = request(root.path());
+    graph.adopt_ontology(request.clone()).unwrap();
+    let before = selected(&project);
+    let mut conflict = request;
+    conflict.mode = OntologyMode::Strict;
+    let error = graph.adopt_ontology(conflict).unwrap_err();
+    assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+    assert_eq!(selected(&project), before);
+    assert_eq!(graph.ontology_mode(), OntologyMode::Advisory);
+}
