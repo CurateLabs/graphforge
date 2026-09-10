@@ -2351,21 +2351,34 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         schemas
     };
     let before = schemas(&source);
-    graph
-        .publish_composite_transaction(CompositeTransactionRequest {
-            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
-            context: WriteContext {
-                operation_uuid: OperationId(Uuid::now_v7()),
-                actor_uuid: None,
-            },
-            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: changed_node,
-                property: "score".into(),
-                value: PropValue::Int(123),
-            }],
-            knowledge: CompositeKnowledgeParticipants::default(),
-        })
-        .unwrap();
+    // First write establishes qualified schema authority; the next is real GFDR.
+    for score in [122, 123] {
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                    node_uuid: changed_node,
+                    property: "score".into(),
+                    value: PropValue::Int(score),
+                }],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+    }
+    let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert_eq!(
+        graphforge_storage::list_delta_runs(
+            &delta.graph_files_inventory().unwrap().unwrap(),
+            Default::default()
+        )
+        .unwrap()
+        .len(),
+        1
+    );
     graph
         .compact_graph_delta(
             &GraphDeltaCompactionRequest {
@@ -2384,7 +2397,8 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
     drop(graph);
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
-    let score_query = "MATCH (n) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
+    let score_query =
+        "MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
     let expected_score = graph.execute(score_query).unwrap();
     assert_eq!(
         expected_score
