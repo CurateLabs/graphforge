@@ -178,7 +178,11 @@ fn uuid_at(batch: &RecordBatch, column: usize, row: usize) -> Uuid {
     .unwrap()
 }
 fn int_at(batch: &RecordBatch, column: usize, row: usize) -> Option<i64> {
-    (!batch.column(column).is_null(row)).then(|| {
+    (!batch
+        .column(column)
+        .logical_nulls()
+        .is_some_and(|nulls| nulls.is_null(row)))
+    .then(|| {
         batch
             .column(column)
             .as_any()
@@ -234,7 +238,12 @@ fn verify_graph(
             .downcast_ref::<StringArray>()
             .unwrap();
         for row in 0..batch.num_rows() {
-            let text = if f.properties && !batch.column(5).is_null(row) {
+            let text = if f.properties
+                && !batch
+                    .column(5)
+                    .logical_nulls()
+                    .is_some_and(|nulls| nulls.is_null(row))
+            {
                 Some(
                     batch
                         .column(5)
@@ -277,8 +286,16 @@ fn verify_graph(
 }
 
 fn round_trip(root: &Path, source: &Path, f: Fixture, nodes: &[Node], edges: &[Edge]) -> String {
+    round_trip_checked(root, source, |graph| verify_graph(graph, f, nodes, edges))
+}
+
+fn round_trip_checked(
+    root: &Path,
+    source: &Path,
+    verify: impl Fn(&GraphForge) -> String,
+) -> String {
     let graph = GraphForge::new(source.to_str()).unwrap();
-    let fingerprint = verify_graph(&graph, f, nodes, edges);
+    let fingerprint = verify(&graph);
     let limits = PortableV2Limits::default();
     let package = root.join("graph.gfpb");
     let exported = graph
@@ -319,7 +336,7 @@ fn round_trip(root: &Path, source: &Path, f: Fixture, nodes: &[Node], edges: &[E
     .unwrap();
     assert_eq!(exported.package_digest, imported.package_digest);
     let imported = GraphForge::new(imported_path.to_str()).unwrap();
-    assert_eq!(verify_graph(&imported, f, nodes, edges), fingerprint);
+    assert_eq!(verify(&imported), fingerprint);
     fingerprint
 }
 
@@ -4404,6 +4421,529 @@ fn edge_property_union_preserves_null_positions_and_concrete_type_errors() {
         assert!(
             graph.execute(query).is_err(),
             "incompatible concrete types must remain an error: {query}"
+        );
+    }
+}
+
+fn promotion_request(root: &Path) -> graphforge_api::AdoptOntologyRequest {
+    let ontology = root.join("promotion.yaml");
+    std::fs::write(&ontology, "ontology_id: https://example.test/promotion\nversion: \"1\"\nentity_types:\n  - name: Node0\n    abstract: false\nrelation_types:\n  - name: REL0\n    src: Node0\n    dst: Node0\nproperties:\n  - owner: Node0\n    name: score\n    type: int64\n    nullable: true\n  - owner: REL0\n    name: weight\n    type: int64\n    nullable: true\n  - owner: REL0\n    name: text\n    type: utf8\n    nullable: true\n").unwrap();
+    graphforge_api::AdoptOntologyRequest {
+        context: graphforge_api::WriteContext {
+            operation_uuid: OperationId(Uuid::from_u128(1229001)),
+            actor_uuid: None,
+        },
+        path: ontology,
+        mode: graphforge_api::OntologyMode::Advisory,
+    }
+}
+
+fn verify_promoted_graph(graph: &GraphForge, nodes: &[Node], edges: &[Edge]) {
+    verify_promoted_route(graph, nodes, edges, "Node0", "REL0");
+}
+
+fn verify_promoted_route(
+    graph: &GraphForge,
+    nodes: &[Node],
+    edges: &[Edge],
+    label: &str,
+    route: &str,
+) {
+    let mut actual = graph
+        .execute(&format!("MATCH (n:{label}) RETURN n.node_uuid, n.score"))
+        .unwrap()
+        .batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows())
+                .map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut expected = nodes.iter().map(|n| (n.0, n.2)).collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+    let mut actual_edges = Vec::new();
+    for batch in graph.execute(&format!("MATCH (a)-[r:{route}]->(b) RETURN r.edge_uuid, a.node_uuid, b.node_uuid, r.weight, r.text")).unwrap_or_else(|error| panic!("route={route}: {error}")).batches {
+        for row in 0..batch.num_rows() {
+            let column = batch.column(4);
+            let text = if column.data_type() == &DataType::Null || column.is_null(row) { None } else if let Some(text) = column.as_any().downcast_ref::<StringArray>() {
+                Some(text.value(row).to_owned())
+            } else {
+                Some(column.as_any().downcast_ref::<arrow::array::StringViewArray>().expect("text must be an Arrow string").value(row).to_owned())
+            };
+            actual_edges.push((uuid_at(&batch, 0, row), uuid_at(&batch, 1, row), uuid_at(&batch, 2, row), route.to_owned(), int_at(&batch, 3, row), text));
+        }
+    }
+    actual_edges.sort();
+    let mut expected_edges = edges.to_vec();
+    expected_edges.sort();
+    assert_eq!(actual_edges, expected_edges);
+}
+
+#[test]
+fn same_name_adoption_publishes_complete_constructed_authority() {
+    use futures::TryStreamExt as _;
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "same_name_promotion",
+            nodes: node_count,
+            edges: 129,
+            routes: 1,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (mut nodes, mut edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let base_ids = cas_uuid_node_surrogates(&source);
+        let objects = cas_uuid_parent_objects(&source);
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        let query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+        let expected_snapshot = graph.execute(query).unwrap();
+        let stream = graph.execute_stream(query).unwrap();
+        let mut request = promotion_request(root.path());
+        if node_count == 4097 {
+            request.mode = graphforge_api::OntologyMode::Strict;
+        }
+        graph.adopt_ontology(request.clone()).unwrap();
+        verify_promoted_graph(&graph, &nodes, &edges);
+        assert_eq!(cas_uuid_node_surrogates(&source), base_ids);
+        let selected = graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid();
+        graph.adopt_ontology(request).unwrap();
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid(),
+            selected
+        );
+        verify_promoted_graph(&graph, &nodes, &edges);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let snapshot = runtime.block_on(stream.try_collect::<Vec<_>>()).unwrap();
+        let snapshot_rows = |batches: Vec<RecordBatch>| {
+            batches
+                .iter()
+                .flat_map(|batch| {
+                    (0..batch.num_rows())
+                        .map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            snapshot_rows(snapshot),
+            snapshot_rows(expected_snapshot.batches)
+        );
+        cas_uuid_assert_parent_objects(&source, &objects);
+        let result = graph
+            .execute("CREATE (n:Node0 {score: 9001229}) RETURN n.node_uuid")
+            .unwrap();
+        let new_uuid = uuid_at(&result.batches[0], 0, 0);
+        assert!(cas_uuid_node_surrogates(&source)[&new_uuid] > *base_ids.values().max().unwrap());
+        nodes.push((new_uuid, "Node0".into(), Some(9001229)));
+        verify_promoted_graph(&graph, &nodes, &edges);
+        drop(graph);
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        verify_promoted_graph(&graph, &nodes, &edges);
+        let package = root.path().join("promotion.gfpb");
+        let limits = PortableV2Limits::default();
+        let exported = graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: package.clone(),
+                    representation: PortableV2Output::Bundle,
+                    profile: PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits,
+                },
+                None,
+                |_| {},
+            )
+            .unwrap();
+        let verified = verify_portable_v2(
+            &PortableVerifyRequest {
+                input: package.clone(),
+                mode: PortableV2Mode::Full,
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(exported.package_digest, verified.package_digest);
+        let imported = root.path().join("imported");
+        GraphForge::import_portable_v2(
+            &imported,
+            &PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(Uuid::from_u128(1229002)),
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        let graph = GraphForge::new(imported.to_str()).unwrap();
+        verify_promoted_graph(&graph, &nodes, &edges);
+        graph
+            .execute("MATCH (n:Node0 {score: 9001229}) SET n.score = 9001230")
+            .unwrap();
+        nodes.last_mut().unwrap().2 = Some(9001230);
+        verify_promoted_graph(&graph, &nodes, &edges);
+        graph
+            .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: graphforge_api::WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: edges[0].0,
+                        property: "weight".into(),
+                        value: graphforge_api::PropValue::Int(1229),
+                    },
+                    graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
+                        edge_uuid: edges[1].0,
+                        property: "weight".into(),
+                    },
+                ],
+                knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        edges[0].4 = Some(1229);
+        edges[1].4 = None;
+        verify_promoted_graph(&graph, &nodes, &edges);
+        drop(graph);
+        let graph = GraphForge::new(imported.to_str()).unwrap();
+        verify_promoted_graph(&graph, &nodes, &edges);
+    }
+}
+
+#[test]
+fn ontology_promotion_fault_child() {
+    use futures::TryStreamExt as _;
+    let Ok(source) = std::env::var("GF_ONTOLOGY_PROMOTION_ROOT") else {
+        return;
+    };
+    let source = Path::new(&source);
+    let request = promotion_request(source.parent().unwrap());
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+    let before = graph.execute(query).unwrap();
+    let stream = graph.execute_stream(query).unwrap();
+    let error = graph.adopt_ontology(request.clone()).unwrap_err();
+    assert_eq!(error.code(), "GF_PUBLICATION_FAILED", "{error}");
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let selected_query = if selected.transaction_uuid() == request.context.operation_uuid.0 {
+        "MATCH (n:Node0) RETURN n.node_uuid, n.score ORDER BY n.node_uuid"
+    } else {
+        query
+    };
+    let exact = |batches: Vec<RecordBatch>| {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                (0..batch.num_rows())
+                    .map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        exact(graph.execute(selected_query).unwrap().batches),
+        exact(before.batches.clone())
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        exact(runtime.block_on(stream.try_collect::<Vec<_>>()).unwrap()),
+        exact(before.batches)
+    );
+    if selected.transaction_uuid() == request.context.operation_uuid.0 {
+        graph.adopt_ontology(request).unwrap();
+    }
+    graph.execute("CREATE (:Node0 {score: 9001229})").unwrap();
+}
+
+#[test]
+fn ontology_promotion_faults_select_complete_authority_and_retry() {
+    let executable = tempfile::tempdir().unwrap();
+    let frozen = executable.path().join("promotion-fault-tests");
+    std::fs::copy(std::env::current_exe().unwrap(), &frozen).unwrap();
+    for boundary in [
+        "project.before_current_replace",
+        "project.after_current_replace",
+    ] {
+        for returned_error in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let fixture = Fixture {
+                name: "promotion_fault",
+                nodes: 33,
+                edges: 129,
+                routes: 1,
+                identifiers: Identifiers::Random,
+                properties: true,
+                adjacency: false,
+                heterogeneous: false,
+            };
+            let (mut nodes, edges) = rows(fixture);
+            construct(&source, fixture, &nodes, &edges);
+            let prior = graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid();
+            let request = promotion_request(root.path());
+            let hook = format!("{boundary}{}", if returned_error { ".error" } else { "" });
+            let output = std::process::Command::new(&frozen)
+                .args(["--exact", "ontology_promotion_fault_child", "--nocapture"])
+                .env("GF_ONTOLOGY_PROMOTION_ROOT", &source)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", &hook)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINT_TRANSACTION",
+                    request.context.operation_uuid.0.to_string(),
+                )
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if returned_error { 0 } else { 86 }),
+                "{hook}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut graph = GraphForge::new(source.to_str()).unwrap();
+            let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+            if !returned_error && boundary == "project.before_current_replace" {
+                assert_eq!(current.generation_uuid(), prior);
+                verify_graph(&graph, fixture, &nodes, &edges);
+            }
+            if returned_error {
+                let batches = graph
+                    .execute("MATCH (n:Node0 {score: 9001229}) RETURN n.node_uuid")
+                    .unwrap()
+                    .batches;
+                let uuid = uuid_at(&batches[0], 0, 0);
+                nodes.push((uuid, "Node0".into(), Some(9001229)));
+            }
+            graph.adopt_ontology(request).unwrap();
+            verify_promoted_graph(&graph, &nodes, &edges);
+        }
+    }
+}
+
+#[test]
+fn ontology_promotion_cancellation_and_conflict_preserve_prior_view() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "promotion_cancel",
+        nodes: 33,
+        edges: 129,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let request = promotion_request(root.path());
+    let before = clear_publication_files(&source);
+    let cancellation = graphforge_api::CancellationToken::new();
+    cancellation.cancel();
+    assert!(
+        graph
+            .adopt_ontology_cancellable(request.clone(), Some(&cancellation))
+            .is_err()
+    );
+    assert_eq!(clear_publication_files(&source), before);
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let other = GraphForge::new(source.to_str()).unwrap();
+    other.execute("CREATE (:Node0 {score: 9001229})").unwrap();
+    let current = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .generation_uuid();
+    assert!(graph.adopt_ontology(request).is_err());
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        current
+    );
+    verify_graph(&graph, fixture, &nodes, &edges);
+}
+
+#[test]
+fn ontology_promotion_preserves_mixed_routes_and_reencoding_scope() {
+    for (node_count, edge_count, routes) in [(33, 129, 2), (4097, 4097, 4)] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "promotion_mixed",
+            nodes: node_count,
+            edges: edge_count,
+            routes,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (nodes, edges) = rows(fixture);
+        let verify = |graph: &GraphForge| {
+            for route in 0..routes {
+                let label = format!("Node{route}");
+                let relation = format!("REL{route}");
+                verify_promoted_route(
+                    graph,
+                    &nodes
+                        .iter()
+                        .filter(|n| n.1 == label)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &edges
+                        .iter()
+                        .filter(|e| e.3 == relation)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    &label,
+                    &relation,
+                );
+            }
+            Sha256::digest(serde_json::to_vec(&(&nodes, &edges)).unwrap())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        construct(&source, fixture, &nodes, &edges);
+        let before = publishing_parquet_inventory(&source);
+        let old_objects = cas_uuid_parent_objects(&source);
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        let request = promotion_request(root.path());
+        let started = Instant::now();
+        graph.adopt_ontology(request.clone()).unwrap();
+        let elapsed_ns = started.elapsed().as_nanos();
+        verify(&graph);
+        cas_uuid_assert_parent_objects(&source, &old_objects);
+        let after = publishing_parquet_inventory(&source);
+        let files = after["files"].as_array().unwrap();
+        // Fixed-width identity/property payloads plus bounded shard framing.
+        // This is a representative encoding ceiling, not a process-memory bound.
+        let payload_limit =
+            node_count as u64 * 64 + edge_count as u64 * 128 + files.len() as u64 * 8192 + 65536;
+        assert!(after["parquet_bytes"].as_u64().unwrap() <= payload_limit);
+        assert!(
+            after["parquet_allocated_bytes"].as_u64().unwrap()
+                <= after["parquet_bytes"].as_u64().unwrap() + files.len() as u64 * 4096
+        );
+        let changed = files
+            .iter()
+            .filter(|file| {
+                !before["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|old| old["path"] == file["path"] && old["sha256"] == file["sha256"])
+            })
+            .collect::<Vec<_>>();
+        let changed_bytes = changed
+            .iter()
+            .map(|file| file["bytes"].as_u64().unwrap())
+            .sum::<u64>();
+        println!(
+            "ONTOLOGY_PROMOTION {}",
+            json!({
+                "nodes":node_count,"edges":edge_count,"routes":routes,
+                "promotion_ns":elapsed_ns,"before":before,"after":after,
+                "changed_parquet_files":changed.len(),"changed_parquet_bytes":changed_bytes,
+                "parquet_payload_limit_bytes":payload_limit,
+            })
+        );
+        // A second authored operation on the already promoted mixed graph must
+        // preserve exact semantics and avoid repeating property ownership moves.
+        let mut again = request;
+        again.context.operation_uuid = OperationId(Uuid::from_u128(1229010));
+        graph.adopt_ontology(again).unwrap();
+        verify(&graph);
+        assert_eq!(
+            publishing_parquet_inventory(&source),
+            after,
+            "already promoted routes must not be reencoded"
+        );
+        drop(graph);
+        round_trip_checked(root.path(), &source, verify);
+    }
+}
+
+#[test]
+fn ontology_promotion_bounds_changed_control_inventory() {
+    for (node_count, edge_count, routes) in [(33, 129, 2), (4097, 4097, 4)] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "promotion_controls",
+            nodes: node_count,
+            edges: edge_count,
+            routes,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let inventory = || {
+            graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .graph_files_inventory()
+                .unwrap()
+                .unwrap()
+        };
+        let before = inventory();
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        graph
+            .adopt_ontology(promotion_request(root.path()))
+            .unwrap();
+        let after = inventory();
+        let controls = after
+            .files
+            .iter()
+            .filter(|entry| {
+                !entry.relative_path.ends_with(".parquet")
+                    && !before.files.iter().any(|old| {
+                        old.relative_path == entry.relative_path
+                            && old.content_sha256 == entry.content_sha256
+                    })
+            })
+            .collect::<Vec<_>>();
+        let bytes = controls.iter().map(|entry| entry.byte_length).sum::<u64>();
+        // Identity and ordinal records remain full-width; allow their complete
+        // representation plus bounded control framing, without quadratic growth.
+        let limit = (node_count + edge_count) as u64 * 80 + controls.len() as u64 * 1024 + 65536;
+        assert!(bytes <= limit, "changed controls {bytes} exceed {limit}");
+        println!(
+            "ONTOLOGY_PROMOTION_CONTROLS {}",
+            json!({
+                "nodes":node_count,"edges":edge_count,"routes":routes,
+                "changed_control_bytes":bytes,"changed_control_files":controls.len(),
+                "control_byte_limit":limit,
+                "controls":controls.iter().map(|entry| json!({"path":entry.relative_path,"bytes":entry.byte_length})).collect::<Vec<_>>()
+            })
         );
     }
 }

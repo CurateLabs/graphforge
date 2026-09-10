@@ -100,6 +100,22 @@ impl GraphForge {
     /// # Errors
     /// Returns a structured ontology, validation, publication, or idempotency error.
     pub fn adopt_ontology(&mut self, request: AdoptOntologyRequest) -> Result<(), GfError> {
+        self.adopt_ontology_cancellable(request, None)
+    }
+
+    /// Adopt an ontology, polling cancellation before selecting the complete generation.
+    ///
+    /// # Errors
+    /// Returns validation, cancellation, publication, or idempotency errors.
+    #[allow(clippy::too_many_lines)] // compile, stage, select and recover one ontology transaction
+    pub fn adopt_ontology_cancellable(
+        &mut self,
+        request: AdoptOntologyRequest,
+        cancellation: Option<&crate::CancellationToken>,
+    ) -> Result<(), GfError> {
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
         let AdoptOntologyRequest {
             context,
             path,
@@ -162,9 +178,97 @@ impl GraphForge {
             canonical_ontology_sha256: Some(encode_hex(&Sha256::digest(canonical_bytes))),
             canonical_ontology: Some(canonical_ontology),
         };
+        // The operation identifies the authored request, not regenerated Parquet
+        // bytes (whose fragment identities may differ after recovery).
+        let mut operation = Sha256::new();
+        operation.update(b"graphforge-ontology-adoption/1");
+        operation.update(context.operation_uuid.0.as_bytes());
+        operation.update(
+            serde_json::to_vec(&(context.actor_uuid, &record, &composition))
+                .map_err(|error| GfError::Ontology(error.to_string()))?,
+        );
+        let operation_fingerprint: [u8; 32] = operation.finalize().into();
+        let generation_uuid = graphforge_core::canonical::uuid_v8(operation_fingerprint);
+        if let Some(receipt) = graphforge_storage::published_project_transaction(
+            self.resolved_generation.container_root(),
+            context.operation_uuid.0,
+        )? {
+            if receipt.generation_uuid != generation_uuid {
+                return Err(GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::TransactionConflict,
+                    message: "ontology adoption operation identity conflict".into(),
+                });
+            }
+            let current = self.generation_for_read()?;
+            if current.generation_uuid()
+                != *self
+                    .current_generation_uuid
+                    .lock()
+                    .expect("generation UUID lock poisoned")
+            {
+                return Err(GfError::Validation(
+                    "project generation changed before ontology retry; reopen the project".into(),
+                ));
+            }
+            return Ok(());
+        }
         let mut configuration = current_configuration(self)?;
         configuration.ontology_mode = mode;
-        publish_workspace_records(
+        let handle = OntologyHandle::new(runtime);
+        if let Some(previous) = &self.ontology {
+            for name in previous.entity_type_names() {
+                if previous.entity_type_id(name) != handle.entity_type_id(name) {
+                    return Err(GfError::Validation(
+                        "ontology replacement changes existing entity type identities".into(),
+                    ));
+                }
+            }
+            for name in previous.relation_type_names() {
+                if previous.relation_type_id(name) != handle.relation_type_id(name) {
+                    return Err(GfError::Validation(
+                        "ontology replacement changes existing relation type identities".into(),
+                    ));
+                }
+            }
+        }
+        let catalog = self
+            .runtime_catalog
+            .lock()
+            .expect("runtime catalog lock")
+            .clone();
+        let promotes = catalog
+            .entity_type_names_with_ids()
+            .any(|(_, name)| handle.entity_type_id(name).is_some())
+            || catalog
+                .relation_type_names_with_ids()
+                .any(|(_, name)| handle.relation_type_id(name).is_some());
+        // Reconcile only a separate authenticated workspace. A failed candidate
+        // cannot mutate the facade or any retained stream's graph authority.
+        let mut candidate = if promotes {
+            let parent = self.generation_for_read()?;
+            let expected = *self
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned");
+            if parent.generation_uuid() != expected {
+                return Err(GfError::Validation(
+                    "project generation changed before ontology promotion".into(),
+                ));
+            }
+            let candidate = crate::hydrate_graph_workspace(&parent, false)?;
+            graphforge_storage::promote_runtime_graph_for_ontology(
+                &candidate.0,
+                &handle,
+                &catalog,
+            )?;
+            Some(candidate)
+        } else {
+            None
+        };
+        if let Some(token) = cancellation {
+            token.checkpoint()?;
+        }
+        let publication = publish_workspace_records_inner(
             self,
             context.operation_uuid.0,
             context.actor_uuid,
@@ -172,36 +276,58 @@ impl GraphForge {
             &configuration,
             Some(&composition),
             None,
-            None,
-            None,
-        )?;
-        self.ontology = Some(OntologyHandle::new(runtime));
+            Some(generation_uuid),
+            candidate.as_ref().map(|candidate| candidate.0.as_path()),
+            cancellation,
+            true,
+            Some(operation_fingerprint),
+        );
+        if publication.is_err() {
+            let current = graphforge_storage::resolve_project_generation(
+                self.resolved_generation.container_root(),
+            )?;
+            if current.transaction_uuid() != context.operation_uuid.0 {
+                graphforge_storage::recover_project_transactions_with_mode(
+                    current.container_root(),
+                    self.lifecycle_mode,
+                )?;
+                return publication;
+            }
+            // An error after CURRENT still selects the complete candidate.
+            // Finish the normal transaction receipt before allowing exact retry.
+            graphforge_storage::recover_project_transactions_with_mode(
+                current.container_root(),
+                self.lifecycle_mode,
+            )?;
+            // Another identical attempt may have selected a different physical
+            // candidate. Always recover readers from the selected authority.
+            candidate = Some(crate::hydrate_graph_workspace(&current, false)?);
+            self.resolved_generation = current;
+        }
+        self.ontology = Some(handle);
         self.ontology_document = Some(document);
         self.ontology_mode = requested_mode;
-        // Promote same-named tagged exploratory labels onto ontology TypeIds so
-        // algorithms/query see one logical population after adopt (#702/#725).
-        {
-            let catalog = self
-                .runtime_catalog
+        if let Some((dir, workspace, evidence)) = candidate {
+            if publication.is_err() {
+                let prepared =
+                    self.prepare_generation_read_authority(&self.resolved_generation, &dir)?;
+                self.install_prepared_generation_read_authority(
+                    self.resolved_generation.generation_uuid(),
+                    prepared,
+                );
+            }
+            self.dir = dir;
+            self.workspace_guard = workspace;
+            self.graph_open_evidence = evidence;
+            *self
+                .uuid_membership_index
                 .lock()
-                .expect("runtime catalog lock")
-                .clone();
-            graphforge_storage::reconcile_runtime_entity_label_ids(
-                &self.dir,
-                self.ontology.as_ref(),
-                &catalog,
-            )?;
+                .expect("UUID membership index lock poisoned") = None;
+        } else {
+            self.install_property_generation(&self.resolved_generation)?;
         }
-        *self
-            .adjacency_provider
-            .write()
-            .expect("adjacency provider lock poisoned") =
-            std::sync::Arc::new(crate::adjacency_provider_for_graph(
-                &self.dir,
-                self.ontology_mode,
-                self.property_inventory_for_session(),
-            )?);
-        Ok(())
+
+        publication
     }
 
     /// Publish explicit ontology absence and return the project to exploratory mode.
@@ -283,6 +409,8 @@ pub(crate) fn publish_workspace_records(
         generation_uuid_override,
         None,
         cancellation,
+        false,
+        None,
     )
 }
 
@@ -312,6 +440,8 @@ pub(crate) fn publish_workspace_records_with_graph_tree(
         Some(generation_uuid_override),
         Some(candidate_graph_root),
         cancellation,
+        false,
+        None,
     )
 }
 
@@ -327,6 +457,8 @@ fn publish_workspace_records_inner(
     generation_uuid_override: Option<uuid::Uuid>,
     candidate_graph_root: Option<&std::path::Path>,
     cancellation: Option<&crate::CancellationToken>,
+    prepare_candidate_readers: bool,
+    operation_fingerprint: Option<[u8; 32]>,
 ) -> Result<(), GfError> {
     if let Some(token) = cancellation {
         token.checkpoint()?;
@@ -432,13 +564,62 @@ fn publish_workspace_records_inner(
     let selected_graph_root = candidate_graph_root
         .map(std::path::Path::to_path_buf)
         .or_else(|| generation_owned.then(|| parent.graph_tree_root()));
-    let receipt = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
-        &root,
-        &request,
-        selected_graph_root.as_deref(),
-        graph.lifecycle_mode,
-    )? {
-        ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
+    let mut prepared_candidate = None;
+    let mut prepared_generation = None;
+    let mut prepare =
+        |generation: &graphforge_storage::ResolvedProjectGeneration| -> Result<(), GfError> {
+            if let Some(dir) = candidate_graph_root {
+                let properties =
+                    crate::property_inventory_for_hydrated_generation(generation, dir)?;
+                let ordinal = crate::ordinal_identity_handle(generation, dir)?;
+                let mode = match configuration.ontology_mode {
+                    WorkspaceOntologyMode::None => OntologyMode::Exploratory,
+                    WorkspaceOntologyMode::Advisory => OntologyMode::Advisory,
+                    WorkspaceOntologyMode::Strict => OntologyMode::Strict,
+                };
+                let adjacency = std::sync::Arc::new(crate::adjacency_provider_for_graph(
+                    dir,
+                    mode,
+                    std::sync::Arc::clone(&properties),
+                )?);
+                prepared_candidate = Some(crate::PreparedGenerationReadAuthority {
+                    properties,
+                    ordinal,
+                    adjacency,
+                });
+                prepared_generation = Some(generation.clone());
+            }
+            if let Some(token) = cancellation {
+                token.checkpoint()?;
+            }
+            Ok(())
+        };
+    let staged = if let Some(fingerprint) = operation_fingerprint {
+        graphforge_storage::stage_project_generation_optimistic_with_graph_tree_mode(
+            &root,
+            &request,
+            fingerprint,
+            selected_graph_root.as_deref(),
+            graph.lifecycle_mode,
+        )?
+    } else {
+        graphforge_storage::stage_project_generation_with_graph_tree_mode(
+            &root,
+            &request,
+            selected_graph_root.as_deref(),
+            graph.lifecycle_mode,
+        )?
+    };
+    let receipt = match staged {
+        ProjectStageOutcome::AlreadyPublished(receipt) => {
+            if prepare_candidate_readers && candidate_graph_root.is_some() {
+                return Err(GfError::Validation(
+                    "ontology operation was published concurrently; recover selected authority"
+                        .into(),
+                ));
+            }
+            receipt
+        }
         ProjectStageOutcome::Staged(staged) => {
             if let Some(token) = cancellation {
                 token.checkpoint()?;
@@ -455,7 +636,10 @@ fn publish_workspace_records_inner(
             if let Some(token) = cancellation {
                 token.checkpoint()?;
             }
-            if let Some(lease) = &publication_lease {
+            if prepare_candidate_readers && candidate_graph_root.is_some() {
+                validated
+                    .publish_with_reader_preparation(publication_lease.as_ref(), &mut prepare)?
+            } else if let Some(lease) = &publication_lease {
                 validated.publish_with_graph_objects(lease)?
             } else {
                 validated.publish()?
@@ -466,7 +650,14 @@ fn publish_workspace_records_inner(
         .current_generation_uuid
         .lock()
         .expect("generation UUID lock poisoned") = receipt.generation_uuid;
-    graph.resolved_generation = graphforge_storage::resolve_project_generation(&root)?;
+    graph.resolved_generation = if let Some(generation) = prepared_generation {
+        generation
+    } else {
+        graphforge_storage::resolve_project_generation(&root)?
+    };
+    if let Some(prepared) = prepared_candidate {
+        graph.install_prepared_generation_read_authority(receipt.generation_uuid, prepared);
+    }
     Ok(())
 }
 

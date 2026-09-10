@@ -206,6 +206,14 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "ontology_adoption_retry",
+    srcs = ["tests/ontology_adoption_retry.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "permanent_storage_budgets",
     srcs = ["tests/permanent_storage_budgets.rs"],
     crate = ":graphforge_api",
@@ -568,6 +576,7 @@ test_suite(
         ":public_lifecycle_conformance",
         ":release_load_construction",
         ":resumable_construction_surface",
+        ":ontology_adoption_retry",
         ":permanent_storage_budgets",
         ":scale_g500_ladder",
         ":scale_g500_scale20",

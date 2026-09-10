@@ -520,6 +520,21 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    /// Narrow an already authenticated inventory to transaction-owned property
+    /// fragments while retaining the complete graph and semantic-route admission.
+    pub(crate) fn retain_property_fragment_paths(
+        &mut self,
+        paths: &std::collections::HashSet<PathBuf>,
+    ) {
+        let Some(root) = &self.root_path else {
+            return;
+        };
+        self.routes.retain(|_, fragments| {
+            fragments.retain(|fragment| paths.contains(&root.join(&fragment.physical_relative)));
+            !fragments.is_empty()
+        });
+    }
+
     /// Return admitted immutable property fragments in oldest-to-newest order.
     /// The caller must retain this inventory while using its physical paths.
     #[must_use]

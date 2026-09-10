@@ -21,14 +21,16 @@ use std::sync::Arc;
 
 use arrow::array::{Array, ListArray, UInt32Array, UInt32Builder};
 use arrow::datatypes::{DataType, Field};
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use graphforge_core::{GfError, TypeId};
 use graphforge_ir::RuntimeCatalog;
 use graphforge_ontology::OntologyHandle;
 use graphforge_value::{EntityTypeId, PrimaryEntityTypeId, RuntimeEntityId};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{normalize_topology_nodes, read_nodes};
+use crate::catalog::normalize_topology_nodes;
+#[cfg(test)]
+use crate::catalog::read_nodes;
 use crate::schemas::TOPOLOGY_NODES_SCHEMA;
 use crate::staging::RewriteBatch;
 
@@ -435,8 +437,399 @@ fn merge_remaps(
     Ok(remap)
 }
 
-fn read_topology_batches(dir: &Path) -> Result<Vec<RecordBatch>, GfError> {
-    normalize_topology_nodes(read_nodes(dir).map_err(pq_err)?).map_err(pq_err)
+// Process one topology decoder batch at a time. Targeted authenticated property
+// reads and private fragment commits prevent property windows growing with the graph.
+fn promote_node_properties(
+    dir: &Path,
+    ontology: &OntologyHandle,
+    runtime_catalog: &RuntimeCatalog,
+) -> Result<(), GfError> {
+    use arrow::array::FixedSizeBinaryArray;
+    use std::collections::{BTreeMap, BTreeSet};
+    let remaps = adoption_name_remaps(Some(ontology), runtime_catalog)?;
+    if remaps.is_empty() {
+        return Ok(());
+    }
+    let source = crate::property_overlay::authenticated_property_inventory_for_route(
+        dir,
+        crate::PropertyRouteKind::Node,
+        "_untyped",
+    )?;
+    let Some(schema) = source.route_schema(crate::PropertyRouteKind::Node, "_untyped") else {
+        return Ok(());
+    };
+    let names = runtime_catalog
+        .entity_type_names_with_ids()
+        .filter_map(|(id, name)| {
+            remaps
+                .contains_key(&EntityTypeId::runtime(id))
+                .then_some((EntityTypeId::runtime(id).encode(), name.to_owned()))
+        })
+        .collect::<HashMap<_, _>>();
+    for path in crate::mutator::node_parquet_files(dir)? {
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(path).map_err(pq_err)?,
+        )
+        .map_err(pq_err)?
+        .with_batch_size(4096)
+        .build()
+        .map_err(pq_err)?;
+        for batch in reader {
+            let batch = batch.map_err(pq_err)?;
+            let primary = batch
+                .column_by_name("type_id")
+                .and_then(|a| a.as_any().downcast_ref::<UInt32Array>())
+                .ok_or_else(|| storage_err("missing node primary label"))?;
+            let uuids = batch
+                .column_by_name("node_uuid")
+                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| storage_err("missing node UUID"))?;
+            let mut targets = BTreeMap::<String, BTreeSet<[u8; 16]>>::new();
+            for row in 0..batch.num_rows() {
+                if let Some(name) = names.get(&primary.value(row)) {
+                    targets
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(uuids.value(row).try_into().map_err(pq_err)?);
+                }
+            }
+            for (name, targets) in targets {
+                let (rows, _) =
+                    crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                        &source,
+                        crate::PropertyRouteKind::Node,
+                        "_untyped",
+                        &targets,
+                    )?;
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut staged = RewriteBatch::new();
+                crate::writer::stage_promoted_properties(
+                    &mut staged,
+                    dir,
+                    &name,
+                    crate::PropertyRouteKind::Node,
+                    schema.as_ref(),
+                    &rows,
+                )?;
+                let current_source =
+                    crate::property_overlay::authenticated_property_inventory_for_route(
+                        dir,
+                        crate::PropertyRouteKind::Node,
+                        "_untyped",
+                    )?;
+                crate::writer::stage_property_tombstones_authenticated(
+                    &mut staged,
+                    dir,
+                    &current_source,
+                    crate::PropertyRouteKind::Node,
+                    "_untyped",
+                    &rows.keys().copied().collect::<HashSet<_>>(),
+                )?;
+                staged.commit_at(dir)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // bounded ownership transfer and source tombstones form one operation
+fn promote_edge_properties(dir: &Path) -> Result<HashSet<std::path::PathBuf>, GfError> {
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use std::collections::{BTreeMap, BTreeSet};
+    let inventory = crate::property_overlay::authenticated_property_inventory(dir)?;
+    let kind = crate::PropertyRouteKind::Edge;
+    let mut transferred = HashSet::new();
+    let Some(schema) = inventory.route_schema(kind, "_exploratory") else {
+        return Ok(transferred);
+    };
+    for (_, path) in inventory.edge_files(Some("_exploratory")) {
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(path).map_err(pq_err)?,
+        )
+        .map_err(pq_err)?
+        .with_batch_size(4096)
+        .build()
+        .map_err(pq_err)?;
+        for batch in reader {
+            let batch = batch.map_err(pq_err)?;
+            let names = batch
+                .column_by_name("rel_type_name")
+                .and_then(|a| a.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| storage_err("missing exploratory relation name"))?;
+            let uuids = batch
+                .column_by_name("edge_uuid")
+                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| storage_err("missing edge UUID"))?;
+            let mut targets = BTreeMap::<String, BTreeSet<[u8; 16]>>::new();
+            for row in 0..batch.num_rows() {
+                let name = names.value(row);
+                targets
+                    .entry(name.to_owned())
+                    .or_default()
+                    .insert(uuids.value(row).try_into().map_err(pq_err)?);
+            }
+            for (name, targets) in targets {
+                let (mut rows, _) =
+                    crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+                        &inventory,
+                        kind,
+                        "_exploratory",
+                        &targets,
+                    )?;
+                let (present, _) =
+                    crate::property_overlay::read_authenticated_property_presence_for_inventory(
+                        &inventory,
+                        kind,
+                        "_exploratory",
+                        &targets,
+                    )?;
+                for uuid in present {
+                    rows.entry(uuid)
+                        .or_insert_with(|| crate::PropertySnapshotRow {
+                            uuid,
+                            tombstone: true,
+                            values: BTreeMap::new(),
+                        });
+                }
+                if rows.is_empty() {
+                    continue;
+                }
+                let prior_destination =
+                    crate::property_overlay::authenticated_property_inventory_for_route(
+                        dir, kind, &name,
+                    )?;
+                let prior_paths = prior_destination
+                    .property_fragments(kind, &name)
+                    .into_iter()
+                    .map(|fragment| fragment.path)
+                    .collect::<HashSet<_>>();
+                let mut staged = RewriteBatch::new();
+                crate::writer::stage_promoted_properties(
+                    &mut staged,
+                    dir,
+                    &name,
+                    kind,
+                    schema.as_ref(),
+                    &rows,
+                )?;
+                let current_source =
+                    crate::property_overlay::authenticated_property_inventory_for_route(
+                        dir,
+                        kind,
+                        "_exploratory",
+                    )?;
+                crate::writer::stage_property_tombstones_authenticated(
+                    &mut staged,
+                    dir,
+                    &current_source,
+                    kind,
+                    "_exploratory",
+                    &rows.keys().copied().collect::<HashSet<_>>(),
+                )?;
+                staged.commit_at(dir)?;
+                let current_destination =
+                    crate::property_overlay::authenticated_property_inventory_for_route(
+                        dir, kind, &name,
+                    )?;
+                transferred.extend(
+                    current_destination
+                        .property_fragments(kind, &name)
+                        .into_iter()
+                        .map(|fragment| fragment.path)
+                        .filter(|path| !prior_paths.contains(path)),
+                );
+            }
+        }
+    }
+    Ok(transferred)
+}
+
+// Tombstones remain property ownership evidence. Remove every physical source
+// occurrence after transferring that ownership, including old snapshots.
+fn stage_retired_edge_property_owners(
+    dir: &Path,
+    transferred: &HashSet<std::path::PathBuf>,
+    staged: &mut RewriteBatch,
+) -> Result<(), GfError> {
+    use arrow::array::{BooleanArray, FixedSizeBinaryArray};
+    use std::collections::BTreeSet;
+    if transferred.is_empty() {
+        return Ok(());
+    }
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
+    let mut transferred_inventory =
+        crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
+    transferred_inventory.retain_property_fragment_paths(transferred);
+    let kind = crate::PropertyRouteKind::Edge;
+    let routes = transferred_inventory.routes(kind).collect::<Vec<_>>();
+    let final_summary = inventory
+        .route_schema(kind, "_exploratory")
+        .and_then(|schema| {
+            schema
+                .metadata()
+                .get(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY)
+                .cloned()
+        });
+    let fragments = inventory.property_fragments(kind, "_exploratory");
+    let last_fragment = fragments.last().map(|fragment| fragment.path.clone());
+    if routes.is_empty() {
+        return Ok(());
+    }
+    for fragment in fragments {
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(&fragment.path).map_err(pq_err)?,
+        )
+        .map_err(pq_err)?
+        .with_batch_size(4096)
+        .build()
+        .map_err(pq_err)?;
+        // Historical summaries counted the removed ownership. Preserve the
+        // current cumulative summary only on the newest source fragment.
+        let mut metadata = reader.schema().metadata().clone();
+        metadata.remove(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY);
+        if Some(&fragment.path) == last_fragment.as_ref()
+            && let Some(summary) = &final_summary
+        {
+            metadata.insert(
+                crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.into(),
+                summary.clone(),
+            );
+        }
+        metadata.insert(
+            crate::property_overlay::PROPERTY_OVERLAY_FORMAT_KEY.into(),
+            crate::property_overlay::PROPERTY_OVERLAY_FORMAT.into(),
+        );
+        metadata.insert(
+            crate::property_overlay::PROPERTY_ROUTE_KEY.into(),
+            "_exploratory".into(),
+        );
+        metadata.insert(
+            crate::property_overlay::PROPERTY_KIND_KEY.into(),
+            "edge".into(),
+        );
+        metadata.insert(
+            crate::property_overlay::PROPERTY_GENERATION_KEY.into(),
+            fragment.id.generation.to_string(),
+        );
+        metadata.insert(
+            crate::property_overlay::PROPERTY_ORDINAL_KEY.into(),
+            fragment.id.ordinal.to_string(),
+        );
+        let schema = Arc::new(reader.schema().as_ref().clone().with_metadata(metadata));
+        let batches = reader.map(|batch| {
+            let batch = batch.map_err(pq_err)?;
+            let uuids = batch
+                .column_by_name("edge_uuid")
+                .and_then(|a| a.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                .ok_or_else(|| storage_err("edge property UUID missing"))?;
+            let targets = (0..batch.num_rows())
+                .map(|row| uuids.value(row).try_into().map_err(pq_err))
+                .collect::<Result<BTreeSet<[u8; 16]>, _>>()?;
+            let mut retired = BTreeSet::new();
+            for route in &routes {
+                let (present, _) =
+                    crate::property_overlay::read_authenticated_property_presence_for_inventory(
+                        &transferred_inventory,
+                        kind,
+                        route,
+                        &targets,
+                    )?;
+                retired.extend(present);
+            }
+            let keep = BooleanArray::from(
+                (0..batch.num_rows())
+                    .map(|row| {
+                        !retired.contains(
+                            &<[u8; 16]>::try_from(uuids.value(row)).expect("validated UUID width"),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let filtered = arrow::compute::filter_record_batch(&batch, &keep).map_err(pq_err)?;
+            RecordBatch::try_new(schema.clone(), filtered.columns().to_vec()).map_err(pq_err)
+        });
+        staged.stage_batches(&fragment.path, schema.clone(), batches)?;
+    }
+    Ok(())
+}
+
+fn stage_promoted_edges(dir: &Path, staged: &mut RewriteBatch) -> Result<bool, GfError> {
+    use arrow::array::{BooleanArray, StringArray, UInt64Array};
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_rewrite(dir, staged)?;
+    let mut changed = false;
+    for (_, path) in inventory.edge_files(Some("_exploratory")) {
+        let reader = || -> Result<_, GfError> {
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(&path).map_err(pq_err)?,
+            )
+            .map_err(pq_err)?
+            .with_batch_size(4096)
+            .build()
+            .map_err(pq_err)
+        };
+        let mut file_changed = false;
+        for batch in reader()? {
+            let batch = batch.map_err(pq_err)?;
+            let names = batch
+                .column_by_name("rel_type_name")
+                .and_then(|a| a.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| storage_err("exploratory edge relation name missing"))?;
+            let routes = (0..batch.num_rows())
+                .map(|row| names.value(row))
+                .collect::<std::collections::BTreeSet<_>>();
+            for route in routes {
+                let selected = arrow::compute::filter_record_batch(
+                    &batch,
+                    &BooleanArray::from(
+                        (0..batch.num_rows())
+                            .map(|row| names.value(row) == route)
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+                .map_err(pq_err)?;
+                let schema = crate::TYPED_EDGE_SCHEMA.clone();
+                let columns = schema
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        selected
+                            .column_by_name(field.name())
+                            .cloned()
+                            .ok_or_else(|| storage_err("promoted edge field missing"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let selected = RecordBatch::try_new(schema.clone(), columns).map_err(pq_err)?;
+                let ids = selected
+                    .column_by_name("edge_id")
+                    .and_then(|a| a.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| storage_err("promoted edge ID missing"))?;
+                let first = ids.value(0);
+                let last = ids.value(ids.len() - 1);
+                let component = staged.route_component(dir, route)?;
+                let target = dir
+                    .join("topology/edges")
+                    .join(component)
+                    .join(format!("{first:020}-{last:020}.parquet"));
+                if target.exists() || staged.staged_temp(&target).is_some() {
+                    return Err(storage_err("promoted edge surrogate range already exists"));
+                }
+                staged.stage(&target, schema, &selected)?;
+                file_changed = true;
+            }
+        }
+        if file_changed {
+            let schema = reader()?.schema();
+            // Ontology modes read every named relationship through its own
+            // route, including Advisory names not declared by the ontology.
+            staged.stage_batches(&path, schema, std::iter::empty())?;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 fn reconcile_inner(
@@ -444,6 +837,7 @@ fn reconcile_inner(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
     rewrite: bool,
+    promotion: bool,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
     let marked = has_runtime_entity_label_encoding_marker(dir);
     let ontology_ids = ontology_entity_ids(ontology);
@@ -463,7 +857,13 @@ fn reconcile_inner(
     // Nothing to validate or rewrite: skip topology I/O entirely. This keeps
     // non-parquet legacy snapshot placeholders out of the migration path and
     // avoids a full nodes.parquet scan on already-reconciled projects.
-    if collisions.is_empty() && remap.is_empty() {
+    let promotes_relations = promotion
+        && ontology.is_some_and(|ontology| {
+            runtime_catalog
+                .relation_type_names_with_ids()
+                .any(|(_, name)| ontology.relation_type_id(name).is_some())
+        });
+    if collisions.is_empty() && remap.is_empty() && !promotes_relations {
         if rewrite && !marked {
             write_runtime_entity_label_encoding_marker(dir)?;
         }
@@ -474,51 +874,64 @@ fn reconcile_inner(
         });
     }
 
-    let batches = read_topology_batches(dir)?;
-
-    if !marked {
-        let collision_hits = collect_untagged_label_hits(&batches, &collisions)?;
-        if !collision_hits.is_empty() {
-            let mut ids = collision_hits.into_iter().collect::<Vec<_>>();
-            ids.sort_unstable();
-            return Err(storage_err(format!(
-                "runtime entity label ID collision with ontology type IDs; \
-                 cannot safely migrate untagged node labels for raw ids {ids:?} \
-                 (identity domains must remain disjoint)"
-            )));
-        }
-    }
-
+    let candidate_keys = remap.keys().copied().collect::<HashSet<_>>();
     let mut remapped_label_values = 0u64;
-    if !remap.is_empty() {
-        let candidate_keys = remap.keys().copied().collect::<HashSet<_>>();
-        let needs_migration = !collect_label_hits(&batches, &candidate_keys)?.is_empty();
-        if needs_migration {
-            if !rewrite {
+    let mut staged = RewriteBatch::new();
+    for path in crate::mutator::node_parquet_files(dir)? {
+        let reader = || -> Result<_, GfError> {
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(&path).map_err(pq_err)?,
+            )
+            .map_err(pq_err)?
+            .with_batch_size(4096)
+            .build()
+            .map_err(pq_err)
+        };
+        let mut needs_rewrite = false;
+        for batch in reader()? {
+            let batches = normalize_topology_nodes(vec![batch.map_err(pq_err)?]).map_err(pq_err)?;
+            if !marked && !collect_untagged_label_hits(&batches, &collisions)?.is_empty() {
                 return Err(storage_err(
-                    "runtime entity label IDs require writable reconciliation; \
-                     read-only open cannot rewrite topology",
+                    "runtime entity label ID collision with ontology type IDs",
                 ));
             }
-            let mut staged = RewriteBatch::new();
-            for path in crate::mutator::node_parquet_files(dir)? {
-                let source = normalize_topology_nodes(
-                    crate::catalog::read_parquet_or_empty(&path, TOPOLOGY_NODES_SCHEMA.clone())
-                        .map_err(pq_err)?,
-                )
-                .map_err(pq_err)?;
-                let (rewritten, remapped) = remap_batches(source, &remap)?;
-                remapped_label_values = remapped_label_values.saturating_add(remapped);
-                if remapped > 0 {
-                    let merged = arrow::compute::concat_batches(&TOPOLOGY_NODES_SCHEMA, &rewritten)
-                        .map_err(|e| storage_err(e.to_string()))?;
-                    staged.restage(&path, TOPOLOGY_NODES_SCHEMA.clone(), &merged)?;
-                }
-            }
-            if remapped_label_values > 0 {
-                crate::uuid_membership::commit_uuid_neutral_topology_rewrite(dir, staged)?;
-            }
+            needs_rewrite |= !collect_label_hits(&batches, &candidate_keys)?.is_empty();
         }
+        if !needs_rewrite {
+            continue;
+        }
+        if !rewrite {
+            return Err(storage_err(
+                "runtime entity label IDs require writable reconciliation; read-only open cannot rewrite topology",
+            ));
+        }
+        let batches = reader()?.map(|batch| {
+            let source = normalize_topology_nodes(vec![batch.map_err(pq_err)?]).map_err(pq_err)?;
+            let (mut rewritten, count) = remap_batches(source, &remap)?;
+            remapped_label_values = remapped_label_values.saturating_add(count);
+            Ok(rewritten.remove(0))
+        });
+        staged.stage_batches(&path, TOPOLOGY_NODES_SCHEMA.clone(), batches)?;
+    }
+    if promotion
+        && remapped_label_values > 0
+        && let Some(ontology) = ontology
+    {
+        promote_node_properties(dir, ontology, runtime_catalog)?;
+    }
+    let edges_changed = if promotion
+        && rewrite
+        && ontology.is_some()
+        && (remapped_label_values > 0 || promotes_relations)
+    {
+        let transferred = promote_edge_properties(dir)?;
+        stage_retired_edge_property_owners(dir, &transferred, &mut staged)?;
+        stage_promoted_edges(dir, &mut staged)?
+    } else {
+        false
+    };
+    if remapped_label_values > 0 || edges_changed {
+        crate::uuid_membership::commit_uuid_neutral_topology_rewrite(dir, staged)?;
     }
 
     if rewrite && !marked {
@@ -545,7 +958,20 @@ pub fn reconcile_runtime_entity_label_ids(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
-    reconcile_inner(dir, ontology, runtime_catalog, true)
+    reconcile_inner(dir, ontology, runtime_catalog, true, false)
+}
+
+/// Promote labels and property/relationship routes in a private adoption candidate.
+/// The caller must publish this complete tree with its ontology before installing readers.
+///
+/// # Errors
+/// Refuses ambiguous identities or property owners and propagates authenticated I/O failures.
+pub fn promote_runtime_graph_for_ontology(
+    dir: &Path,
+    ontology: &OntologyHandle,
+    runtime_catalog: &RuntimeCatalog,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(dir, Some(ontology), runtime_catalog, true, true)
 }
 
 /// Validate runtime entity label encoding without rewriting topology.
@@ -562,7 +988,7 @@ pub fn validate_runtime_entity_label_ids(
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
-    reconcile_inner(dir, ontology, runtime_catalog, false)
+    reconcile_inner(dir, ontology, runtime_catalog, false, false)
 }
 
 /// Pure helper: tagged runtime entity plan IDs stay disjoint from ontology IDs.
@@ -711,7 +1137,7 @@ mod tests {
     fn membership_remap_preserves_absent_original_primary() {
         let directory = TempDir::new().unwrap();
         write_nodes(directory.path(), &[&[0]]);
-        let batch = read_topology_batches(directory.path()).unwrap().remove(0);
+        let batch = read_nodes(directory.path()).unwrap().remove(0);
         let mut columns = batch.columns().to_vec();
         columns[batch.schema().index_of("type_id").unwrap()] =
             Arc::new(UInt32Array::from(vec![u32::MAX]));

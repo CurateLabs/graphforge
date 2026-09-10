@@ -87,6 +87,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `algorithm_public_surface` | `integration-test` | `crates/graphforge-api/tests/algorithm_public_surface.rs` | `//crates/graphforge-api:algorithm_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `search_public_surface` | `integration-test` | `crates/graphforge-api/tests/search_public_surface.rs` | `//crates/graphforge-api:search_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `scale_g500_scale20` | `integration-test` | `crates/graphforge-api/tests/scale_g500_scale20.rs` | `//crates/graphforge-api:scale_g500_scale20` | `mapped` | #710 |
+| `graphforge-api` | `ontology_adoption_retry` | `integration-test` | `crates/graphforge-api/tests/ontology_adoption_retry.rs` | `//crates/graphforge-api:ontology_adoption_retry` | `mapped` | #1229 atomic promotion retry and type identity refusal |
 | `graphforge-api` | `permanent_storage_budgets` | `integration-test` | `crates/graphforge-api/tests/permanent_storage_budgets.rs` | `//crates/graphforge-api:permanent_storage_budgets` | `mapped` | #1196 permanent ownership and lossless codec assessment |
 | `graphforge-api` | `scale_g500_ladder` | `integration-test` | `crates/graphforge-api/tests/scale_g500_ladder.rs` | `//crates/graphforge-api:scale_g500_ladder` | `mapped` | #736 |
 | `graphforge-api` | `provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/provider_public_surface.rs` | `//crates/graphforge-api:provider_public_surface` | `mapped` | #8 |

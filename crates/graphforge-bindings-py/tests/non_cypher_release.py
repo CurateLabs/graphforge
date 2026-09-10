@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "c07b80a5bb8c6d907d1c02d0862702965c94730e21bd71302e0288ba2c7af4b1"
-EXPECTED_RELEASE_DIGEST = "88063e340c9fe29d290dda9442a4e8aa8311d0515a3154ed69340b23c3bfc4ae"
+EXPECTED_RUST_DIGEST = "3199148900ac01b875528b26e6d900423998dcaaa5cc40014c200e55400afc13"
+EXPECTED_RELEASE_DIGEST = "9c5cda8accc92758d15741874439ad5d194e4e64483a275f36c2ef7c5aedfe49"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -257,7 +257,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 266
+    assert len(release_methods) == 267
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -347,6 +347,10 @@ def _classification_report() -> dict[str, object]:
             "reason": reason,
         }
 
+    # Cancellation-token ownership remains Rust-only; existing adoption stays equivalent.
+    assert (
+        classifications["GraphForge.adopt_ontology_cancellable"]["classification"] == "not-exposed"
+    )
     assert classifications["GraphForge.explain_stage"]["classification"] == "not-exposed"
     assert classifications["GraphForge.explain_stage"]["python_id"] == ""
 

@@ -1420,6 +1420,8 @@ impl StagedProjectGeneration {
     }
 }
 
+type ReaderPreparation<'a> = &'a mut dyn FnMut(&ResolvedProjectGeneration) -> Result<(), GfError>;
+
 impl ValidatedProjectGeneration {
     /// Durably install the generation, then atomically replace `CURRENT`.
     ///
@@ -1427,7 +1429,7 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(None, None)
+        self.publish_with_optional_graph_objects(None, None, None)
     }
 
     /// Publish a compact graph generation while holding its CAS lease through
@@ -1436,7 +1438,7 @@ impl ValidatedProjectGeneration {
         mut self,
         lease: &crate::GraphObjectPublicationLease,
     ) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(Some(lease), None)
+        self.publish_with_optional_graph_objects(Some(lease), None, None)
     }
 
     /// Publish a compact graph while polling cancellation until the atomic
@@ -1446,13 +1448,27 @@ impl ValidatedProjectGeneration {
         lease: &crate::GraphObjectPublicationLease,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_optional_graph_objects(Some(lease), Some(cancelled))
+        self.publish_with_optional_graph_objects(Some(lease), Some(cancelled), None)
+    }
+
+    /// Prepare authenticated readers against the durable candidate before CURRENT.
+    /// The callback runs under the normal publication lock and cannot select a generation.
+    ///
+    /// # Errors
+    /// Callback failure leaves CURRENT unchanged; publication errors retain their commit status.
+    pub fn publish_with_reader_preparation(
+        mut self,
+        lease: Option<&crate::GraphObjectPublicationLease>,
+        prepare: &mut dyn FnMut(&ResolvedProjectGeneration) -> Result<(), GfError>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(lease, None, Some(prepare))
     }
 
     fn publish_with_optional_graph_objects(
         &mut self,
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
         cancellation: Option<&mut dyn FnMut() -> bool>,
+        preparation: Option<ReaderPreparation<'_>>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
@@ -1467,6 +1483,7 @@ impl ValidatedProjectGeneration {
                 graph_object_lease,
                 lifecycle_admission.as_ref(),
                 cancellation,
+                preparation,
             )
             .map_err(|error| {
                 if matches!(error, GfError::Project { .. } | GfError::Api { .. }) {
@@ -1523,6 +1540,7 @@ impl ValidatedProjectGeneration {
         graph_object_lease: Option<&crate::GraphObjectPublicationLease>,
         lifecycle_admission: Option<&crate::filesystem_admission::ProjectLifecycleAdmission>,
         cancellation: Option<&mut dyn FnMut() -> bool>,
+        preparation: Option<ReaderPreparation<'_>>,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         let staged = &self.0;
         let compact_graph = has_compact_graph_participant(staged)?;
@@ -1546,6 +1564,14 @@ impl ValidatedProjectGeneration {
                 .join(staged.generation_uuid.hyphenated().to_string());
             verify_optional_graph_tree_with_lease(&durable_root, &staged.participants, lease)?;
             lease.revalidate_for_root(staged.parent.container_root())?;
+        }
+        if let Some(prepare) = preparation {
+            let candidate = crate::resolve_verified_generation(
+                &staged.root,
+                staged.generation_uuid,
+                manifest_sha256,
+            )?;
+            prepare(&candidate)?;
         }
         replace_current(
             staged,
@@ -3480,6 +3506,77 @@ mod tests {
                 .unwrap()
                 .generation_uuid(),
             parent
+        );
+    }
+
+    #[test]
+    fn reader_preparation_failure_preserves_current_and_recovers_candidate() {
+        let root = project();
+        let parent = resolve_project_generation(root.path()).unwrap();
+        let current_bytes = fs::read(root.path().join("CURRENT")).unwrap();
+        let request = request(vec![participant("graph", "nodes", b"candidate")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        let validated = staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
+        let refusal = || GfError::Project {
+            code: ProjectErrorCode::WriteConflict,
+            message: "reader preparation deliberately refused candidate".into(),
+        };
+        let mut calls = 0;
+        let error = validated
+            .publish_with_reader_preparation(None, &mut |candidate| {
+                calls += 1;
+                assert_eq!(candidate.generation_uuid(), request.generation_uuid);
+                assert_eq!(
+                    candidate
+                        .participant_snapshot("graph", "nodes")?
+                        .unwrap()
+                        .bytes,
+                    b"candidate"
+                );
+                assert_eq!(
+                    fs::read(root.path().join("CURRENT")).unwrap(),
+                    current_bytes
+                );
+                Err(refusal())
+            })
+            .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.code(), refusal().code());
+        assert_eq!(error.to_string(), refusal().to_string());
+        assert_eq!(
+            fs::read(root.path().join("CURRENT")).unwrap(),
+            current_bytes
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent.generation_uuid()
+        );
+        let candidate_path = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(request.generation_uuid.hyphenated().to_string());
+        assert!(
+            candidate_path.exists(),
+            "preparation runs against a durable candidate"
+        );
+        let recovered = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(recovered.aborted_journals, 1);
+        assert_eq!(recovered.removed_generations, 1);
+        assert!(!candidate_path.exists());
+        assert_eq!(
+            fs::read(root.path().join("CURRENT")).unwrap(),
+            current_bytes
+        );
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
         );
     }
 
