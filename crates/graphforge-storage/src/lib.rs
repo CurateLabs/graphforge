@@ -113,7 +113,7 @@ pub use graph_object_store::graph_object_path;
 pub use graph_object_store::{
     AuthenticatedGraphObject, GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals,
     GraphObjectPublicationLease, GraphPublicationIo, begin_graph_object_publication,
-    materialize_graph_objects, open_graph_object_by_digest,
+    materialize_graph_objects, open_graph_object_by_digest, prepare_graph_files_replacement,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{

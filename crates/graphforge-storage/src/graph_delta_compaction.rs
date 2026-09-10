@@ -338,7 +338,7 @@ fn compact_graph_delta_after_prepare(
 
     let inventory = &prepared.materialized_inventory;
     let (files_participant, publication_lease) =
-        compaction_graph_participant(&parent, staging.path(), inventory)?;
+        crate::prepare_graph_files_replacement(&parent, staging.path(), inventory)?;
     let generation_request = crate::graph_delta_journal::generation_with_replaced_graph(
         &parent,
         request.transaction_uuid,
@@ -400,40 +400,6 @@ fn compact_graph_delta_after_prepare(
     );
     report.output_bytes = output_bytes;
     Ok(report)
-}
-
-fn compaction_graph_participant(
-    parent: &crate::ResolvedProjectGeneration,
-    workspace: &Path,
-    inventory: &GraphFilesInventory,
-) -> Result<
-    (
-        crate::ProjectParticipant,
-        Option<crate::GraphObjectPublicationLease>,
-    ),
-    GfError,
-> {
-    let mut files_participant = crate::graph_files::inventory_participant(
-        crate::graph_files::encode_inventory(inventory)?,
-        inventory.file_count,
-    )?;
-    let publication_lease = match parent.declared_graph_files_participant()? {
-        Some(crate::GraphFilesParticipant::V2(root)) => {
-            let lease = crate::begin_graph_object_publication(parent.container_root())?;
-            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
-                &lease,
-                root,
-                crate::GraphManifestLimits::default(),
-            )?;
-            let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
-                &lease, workspace, &mut state, inventory,
-            )?;
-            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
-            Some(lease)
-        }
-        _ => None,
-    };
-    Ok((files_participant, publication_lease))
 }
 
 /// Inspect whether CURRENT triggers compaction under `policy`.

@@ -26,10 +26,226 @@ use crate::composite_transaction::{CompositeGraphMutation, CompositeTransactionR
 use crate::composite_validation::{CompositeOntologySnapshot, CompositeValidationSnapshot};
 use crate::construction::prop_literal;
 
+/// Physical property owners resolved during the existing authenticated topology scan.
+/// Only requested identities are retained; both publication backends use this plan.
+#[derive(Default)]
+struct CompositePropertyRoutes {
+    nodes: BTreeMap<Uuid, String>,
+    edges: BTreeMap<Uuid, String>,
+    requires_canonical: bool,
+    created_node_types: HashMap<Uuid, graphforge_value::EntityTypeId>,
+}
+
+impl CompositePropertyRoutes {
+    fn node(&self, uuid: &Uuid) -> Result<String, GfError> {
+        self.nodes
+            .get(uuid)
+            .cloned()
+            .ok_or_else(|| GfError::Validation("composite node property owner is absent".into()))
+    }
+
+    fn edge(&self, uuid: &Uuid) -> Result<String, GfError> {
+        self.edges
+            .get(uuid)
+            .cloned()
+            .ok_or_else(|| GfError::Validation("composite edge property owner is absent".into()))
+    }
+}
+
+fn composite_node_property_owner(
+    graph: &GraphForge,
+    primary: graphforge_value::PrimaryEntityTypeId,
+) -> Result<String, GfError> {
+    let Some(id) = primary.label().and_then(|id| id.tagged().ontology_id()) else {
+        return Ok("_untyped".to_owned());
+    };
+    let bindings = graph
+        .semantic_storage_bindings
+        .lock()
+        .expect("semantic storage binding lock poisoned");
+    if let Some(bindings) = bindings.as_ref() {
+        if let Some(owner) = bindings.bindings.iter().find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Entity
+                && binding.storage_id == id.0
+        }) {
+            return Ok(owner.route.clone());
+        }
+        return Err(GfError::Storage(
+            "composite node property owner is absent from semantic authority".into(),
+        ));
+    }
+    graph
+        .ontology
+        .as_ref()
+        .and_then(|ontology| ontology.entity_type_name(id))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            GfError::Storage(
+                "composite node property owner is absent from ontology authority".into(),
+            )
+        })
+}
+
+fn composite_created_owner(
+    graph: &GraphForge,
+    kind: graphforge_ontology::SymbolKind,
+    name: &str,
+) -> Result<Option<(u32, String)>, GfError> {
+    let Some(context) = graph.default_composition_snapshot() else {
+        return Ok(None);
+    };
+    let (symbol, _) = context.resolve(kind, name).map_err(|error| {
+        GfError::Validation(format!(
+            "composite owner resolution failed: {:?}",
+            error.code
+        ))
+    })?;
+    let graphforge_ir::SymbolBinding::Qualified(symbol) = symbol else {
+        return Ok(None);
+    };
+    let route_kind = if kind == graphforge_ontology::SymbolKind::Entity {
+        graphforge_storage::SemanticRouteKind::Entity
+    } else {
+        graphforge_storage::SemanticRouteKind::Relation
+    };
+    graph
+        .semantic_storage_bindings
+        .lock()
+        .expect("semantic storage binding lock poisoned")
+        .as_ref()
+        .and_then(|bindings| {
+            bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.route_kind == route_kind && binding.symbol == symbol)
+        })
+        .map(|binding| (binding.storage_id, binding.route.clone()))
+        .ok_or_else(|| {
+            GfError::Validation("composite owner lacks a generation storage binding".into())
+        })
+        .map(Some)
+}
+
+fn validate_composite_property_owner(
+    graph: &GraphForge,
+    route: &str,
+    edge: bool,
+    property: &str,
+) -> Result<(), GfError> {
+    if !route.starts_with("s-") {
+        return Ok(());
+    }
+    let context = graph.default_composition_snapshot().ok_or_else(|| {
+        GfError::Validation("composite semantic property lacks composition authority".into())
+    })?;
+    let bindings = graph
+        .semantic_storage_bindings
+        .lock()
+        .expect("semantic storage binding lock poisoned");
+    let kind = if edge {
+        graphforge_storage::SemanticRouteKind::Relation
+    } else {
+        graphforge_storage::SemanticRouteKind::Entity
+    };
+    let owner = bindings
+        .as_ref()
+        .and_then(|bindings| {
+            bindings
+                .bindings
+                .iter()
+                .find(|binding| binding.route_kind == kind && binding.route == route)
+        })
+        .ok_or_else(|| {
+            GfError::Validation("composite property owner lacks semantic authority".into())
+        })?;
+    context
+        .resolve_owned_property(
+            owner.symbol.kind,
+            &owner.symbol.ambiguity_candidate(),
+            property,
+        )
+        .map_err(|error| {
+            GfError::Validation(format!(
+                "composite property owner rejected: {:?}",
+                error.code
+            ))
+        })?;
+    Ok(())
+}
+
+fn validate_composite_property_routes(
+    graph: &GraphForge,
+    request: &CompositeTransactionRequest,
+    routes: &CompositePropertyRoutes,
+) -> Result<(), GfError> {
+    for mutation in &request.graph_mutations {
+        match mutation {
+            CompositeGraphMutation::SetNodeProperty {
+                node_uuid,
+                property,
+                ..
+            }
+            | CompositeGraphMutation::RemoveNodeProperty {
+                node_uuid,
+                property,
+            } => {
+                validate_composite_property_owner(
+                    graph,
+                    &routes.node(node_uuid)?,
+                    false,
+                    property,
+                )?;
+            }
+            CompositeGraphMutation::SetEdgeProperty {
+                edge_uuid,
+                property,
+                ..
+            }
+            | CompositeGraphMutation::RemoveEdgeProperty {
+                edge_uuid,
+                property,
+            } => {
+                validate_composite_property_owner(graph, &routes.edge(edge_uuid)?, true, property)?;
+            }
+            CompositeGraphMutation::CreateNode {
+                node_uuid,
+                properties,
+                ..
+            } => {
+                for property in properties.keys() {
+                    validate_composite_property_owner(
+                        graph,
+                        &routes.node(node_uuid)?,
+                        false,
+                        property,
+                    )?;
+                }
+            }
+            CompositeGraphMutation::CreateEdge {
+                edge_uuid,
+                properties,
+                ..
+            } => {
+                for property in properties.keys() {
+                    validate_composite_property_owner(
+                        graph,
+                        &routes.edge(edge_uuid)?,
+                        true,
+                        property,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn eligible_delta_operations(
     request: &CompositeTransactionRequest,
+    routes: &CompositePropertyRoutes,
 ) -> Result<Option<Vec<graphforge_storage::GraphDeltaOp>>, GfError> {
-    if request.graph_mutations.is_empty() {
+    if request.graph_mutations.is_empty() || routes.requires_canonical {
         return Ok(None);
     }
     let mut operations = Vec::with_capacity(request.graph_mutations.len());
@@ -43,7 +259,7 @@ fn eligible_delta_operations(
                 graphforge_storage::GraphDeltaOpKind::SetNodeProperty,
                 graphforge_storage::GraphDeltaPayload::SetNodeProperty {
                     node_uuid: node_uuid.hyphenated().to_string(),
-                    property_stem: "_untyped".into(),
+                    property_stem: routes.node(node_uuid)?,
                     key: property.clone(),
                     value: graphforge_storage::encode_graph_delta_value(&prop_literal(value)?)?,
                 },
@@ -55,7 +271,7 @@ fn eligible_delta_operations(
                 graphforge_storage::GraphDeltaOpKind::RemoveNodeProperty,
                 graphforge_storage::GraphDeltaPayload::RemoveNodeProperty {
                     node_uuid: node_uuid.hyphenated().to_string(),
-                    property_stem: "_untyped".into(),
+                    property_stem: routes.node(node_uuid)?,
                     key: property.clone(),
                 },
             ),
@@ -67,7 +283,7 @@ fn eligible_delta_operations(
                 graphforge_storage::GraphDeltaOpKind::SetEdgeProperty,
                 graphforge_storage::GraphDeltaPayload::SetEdgeProperty {
                     edge_uuid: edge_uuid.hyphenated().to_string(),
-                    property_stem: "_untyped".into(),
+                    property_stem: routes.edge(edge_uuid)?,
                     key: property.clone(),
                     value: graphforge_storage::encode_graph_delta_value(&prop_literal(value)?)?,
                 },
@@ -79,7 +295,7 @@ fn eligible_delta_operations(
                 graphforge_storage::GraphDeltaOpKind::RemoveEdgeProperty,
                 graphforge_storage::GraphDeltaPayload::RemoveEdgeProperty {
                     edge_uuid: edge_uuid.hyphenated().to_string(),
-                    property_stem: "_untyped".into(),
+                    property_stem: routes.edge(edge_uuid)?,
                     key: property.clone(),
                 },
             ),
@@ -195,10 +411,7 @@ impl GraphForge {
                 reconciled = true;
             }
 
-            if optimistic && baseline.is_none() {
-                baseline = Some(capture_rebase_baseline(self, &request, &parent)?);
-            }
-            let snapshot = build_validation_snapshot(self, &parent)?;
+            let (snapshot, routes) = build_validation_snapshot(self, &parent, &request)?;
             let receipt =
                 authorize_composite_transaction(&request, &snapshot, None).map_err(|error| {
                     if (reconciled || rebases > 0) && error.code() == "GF_IDENTITY_CONFLICT" {
@@ -208,6 +421,10 @@ impl GraphForge {
                     }
                 })?;
             require_capabilities(&parent, &request)?;
+            validate_composite_property_routes(self, &request, &routes)?;
+            if optimistic && baseline.is_none() {
+                baseline = Some(capture_rebase_baseline(self, &request, &parent, &routes)?);
+            }
 
             match self.publish_composite_attempt(
                 &request,
@@ -216,6 +433,7 @@ impl GraphForge {
                 content_fingerprint,
                 generation_uuid,
                 optimistic,
+                &routes,
             ) {
                 Ok(batch) => return Ok(batch),
                 Err(error) if optimistic && error.code() == "GF_WRITE_CONFLICT" => {
@@ -254,8 +472,10 @@ impl GraphForge {
     ) -> Result<RecordBatch, GfError> {
         let root = self.resolved_generation.container_root();
         let parent = graphforge_storage::resolve_project_generation(root)?;
-        let snapshot = build_validation_snapshot(self, &parent)?;
-        authorize_composite_transaction(request, &snapshot, None)
+        let (snapshot, routes) = build_validation_snapshot(self, &parent, request)?;
+        let receipt = authorize_composite_transaction(request, &snapshot, None)?;
+        validate_composite_property_routes(self, request, &routes)?;
+        Ok(receipt)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -267,6 +487,7 @@ impl GraphForge {
         content_fingerprint: [u8; 32],
         generation_uuid: Uuid,
         optimistic: bool,
+        routes: &CompositePropertyRoutes,
     ) -> Result<RecordBatch, GfError> {
         let root = self.resolved_generation.container_root();
         let expected_parent = parent.generation_uuid();
@@ -286,7 +507,7 @@ impl GraphForge {
             let delta_operations = if optimistic {
                 None
             } else {
-                eligible_delta_operations(request)?
+                eligible_delta_operations(request, routes)?
             };
             let property_inventory =
                 crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
@@ -296,6 +517,7 @@ impl GraphForge {
                 &mut next_catalog,
                 recorded_at,
                 property_inventory.as_ref(),
+                routes,
             )?;
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
@@ -318,9 +540,20 @@ impl GraphForge {
             } else {
                 None
             };
-            let graph = match prepared_delta.as_ref() {
-                Some(prepared) => prepared.files_participant.clone(),
-                None => graphforge_storage::capture_graph_files(&self.dir)?.1,
+            let mut canonical_lease = None;
+            let graph = if let Some(prepared) = prepared_delta.as_ref() {
+                prepared.files_participant.clone()
+            } else {
+                let (inventory, participant) = graphforge_storage::capture_graph_files(&self.dir)?;
+                if routes.requires_canonical {
+                    let (participant, lease) = graphforge_storage::prepare_graph_files_replacement(
+                        parent, &self.dir, &inventory,
+                    )?;
+                    canonical_lease = lease;
+                    participant
+                } else {
+                    participant
+                }
             };
             let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
@@ -342,22 +575,20 @@ impl GraphForge {
                     root,
                     &publication,
                     content_fingerprint,
-                    prepared_delta
-                        .as_ref()
-                        .map_or(Some(self.dir.as_path()), |prepared| {
-                            prepared.graph_tree_source()
-                        }),
+                    prepared_delta.as_ref().map_or_else(
+                        || canonical_lease.is_none().then_some(self.dir.as_path()),
+                        |prepared| prepared.graph_tree_source(),
+                    ),
                     self.lifecycle_mode,
                 )?
             } else {
                 graphforge_storage::stage_project_generation_with_graph_tree_mode(
                     root,
                     &publication,
-                    prepared_delta
-                        .as_ref()
-                        .map_or(Some(self.dir.as_path()), |prepared| {
-                            prepared.graph_tree_source()
-                        }),
+                    prepared_delta.as_ref().map_or_else(
+                        || canonical_lease.is_none().then_some(self.dir.as_path()),
+                        |prepared| prepared.graph_tree_source(),
+                    ),
                     self.lifecycle_mode,
                 )?
             };
@@ -380,7 +611,10 @@ impl GraphForge {
                     )?;
                     match &prepared_delta {
                         Some(prepared) => prepared.publish(validated)?,
-                        None => validated.publish()?,
+                        None => match &canonical_lease {
+                            Some(lease) => validated.publish_with_graph_objects(lease)?,
+                            None => validated.publish()?,
+                        },
                     }
                 }
             };
@@ -522,6 +756,7 @@ fn capture_rebase_baseline(
     graph: &GraphForge,
     request: &CompositeTransactionRequest,
     generation: &ResolvedProjectGeneration,
+    routes: &CompositePropertyRoutes,
 ) -> Result<RebaseBaseline, GfError> {
     let created_nodes = request
         .graph_mutations
@@ -555,7 +790,14 @@ fn capture_rebase_baseline(
                 property,
             } if !created_nodes.contains(node_uuid) => {
                 baseline.node_targets.insert(*node_uuid);
-                capture_rebase_field(graph, &mut baseline, *node_uuid, property, false)?;
+                capture_rebase_field(
+                    graph,
+                    &mut baseline,
+                    *node_uuid,
+                    property,
+                    false,
+                    &routes.node(node_uuid)?,
+                )?;
             }
             CompositeGraphMutation::SetEdgeProperty {
                 edge_uuid,
@@ -567,7 +809,14 @@ fn capture_rebase_baseline(
                 property,
             } if !created_edges.contains(edge_uuid) => {
                 baseline.edge_targets.insert(*edge_uuid);
-                capture_rebase_field(graph, &mut baseline, *edge_uuid, property, true)?;
+                capture_rebase_field(
+                    graph,
+                    &mut baseline,
+                    *edge_uuid,
+                    property,
+                    true,
+                    &routes.edge(edge_uuid)?,
+                )?;
             }
             CompositeGraphMutation::DeleteNode { .. }
             | CompositeGraphMutation::DeleteEdge { .. } => baseline.non_mergeable = true,
@@ -583,6 +832,7 @@ fn capture_rebase_field(
     uuid: Uuid,
     property: &str,
     is_edge: bool,
+    route: &str,
 ) -> Result<(), GfError> {
     let kind = if is_edge {
         graphforge_storage::PropertyRouteKind::Edge
@@ -593,7 +843,7 @@ fn capture_rebase_field(
     let (rows, _) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
         &inventory,
         kind,
-        "_untyped",
+        route,
         &BTreeSet::from([uuid.into_bytes()]),
     )?;
     let properties = rows
@@ -625,7 +875,7 @@ fn ensure_rebase_compatible(
             "concurrent operation changed project capabilities or workspace configuration",
         ));
     }
-    let snapshot = build_validation_snapshot(graph, latest)?;
+    let (snapshot, routes) = build_validation_snapshot(graph, latest, request)?;
     if !baseline.node_targets.is_subset(&snapshot.nodes)
         || !baseline.edge_targets.is_subset(&snapshot.edges)
     {
@@ -633,7 +883,7 @@ fn ensure_rebase_compatible(
             "concurrent operation removed a graph mutation target",
         ));
     }
-    let current = capture_rebase_baseline(graph, request, latest)?;
+    let current = capture_rebase_baseline(graph, request, latest, &routes)?;
     if current.fields != baseline.fields {
         return Err(write_conflict(
             "concurrent operation changed a requested graph property",
@@ -748,7 +998,32 @@ fn require_capabilities(
 fn build_validation_snapshot(
     graph: &GraphForge,
     parent: &ResolvedProjectGeneration,
-) -> Result<CompositeValidationSnapshot, GfError> {
+    request: &CompositeTransactionRequest,
+) -> Result<(CompositeValidationSnapshot, CompositePropertyRoutes), GfError> {
+    let mut routes = CompositePropertyRoutes::default();
+    let node_targets = request
+        .graph_mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            CompositeGraphMutation::SetNodeProperty { node_uuid, .. }
+            | CompositeGraphMutation::RemoveNodeProperty { node_uuid, .. } => Some(*node_uuid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let edge_targets = request
+        .graph_mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            CompositeGraphMutation::SetEdgeProperty { edge_uuid, .. }
+            | CompositeGraphMutation::RemoveEdgeProperty { edge_uuid, .. } => Some(*edge_uuid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mode = graph
+        .default_composition_snapshot()
+        .map_or(graph.ontology_mode, |context| {
+            GraphForge::composition_execution_mode(&context)
+        });
     let mut snapshot = CompositeValidationSnapshot {
         ontology: CompositeOntologySnapshot {
             mode: graph.ontology_mode,
@@ -783,11 +1058,36 @@ fn build_validation_snapshot(
             .ok_or_else(|| GfError::Storage("node_uuid column has unexpected type".into()))?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
-                snapshot
-                    .nodes
-                    .insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                        GfError::Storage("persisted node UUID is malformed".into())
-                    })?);
+                let uuid = Uuid::from_slice(uuids.value(row))
+                    .map_err(|_| GfError::Storage("persisted node UUID is malformed".into()))?;
+                snapshot.nodes.insert(uuid);
+                if node_targets.contains(&uuid) {
+                    let primary = batch
+                        .column_by_name("type_id")
+                        .and_then(|column| {
+                            column.as_any().downcast_ref::<arrow::array::UInt32Array>()
+                        })
+                        .ok_or_else(|| {
+                            GfError::Storage("composite node primary identity is absent".into())
+                        })?;
+                    if primary.is_null(row) {
+                        return Err(GfError::Storage(
+                            "composite node primary identity is null".into(),
+                        ));
+                    }
+                    let primary = graphforge_value::PrimaryEntityTypeId::decode(primary.value(row))
+                        .map_err(|error| GfError::Storage(error.to_string()))?;
+                    let route = if mode == OntologyMode::Exploratory {
+                        "_untyped".to_owned()
+                    } else {
+                        composite_node_property_owner(graph, primary)?
+                    };
+                    if routes.nodes.insert(uuid, route).is_some() {
+                        return Err(GfError::Storage(
+                            "composite node property owner is duplicated".into(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -807,11 +1107,33 @@ fn build_validation_snapshot(
             .ok_or_else(|| GfError::Storage("edge_uuid column has unexpected type".into()))?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
-                snapshot
-                    .edges
-                    .insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                        GfError::Storage("persisted edge UUID is malformed".into())
-                    })?);
+                let uuid = Uuid::from_slice(uuids.value(row))
+                    .map_err(|_| GfError::Storage("persisted edge UUID is malformed".into()))?;
+                snapshot.edges.insert(uuid);
+                if edge_targets.contains(&uuid) {
+                    let owners = batch
+                        .column_by_name("rel_type_name")
+                        .and_then(|column| {
+                            column.as_any().downcast_ref::<arrow::array::StringArray>()
+                        })
+                        .ok_or_else(|| {
+                            GfError::Storage("composite edge property owner is absent".into())
+                        })?;
+                    if owners.is_null(row) || owners.value(row).is_empty() {
+                        return Err(GfError::Storage(
+                            "composite edge property owner is empty".into(),
+                        ));
+                    }
+                    if routes
+                        .edges
+                        .insert(uuid, owners.value(row).to_owned())
+                        .is_some()
+                    {
+                        return Err(GfError::Storage(
+                            "composite edge property owner is duplicated".into(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -892,7 +1214,78 @@ fn build_validation_snapshot(
         let runs = crate::algorithm_runs::read_ledger(parent)?;
         snapshot.algorithm_runs = runs.runs.iter().map(|row| row.run_uuid).collect();
     }
-    Ok(snapshot)
+    for mutation in &request.graph_mutations {
+        match mutation {
+            CompositeGraphMutation::CreateNode {
+                node_uuid, label, ..
+            } => {
+                let semantic =
+                    composite_created_owner(graph, graphforge_ontology::SymbolKind::Entity, label)?;
+                let declared = semantic
+                    .as_ref()
+                    .map(|(id, _)| graphforge_core::TypeId(*id))
+                    .or_else(|| {
+                        graph
+                            .ontology
+                            .as_ref()
+                            .and_then(|ontology| ontology.entity_type_id(label))
+                    });
+                let route = if let Some((_, route)) = semantic {
+                    route
+                } else if declared.is_some() && mode != OntologyMode::Exploratory {
+                    label.clone()
+                } else {
+                    "_untyped".to_owned()
+                };
+                if let Some(id) = declared {
+                    routes.created_node_types.insert(
+                        *node_uuid,
+                        graphforge_value::EntityTypeId::ontology(id)
+                            .map_err(|error| GfError::Validation(error.to_string()))?,
+                    );
+                    snapshot.ontology.entity_types.insert(label.clone());
+                }
+                routes.nodes.insert(*node_uuid, route);
+            }
+            CompositeGraphMutation::CreateEdge {
+                edge_uuid,
+                rel_type,
+                ..
+            } => {
+                let semantic = composite_created_owner(
+                    graph,
+                    graphforge_ontology::SymbolKind::Relation,
+                    rel_type,
+                )?;
+                let route = if let Some((_, route)) = semantic {
+                    snapshot.ontology.relation_types.insert(rel_type.clone());
+                    route
+                } else {
+                    rel_type.clone()
+                };
+                routes.edges.insert(*edge_uuid, route);
+            }
+            _ => {}
+        }
+    }
+    // A GFDR run has no schema-metadata authority of its own. Publish a first
+    // qualified property fragment canonically so later replay can inherit its
+    // authenticated semantic schema from the base inventory.
+    let property_inventory = graph.property_inventory_for_session();
+    for (kind, owners) in [
+        (graphforge_storage::PropertyRouteKind::Node, &routes.nodes),
+        (graphforge_storage::PropertyRouteKind::Edge, &routes.edges),
+    ] {
+        for route in owners.values().filter(|route| route.starts_with("s-")) {
+            if !property_inventory
+                .routes(kind)
+                .any(|existing| existing == route)
+            {
+                routes.requires_canonical = true;
+            }
+        }
+    }
+    Ok((snapshot, routes))
 }
 
 fn register_existing_endpoints(
@@ -924,12 +1317,18 @@ fn apply_graph_mutations(
     catalog: &mut RuntimeCatalog,
     recorded_at: i64,
     inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    routes: &CompositePropertyRoutes,
 ) -> Result<(), GfError> {
     if request.graph_mutations.is_empty() {
         return Ok(());
     }
     let mut writer =
-        graphforge_storage::GraphWriter::open_at(&graph.dir, graph.ontology_mode, recorded_at)?;
+        graphforge_storage::GraphWriter::open_at(&graph.dir, graph.ontology_mode, recorded_at)?
+            .with_semantic_composition_fingerprint(
+                graph
+                    .default_composition_snapshot()
+                    .map(|context| context.fingerprint().to_owned()),
+            );
     let endpoints = request
         .graph_mutations
         .iter()
@@ -968,13 +1367,8 @@ fn apply_graph_mutations(
             node_uuid, label, ..
         } = mutation
         {
-            let type_id = match graph
-                .ontology
-                .as_ref()
-                .and_then(|ontology| ontology.entity_type_id(label))
-            {
-                Some(id) => graphforge_value::EntityTypeId::ontology(id)
-                    .map_err(|error| graphforge_core::GfError::Validation(error.to_string()))?,
+            let type_id = match routes.created_node_types.get(node_uuid) {
+                Some(id) => *id,
                 None => graphforge_value::EntityTypeId::runtime(catalog.intern_label(label)?),
             };
             writer.create_node(*node_uuid, type_id)?;
@@ -996,10 +1390,7 @@ fn apply_graph_mutations(
                             Ok((name.clone(), prop_literal(value)?))
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
-                    let property_route = match graph.ontology_mode {
-                        OntologyMode::Advisory | OntologyMode::Strict => label.clone(),
-                        OntologyMode::Exploratory => "_untyped".to_owned(),
-                    };
+                    let property_route = routes.node(node_uuid)?;
                     node_sets
                         .entry(property_route)
                         .or_default()
@@ -1014,7 +1405,12 @@ fn apply_graph_mutations(
                 properties,
             } => {
                 catalog.intern_relation_type(rel_type)?;
-                writer.create_edge(*edge_uuid, rel_type, source_uuid, target_uuid)?;
+                writer.create_edge(
+                    *edge_uuid,
+                    &routes.edge(edge_uuid)?,
+                    source_uuid,
+                    target_uuid,
+                )?;
                 if !properties.is_empty() {
                     let props = properties
                         .iter()
@@ -1024,7 +1420,7 @@ fn apply_graph_mutations(
                         })
                         .collect::<Result<HashMap<_, _>, GfError>>()?;
                     edge_sets
-                        .entry(rel_type.clone())
+                        .entry(routes.edge(edge_uuid)?)
                         .or_default()
                         .insert(edge_uuid.into_bytes(), props);
                 }
@@ -1037,7 +1433,7 @@ fn apply_graph_mutations(
                 catalog.intern_property(property, None)?;
                 let literal = prop_literal(value)?;
                 node_sets
-                    .entry("_untyped".into())
+                    .entry(routes.node(node_uuid)?)
                     .or_default()
                     .entry(node_uuid.into_bytes())
                     .or_default()
@@ -1051,7 +1447,7 @@ fn apply_graph_mutations(
                 catalog.intern_property(property, None)?;
                 let literal = prop_literal(value)?;
                 edge_sets
-                    .entry("_untyped".into())
+                    .entry(routes.edge(edge_uuid)?)
                     .or_default()
                     .entry(edge_uuid.into_bytes())
                     .or_default()
@@ -1062,7 +1458,7 @@ fn apply_graph_mutations(
                 property,
             } => {
                 node_removes
-                    .entry("_untyped".into())
+                    .entry(routes.node(node_uuid)?)
                     .or_default()
                     .entry(node_uuid.into_bytes())
                     .or_default()
@@ -1073,7 +1469,7 @@ fn apply_graph_mutations(
                 property,
             } => {
                 edge_removes
-                    .entry("_untyped".into())
+                    .entry(routes.edge(edge_uuid)?)
                     .or_default()
                     .entry(edge_uuid.into_bytes())
                     .or_default()
@@ -1818,6 +2214,12 @@ mod tests {
             &mut catalog,
             1,
             inventory.as_ref(),
+            &CompositePropertyRoutes {
+                nodes: BTreeMap::from([(Uuid::from_u128(231), "_untyped".into())]),
+                edges: BTreeMap::new(),
+                requires_canonical: false,
+                created_node_types: HashMap::new(),
+            },
         )
         .unwrap_err();
 

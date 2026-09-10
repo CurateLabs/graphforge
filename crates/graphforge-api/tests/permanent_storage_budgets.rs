@@ -1448,3 +1448,441 @@ fn workspace_publication_preserves_constructed_cas_payloads() {
         json!({"retained_files":before.files.len(),"retained_bytes":before.total_byte_length,"reencoded_graph_payload_bytes":0})
     );
 }
+
+#[test]
+fn composite_qualified_property_publishing_preserves_values() {
+    exercise_qualified_property_publication(true, 33);
+}
+
+#[test]
+fn composite_qualified_undeclared_property_is_rejected_before_publication() {
+    exercise_qualified_property_publication(false, 33);
+}
+
+#[test]
+fn composite_qualified_property_large_base_reuses_topology() {
+    exercise_qualified_property_publication(true, 4097);
+}
+
+fn exercise_qualified_property_publication(declared_property: bool, node_count: usize) {
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "mixed_semantic_routes",
+        nodes: 0,
+        edges: 0,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = rows(fixture);
+    drop(GraphForge::new(source.to_str()).unwrap());
+    configure_composite_ontology(root.path(), &source, declared_property);
+    let child_nodes = (0..node_count)
+        .map(|row| (id(3, row, true), "NewNode".to_owned(), None))
+        .collect::<Vec<_>>();
+    let changed_node = child_nodes[0].0;
+    for (row, edge) in edges[..].iter_mut().enumerate() {
+        edge.3 = "NEW_TYPED".into();
+        edge.1 = child_nodes[row % child_nodes.len()].0;
+        edge.2 = child_nodes[(row + 1) % child_nodes.len()].0;
+    }
+    construct(&source, fixture, &child_nodes, &edges[..]);
+    nodes.extend(child_nodes.into_iter().map(|mut node| {
+        node.1 = "mixed:entity:NewNode".into();
+        node
+    }));
+    let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let bindings = graphforge_storage::semantic_storage_bindings(&current)
+        .unwrap()
+        .unwrap();
+    let relation = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.local_id == "NEW_TYPED"
+        })
+        .unwrap();
+    assert_eq!(relation.symbol.display(), "mixed:relation:NEW_TYPED");
+    for edge in &mut edges[..] {
+        edge.3.clone_from(&relation.route);
+    }
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let base = current.graph_files_inventory().unwrap().unwrap();
+    assert!(current.declared_graph_files_inventory().unwrap().is_none());
+    let publication = graph.publish_composite_transaction(CompositeTransactionRequest {
+        contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+        context: WriteContext {
+            operation_uuid: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        },
+        graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+            node_uuid: changed_node,
+            property: "score".into(),
+            value: PropValue::Int(123),
+        }],
+        knowledge: CompositeKnowledgeParticipants::default(),
+    });
+    if !declared_property {
+        let error = publication.unwrap_err();
+        assert!(error.to_string().contains("WrongOwnerProperty"), "{error}");
+        let unchanged = graphforge_storage::resolve_project_generation(&source).unwrap();
+        assert_eq!(current.generation_uuid(), unchanged.generation_uuid());
+        assert_eq!(base, unchanged.graph_files_inventory().unwrap().unwrap());
+        verify_graph(&graph, fixture, &nodes, &edges);
+        return;
+    }
+    publication.unwrap();
+    let first = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(
+        first.declared_graph_files_inventory().unwrap().is_none(),
+        "first property authority must retain CAS ownership"
+    );
+    let first_inventory = first.graph_files_inventory().unwrap().unwrap();
+    for entry in base.files.iter().filter(|entry| {
+        entry.relative_path.starts_with("topology/")
+            && entry.relative_path.ends_with(".parquet")
+            && entry.relative_path != "topology/runtime_catalog.parquet"
+    }) {
+        assert!(
+            first_inventory.files.contains(entry),
+            "property publication must reuse unchanged topology: {}",
+            entry.relative_path
+        );
+    }
+    assert!(
+        graphforge_storage::list_delta_runs(&first_inventory, Default::default())
+            .unwrap()
+            .is_empty()
+    );
+    let changed_payload_bytes: u64 = first_inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet") && !base.files.contains(entry))
+        .map(|entry| entry.byte_length)
+        .sum();
+    assert!(
+        changed_payload_bytes <= 64 * 1024,
+        "one property must not copy or reencode the base: {changed_payload_bytes}"
+    );
+    println!(
+        "COMPOSITE_OWNER_BUDGET {}",
+        json!({
+            "nodes": node_count, "base_bytes": base.total_byte_length,
+            "first_property_changed_parquet_bytes": changed_payload_bytes,
+            "unchanged_topology_reencoded_bytes": 0
+        })
+    );
+    let immediate = graph
+        .execute("MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score")
+        .unwrap();
+    assert_eq!(
+        immediate
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1,
+        "qualified property must be visible immediately"
+    );
+    assert_eq!(uuid_at(&immediate.batches[0], 0, 0), changed_node);
+    assert_eq!(int_at(&immediate.batches[0], 1, 0), Some(123));
+    let snapshot_query =
+        "MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
+    let (snapshot, _, _snapshot_guard) = graph
+        .execute_stream_owned(snapshot_query, &Default::default())
+        .unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: changed_node,
+                property: "score".into(),
+                value: PropValue::Int(124),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert_eq!(
+        graphforge_storage::list_delta_runs(
+            &delta.graph_files_inventory().unwrap().unwrap(),
+            Default::default()
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    let latest = graph.execute(snapshot_query).unwrap();
+    assert_eq!(int_at(&latest.batches[0], 1, 0), Some(124));
+    graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    use futures::TryStreamExt as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old: Vec<RecordBatch> = runtime.block_on(snapshot.try_collect()).unwrap();
+    assert_eq!(
+        old.iter().map(|batch| batch.columns()).collect::<Vec<_>>(),
+        immediate
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>()
+    );
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let score_query =
+        "MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
+    let expected_score = graph.execute(score_query).unwrap();
+    assert_eq!(
+        expected_score
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(uuid_at(&expected_score.batches[0], 0, 0), changed_node);
+    assert_eq!(int_at(&expected_score.batches[0], 1, 0), Some(124));
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+    for path in [&source, &root.path().join("imported")] {
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .execute(score_query)
+                .unwrap()
+                .batches
+                .iter()
+                .map(|batch| batch.columns())
+                .collect::<Vec<_>>(),
+            expected_score
+                .batches
+                .iter()
+                .map(|batch| batch.columns())
+                .collect::<Vec<_>>()
+        );
+        reopened
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![CompositeGraphMutation::RemoveNodeProperty {
+                    node_uuid: changed_node,
+                    property: "score".into(),
+                }],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            reopened
+                .execute(score_query)
+                .unwrap()
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            0
+        );
+        drop(reopened);
+        let removed = GraphForge::new(path.to_str()).unwrap();
+        assert_eq!(
+            removed
+                .execute(score_query)
+                .unwrap()
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            0
+        );
+    }
+}
+
+fn configure_composite_ontology(root: &Path, source: &Path, declared_property: bool) {
+    use graphforge_api::{AdoptOntologyRequest, OntologyMode, WriteContext};
+    let ontology = root.join("routes.yaml");
+    let mut ontology_yaml = "ontology_id: https://example.test/mixed\nversion: \"1\"\nentity_types:\n  - name: NewNode\n    abstract: false\nrelation_types:\n  - name: NEW_TYPED\n    src: NewNode\n    dst: NewNode\n".to_owned();
+    if declared_property {
+        ontology_yaml.push_str("properties:\n  - owner: NewNode\n    name: score\n    type: int64\n    nullable: true\n  - owner: NEW_TYPED\n    name: weight\n    type: int64\n    nullable: true\n");
+    }
+    std::fs::write(&ontology, ontology_yaml).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .adopt_ontology(AdoptOntologyRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            path: ontology,
+            mode: OntologyMode::Advisory,
+        })
+        .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let candidate = graph.workspace_ontology_composition().unwrap().unwrap();
+    let request = graphforge_api::CompositionChangeRequest {
+        context: WriteContext {
+            operation_uuid: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        },
+        expected_project_generation_uuid: graphforge_storage::resolve_project_generation(source)
+            .unwrap()
+            .generation_uuid(),
+        expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+        candidate,
+        data_disposition: graphforge_api::CompositionDataDisposition::RequireConforming,
+    };
+    let preview = graph
+        .preview_ontology_composition_change(&request, None)
+        .unwrap();
+    assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+    graph
+        .publish_ontology_composition_change(&request, &preview, None)
+        .unwrap();
+    drop(graph);
+}
+
+#[test]
+fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation as Mutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    drop(GraphForge::new(source.to_str()).unwrap());
+    configure_composite_ontology(root.path(), &source, true);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let a = Uuid::now_v7();
+    let b = Uuid::now_v7();
+    let edge = Uuid::now_v7();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![
+                Mutation::CreateNode {
+                    node_uuid: a,
+                    label: "mixed:NewNode".into(),
+                    properties: [("score".into(), PropValue::Int(1))].into(),
+                },
+                Mutation::CreateNode {
+                    node_uuid: b,
+                    label: "mixed:NewNode".into(),
+                    properties: [("score".into(), PropValue::Int(2))].into(),
+                },
+                Mutation::CreateEdge {
+                    edge_uuid: edge,
+                    rel_type: "mixed:NEW_TYPED".into(),
+                    source_uuid: a,
+                    target_uuid: b,
+                    properties: [("weight".into(), PropValue::Int(1))].into(),
+                },
+                Mutation::SetNodeProperty {
+                    node_uuid: a,
+                    property: "score".into(),
+                    value: PropValue::Int(3),
+                },
+                Mutation::SetEdgeProperty {
+                    edge_uuid: edge,
+                    property: "weight".into(),
+                    value: PropValue::Int(4),
+                },
+            ],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let result = graph.execute("MATCH (a:`mixed:NewNode`)-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode`) RETURN a.node_uuid, b.node_uuid, a.score, r.weight, b.score").unwrap();
+    assert_eq!(
+        result
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    let batch = &result.batches[0];
+    assert_eq!(uuid_at(batch, 0, 0), a);
+    assert_eq!(uuid_at(batch, 1, 0), b);
+    assert_eq!(int_at(batch, 2, 0), Some(3));
+    assert_eq!(int_at(batch, 3, 0), Some(4));
+    assert_eq!(int_at(batch, 4, 0), Some(2));
+    drop(graph);
+    // Optimistic publication exercises the canonical lifecycle independently
+    // of the typed-edge GFDR schema repair tracked in #1218.
+    let graph = GraphForge::new_with_options(
+        source.to_str(),
+        graphforge_api::GraphForgeOptions {
+            write_mode: graphforge_api::ProjectWriteMode::OptimisticMultiWriter,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![Mutation::RemoveEdgeProperty {
+                edge_uuid: edge,
+                property: "weight".into(),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let result = graph.execute("MATCH (a:`mixed:NewNode`)-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode`) RETURN a.score, r.weight, b.score").unwrap();
+    assert_eq!(
+        result
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(int_at(&result.batches[0], 0, 0), Some(3));
+    assert_eq!(int_at(&result.batches[0], 1, 0), None);
+    assert_eq!(int_at(&result.batches[0], 2, 0), Some(2));
+}
