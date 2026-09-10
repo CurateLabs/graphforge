@@ -27,6 +27,7 @@
       "PropertyFragmentId", "PropertyInventoryOpenMetrics", "PropertyOverlayLimits",
       "PropertyOverlayMetrics", "PropertyRouteKind", "PropertySnapshotRow",
       "enumerate_property_fragments", "read_authenticated_property_snapshots_for",
+      "read_authenticated_property_presence_for_inventory",
       "read_authenticated_property_snapshots_for_inventory",
       "visit_authenticated_property_snapshots"
     ],
@@ -45,6 +46,7 @@
       "PropertyFragmentId::parse", "PropertyInventoryOpenMetrics", "PropertyOverlayLimits",
       "PropertyOverlayMetrics", "PropertyRouteKind", "PropertySnapshotRow",
       "enumerate_property_fragments", "read_authenticated_property_snapshots_for",
+      "read_authenticated_property_presence_for_inventory",
       "read_authenticated_property_snapshots_for_inventory",
       "visit_authenticated_property_snapshots"
     ],

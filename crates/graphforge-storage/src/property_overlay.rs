@@ -2430,7 +2430,22 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     ),
     GfError,
 > {
-    read_property_targets(inventory, kind, route, targets, None)
+    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    Ok((result.rows, result.metrics))
+}
+
+/// Resolve authenticated target row presence, including newest tombstones.
+/// Unlike live snapshot reads, a removed row still proves its physical owner.
+/// Uses the same schema, UUID ordering, tombstone-value and resource validation.
+pub fn read_authenticated_property_presence_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+) -> Result<(BTreeSet<[u8; 16]>, PropertyOverlayMetrics), GfError> {
+    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    let present = targets.difference(&result.unresolved).copied().collect();
+    Ok((present, result.metrics))
 }
 
 pub(crate) fn read_replay_property_targets(
@@ -2446,7 +2461,14 @@ pub(crate) fn read_replay_property_targets(
     ),
     GfError,
 > {
-    read_property_targets(inventory, kind, route, targets, Some(max_memory_bytes))
+    let result = read_property_targets(inventory, kind, route, targets, Some(max_memory_bytes))?;
+    Ok((result.rows, result.metrics))
+}
+
+struct TargetPropertyRows {
+    rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
+    unresolved: BTreeSet<[u8; 16]>,
+    metrics: PropertyOverlayMetrics,
 }
 
 #[allow(
@@ -2459,13 +2481,7 @@ fn read_property_targets(
     route: &str,
     targets: &BTreeSet<[u8; 16]>,
     replay_budget: Option<usize>,
-) -> Result<
-    (
-        BTreeMap<[u8; 16], PropertySnapshotRow>,
-        PropertyOverlayMetrics,
-    ),
-    GfError,
-> {
+) -> Result<TargetPropertyRows, GfError> {
     let mut limits = PropertyOverlayLimits::default();
     if let Some(bytes) = replay_budget {
         limits.max_buffered_bytes = bytes as u64;
@@ -2480,7 +2496,11 @@ fn read_property_targets(
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
-        return Ok((found, metrics));
+        return Ok(TargetPropertyRows {
+            rows: found,
+            unresolved,
+            metrics,
+        });
     };
     let root_path = inventory
         .root_path
@@ -2629,7 +2649,11 @@ fn read_property_targets(
         .saturating_add(metrics.authentication_bytes);
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     metrics.peak_buffered_rows = metrics.decoder_peak_rows;
-    Ok((found, metrics))
+    Ok(TargetPropertyRows {
+        rows: found,
+        unresolved,
+        metrics,
+    })
 }
 
 #[allow(
@@ -5184,6 +5208,134 @@ mod tests {
         );
         assert!(projected.validation_bytes < full.validation_bytes);
         assert_eq!(projected.per_record_seeks, 0);
+    }
+
+    #[test]
+    fn targeted_presence_retains_removed_owner_without_reviving_values() {
+        let root = TempDir::new().unwrap();
+        let mut entries = Vec::new();
+        for generation in [1, 2] {
+            let id = PropertyFragmentId {
+                generation,
+                ordinal: 0,
+            };
+            let relative = format!("edge_properties/REL/{}", id.file_name());
+            let path = root.path().join(&relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let schema = Arc::new(Schema::new_with_metadata(
+                vec![
+                    Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+                    Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
+                    Field::new("value", DataType::Int64, true),
+                ],
+                HashMap::from([
+                    (
+                        PROPERTY_OVERLAY_FORMAT_KEY.into(),
+                        PROPERTY_OVERLAY_FORMAT.into(),
+                    ),
+                    (PROPERTY_ROUTE_KEY.into(), "REL".into()),
+                    (PROPERTY_KIND_KEY.into(), "edge".into()),
+                    (PROPERTY_GENERATION_KEY.into(), generation.to_string()),
+                    (PROPERTY_ORDINAL_KEY.into(), "0".into()),
+                ]),
+            ));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(
+                        FixedSizeBinaryArray::try_from_iter([[1; 16], [2; 16]].into_iter())
+                            .unwrap(),
+                    ),
+                    Arc::new(BooleanArray::from(vec![generation == 2, false])),
+                    Arc::new(Int64Array::from(vec![(generation == 1).then_some(7), None])),
+                ],
+            )
+            .unwrap();
+            let mut writer = ArrowWriter::try_new(
+                File::create(&path).unwrap(),
+                schema,
+                Some(crate::permanent_parquet::writer_properties().build()),
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            entries.push(crate::GraphFileEntry {
+                relative_path: relative,
+                byte_length: bytes.len() as u64,
+                content_sha256: digest_hex(&Sha256::digest(&bytes)),
+                role: crate::GraphFileRole::Properties,
+            });
+        }
+        let inventory =
+            AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries.clone())
+                .unwrap();
+        let targets = BTreeSet::from([[1; 16], [2; 16], [3; 16]]);
+        let (live, live_work) = read_authenticated_property_snapshots_for_inventory(
+            &inventory,
+            PropertyRouteKind::Edge,
+            "REL",
+            &targets,
+        )
+        .unwrap();
+        let (present, work) = read_authenticated_property_presence_for_inventory(
+            &inventory,
+            PropertyRouteKind::Edge,
+            "REL",
+            &targets,
+        )
+        .unwrap();
+        assert_eq!(live.keys().copied().collect::<Vec<_>>(), vec![[2; 16]]);
+        assert_eq!(present, BTreeSet::from([[1; 16], [2; 16]]));
+        assert_eq!(
+            work, live_work,
+            "presence adds no second scan or value decode"
+        );
+        assert_eq!(work.fragments_considered, 2);
+        assert_eq!(work.tombstones, 1);
+        drop(inventory);
+        // Re-admit a deliberately malformed fixture so this checks row
+        // validation, rather than merely failing its prior digest authority.
+        let last = entries.last_mut().unwrap();
+        let path = root.path().join(&last.relative_path);
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+        let schema = Arc::clone(reader.schema());
+        let batch = reader.build().unwrap().next().unwrap().unwrap();
+        let malformed = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::clone(batch.column(0)),
+                Arc::clone(batch.column(1)),
+                Arc::new(Int64Array::from(vec![Some(9), None])),
+            ],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(
+            File::create(&path).unwrap(),
+            malformed.schema(),
+            Some(crate::permanent_parquet::writer_properties().build()),
+        )
+        .unwrap();
+        writer.write(&malformed).unwrap();
+        writer.close().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        last.byte_length = bytes.len() as u64;
+        last.content_sha256 = digest_hex(&Sha256::digest(&bytes));
+        let inventory =
+            AuthenticatedPropertyInventory::from_entries_at_root(root.path(), entries).unwrap();
+        let error = read_authenticated_property_presence_for_inventory(
+            &inventory,
+            PropertyRouteKind::Edge,
+            "REL",
+            &targets,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(
+            error
+                .to_string()
+                .contains("property tombstone carries values")
+        );
     }
 
     #[test]

@@ -994,6 +994,100 @@ fn require_capabilities(
     Ok(())
 }
 
+/// Cumulative probe I/O and serial decoder peaks. The identity containers are
+/// reported separately: decoder counters are not a bound on process memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EdgeOwnerProbeWork {
+    candidate_routes: usize,
+    target_memberships: usize,
+    resolved_targets: usize,
+    route_name_bytes: usize,
+    physical_bytes: u64,
+    authentication_bytes: u64,
+    authenticated_snapshot_bytes: u64,
+    authenticated_snapshot_peak_bytes: u64,
+    physical_rows: u64,
+    physical_blocks: u64,
+    fragments_considered: u64,
+    row_groups_considered: u64,
+    row_groups_selected: u64,
+    decoder_peak_bytes: u64,
+    decoder_page_reservation_bytes: u64,
+}
+
+/// Construction and ordinary mutation have different exploratory property
+/// owners. Probe only the candidate routes for requested identities, once per
+/// route, using authenticated row presence (including a newest tombstone).
+fn resolve_existing_edge_property_owners(
+    inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    owners: &mut BTreeMap<Uuid, String>,
+) -> Result<EdgeOwnerProbeWork, GfError> {
+    use graphforge_storage::PropertyRouteKind;
+    let mut candidates = BTreeMap::<String, BTreeSet<[u8; 16]>>::new();
+    for (uuid, route) in owners.iter() {
+        for candidate in [route.as_str(), "_exploratory"] {
+            if inventory
+                .route_schema(PropertyRouteKind::Edge, candidate)
+                .is_some()
+            {
+                if let Some(targets) = candidates.get_mut(candidate) {
+                    targets.insert(uuid.into_bytes());
+                } else {
+                    candidates.insert(candidate.to_owned(), BTreeSet::from([uuid.into_bytes()]));
+                }
+            }
+        }
+    }
+    let mut resolved = BTreeMap::new();
+    let mut total = EdgeOwnerProbeWork {
+        candidate_routes: candidates.len(),
+        target_memberships: candidates.values().map(BTreeSet::len).sum(),
+        route_name_bytes: candidates.keys().map(String::len).sum(),
+        ..EdgeOwnerProbeWork::default()
+    };
+    for (route, targets) in &candidates {
+        let (present, work) =
+            graphforge_storage::read_authenticated_property_presence_for_inventory(
+                inventory,
+                PropertyRouteKind::Edge,
+                route,
+                targets,
+            )?;
+        total.physical_bytes += work.physical_bytes;
+        total.authentication_bytes += work.authentication_bytes;
+        total.authenticated_snapshot_bytes += work.authenticated_snapshot_bytes;
+        total.authenticated_snapshot_peak_bytes = total
+            .authenticated_snapshot_peak_bytes
+            .max(work.authenticated_snapshot_peak_bytes);
+        total.physical_rows += work.physical_rows;
+        total.physical_blocks += work.physical_blocks;
+        total.fragments_considered += work.fragments_considered;
+        total.row_groups_considered += work.row_groups_considered;
+        total.row_groups_selected += work.row_groups_selected;
+        total.decoder_peak_bytes = total.decoder_peak_bytes.max(work.decoder_peak_bytes);
+        total.decoder_page_reservation_bytes = total
+            .decoder_page_reservation_bytes
+            .max(work.decoder_page_reservation_bytes);
+        for uuid in present {
+            if resolved
+                .insert(Uuid::from_bytes(uuid), route.as_str())
+                .is_some()
+            {
+                return Err(GfError::Storage(
+                    "composite edge property owner is ambiguous".into(),
+                ));
+            }
+        }
+    }
+    // No property row means ordinary writer ownership, already derived from
+    // topology. Same-request creations are added by the caller afterwards.
+    total.resolved_targets = resolved.len();
+    for (uuid, route) in resolved {
+        owners.insert(uuid, route.to_owned());
+    }
+    Ok(total)
+}
+
 #[allow(clippy::too_many_lines)]
 fn build_validation_snapshot(
     graph: &GraphForge,
@@ -1137,6 +1231,10 @@ fn build_validation_snapshot(
             }
         }
     }
+    resolve_existing_edge_property_owners(
+        &graph.property_inventory_for_session(),
+        &mut routes.edges,
+    )?;
     if parent.capability("provenance")?.is_some() {
         let ledger = crate::provenance::read_ledger(parent)?;
         snapshot.provenance = ledger
@@ -1922,6 +2020,157 @@ mod tests {
                 capability_version: 1,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn edge_owner_probe_bounds_selected_routes_and_refuses_ambiguity() {
+        let graph = GraphForge::new(None).unwrap();
+        let mut reference_work = None;
+        for unrelated_rows in [33, 4097] {
+            let root = TempDir::new().unwrap();
+            let mut writer =
+                graphforge_storage::GraphWriter::open_at(root.path(), OntologyMode::Exploratory, 1)
+                    .unwrap();
+            for row in 0..129_u128 {
+                let route = if row % 2 == 0 { "_exploratory" } else { "REL0" };
+                writer
+                    .set_edge_properties(
+                        &Uuid::from_u128(row + 1),
+                        Some(route),
+                        HashMap::from([("weight".into(), IrLiteral::Int(row as i64))]),
+                    )
+                    .unwrap();
+            }
+            for row in 0..unrelated_rows {
+                writer
+                    .set_edge_properties(
+                        &Uuid::from_u128(1000 + row),
+                        Some("Unrelated"),
+                        HashMap::from([("text".into(), IrLiteral::Str("unrelated".into()))]),
+                    )
+                    .unwrap();
+            }
+            writer.flush().unwrap();
+            let inventory =
+                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                    &graph.resolved_generation,
+                    root.path(),
+                    graphforge_storage::capture_graph_files(root.path())
+                        .unwrap()
+                        .0,
+                )
+                .unwrap();
+            for targets in [1, 16, 129_u128] {
+                let mut owners = (1..=targets)
+                    .map(|id| (Uuid::from_u128(id), "REL0".to_owned()))
+                    .collect();
+                let work = resolve_existing_edge_property_owners(&inventory, &mut owners).unwrap();
+                for (uuid, owner) in &owners {
+                    assert_eq!(
+                        owner,
+                        if (uuid.as_u128() - 1) % 2 == 0 {
+                            "_exploratory"
+                        } else {
+                            "REL0"
+                        }
+                    );
+                }
+                assert_eq!(work.candidate_routes, 2);
+                assert_eq!(work.target_memberships, 2 * targets as usize);
+                assert_eq!(work.resolved_targets, targets as usize);
+                assert_eq!(work.route_name_bytes, "_exploratoryREL0".len());
+                assert_eq!(work.fragments_considered, 2);
+                assert_eq!(work.row_groups_considered, 2);
+                assert!(work.physical_bytes <= 64 * 1024, "{work:?}");
+                assert!(work.authenticated_snapshot_bytes <= 16 * 1024, "{work:?}");
+                assert!(work.decoder_peak_bytes <= 32 * 1024, "{work:?}");
+                eprintln!("owner-probe unrelated={unrelated_rows} targets={targets}: {work:?}");
+                if targets == 129 {
+                    if let Some(reference) = reference_work {
+                        assert_eq!(
+                            work, reference,
+                            "unrelated route growth must add no probe I/O"
+                        );
+                    } else {
+                        reference_work = Some(work);
+                    }
+                }
+            }
+            drop(inventory);
+            for sequence in 2..=4 {
+                let mut writer = graphforge_storage::GraphWriter::open_at(
+                    root.path(),
+                    OntologyMode::Exploratory,
+                    sequence,
+                )
+                .unwrap();
+                for row in 0..129_u128 {
+                    let route = if row % 2 == 0 { "_exploratory" } else { "REL0" };
+                    writer
+                        .set_edge_properties(
+                            &Uuid::from_u128(row + 1),
+                            Some(route),
+                            HashMap::from([("weight".into(), IrLiteral::Int(sequence))]),
+                        )
+                        .unwrap();
+                }
+                writer.flush().unwrap();
+            }
+            let inventory =
+                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                    &graph.resolved_generation,
+                    root.path(),
+                    graphforge_storage::capture_graph_files(root.path())
+                        .unwrap()
+                        .0,
+                )
+                .unwrap();
+            let mut owners = (1..=129)
+                .map(|id| (Uuid::from_u128(id), "REL0".to_owned()))
+                .collect();
+            let work = resolve_existing_edge_property_owners(&inventory, &mut owners).unwrap();
+            assert_eq!(work.fragments_considered, 8);
+            assert_eq!(work.row_groups_considered, 8);
+            assert_eq!(work.resolved_targets, 129);
+            assert!(work.physical_bytes <= 256 * 1024, "{work:?}");
+            assert!(work.authenticated_snapshot_bytes <= 64 * 1024, "{work:?}");
+            assert!(
+                work.authenticated_snapshot_peak_bytes <= 16 * 1024,
+                "{work:?}"
+            );
+            assert!(work.decoder_peak_bytes <= 32 * 1024, "{work:?}");
+            eprintln!("owner-probe unrelated={unrelated_rows} fragments=8: {work:?}");
+            drop(inventory);
+
+            let mut writer =
+                graphforge_storage::GraphWriter::open_at(root.path(), OntologyMode::Exploratory, 2)
+                    .unwrap();
+            writer
+                .set_edge_properties(&Uuid::from_u128(1), Some("REL0"), HashMap::new())
+                .unwrap();
+            writer.flush().unwrap();
+            let inventory =
+                graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
+                    &graph.resolved_generation,
+                    root.path(),
+                    graphforge_storage::capture_graph_files(root.path())
+                        .unwrap()
+                        .0,
+                )
+                .unwrap();
+            let mut owners = BTreeMap::from([(Uuid::from_u128(1), "REL0".to_owned())]);
+            let before = owners.clone();
+            assert!(
+                resolve_existing_edge_property_owners(&inventory, &mut owners)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("composite edge property owner is ambiguous")
+            );
+            assert_eq!(
+                owners, before,
+                "refusal must not install a partial resolution"
+            );
+        }
     }
 
     #[test]

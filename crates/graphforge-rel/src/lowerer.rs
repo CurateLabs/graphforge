@@ -3666,20 +3666,26 @@ fn lower_var_len_expand(
     // the `edge_uuid` key + any name colliding with the struct's four topology
     // fields (`edge_uuid`/`src_uuid`/`dst_uuid`/`rel_type`). A wildcard (`*`)
     // has no single property file, so it unions EVERY relation's fields (#1023)
-    // — sorted stem order for determinism, first occurrence of a name wins,
+    // — sorted stem order for determinism, first concrete type of a name wins,
     // forced nullable since an edge from a relation without the column is NULL
     // (the exec coalesces each edge's values from its own relation's file).
     let topology_names = ["edge_uuid", "src_uuid", "dst_uuid", "rel_type"];
     let prop_fields: Vec<datafusion::arrow::datatypes::Field> = if rel_name == "*" {
-        let mut seen = std::collections::HashSet::new();
-        let mut fields = Vec::new();
+        let mut positions = std::collections::HashMap::<String, usize>::new();
+        let mut fields: Vec<datafusion::arrow::datatypes::Field> = Vec::new();
         for stem in dir_path.edge_property_stems.clone() {
             let prop_table = edge_property_schema(dir_path, &stem);
             for f in prop_table.fields() {
                 if topology_names.contains(&f.name().as_str()) {
                     continue;
                 }
-                if seen.insert(f.name().clone()) {
+                if let Some(&position) = positions.get(f.name()) {
+                    if fields[position].data_type() == &datafusion::arrow::datatypes::DataType::Null
+                    {
+                        fields[position] = f.as_ref().clone().with_nullable(true);
+                    }
+                } else {
+                    positions.insert(f.name().clone(), fields.len());
                     fields.push(f.as_ref().clone().with_nullable(true));
                 }
             }
@@ -4045,7 +4051,7 @@ fn try_lower_provider_expand(
         .map_or(dst, |_| VarId(u32::MAX.saturating_sub(dst.0)));
 
     // Edge property fields, discovered exactly like `join_edge_properties`:
-    // wildcard traversal unions every relation's fields, first occurrence wins.
+    // wildcard traversal unions every relation's fields, first concrete type wins.
     let edge_schema = if rel_ty.is_none() || matches!(mode, OntologyMode::Exploratory) {
         &*EXPLORATORY_EDGE_SCHEMA
     } else {
@@ -4060,16 +4066,22 @@ fn try_lower_provider_expand(
         vec![rel_name.clone()]
     };
     stems.sort();
-    let mut seen = HashSet::new();
-    let mut edge_prop_fields = Vec::new();
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+    let mut edge_prop_fields: Vec<Arc<datafusion::arrow::datatypes::Field>> = Vec::new();
     for stem in stems {
         let prop_table = edge_property_schema(dir_path, &stem);
         for field in prop_table.fields() {
-            if field.name() != "edge_uuid"
-                && !base_names.contains(field.name().as_str())
-                && seen.insert(field.name().clone())
-            {
-                edge_prop_fields.push(Arc::clone(field));
+            if field.name() != "edge_uuid" && !base_names.contains(field.name().as_str()) {
+                if let Some(&position) = positions.get(field.name()) {
+                    if edge_prop_fields[position].data_type()
+                        == &datafusion::arrow::datatypes::DataType::Null
+                    {
+                        edge_prop_fields[position] = Arc::clone(field);
+                    }
+                } else {
+                    positions.insert(field.name().clone(), edge_prop_fields.len());
+                    edge_prop_fields.push(Arc::clone(field));
+                }
             }
         }
     }
