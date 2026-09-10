@@ -110,6 +110,8 @@ mod multi_ontology;
 mod mutation_transaction;
 #[cfg(test)]
 mod mutation_transaction_fault_tests;
+#[cfg(test)]
+mod permanent_parquet_test_support;
 pub use multi_ontology::{
     ActivationProfileChangeRequest, BridgeAdoptionRequest, BridgeCandidate, BridgeDeleteRequest,
     BridgeUpdateRequest, CompositionValidationReceipt, ModuleAdoptionRequest, ModuleCandidate,

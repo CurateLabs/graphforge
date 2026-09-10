@@ -280,8 +280,12 @@ fn participant(
 }
 
 fn write_parquet(batch: &RecordBatch, schema: &SchemaRef) -> Result<Vec<u8>, GfError> {
-    let mut writer = ArrowWriter::try_new(Vec::new(), Arc::clone(schema), None)
-        .map_err(|error| GfError::Storage(error.to_string()))?;
+    let mut writer = ArrowWriter::try_new(
+        Vec::new(),
+        Arc::clone(schema),
+        Some(graphforge_storage::permanent_parquet::writer_properties().build()),
+    )
+    .map_err(|error| GfError::Storage(error.to_string()))?;
     writer
         .write(batch)
         .map_err(|error| GfError::Storage(error.to_string()))?;
@@ -551,6 +555,8 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        crate::permanent_parquet_test_support::assert_participants(root.path(), "provenance");
+        crate::permanent_parquet_test_support::assert_graph(&generation);
         let ledger = read_ledger(&generation).unwrap();
         assert_eq!(ledger.events.len(), 1);
         assert_eq!(ledger.events[0].event_kind, EventKind::CreateNode);

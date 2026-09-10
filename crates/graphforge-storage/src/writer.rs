@@ -163,15 +163,12 @@ fn replay_resource_limit(message: impl Into<String>) -> GfError {
 }
 
 fn replay_writer_properties(max_batch_rows: usize) -> parquet::file::properties::WriterProperties {
-    parquet::file::properties::WriterProperties::builder()
+    crate::permanent_parquet::writer_properties()
         .set_max_row_group_row_count(Some(max_batch_rows))
         .set_dictionary_enabled(false)
-        .set_compression(parquet::basic::Compression::UNCOMPRESSED)
         .build()
 }
 
-const REPLAY_WRITER_FIXED_BYTES: usize = 256 * 1024;
-const REPLAY_COLUMN_CHUNK_METADATA_BYTES: usize = 512;
 const REPLAY_NODE_FIXED_ROW_BYTES: usize = 128;
 
 fn parquet_reader_metadata_reservation(path: &Path) -> Result<usize, GfError> {
@@ -197,6 +194,38 @@ fn parquet_reader_metadata_reservation(path: &Path) -> Result<usize, GfError> {
         .ok_or_else(|| replay_resource_limit("Parquet reader metadata reservation overflow"))
 }
 
+fn replay_reader_reservation(
+    path: &Path,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<usize, GfError> {
+    let footer = parquet_reader_metadata_reservation(path)?;
+    if footer > limits.max_replay_memory_bytes {
+        return Err(replay_resource_limit(
+            "Parquet reader footer exceeds replay budget",
+        ));
+    }
+    let file = fs::File::open(path).map_err(|error| io_err(&error))?;
+    let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        file.try_clone().map_err(|error| io_err(&error))?,
+    )
+    .map_err(pq_err)?;
+    let metadata_bytes = builder.metadata().memory_size();
+    let available = limits
+        .max_replay_memory_bytes
+        .checked_sub(metadata_bytes)
+        .ok_or_else(|| replay_resource_limit("Parquet reader metadata exceeds replay budget"))?;
+    let decoder = crate::property_overlay::replay_parquet_reader_reservation(
+        builder.metadata(),
+        &file,
+        available,
+        limits.max_batch_rows,
+    )?;
+    metadata_bytes
+        .checked_add(decoder)
+        .map(|bytes| bytes.max(footer))
+        .ok_or_else(|| replay_resource_limit("Parquet reader reservation overflow"))
+}
+
 fn replay_writer_reservation(
     schema: &Schema,
     maximum_rows: usize,
@@ -204,21 +233,24 @@ fn replay_writer_reservation(
     max_batch_rows: usize,
 ) -> Result<usize, GfError> {
     let groups = maximum_rows.div_ceil(max_batch_rows);
-    let fields = schema.fields().len();
-    let schema_bytes = schema.fields().iter().try_fold(0_usize, |sum, field| {
-        sum.checked_add(field.name().len().saturating_add(128))
-            .ok_or_else(|| replay_resource_limit("graph delta replay schema memory overflow"))
-    })?;
-    let metadata_bytes = groups
-        .checked_mul(fields)
-        .and_then(|chunks| chunks.checked_mul(REPLAY_COLUMN_CHUNK_METADATA_BYTES))
-        .ok_or_else(|| replay_resource_limit("graph delta replay metadata memory overflow"))?;
+    let structure_bytes = crate::permanent_parquet::replay_writer_structure_bytes(schema)?;
+    let metadata_bytes = crate::permanent_parquet::replay_metadata_bytes(
+        schema,
+        groups,
+        max_batch_rows.min(maximum_rows),
+        maximum_row_bytes,
+    )?;
     let active_rows = max_batch_rows.min(maximum_rows);
     let active_buffer_bytes = maximum_row_bytes
         .checked_mul(active_rows)
         .ok_or_else(|| replay_resource_limit("graph delta replay active buffer overflow"))?;
-    REPLAY_WRITER_FIXED_BYTES
-        .checked_add(schema_bytes)
+    let encoder_bytes = if maximum_row_bytes == 0 {
+        0 // Property chunks reserve their actual aggregate snapshot bytes below.
+    } else {
+        crate::permanent_parquet::replay_encoder_buffers(schema, active_buffer_bytes, active_rows)?
+    };
+    structure_bytes
+        .checked_add(encoder_bytes)
         .and_then(|bytes| bytes.checked_add(metadata_bytes))
         .and_then(|bytes| bytes.checked_add(active_buffer_bytes))
         .ok_or_else(|| replay_resource_limit("graph delta replay writer reservation overflow"))
@@ -237,7 +269,7 @@ fn admit_replay_writer(
         .is_none_or(|bytes| bytes > limit)
     {
         return Err(replay_resource_limit(format!(
-            "graph delta replay {context} writer memory bound exceeded"
+            "graph delta replay {context} writer memory bound exceeded: overlay={overlay_bytes} authority={authority_bytes} writer={reservation_bytes} limit={limit}"
         )));
     }
     Ok(())
@@ -291,7 +323,7 @@ pub(crate) fn write_replay_overlay_streaming(
     target: &Path,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
-) -> Result<(), GfError> {
+) -> Result<ReplayNodeSpoolEvidence, GfError> {
     let mut target_routes = crate::route_component::owned::admit_owned_workspace(target)?;
     let property_inventory = crate::AuthenticatedPropertyInventory::from_inventory_at_root(
         source,
@@ -335,7 +367,216 @@ pub(crate) fn write_replay_overlay_streaming(
         &target_routes,
         properties_changed,
         node_properties_changed,
-    )
+    )?;
+    Ok(node_scan.spool_evidence)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ReplayNodeSpoolEvidence {
+    pub(crate) bytes: u64,
+    pub(crate) allocated_bytes: u64,
+}
+
+// Only the low-budget flat-node replay strategy uses this private stream. One
+// unlinked file exists at a time; it is never a graph payload or recovery input.
+const REPLAY_NODE_SPOOL_LIMIT: u64 = 64 * 1024 * 1024;
+
+struct ReplayNodeSpoolSink {
+    file: fs::File,
+    bytes: u64,
+    limit: u64,
+}
+
+impl std::io::Write for ReplayNodeSpoolSink {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self
+            .bytes
+            .checked_add(buffer.len() as u64)
+            .is_none_or(|end| end > self.limit)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "replay node spool byte ceiling",
+            ));
+        }
+        let written = std::io::Write::write(&mut self.file, buffer)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut self.file)
+    }
+}
+
+fn replay_spool_error(error: arrow::error::ArrowError) -> GfError {
+    if matches!(&error, arrow::error::ArrowError::IoError(_, source) if source.kind() == std::io::ErrorKind::FileTooLarge)
+    {
+        replay_resource_limit("replay node spool exceeds temporary-disk byte ceiling")
+    } else {
+        pq_err(error)
+    }
+}
+
+enum ReplayNodeInput {
+    Direct(parquet::arrow::arrow_reader::ParquetRecordBatchReader),
+    Spool(arrow::ipc::reader::StreamReader<fs::File>),
+}
+
+impl Iterator for ReplayNodeInput {
+    type Item = Result<RecordBatch, arrow::error::ArrowError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Direct(reader) => reader.next(),
+            Self::Spool(reader) => reader.next(),
+        }
+    }
+}
+
+fn spool_replay_nodes(
+    builder: parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<fs::File>,
+    target: &Path,
+    expected_rows: usize,
+    batch_rows: usize,
+    byte_limit: u64,
+) -> Result<ReplayNodeInput, GfError> {
+    use std::io::{Seek, SeekFrom};
+    let schema = builder.schema().clone();
+    let source = builder
+        .with_batch_size(batch_rows)
+        .build()
+        .map_err(pq_err)?;
+    let sink = ReplayNodeSpoolSink {
+        file: tempfile::tempfile_in(target).map_err(|error| io_err(&error))?,
+        bytes: 0,
+        limit: byte_limit,
+    };
+    let mut writer =
+        arrow::ipc::writer::StreamWriter::try_new(sink, &schema).map_err(replay_spool_error)?;
+    let mut rows = 0_usize;
+    for batch in source {
+        let batch = batch.map_err(pq_err)?;
+        if batch.num_rows() > batch_rows || batch.schema() != schema {
+            return Err(pq_err(
+                "replay node spool schema or batch authority differs",
+            ));
+        }
+        rows = rows
+            .checked_add(batch.num_rows())
+            .ok_or_else(|| replay_resource_limit("replay node spool row overflow"))?;
+        if rows > expected_rows {
+            return Err(pq_err("replay node spool row authority differs"));
+        }
+        writer.write(&batch).map_err(replay_spool_error)?;
+    }
+    if rows != expected_rows {
+        return Err(pq_err("replay node spool row authority differs"));
+    }
+    // The Parquet iterator and all decoder contexts have dropped before the
+    // returned private IPC reader can overlap the permanent Parquet writer.
+    let mut sink = writer.into_inner().map_err(replay_spool_error)?;
+    sink.file
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| io_err(&error))?;
+    let reader = arrow::ipc::reader::StreamReader::try_new(sink.file, None).map_err(pq_err)?;
+    if reader.schema() != schema {
+        return Err(pq_err("replay node spool schema differs"));
+    }
+    Ok(ReplayNodeInput::Spool(reader))
+}
+
+fn replay_node_input(
+    node_path: &Path,
+    target: &Path,
+    node_scan: &ReplayNodeAuthority,
+    overlay_bytes: usize,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    node_writer_reservation: usize,
+) -> Result<(Option<ReplayNodeInput>, ReplayNodeSpoolEvidence), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let combined = overlay_bytes
+        .saturating_add(node_scan.estimated_memory())
+        .saturating_add(node_scan.reader_reservation_bytes)
+        .saturating_add(node_writer_reservation);
+    let use_spool = node_path.exists() && combined > limits.max_replay_memory_bytes;
+    let reader = if use_spool {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            fs::File::open(node_path).map_err(|error| io_err(&error))?,
+        )
+        .map_err(pq_err)?;
+        let active_bytes = node_scan
+            .maximum_row_bytes
+            .saturating_mul(limits.max_batch_rows.min(node_scan.base_rows));
+        let ipc_reservation = 64_usize
+            .saturating_mul(1024)
+            .saturating_add(active_bytes.saturating_mul(3))
+            .saturating_add(crate::permanent_parquet::replay_schema_bytes(
+                builder.schema(),
+            )?);
+        // Select both admitted phases before allocating the stream. No retry
+        // after a writer failure, and no uncompressed permanent-output mode.
+        admit_replay_writer(
+            overlay_bytes,
+            node_scan.estimated_memory(),
+            node_scan
+                .reader_reservation_bytes
+                .saturating_add(ipc_reservation),
+            limits.max_replay_memory_bytes,
+            "topology node spool decoder",
+        )?;
+        admit_replay_writer(
+            overlay_bytes,
+            node_scan.estimated_memory(),
+            node_writer_reservation.saturating_add(ipc_reservation),
+            limits.max_replay_memory_bytes,
+            "topology node",
+        )?;
+        Some(spool_replay_nodes(
+            builder,
+            target,
+            node_scan.base_rows,
+            limits.max_batch_rows,
+            REPLAY_NODE_SPOOL_LIMIT,
+        )?)
+    } else {
+        admit_replay_writer(
+            overlay_bytes,
+            node_scan
+                .estimated_memory()
+                .saturating_add(node_scan.reader_reservation_bytes),
+            node_writer_reservation,
+            limits.max_replay_memory_bytes,
+            "topology node",
+        )?;
+        if node_path.exists() {
+            Some(ReplayNodeInput::Direct(
+                ParquetRecordBatchReaderBuilder::try_new(
+                    fs::File::open(node_path).map_err(|error| io_err(&error))?,
+                )
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?,
+            ))
+        } else {
+            None
+        }
+    };
+    let spool_evidence = if let Some(ReplayNodeInput::Spool(reader)) = reader.as_ref() {
+        ReplayNodeSpoolEvidence {
+            bytes: reader
+                .get_ref()
+                .metadata()
+                .map_err(|error| io_err(&error))?
+                .len(),
+            allocated_bytes: graphforge_filesystem::file_space_usage(reader.get_ref())
+                .map_err(|error| io_err(&error))?
+                .allocated_bytes,
+        }
+    } else {
+        ReplayNodeSpoolEvidence::default()
+    };
+    Ok((reader, spool_evidence))
 }
 
 fn stream_replay_nodes(
@@ -344,10 +585,9 @@ fn stream_replay_nodes(
     overlay: &crate::graph_delta_journal::ReplayOverlay,
     limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
 ) -> Result<ReplayNodeAuthority, GfError> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let node_path = source.join("topology/nodes.parquet");
     let output_node_path = target.join("topology/nodes.parquet");
-    let node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
+    let mut node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
     fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
         .map_err(|error| io_err(&error))?;
     let maximum_node_rows = node_scan.base_rows.saturating_add(overlay.nodes.len());
@@ -357,30 +597,15 @@ fn stream_replay_nodes(
         node_scan.maximum_row_bytes,
         limits.max_batch_rows,
     )?;
-    admit_replay_writer(
+    let (reader, spool_evidence) = replay_node_input(
+        &node_path,
+        target,
+        &node_scan,
         overlay.estimated_memory(),
-        node_scan.estimated_memory(),
+        limits,
         node_writer_reservation,
-        limits.max_replay_memory_bytes,
-        "topology node",
     )?;
-    let reader = if node_path.exists() {
-        let node_file = fs::File::open(&node_path).map_err(|error| {
-            GfError::Storage(format!(
-                "open canonical replay nodes at {}: {error}",
-                node_path.display()
-            ))
-        })?;
-        Some(
-            ParquetRecordBatchReaderBuilder::try_new(node_file)
-                .map_err(pq_err)?
-                .with_batch_size(limits.max_batch_rows)
-                .build()
-                .map_err(pq_err)?,
-        )
-    } else {
-        None
-    };
+    node_scan.spool_evidence = spool_evidence;
     let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
     let mut writer = parquet::arrow::ArrowWriter::try_new(
         output,
@@ -445,7 +670,8 @@ struct ReplayNodeAuthority {
     deleted_nodes: HashSet<String>,
     base_rows: usize,
     maximum_row_bytes: usize,
-    reader_metadata_bytes: usize,
+    reader_reservation_bytes: usize,
+    spool_evidence: ReplayNodeSpoolEvidence,
 }
 
 impl ReplayNodeAuthority {
@@ -460,7 +686,6 @@ impl ReplayNodeAuthority {
             .saturating_add(self.endpoint_ids.iter().fold(0_usize, |sum, (uuid, _)| {
                 sum.saturating_add(80).saturating_add(uuid.len())
             }))
-            .saturating_add(self.reader_metadata_bytes)
     }
 }
 
@@ -507,9 +732,18 @@ fn scan_replay_node_authority(
                 })
                 .max()
                 .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
-            reader_metadata_bytes: 0,
+            reader_reservation_bytes: 0,
+            spool_evidence: ReplayNodeSpoolEvidence::default(),
         });
     }
+    let reader_reservation = replay_reader_reservation(node_path, limits)?;
+    admit_replay_writer(
+        overlay.estimated_memory(),
+        0,
+        reader_reservation,
+        limits.max_replay_memory_bytes,
+        "topology node decoder",
+    )?;
     let input = fs::File::open(node_path).map_err(|error| {
         GfError::Storage(format!(
             "scan canonical replay nodes at {}: {error}",
@@ -631,7 +865,8 @@ fn scan_replay_node_authority(
                 .max()
                 .unwrap_or(REPLAY_NODE_FIXED_ROW_BYTES),
         ),
-        reader_metadata_bytes: parquet_reader_metadata_reservation(node_path)?,
+        reader_reservation_bytes: reader_reservation,
+        spool_evidence: ReplayNodeSpoolEvidence::default(),
     })
 }
 
@@ -743,6 +978,21 @@ fn stream_replay_edges(
             TYPED_EDGE_SCHEMA.clone()
         };
         for (_, source_path) in &source_paths {
+            let reader_reservation = replay_reader_reservation(source_path, limits)?;
+            admit_replay_writer(
+                overlay.estimated_memory(),
+                nodes
+                    .estimated_memory()
+                    .saturating_add(relation_authority_bytes)
+                    .saturating_add(
+                        existing_overlay
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<&str>() + 8),
+                    ),
+                reader_reservation,
+                limits.max_replay_memory_bytes,
+                "topology edge decoder",
+            )?;
             let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(pq_err)?;
             if builder.schema().fields() != expected_schema.fields()
@@ -851,7 +1101,7 @@ fn stream_replay_edges(
                 source_paths
                     .iter()
                     .try_fold(0_usize, |maximum, (_, path)| {
-                        Ok::<_, GfError>(maximum.max(parquet_reader_metadata_reservation(path)?))
+                        Ok::<_, GfError>(maximum.max(replay_reader_reservation(path, limits)?))
                     })?,
             );
         admit_replay_writer(
@@ -1087,7 +1337,38 @@ fn stream_replay_property_fragments(
     Ok(())
 }
 
+fn replay_property_resource_schema(logical: &Schema) -> Schema {
+    let mut fields = logical
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    fields.insert(
+        1,
+        Field::new(
+            crate::property_overlay::PROPERTY_TOMBSTONE_FIELD,
+            DataType::Boolean,
+            false,
+        ),
+    );
+    Schema::new_with_metadata(fields, logical.metadata().clone())
+}
+
+fn parse_replay_property_uuids(
+    names: &[&str],
+) -> Result<std::collections::BTreeSet<[u8; 16]>, GfError> {
+    names
+        .iter()
+        .map(|uuid| {
+            uuid::Uuid::parse_str(uuid)
+                .map(uuid::Uuid::into_bytes)
+                .map_err(pq_err)
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+}
+
 struct ReplayPropertyFragmentWriter {
+    extra_metadata_bytes: usize,
     logical_schema: Schema,
     physical_schema: SchemaRef,
     writer: parquet::arrow::ArrowWriter<fs::File>,
@@ -1138,7 +1419,11 @@ impl ReplayPropertyRouteContext<'_> {
         names: &[&str],
         fragment: &mut Option<ReplayPropertyFragmentWriter>,
     ) -> Result<(), GfError> {
-        let (before, rows) = self.property_rows(names)?;
+        let retained_writer = fragment.as_ref().map_or(0, |writer| {
+            self.writer_reservation_bytes
+                .saturating_add(writer.extra_metadata_bytes)
+        });
+        let (before, rows) = self.property_rows(names, retained_writer)?;
         drop(before);
         if rows.is_empty() {
             return Ok(());
@@ -1149,9 +1434,41 @@ impl ReplayPropertyRouteContext<'_> {
             sum.checked_add(charge.saturating_mul(3))
                 .ok_or_else(|| replay_resource_limit("property replay output memory overflow"))
         })?;
+        let physical_schema = replay_property_resource_schema(&self.logical_schema);
+        let encoder_bytes = crate::permanent_parquet::replay_encoder_buffers(
+            &physical_schema,
+            output_bytes / 3,
+            rows.len(),
+        )?;
+        let maximum_row_bytes = usize::try_from(
+            rows.iter()
+                .map(crate::property_overlay::snapshot_charge)
+                .max()
+                .unwrap_or(0),
+        )
+        .map_err(|_| replay_resource_limit("property replay row byte bound overflows"))?;
+        let chunk_metadata = crate::permanent_parquet::replay_metadata_bytes(
+            &physical_schema,
+            1,
+            rows.len(),
+            maximum_row_bytes,
+        )?;
+        let base_chunk_metadata = crate::permanent_parquet::replay_metadata_bytes(
+            &physical_schema,
+            1,
+            self.limits.max_batch_rows,
+            0,
+        )?;
+        let extra_metadata_bytes = fragment
+            .as_ref()
+            .map_or(0, |writer| writer.extra_metadata_bytes)
+            .checked_add(chunk_metadata.saturating_sub(base_chunk_metadata))
+            .ok_or_else(|| replay_resource_limit("property replay metadata overflow"))?;
         if self
             .overlay_bytes
             .checked_add(self.retained_target_bytes)
+            .and_then(|bytes| bytes.checked_add(encoder_bytes))
+            .and_then(|bytes| bytes.checked_add(extra_metadata_bytes))
             .and_then(|bytes| bytes.checked_add(output_bytes))
             .and_then(|bytes| bytes.checked_add(self.writer_reservation_bytes))
             .is_none_or(|bytes| bytes > self.limits.max_replay_memory_bytes)
@@ -1161,6 +1478,7 @@ impl ReplayPropertyRouteContext<'_> {
             ));
         }
         let output = self.fragment_writer(fragment)?;
+        output.extra_metadata_bytes = extra_metadata_bytes;
         for row in rows {
             write_replay_property_snapshot(
                 &mut output.writer,
@@ -1173,22 +1491,26 @@ impl ReplayPropertyRouteContext<'_> {
         Ok(())
     }
 
-    fn property_rows(&self, names: &[&str]) -> Result<ReplayPropertyRows, GfError> {
-        let targets = names
-            .iter()
-            .map(|uuid| {
-                uuid::Uuid::parse_str(uuid)
-                    .map(uuid::Uuid::into_bytes)
-                    .map_err(pq_err)
-            })
-            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-        let (mut baseline, _) =
-            crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
-                self.inventory,
-                self.kind,
-                self.route,
-                &targets,
-            )?;
+    fn property_rows(
+        &self,
+        names: &[&str],
+        retained_writer_bytes: usize,
+    ) -> Result<ReplayPropertyRows, GfError> {
+        let targets = parse_replay_property_uuids(names)?;
+        let (mut baseline, _) = crate::property_overlay::read_replay_property_targets(
+            self.inventory,
+            self.kind,
+            self.route,
+            &targets,
+            self.limits
+                .max_replay_memory_bytes
+                .checked_sub(self.overlay_bytes)
+                .and_then(|bytes| bytes.checked_sub(self.retained_target_bytes))
+                .and_then(|bytes| bytes.checked_sub(retained_writer_bytes))
+                .ok_or_else(|| {
+                    replay_resource_limit("property replay decoder has no available budget")
+                })?,
+        )?;
         let mut before = BTreeMap::new();
         let baseline_bytes = baseline.values().fold(0_usize, |sum, row| {
             sum.saturating_add(
@@ -1199,6 +1521,7 @@ impl ReplayPropertyRouteContext<'_> {
         let resident_before_output = self
             .overlay_bytes
             .checked_add(self.retained_target_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_writer_bytes))
             .and_then(|bytes| bytes.checked_add(baseline_bytes))
             .ok_or_else(|| replay_resource_limit("property replay decoded memory overflow"))?;
         if resident_before_output > self.limits.max_replay_memory_bytes {
@@ -1337,6 +1660,7 @@ fn open_replay_property_fragment(
     )
     .map_err(pq_err)?;
     Ok(ReplayPropertyFragmentWriter {
+        extra_metadata_bytes: 0,
         logical_schema: logical_schema.as_ref().clone(),
         physical_schema,
         writer,
@@ -1420,7 +1744,7 @@ fn stream_replay_property_route_with_table(
     let inferred = Arc::clone(&context.logical_schema);
     let mut authority = authority;
     for names in target_names.chunks(limits.max_batch_rows) {
-        let (before, after) = context.property_rows(names)?;
+        let (before, after) = context.property_rows(names, 0)?;
         authority = Some(crate::property_overlay::update_live_route_schema(
             kind,
             route,
@@ -1433,7 +1757,7 @@ fn stream_replay_property_route_with_table(
     context.logical_schema =
         authority.ok_or_else(|| pq_err("property replay route has no touched schema authority"))?;
     context.writer_reservation_bytes = replay_writer_reservation(
-        context.logical_schema.as_ref(),
+        &replay_property_resource_schema(&context.logical_schema),
         target_names.len(),
         0,
         limits.max_batch_rows,
@@ -6694,6 +7018,63 @@ mod tests {
     }
 
     #[test]
+    fn replay_node_spool_has_exact_values_byte_boundary_and_private_cleanup() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.parquet");
+        let rows = (0..7)
+            .map(|index| crate::graph_delta_journal::ReplayNodeRow {
+                node_uuid: new_v7().to_string(),
+                node_id: u64::MAX - 7 + index,
+                primary_type: PrimaryEntityTypeId::decode(1).unwrap(),
+                type_ids: (1..=index + 1)
+                    .map(|id| EntityTypeId::decode(id as u32).unwrap())
+                    .collect(),
+                created_at_micros: 1_700_000_000_000_000 + index as i64,
+                updated_at_micros: 1_700_000_000_000_010 + index as i64,
+            })
+            .collect::<Vec<_>>();
+        let expected = replay_node_batch(&rows.iter().collect::<Vec<_>>()).unwrap();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(
+            fs::File::create(&source).unwrap(),
+            expected.schema(),
+            Some(crate::permanent_parquet::writer_properties().build()),
+        )
+        .unwrap();
+        writer.write(&expected).unwrap();
+        writer.close().unwrap();
+        let original = fs::read(&source).unwrap();
+        let open =
+            || ParquetRecordBatchReaderBuilder::try_new(fs::File::open(&source).unwrap()).unwrap();
+        let mut stream =
+            spool_replay_nodes(open(), directory.path(), 7, 2, REPLAY_NODE_SPOOL_LIMIT).unwrap();
+        let ReplayNodeInput::Spool(reader) = &stream else {
+            panic!("private stream expected")
+        };
+        let required = reader.get_ref().metadata().unwrap().len();
+        assert!(required < 16 * 1024);
+        #[cfg(unix)]
+        assert_eq!(
+            directory.path().read_dir().unwrap().count(),
+            1,
+            "Unix spool must have no pathname"
+        );
+        let batches = stream.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() <= 2));
+        assert_eq!(
+            arrow::compute::concat_batches(&expected.schema(), &batches).unwrap(),
+            expected
+        );
+        drop(stream);
+        drop(spool_replay_nodes(open(), directory.path(), 7, 2, required).unwrap());
+        let rejected = spool_replay_nodes(open(), directory.path(), 7, 2, required - 1);
+        assert!(matches!(rejected, Err(ref error) if error.code() == "GF_RESOURCE_LIMIT"));
+        assert!(spool_replay_nodes(open(), directory.path(), 6, 2, required).is_err());
+        assert_eq!(directory.path().read_dir().unwrap().count(), 1);
+        assert_eq!(fs::read(&source).unwrap(), original);
+    }
+
+    #[test]
     fn replay_writer_reservation_scales_with_columns_and_row_groups() {
         let narrow = Schema::new(vec![Field::new("id", DataType::UInt64, false)]);
         let wide = Schema::new(
@@ -6707,9 +7088,9 @@ mod tests {
 
         assert!(four_groups > one_group);
         assert!(four_groups > narrow_four_groups);
-        assert_eq!(
-            four_groups - one_group,
-            3 * 128 * REPLAY_COLUMN_CHUNK_METADATA_BYTES
+        assert!(
+            four_groups - one_group
+                >= 3 * 128 * size_of::<parquet::file::metadata::ColumnChunkMetaData>()
         );
     }
 
@@ -6725,7 +7106,8 @@ mod tests {
             deleted_nodes: (0..count).map(|index| format!("deleted-{index}")).collect(),
             base_rows: count,
             maximum_row_bytes: REPLAY_NODE_FIXED_ROW_BYTES,
-            reader_metadata_bytes: 0,
+            reader_reservation_bytes: 0,
+            spool_evidence: ReplayNodeSpoolEvidence::default(),
         };
         let n = authority(64).estimated_memory();
         let two_n = authority(128).estimated_memory();
@@ -9656,5 +10038,71 @@ mod tests {
         let wrong_dynamic: arrow::array::ArrayRef = Arc::new(Int64Array::from(vec![1]));
         let declared = Field::new("declared", DataType::UInt64, false);
         assert!(decode_value(&wrong_dynamic, &declared, 0).is_err());
+    }
+
+    #[test]
+    fn replay_zstd_context_memory_assessment() {
+        assert_eq!(
+            zstd::zstd_safe::version_string(),
+            "1.5.7",
+            "review the codec memory bound when upgrading Zstd"
+        );
+        let decompressor = zstd::zstd_safe::DCtx::create();
+        let mut active_decoder = zstd::zstd_safe::DCtx::create();
+        let mut reused = zstd::bulk::Compressor::new(1).unwrap();
+        let empty_compressor_bytes = reused.context_mut().sizeof();
+        let mut measurements = Vec::new();
+        let mut maximum_source = 0_usize;
+        for size in [
+            0, 1, 7, 16, 128, 512, 513, 1024, 4096, 16384, 16385, 32768, 32769, 65536, 131072,
+            262144, 1048576, 2097152, 0, 1, 16384, 513, 2097152, 7, 65536,
+        ] {
+            let input = (0..size)
+                .map(|index| {
+                    // Incompressible-looking deterministic data; workspace also checked
+                    // with a reusable context that has retained earlier allocations.
+                    let mut value = index as u64 + 0x9e37_79b9_7f4a_7c15;
+                    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    (value ^ (value >> 31)).to_le_bytes()[0]
+                })
+                .collect::<Vec<_>>();
+            let mut fresh = zstd::bulk::Compressor::new(1).unwrap();
+            let compressed = fresh.compress(&input).unwrap();
+            assert_eq!(zstd::bulk::decompress(&compressed, size).unwrap(), input);
+            let mut decoded = Vec::with_capacity(size);
+            active_decoder
+                .decompress(&mut decoded, &compressed)
+                .unwrap();
+            assert_eq!(decoded, input);
+            assert!(
+                active_decoder.sizeof() + empty_compressor_bytes
+                    <= crate::permanent_parquet::ZSTD_DECODER_WORKSPACE
+            );
+            let reused_output = reused.compress(&input).unwrap();
+            assert_eq!(compressed, reused_output);
+            // Pinned Zstd1 fast strategy: fixed contexts/workspace, at most
+            // 32768 hash entries, and B + 11 * floor(B/4) token storage.
+            // Retained state is bounded by the lifetime maximum source size.
+            // The dormant DCtx is part of this encoder only, not an input reader.
+            maximum_source = maximum_source.max(size);
+            let envelope = crate::permanent_parquet::zstd_encoder_workspace(maximum_source);
+            assert!(fresh.context_mut().sizeof() + decompressor.sizeof() <= envelope);
+            assert!(reused.context_mut().sizeof() + decompressor.sizeof() <= envelope);
+
+            measurements.push(serde_json::json!({"source_bytes":size, "maximum_source_bytes":maximum_source, "sampled_envelope":envelope,
+                "compressed_len":compressed.len(), "compressed_capacity":compressed.capacity(),
+                "fresh_compressor_bytes":fresh.context_mut().sizeof(),
+                "reused_compressor_bytes":reused.context_mut().sizeof(),
+                "active_decoder_bytes":active_decoder.sizeof(), "decoded_capacity":decoded.capacity()}));
+        }
+        println!(
+            "REPLAY_ZSTD_MEMORY {}",
+            serde_json::json!({
+            "zstd_version":zstd::zstd_safe::version_string(),
+            "empty_compressor_bytes":empty_compressor_bytes,
+            "empty_decompressor_bytes":decompressor.sizeof(),
+            "measurements":measurements})
+        );
     }
 }

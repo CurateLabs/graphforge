@@ -782,6 +782,9 @@ mod tests {
             .unwrap();
         let replaced = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
         assert_ne!(replaced.path, first.path);
+        crate::permanent_parquet_test_support::assert_file(
+            &replaced.path.join(graphforge_storage::VECTOR_DATA_FILE),
+        );
         let rows = read_vector_snapshot(&replaced.path, 2, VectorStoreLimits::default(), || Ok(()))
             .unwrap();
         assert_eq!(rows.len(), 1);

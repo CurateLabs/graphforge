@@ -2496,3 +2496,455 @@ fn exploratory_coalesced_routes_reject_oversized_encoding_before_publication() {
     let reopened = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&reopened, fixture, &nodes, &[]);
 }
+
+fn publishing_parquet_inventory(source: &Path) -> Value {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
+    let mut files = Vec::new();
+    let mut payload = 0_u64;
+    let mut allocated = 0_u64;
+    for entry in inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet"))
+    {
+        let path = if generation_owned {
+            selected.graph_tree_root().join(&entry.relative_path)
+        } else {
+            graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
+        };
+        let input = File::open(&path).unwrap();
+        let physical = graphforge_filesystem::file_space_usage(&input)
+            .unwrap()
+            .allocated_bytes;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(input).unwrap();
+        for group in reader.metadata().row_groups() {
+            for column in group.columns() {
+                assert!(
+                    matches!(column.compression(), parquet::basic::Compression::ZSTD(_)),
+                    "permanent payload lost shared compression: {}",
+                    entry.relative_path
+                );
+            }
+        }
+        let groups = reader.metadata().row_groups().iter().map(|group| {
+            json!({"rows":group.num_rows(),"columns":group.columns().iter().map(|column| {
+                json!({"path":column.column_path().string(),"codec":format!("{:?}", column.compression()),
+                    "encodings":format!("{:?}", column.encodings().collect::<Vec<_>>())})
+            }).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>();
+        let edge_order = if reader.schema().index_of("edge_id").is_ok() {
+            let ids = reader
+                .build()
+                .unwrap()
+                .flat_map(|batch| {
+                    let batch = batch.unwrap();
+                    batch
+                        .column_by_name("edge_id")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<arrow::array::UInt64Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
+                })
+                .collect::<Vec<_>>();
+            json!({"rows":ids.len(), "first":ids.first(), "last":ids.last(),
+                "first_inversion":ids.windows(2).position(|pair| pair[0] >= pair[1]),
+                "prefix":ids.iter().take(12).collect::<Vec<_>>()})
+        } else {
+            Value::Null
+        };
+        let codec_pairs = if std::env::var_os("GF_PARQUET_CODEC_PAIRS").is_some() {
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+            let schema = reader.schema().clone();
+            let batches = reader
+                .build()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            Some(paired_codec_profiles(
+                &arrow::compute::concat_batches(&schema, &batches).unwrap(),
+            ))
+        } else {
+            None
+        };
+        payload += entry.byte_length;
+        allocated += physical;
+        files.push(json!({"path":entry.relative_path,"sha256":entry.content_sha256,"bytes":entry.byte_length,
+            "allocated_bytes":physical,"row_groups":groups, "edge_id_order":edge_order,"codec_pairs":codec_pairs}));
+    }
+    json!({"ownership":if generation_owned { "generation_graph_tree" } else { "cas" }, "parquet_bytes":payload,"parquet_allocated_bytes":allocated,"files":files})
+}
+
+#[test]
+fn permanent_publishing_policy_construction_mutation_and_compaction() {
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_policy",
+        nodes: 1025,
+        edges: 4097,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let construction = publishing_parquet_inventory(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let before = verify_graph(&graph, fixture, &nodes, &edges);
+    let started = Instant::now();
+    graph
+        .execute("MATCH (n) WHERE n.score IS NOT NULL SET n.score = n.score + 1")
+        .unwrap();
+    let mutation_ns = started.elapsed().as_nanos();
+    for node in &mut nodes {
+        node.2 = node.2.map(|score| score + 1);
+    }
+    let after = verify_graph(&graph, fixture, &nodes, &edges);
+    assert_ne!(before, after);
+    drop(graph);
+    let mutation = publishing_parquet_inventory(&source);
+    let portable = root.path().join("mutation-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+
+    println!(
+        "PUBLISHING_PRE_DELTA {}",
+        json!({"construction":construction, "mutation":mutation})
+    );
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: nodes[0].0,
+                property: "score".into(),
+                value: PropValue::Int(123),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    nodes[0].2 = Some(123);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let before_compaction = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    let started = Instant::now();
+    let report = graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::from_u128(121305),
+                generation_uuid: Uuid::from_u128(121306),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    let compaction_ns = started.elapsed().as_nanos();
+    drop(graph);
+    let compaction = publishing_parquet_inventory(&source);
+    let changed = compaction["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|file| {
+            !before_compaction.files.iter().any(|before| {
+                file["path"].as_str() == Some(before.relative_path.as_str())
+                    && file["sha256"].as_str() == Some(before.content_sha256.as_str())
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !changed.is_empty(),
+        "compaction must encode permanent payloads"
+    );
+    for file in changed {
+        for group in file["row_groups"].as_array().unwrap() {
+            assert!(group["rows"].as_u64().unwrap() <= 8192);
+            for column in group["columns"].as_array().unwrap() {
+                assert!(
+                    !column["encodings"]
+                        .as_str()
+                        .unwrap()
+                        .contains("RLE_DICTIONARY")
+                );
+            }
+        }
+    }
+
+    // Deterministic published-payload ceilings; CPU/RSS/OS I/O remain measured
+    // observations, while replay admission and private-stream limits have
+    // separate exact boundary regressions.
+    for (name, inventory, logical_kib, allocated_kib) in [
+        ("construction", &construction, 400, 448),
+        ("mutation", &mutation, 416, 480),
+        ("compaction", &compaction, 352, 400),
+    ] {
+        assert!(
+            inventory["parquet_bytes"].as_u64().unwrap() <= logical_kib * 1024,
+            "{name} payload budget"
+        );
+        assert!(
+            inventory["parquet_allocated_bytes"].as_u64().unwrap() <= allocated_kib * 1024,
+            "{name} allocation budget"
+        );
+    }
+    let portable = root.path().join("compaction-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+    println!(
+        "PERMANENT_PUBLISHING_POLICY {}",
+        json!({"construction":construction,
+        "mutation":mutation,"compaction":compaction,"mutation_ns":mutation_ns,
+        "compaction_ns":compaction_ns,"compaction_report":format!("{report:?}")})
+    );
+}
+
+// Codec-only comparisons keep schema, dictionary policy, row groups and write
+// batches identical within each pair. Whole publishing costs are measured by
+// the public fixture separately; ArrowWriter::memory_size excludes native Zstd.
+fn paired_codec_profiles(batch: &RecordBatch) -> Value {
+    let mut profiles = Vec::new();
+    for (name, dictionary, row_group_rows, current) in [
+        (
+            "construction",
+            true,
+            1_048_576,
+            Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
+        ),
+        ("canonical_staging", true, 65_536, Compression::UNCOMPRESSED),
+        ("replay", false, 8_192, Compression::UNCOMPRESSED),
+        (
+            "other_permanent",
+            true,
+            1_048_576,
+            Compression::UNCOMPRESSED,
+        ),
+    ] {
+        let mut outputs = Vec::new();
+        let mut retained = Vec::new();
+        let mut allocated_peak = 0_u64;
+        for codec in [current, Compression::ZSTD(ZstdLevel::try_new(1).unwrap())] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let properties = WriterProperties::builder()
+                .set_compression(codec)
+                .set_dictionary_enabled(dictionary)
+                .set_max_row_group_row_count(Some(row_group_rows))
+                .build();
+            let start = Instant::now();
+            let mut writer =
+                ArrowWriter::try_new(file.reopen().unwrap(), batch.schema(), Some(properties))
+                    .unwrap();
+            let mut arrow_writer_peak = 0;
+            for offset in (0..batch.num_rows()).step_by(127) {
+                writer
+                    .write(&batch.slice(offset, 127.min(batch.num_rows() - offset)))
+                    .unwrap();
+                arrow_writer_peak = arrow_writer_peak.max(writer.memory_size());
+            }
+            writer.close().unwrap();
+            let encode_ns = start.elapsed().as_nanos();
+            let bytes = file.as_file().metadata().unwrap().len();
+            let allocated = graphforge_filesystem::file_space_usage(file.as_file())
+                .unwrap()
+                .allocated_bytes;
+            allocated_peak += allocated;
+            let start = Instant::now();
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap()).unwrap();
+            assert_eq!(reader.schema().as_ref(), batch.schema().as_ref());
+            let metadata = reader.metadata();
+            assert_eq!(
+                metadata.num_row_groups(),
+                batch.num_rows().div_ceil(row_group_rows)
+            );
+            for group in metadata.row_groups() {
+                assert!(group.num_rows() <= row_group_rows as i64);
+                for column in group.columns() {
+                    assert_eq!(column.compression(), codec);
+                    if !dictionary {
+                        assert!(
+                            !column.encodings().any(
+                                |encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY
+                            )
+                        );
+                    }
+                }
+            }
+            let decoded = reader
+                .with_batch_size(127)
+                .build()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let decoded = arrow::compute::concat_batches(&batch.schema(), &decoded).unwrap();
+            let decode_ns = start.elapsed().as_nanos();
+            assert_eq!(decoded, *batch);
+            outputs.push(json!({"codec":format!("{codec:?}"),"bytes":bytes,"allocated_bytes":allocated,
+                "encode_ns":encode_ns,"decode_ns":decode_ns,"arrow_writer_peak_bytes":arrow_writer_peak}));
+            retained.push(file);
+        }
+        profiles.push(json!({"profile":name,"dictionary":dictionary,"row_group_rows":row_group_rows,
+            "write_batch_rows":127,"outputs_current_candidate":outputs,"pair_temporary_allocated_peak_bytes":allocated_peak}));
+    }
+    json!({"rows":batch.num_rows(),"arrow_input_bytes":batch.get_array_memory_size(),"profiles":profiles})
+}
+
+#[test]
+fn permanent_codec_pairs_cover_wide_nullable_and_full_width_values() {
+    use arrow::array::{BooleanArray, Float64Array, StructArray, UInt8Array, UInt64Array};
+    let rows = 257;
+    let mut fields = vec![
+        Field::new("uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("ordinal", DataType::UInt64, false),
+    ];
+    let mut arrays = vec![
+        uuids((0..rows).map(|row| id(17, row, true))),
+        Arc::new(UInt64Array::from(
+            (0..rows)
+                .map(|row| u64::MAX - row as u64)
+                .collect::<Vec<_>>(),
+        )) as ArrayRef,
+    ];
+    for column in 0..32 {
+        fields.push(Field::new(
+            format!("nullable_{column}"),
+            DataType::Int64,
+            true,
+        ));
+        arrays.push(Arc::new(Int64Array::from(
+            (0..rows)
+                .map(|row| (!row.is_multiple_of(3)).then_some((row * 37 + column) as i64))
+                .collect::<Vec<_>>(),
+        )));
+    }
+    let strings = (0..rows)
+        .map(|row| {
+            if row.is_multiple_of(3) {
+                None
+            } else {
+                let length = if row == 1 { 256 * 1024 } else { 1024 };
+                Some(
+                    (0..length)
+                        .map(|index| char::from(b'!' + ((index * 31 + row * 17) % 90) as u8))
+                        .collect::<String>(),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    fields.push(Field::new("large_nullable_text", DataType::Utf8, true));
+    arrays.push(Arc::new(StringArray::from(strings)));
+    let tagged_fields: arrow::datatypes::Fields = vec![
+        Field::new("tag", DataType::UInt8, false),
+        Field::new("int", DataType::Int64, true),
+        Field::new("float", DataType::Float64, true),
+        Field::new("str", DataType::Utf8, true),
+        Field::new("bool", DataType::Boolean, true),
+    ]
+    .into();
+    let tagged = StructArray::new(
+        tagged_fields.clone(),
+        vec![
+            Arc::new(UInt8Array::from(
+                (0..rows).map(|row| (row % 4) as u8).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 0).then_some(row as i64))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 1).then_some(row as f64 / 3.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 2).then_some("tagged"))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 3).then_some(true))
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+        None,
+    );
+    fields.push(Field::new("tagged", DataType::Struct(tagged_fields), false));
+    arrays.push(Arc::new(tagged));
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap();
+    let small = RecordBatch::try_new(
+        batch.schema(),
+        batch
+            .columns()
+            .iter()
+            .map(|column| {
+                arrow::compute::take(
+                    column.as_ref(),
+                    &arrow::array::UInt32Array::from(vec![0]),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let narrow_rows = 65_537;
+    let narrow = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("ordinal", DataType::UInt64, false),
+        ])),
+        vec![
+            uuids((0..narrow_rows).map(|row| id(19, row, true))),
+            Arc::new(UInt64Array::from(
+                (0..narrow_rows)
+                    .map(|row| u64::MAX - row as u64)
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    for selected in [small, batch, narrow] {
+        let result = paired_codec_profiles(&selected);
+        for profile in result["profiles"].as_array().unwrap() {
+            assert!(
+                profile["pair_temporary_allocated_peak_bytes"]
+                    .as_u64()
+                    .unwrap()
+                    <= 8 * 1024 * 1024
+            );
+            for output in profile["outputs_current_candidate"].as_array().unwrap() {
+                assert!(output["arrow_writer_peak_bytes"].as_u64().unwrap() <= 8 * 1024 * 1024);
+                assert!(output["bytes"].as_u64().unwrap() <= 2 * 1024 * 1024);
+            }
+        }
+        println!("PERMANENT_CODEC_PAIRS {result}");
+    }
+}

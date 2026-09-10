@@ -289,8 +289,12 @@ where
     let batch = rows_to_batch(rows, schema.clone(), dimension, &mut checkpoint)?;
     let path = build_dir.join(VECTOR_DATA_FILE);
     let file = File::create(&path).map_err(|source| io("create vector snapshot", &path, source))?;
-    let mut writer = ArrowWriter::try_new(file, schema, None)
-        .map_err(|error| build(format!("create vector Parquet writer: {error}")))?;
+    let mut writer = ArrowWriter::try_new(
+        file,
+        schema,
+        Some(crate::permanent_parquet::writer_properties().build()),
+    )
+    .map_err(|error| build(format!("create vector Parquet writer: {error}")))?;
     writer
         .write(&batch)
         .map_err(|error| build(format!("write vector Parquet batch: {error}")))?;

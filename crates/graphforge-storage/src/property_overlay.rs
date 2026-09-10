@@ -2430,6 +2430,52 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     ),
     GfError,
 > {
+    read_property_targets(inventory, kind, route, targets, None)
+}
+
+pub(crate) fn read_replay_property_targets(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    max_memory_bytes: usize,
+) -> Result<
+    (
+        BTreeMap<[u8; 16], PropertySnapshotRow>,
+        PropertyOverlayMetrics,
+    ),
+    GfError,
+> {
+    read_property_targets(inventory, kind, route, targets, Some(max_memory_bytes))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "authenticated targeted read and its resource accounting share one lifecycle"
+)]
+fn read_property_targets(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+    replay_budget: Option<usize>,
+) -> Result<
+    (
+        BTreeMap<[u8; 16], PropertySnapshotRow>,
+        PropertyOverlayMetrics,
+    ),
+    GfError,
+> {
+    let mut limits = PropertyOverlayLimits::default();
+    if let Some(bytes) = replay_budget {
+        limits.max_buffered_bytes = bytes as u64;
+        limits.max_row_bytes = limits.max_row_bytes.min((bytes as u64 / 4).max(1));
+        if bytes < 64 * 1024 {
+            return Err(replay_decoder_limit(
+                "property replay authentication buffer exceeds budget",
+            ));
+        }
+    }
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
     let mut metrics = PropertyOverlayMetrics::default();
@@ -2474,6 +2520,9 @@ pub fn read_authenticated_property_snapshots_for_inventory(
         metrics.property_authentication_read_calls = metrics
             .property_authentication_read_calls
             .saturating_add(opened.authentication_read_calls);
+        if let Some(bytes) = replay_budget {
+            admit_target_footer(&opened.file, fragment.entry.byte_length, bytes)?;
+        }
         let builder =
             open_counted_retained_property_builder(fragment, &opened, Arc::clone(&counts))?;
         validate_fragment_schema(
@@ -2483,17 +2532,41 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             kind,
             route,
         )?;
-        let page_reservation_bytes = validate_parquet_resource_admission(
-            builder.metadata(),
-            PropertyOverlayLimits::default(),
-            opened.file.as_ref(),
-            &counts,
-            None,
-        )?;
+        let targeted_batch_rows = admitted_batch_rows(limits);
+        let page_reservation_bytes = if replay_budget.is_some() {
+            let admission = parquet_resource_admission(
+                builder.metadata(),
+                limits,
+                opened.file.as_ref(),
+                &counts,
+                None,
+                targeted_batch_rows,
+                true,
+                replay_decoder_limit,
+            )?;
+            // Outer authority builder, validation builder, and active reader
+            // may coexist; account metadata independently from page buffers.
+            admission
+                .with_codec_bytes
+                .saturating_add((builder.metadata().memory_size() as u64).saturating_mul(3))
+        } else {
+            validate_parquet_resource_admission(
+                builder.metadata(),
+                limits,
+                opened.file.as_ref(),
+                &counts,
+                None,
+            )?
+        };
+        let admission = TargetReadAdmission {
+            limits,
+            page_reservation_bytes,
+            replay: replay_budget.is_some(),
+        };
+        admission.check(0, found.values().map(snapshot_charge).sum())?;
         metrics.decoder_page_reservation_bytes = metrics
             .decoder_page_reservation_bytes
             .max(page_reservation_bytes);
-        let targeted_batch_rows = admitted_batch_rows(PropertyOverlayLimits::default());
         metrics.row_groups_considered = metrics
             .row_groups_considered
             .saturating_add(u64::try_from(builder.metadata().num_row_groups()).unwrap_or(u64::MAX));
@@ -2504,8 +2577,9 @@ pub fn read_authenticated_property_snapshots_for_inventory(
             &unresolved,
             &counts,
             &mut metrics,
-            page_reservation_bytes,
+            admission,
             targeted_batch_rows,
+            found.values().map(snapshot_charge).sum(),
         )?;
         let validation_bytes = counts.bytes.load(Ordering::Relaxed);
         let validation_read_calls = counts.blocks.load(Ordering::Relaxed);
@@ -2520,7 +2594,7 @@ pub fn read_authenticated_property_snapshots_for_inventory(
                     kind,
                     row_groups,
                     batch_rows: targeted_batch_rows,
-                    page_reservation_bytes,
+                    admission,
                 },
                 &counts,
                 &mut unresolved,
@@ -2569,8 +2643,9 @@ fn select_target_row_groups(
     unresolved: &std::collections::BTreeSet<[u8; 16]>,
     counts: &Arc<ReadCounts>,
     metrics: &mut PropertyOverlayMetrics,
-    page_reservation_bytes: u64,
+    admission: TargetReadAdmission,
     targeted_batch_rows: usize,
+    retained_bytes: u64,
 ) -> Result<Vec<usize>, GfError> {
     let builder = open_counted_retained_property_builder(fragment, opened, Arc::clone(counts))?;
     let mut selected_groups = Vec::new();
@@ -2585,7 +2660,7 @@ fn select_target_row_groups(
         let mut selected = false;
         for batch in validation {
             let batch = batch.map_err(authenticated_arrow_error)?;
-            charge_target_batch(metrics, &batch, page_reservation_bytes)?;
+            charge_target_batch(metrics, &batch, admission, retained_bytes)?;
             let uuids = batch
                 .column_by_name(kind.uuid_field())
                 .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
@@ -2645,7 +2720,7 @@ struct TargetDecodeOptions<'a> {
     kind: PropertyRouteKind,
     row_groups: Vec<usize>,
     batch_rows: usize,
-    page_reservation_bytes: u64,
+    admission: TargetReadAdmission,
 }
 
 fn decode_target_row_groups(
@@ -2666,14 +2741,29 @@ fn decode_target_row_groups(
     .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
-        charge_target_batch(metrics, &batch, options.page_reservation_bytes)?;
+        charge_target_batch(
+            metrics,
+            &batch,
+            options.admission,
+            found.values().map(snapshot_charge).sum(),
+        )?;
         let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
         if decoded
             .iter()
-            .any(|row| snapshot_charge(row) > PropertyOverlayLimits::default().max_row_bytes)
+            .any(|row| snapshot_charge(row) > options.admission.limits.max_row_bytes)
         {
-            return Err(corrupt("property snapshot row exceeds byte limit"));
+            return Err(options
+                .admission
+                .error("property snapshot row exceeds byte limit"));
         }
+        options.admission.check(
+            batch.get_array_memory_size() as u64,
+            decoded
+                .iter()
+                .chain(found.values())
+                .map(snapshot_charge)
+                .sum(),
+        )?;
         metrics.decoder_peak_bytes = metrics
             .decoder_peak_bytes
             .max(decoded.iter().map(snapshot_charge).sum::<u64>());
@@ -2691,33 +2781,76 @@ fn decode_target_row_groups(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct TargetReadAdmission {
+    limits: PropertyOverlayLimits,
+    page_reservation_bytes: u64,
+    replay: bool,
+}
+
+impl TargetReadAdmission {
+    fn error(self, message: &str) -> GfError {
+        if self.replay {
+            replay_decoder_limit(message)
+        } else {
+            corrupt(message)
+        }
+    }
+
+    fn check(self, arrow_bytes: u64, retained_bytes: u64) -> Result<u64, GfError> {
+        // Existing non-replay targeted callers retain their original budget.
+        let retained_bytes = if self.replay { retained_bytes } else { 0 };
+        let bytes = self
+            .page_reservation_bytes
+            .checked_add(arrow_bytes)
+            .and_then(|bytes| bytes.checked_add(retained_bytes))
+            .ok_or_else(|| self.error("targeted property decode memory overflow"))?;
+        if bytes > self.limits.max_buffered_bytes {
+            return Err(self.error("targeted property decode exceeds live-byte budget"));
+        }
+        Ok(bytes)
+    }
+}
+
 fn charge_target_batch(
     metrics: &mut PropertyOverlayMetrics,
     batch: &RecordBatch,
-    page_reservation_bytes: u64,
+    admission: TargetReadAdmission,
+    retained_bytes: u64,
 ) -> Result<(), GfError> {
-    let limits = PropertyOverlayLimits::default();
     let arrow_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
-    let decoded_reservation = limits
+    let decoded_reservation = admission
+        .limits
         .max_row_bytes
         .saturating_mul(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
-    if page_reservation_bytes
-        .checked_add(arrow_bytes)
-        .and_then(|bytes| bytes.checked_add(decoded_reservation))
-        .is_none_or(|bytes| bytes > limits.max_buffered_bytes)
-    {
-        return Err(corrupt("targeted property decode exceeds live-byte budget"));
-    }
+    let bytes = admission.check(
+        arrow_bytes.saturating_add(decoded_reservation),
+        retained_bytes,
+    )?;
     metrics.emitted_batches = metrics.emitted_batches.saturating_add(1);
-    metrics.decoder_peak_rows = metrics
-        .decoder_peak_rows
-        .max(u64::try_from(batch.num_rows()).unwrap_or(u64::MAX));
+    metrics.decoder_peak_rows = metrics.decoder_peak_rows.max(batch.num_rows() as u64);
     metrics.decoder_peak_bytes = metrics.decoder_peak_bytes.max(arrow_bytes);
-    metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(
-        page_reservation_bytes
-            .saturating_add(arrow_bytes)
-            .saturating_add(decoded_reservation),
-    );
+    metrics.peak_buffered_bytes = metrics.peak_buffered_bytes.max(bytes);
+    Ok(())
+}
+
+fn admit_target_footer(file: &File, length: u64, budget: usize) -> Result<(), GfError> {
+    if length < 8 {
+        return Err(corrupt("property Parquet footer is truncated"));
+    }
+    let mut footer = [0_u8; 8];
+    if retained_read_at(file, &mut footer, length - 8).map_err(io_error)? != footer.len()
+        || &footer[4..] != b"PAR1"
+    {
+        return Err(corrupt("property Parquet footer is invalid"));
+    }
+    let encoded =
+        u32::from_le_bytes(footer[..4].try_into().expect("four-byte footer length")) as usize;
+    if encoded > 16 * 1024 * 1024 || encoded.saturating_mul(4).saturating_add(64 * 1024) > budget {
+        return Err(replay_decoder_limit(
+            "property Parquet footer exceeds replay budget",
+        ));
+    }
     Ok(())
 }
 
@@ -2801,19 +2934,108 @@ fn validate_parquet_resource_admission(
     counts: &Arc<ReadCounts>,
     projected_columns: Option<&BTreeSet<usize>>,
 ) -> Result<u64, GfError> {
+    Ok(parquet_resource_admission(
+        metadata,
+        limits,
+        file,
+        counts,
+        projected_columns,
+        admitted_batch_rows(limits),
+        false,
+        corrupt,
+    )?
+    .decoded_bytes)
+}
+
+struct ParquetDecoderMemory {
+    decoded_bytes: u64,
+    with_codec_bytes: u64,
+}
+
+fn replay_decoder_limit(message: &str) -> GfError {
+    GfError::Project {
+        code: graphforge_core::ProjectErrorCode::ResourceLimit,
+        message: message.into(),
+    }
+}
+
+/// Reserve authenticated page, codec and batch exposure before replay decoding.
+/// Reuses the same bounded raw-page parser as property admission.
+pub(crate) fn replay_parquet_reader_reservation(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    file: &File,
+    max_memory_bytes: usize,
+    batch_rows: usize,
+) -> Result<usize, GfError> {
+    let limits = PropertyOverlayLimits {
+        max_buffered_bytes: max_memory_bytes as u64,
+        ..PropertyOverlayLimits::default()
+    };
+    let admission = parquet_resource_admission(
+        metadata,
+        limits,
+        file,
+        &Arc::new(ReadCounts::default()),
+        None,
+        batch_rows,
+        true,
+        replay_decoder_limit,
+    )?;
+    let bytes = usize::try_from(admission.with_codec_bytes)
+        .map_err(|_| replay_decoder_limit("replay decoder reservation overflows"))?;
+    if bytes > max_memory_bytes {
+        return Err(replay_decoder_limit(
+            "replay decoder pages and codecs exceed memory budget",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[allow(
+    deprecated,
+    reason = "Parquet 58 raw page sizes are exposed through compact Thrift headers"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one authenticated page scan computes legacy and replay resource envelopes"
+)]
+fn parquet_resource_admission(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    limits: PropertyOverlayLimits,
+    file: &File,
+    counts: &Arc<ReadCounts>,
+    projected_columns: Option<&BTreeSet<usize>>,
+    batch_rows: usize,
+    include_codec: bool,
+    limit_error: fn(&str) -> GfError,
+) -> Result<ParquetDecoderMemory, GfError> {
     const MAX_PAGE_HEADER_BYTES: usize = 64 * 1024;
     let max_page_bytes = limits.max_buffered_bytes / 4;
     if max_page_bytes == 0 {
-        return Err(corrupt("property page byte budget is too small"));
+        return Err(limit_error("property page byte budget is too small"));
     }
     let mut largest_group_exposure = 0_u64;
+    let mut column_memory = if include_codec {
+        vec![0_u64; metadata.file_metadata().schema_descr().num_columns()]
+    } else {
+        Vec::new()
+    };
+    let mut group_values = Vec::with_capacity(if include_codec {
+        metadata.num_row_groups()
+    } else {
+        0
+    });
     for group in metadata.row_groups() {
+        let mut group_value_bytes = 0_u64;
         let mut group_exposure = 0_u64;
         for (column_index, column) in group.columns().iter().enumerate() {
             let selected = projected_columns.is_none_or(|columns| columns.contains(&column_index));
             let mut dictionary_exposure = 0_u64;
             let mut data_exposure = 0_u64;
-            let _uncompressed = u64::try_from(column.uncompressed_size())
+            let mut compressed_dictionary = 0_u64;
+            let mut compressed_data = 0_u64;
+            let uncompressed = u64::try_from(column.uncompressed_size())
                 .map_err(|_| corrupt("property column chunk has negative uncompressed size"))?;
             let compressed = u64::try_from(column.compressed_size())
                 .map_err(|_| corrupt("property column chunk has negative compressed size"))?;
@@ -2854,17 +3076,21 @@ fn validate_parquet_resource_admission(
                 #[allow(deprecated, reason = "Parquet 58 page admission requires raw sizes")]
                 let uncompressed_page = u64::try_from(header.uncompressed_page_size)
                     .map_err(|_| corrupt("property page has negative uncompressed size"))?;
-                if header_bytes == 0
-                    || (selected && uncompressed_page > max_page_bytes)
-                    || compressed_page > compressed
-                {
+                if selected && uncompressed_page > max_page_bytes {
+                    return Err(limit_error(
+                        "property page exceeds pre-decode byte admission",
+                    ));
+                }
+                if header_bytes == 0 || compressed_page > compressed {
                     return Err(corrupt("property page exceeds pre-decode byte admission"));
                 }
                 if selected {
                     if header.type_ == parquet::format::PageType::DICTIONARY_PAGE {
                         dictionary_exposure = dictionary_exposure.max(uncompressed_page);
+                        compressed_dictionary = compressed_dictionary.max(compressed_page);
                     } else {
                         data_exposure = data_exposure.max(uncompressed_page);
+                        compressed_data = compressed_data.max(compressed_page);
                     }
                 }
                 position = position
@@ -2881,33 +3107,141 @@ fn validate_parquet_resource_admission(
                 ));
             }
             if selected {
+                if include_codec {
+                    let native = match column.compression() {
+                        parquet::basic::Compression::UNCOMPRESSED => 0,
+                        parquet::basic::Compression::ZSTD(_) => {
+                            crate::permanent_parquet::ZSTD_DECODER_WORKSPACE as u64
+                        }
+                        // Ordinary property callers use only decoded_bytes. Replay admission
+                        // refuses a codec without a justified native-memory bound.
+                        _ => u64::MAX,
+                    };
+                    // A returned Arrow batch may span multiple pages. Fixed-width
+                    // leaves have a value-count bound; variable and repeated leaves
+                    // conservatively reserve the entire contributing row group.
+                    let descriptor = column.column_descr();
+                    let values = u64::try_from(column.num_values())
+                        .map_err(|_| corrupt("negative Parquet value count"))?;
+                    let values = if descriptor.max_rep_level() == 0 {
+                        values.min(batch_rows as u64)
+                    } else {
+                        values
+                    };
+                    let width = match descriptor.physical_type() {
+                        parquet::basic::Type::BOOLEAN => Some(1_u64),
+                        parquet::basic::Type::INT32 | parquet::basic::Type::FLOAT => Some(4),
+                        parquet::basic::Type::INT64 | parquet::basic::Type::DOUBLE => Some(8),
+                        parquet::basic::Type::INT96 => Some(12),
+                        parquet::basic::Type::FIXED_LEN_BYTE_ARRAY => Some(
+                            u64::try_from(descriptor.type_length())
+                                .map_err(|_| corrupt("negative fixed binary width"))?,
+                        ),
+                        parquet::basic::Type::BYTE_ARRAY => None,
+                    };
+                    let decoded = width
+                        .map_or_else(
+                            || {
+                                uncompressed
+                                    .saturating_add(dictionary_exposure.saturating_mul(values))
+                            },
+                            |width| values.saturating_mul(width),
+                        )
+                        .saturating_add(
+                            values.saturating_mul(16).saturating_mul(
+                                1 + u64::try_from(descriptor.max_def_level())
+                                    .map_err(|_| corrupt("negative definition level"))?
+                                    + u64::try_from(descriptor.max_rep_level())
+                                        .map_err(|_| corrupt("negative repetition level"))?,
+                            ),
+                        );
+                    group_value_bytes = group_value_bytes.saturating_add(decoded);
+                    let memory = data_exposure
+                        .saturating_mul(2)
+                        .saturating_add(dictionary_exposure.saturating_mul(2))
+                        .saturating_add(compressed_data)
+                        .saturating_add(compressed_dictionary)
+                        .saturating_add(native)
+                        .saturating_add(8 * 1024);
+                    let column_max = column_memory.get_mut(column_index).ok_or_else(|| {
+                        corrupt("Parquet row-group column count disagrees with schema")
+                    })?;
+                    *column_max = (*column_max).max(memory);
+                }
                 group_exposure = group_exposure
                     .checked_add(data_exposure)
                     .and_then(|bytes| {
                         dictionary_exposure
-                            .checked_mul(u64::try_from(admitted_batch_rows(limits)).ok()?)
+                            .checked_mul(u64::try_from(batch_rows).ok()?)
                             .and_then(|decoded_dictionary| bytes.checked_add(decoded_dictionary))
                     })
                     .and_then(|bytes| {
                         // Validity, offsets, and values buffers are live together.
                         // Sixteen bytes/value/column deliberately over-reserves the
                         // fixed Arrow bookkeeping before the builder allocates it.
-                        u64::try_from(admitted_batch_rows(limits))
+                        u64::try_from(batch_rows)
                             .ok()?
                             .checked_mul(16)
                             .and_then(|overhead| bytes.checked_add(overhead))
                     })
                     .ok_or_else(|| corrupt("property projected page exposure overflows"))?;
             }
-            if group_exposure > max_page_bytes {
-                return Err(corrupt(
+            if !include_codec && group_exposure > max_page_bytes {
+                return Err(limit_error(
                     "property projected pages exceed pre-decode live-byte admission",
                 ));
             }
         }
         largest_group_exposure = largest_group_exposure.max(group_exposure);
+        if include_codec {
+            group_values.push((
+                u64::try_from(group.num_rows()).map_err(|_| corrupt("negative row-group rows"))?,
+                group_value_bytes,
+            ));
+        }
     }
-    Ok(largest_group_exposure)
+    Ok(ParquetDecoderMemory {
+        decoded_bytes: largest_group_exposure,
+        // The raw-header audit ends before decoding. Its bounded temporary
+        // memory does not overlap decoder states or returned Arrow values.
+        with_codec_bytes: column_memory
+            .into_iter()
+            .fold(0, u64::saturating_add)
+            .saturating_add(contributing_row_group_bytes(&group_values, batch_rows))
+            .max(64 * 1024),
+    })
+}
+
+/// A batch can start at the final row of any group, then consume up to B-1
+/// rows from following groups. Reserve every touched group's value envelope.
+/// The sliding window is linear in the authenticated footer's group count.
+fn contributing_row_group_bytes(groups: &[(u64, u64)], batch_rows: usize) -> u64 {
+    let mut maximum = 0_u64;
+    let mut end = 0;
+    let mut rows = 0_u64;
+    let mut bytes = 0_u64;
+    for start in 0..groups.len() {
+        if end == start {
+            rows = groups[start].0;
+            bytes = groups[start].1;
+            end += 1;
+        }
+        while end < groups.len()
+            && rows.saturating_sub(groups[start].0) < batch_rows.saturating_sub(1) as u64
+        {
+            rows = rows.saturating_add(groups[end].0);
+            bytes = bytes.saturating_add(groups[end].1);
+            end += 1;
+        }
+        maximum = maximum.max(bytes);
+        // Overflow is a resource rejection, never a wrapped smaller bound.
+        if rows == u64::MAX || bytes == u64::MAX {
+            return u64::MAX;
+        }
+        rows -= groups[start].0;
+        bytes -= groups[start].1;
+    }
+    maximum
 }
 
 fn admitted_batch_rows(limits: PropertyOverlayLimits) -> usize {
@@ -3503,6 +3837,98 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use std::collections::{BTreeSet, HashMap};
     use tempfile::TempDir;
+
+    #[test]
+    fn replay_decoder_admission_covers_pages_groups_and_repeated_values() {
+        use arrow::array::{ListBuilder, UInt64Builder};
+        let strings = (0..7)
+            .map(|index| format!("{index}{}", "x".repeat(100 * 1024)))
+            .collect::<Vec<_>>();
+        let mut lists = ListBuilder::new(UInt64Builder::new());
+        for row in 0..7 {
+            for value in 0..4097 {
+                lists.values().append_value(u64::MAX - value - row);
+            }
+            lists.append(true);
+        }
+        let nested = lists.finish();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Utf8, false),
+            Field::new("repeated", nested.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(StringArray::from(strings)), Arc::new(nested)],
+        )
+        .unwrap();
+        for group_rows in [1, 2, 7] {
+            let file = tempfile::tempfile().unwrap();
+            let properties = crate::permanent_parquet::writer_properties()
+                .set_dictionary_enabled(false)
+                .set_write_batch_size(1)
+                .set_data_page_row_count_limit(1)
+                .set_max_row_group_row_count(Some(group_rows))
+                .build();
+            let mut writer =
+                ArrowWriter::try_new(file.try_clone().unwrap(), schema.clone(), Some(properties))
+                    .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            let builder =
+                ParquetRecordBatchReaderBuilder::try_new(file.try_clone().unwrap()).unwrap();
+            let required =
+                replay_parquet_reader_reservation(builder.metadata(), &file, 64 * 1024 * 1024, 7)
+                    .unwrap();
+            assert!(
+                required
+                    > batch.get_array_memory_size()
+                        + 2 * crate::permanent_parquet::ZSTD_DECODER_WORKSPACE
+            );
+            assert_eq!(
+                replay_parquet_reader_reservation(builder.metadata(), &file, required, 7).unwrap(),
+                required
+            );
+            assert_eq!(
+                replay_parquet_reader_reservation(builder.metadata(), &file, required - 1, 7)
+                    .unwrap_err()
+                    .code(),
+                "GF_RESOURCE_LIMIT"
+            );
+            let decoded = builder
+                .with_batch_size(7)
+                .build()
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded, batch);
+        }
+    }
+
+    #[test]
+    fn replay_decoder_group_window_covers_every_batch_start() {
+        let groups = [(3, 100), (1, 700), (4, 200), (2, 900), (1, 300)];
+        let rows = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (rows, _))| std::iter::repeat_n(index, *rows as usize))
+            .collect::<Vec<_>>();
+        for batch_rows in 1..=rows.len() + 1 {
+            let actual = (0..rows.len())
+                .map(|start| {
+                    rows[start..rows.len().min(start + batch_rows)]
+                        .iter()
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .map(|index| groups[index].1)
+                        .sum::<u64>()
+                })
+                .max()
+                .unwrap();
+            assert_eq!(contributing_row_group_bytes(&groups, batch_rows), actual);
+        }
+    }
 
     #[test]
     fn fragment_identity_is_numeric_canonical_and_total() {

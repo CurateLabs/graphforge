@@ -16,7 +16,6 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
-use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
@@ -1808,7 +1807,7 @@ fn restoration_participant(
         RESTORATION_CONTRACT_VERSION,
     ])));
     let batch = RecordBatch::try_new(Arc::clone(&schema), columns).map_err(arrow_error)?;
-    let properties = WriterProperties::builder()
+    let properties = crate::permanent_parquet::writer_properties()
         .set_created_by("graphforge-restoration-transition/1".into())
         .build();
     let mut writer =

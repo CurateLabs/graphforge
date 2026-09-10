@@ -271,6 +271,36 @@ fn streaming_resource_ladder_is_independent_of_base_rows() {
             limits,
         )
         .unwrap();
+        assert!(replay.temporary_decode_stream_bytes <= 256 * 1024);
+        assert!(replay.temporary_decode_stream_allocated_bytes <= 256 * 1024);
+        if extra_nodes == 1024 {
+            assert!(
+                replay.temporary_decode_stream_bytes > 0,
+                "the 2 MiB phase-separated strategy must be exercised"
+            );
+            let direct = tempfile::tempdir().unwrap();
+            let (_, direct_evidence) = materialize_replayed_graph_tree(
+                &resolved.graph_tree_root(),
+                &inventory,
+                direct.path(),
+                GraphDeltaJournalLimits {
+                    max_batch_rows: 7,
+                    ..GraphDeltaJournalLimits::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(direct_evidence.temporary_decode_stream_bytes, 0);
+            assert_eq!(
+                fs::read(target.path().join("topology/nodes.parquet")).unwrap(),
+                fs::read(direct.path().join("topology/nodes.parquet")).unwrap()
+            );
+        }
+        println!(
+            "REPLAY_STREAM_BUDGET nodes={} stream_bytes={} stream_allocated={}",
+            extra_nodes + 4,
+            replay.temporary_decode_stream_bytes,
+            replay.temporary_decode_stream_allocated_bytes
+        );
         evidence.push((
             replay.estimated_replay_memory_bytes,
             replay.materialization_batch_row_bound,
@@ -332,7 +362,9 @@ fn topology_replay_admission_is_path_specific_and_never_creates_rejected_output(
 
     let mut observed_node_rejection = false;
     let mut observed_edge_rejection = false;
-    for kibibytes in (256..=768).step_by(16) {
+    // Codec admission moves both thresholds; keep the same 2 MiB admitted
+    // ceiling and exercise each path below it without loosening that ceiling.
+    for kibibytes in (256..=2048).step_by(16) {
         let target = tempfile::tempdir().unwrap();
         let node_output = target.path().join("topology/nodes.parquet");
         let edge_output = target.path().join(&edge_relative);

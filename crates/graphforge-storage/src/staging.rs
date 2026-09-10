@@ -32,7 +32,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use parquet::file::properties::WriterProperties;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -432,7 +431,7 @@ impl RewriteBatch {
             .suffix(".tmp")
             .tempfile_in(parent)
             .map_err(|error| io_err(&error))?;
-        let properties = WriterProperties::builder()
+        let properties = crate::permanent_parquet::writer_properties()
             .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
             .build();
         let mut writer =
@@ -902,7 +901,7 @@ fn stage_parquet_temp(
         .tempfile_in(parent)
         .map_err(|e| io_err(&e))?;
 
-    let props = WriterProperties::builder()
+    let props = crate::permanent_parquet::writer_properties()
         .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
         .build();
     let mut writer = ArrowWriter::try_new(tmp.as_file(), schema, Some(props)).map_err(pq_err)?;
@@ -935,7 +934,7 @@ where
         .suffix(".tmp")
         .tempfile_in(parent)
         .map_err(|error| io_err(&error))?;
-    let properties = WriterProperties::builder()
+    let properties = crate::permanent_parquet::writer_properties()
         .set_max_row_group_row_count(Some(ROW_GROUP_SIZE))
         .build();
     let mut writer =

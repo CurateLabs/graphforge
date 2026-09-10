@@ -1708,6 +1708,9 @@ mod tests {
                 policy: policy.clone(),
             })
             .unwrap();
+        crate::permanent_parquet_test_support::assert_file(
+            &projection.graph.dir.join("topology/nodes.parquet"),
+        );
         assert_ne!(projection.source_generation_uuid(), Uuid::nil());
         assert!(!projection.policy_bytes().is_empty());
         assert_ne!(projection.policy_fingerprint(), [0; 32]);

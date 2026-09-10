@@ -427,6 +427,9 @@ pub use runtime_entity_labels::{
 };
 
 pub mod parquet_scan;
+
+/// Shared encoding defaults for published project Parquet payloads.
+pub mod permanent_parquet;
 pub use parquet_scan::{GraphForgeParquetExec, IoConcurrencyExt, ParquetFragment};
 
 pub mod schemas;

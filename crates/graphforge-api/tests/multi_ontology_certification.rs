@@ -1,5 +1,9 @@
 //! Public Rust certification for the reproducible six-domain M9 fixture.
 
+#[path = "../src/permanent_parquet_test_support.rs"]
+#[allow(dead_code)]
+mod permanent_parquet_test_support;
+
 use std::collections::BTreeMap;
 
 use graphforge_api::{
@@ -343,6 +347,9 @@ fn retained_data_migrates_atomically_and_exact_identity_reopens() {
     let receipt = graph
         .migrate_ontology_module(&request, &preview, None)
         .expect("publish retained-data migration");
+    permanent_parquet_test_support::assert_graph(
+        &graphforge_storage::resolve_project_generation(project.path()).unwrap(),
+    );
     let replay = graph
         .migrate_ontology_module(&request, &preview, None)
         .expect("exact idempotent replay");
