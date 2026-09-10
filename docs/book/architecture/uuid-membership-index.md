@@ -147,8 +147,10 @@ manifest as reachability evidence.
 
 [Raw integrated measurements](../../development/evidence/packed-membership-1203.json)
 use source `d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60`, including the merged
-construction Zstd repair. The four permanent fixtures and full-width boundary
-test pass exact query/reopen/export/full-verify/clean-import checks.
+construction Zstd repair. Four permanent fixtures pass exact
+query/reopen/export/full-verify/clean-import checks. The additional boundary test
+verifies full-width encoding; separate production tests cover rebuild, reopen,
+probes and deletion at the ID boundary.
 
 For 4,097 nodes and 65,537 edges, membership payload falls from 2,228,288 to
 1,216,554 bytes: 487,438 bytes of reserved padding and 524,296 bytes of defined-zero
