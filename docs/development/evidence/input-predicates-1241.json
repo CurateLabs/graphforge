@@ -1,0 +1,750 @@
+{
+  "status": "Implemented candidate meets measured selection budgets; repository regression and exact-head CI gate are recorded separately before merge.",
+  "baseline": {
+    "source": "5fc68e568893110cca97b0eb2c797d306b264e27",
+    "probe": {
+      "source": "9ca395d3785ce9ede9c34b539d1e3479d0d08d05",
+      "integrated_core_source": "5fc68e568893110cca97b0eb2c797d306b264e27",
+      "sha256": "d695553c3e0ebb22cc4ae0db09466843689636159179fb9f478170183ae19505",
+      "profile": "release optimized; RUSTFLAGS,CARGO_ENCODED_RUSTFLAGS,LLVM_PROFILE_FILE unset",
+      "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+      "limitations": "Diagnostic mode explains before execution and enables work counters; those timings are not uninstrumented latency observations. Normal mode remains the five-query latency probe."
+    },
+    "observations": {
+      "first_ns": [
+        3964624405,
+        3839940110,
+        4636086101
+      ],
+      "first_median_ns": 3964624405,
+      "warm_min_ns": 3582274212,
+      "warm_max_ns": 4016911263,
+      "warm_median_ns": 3850297525.0,
+      "process": [
+        {
+          "user_seconds": 22.76,
+          "system_seconds": 8.71,
+          "rss_kib": 153640.0,
+          "input_blocks": 22680.0,
+          "output_blocks": 410264.0
+        },
+        {
+          "user_seconds": 22.49,
+          "system_seconds": 8.59,
+          "rss_kib": 152332.0,
+          "input_blocks": 22680.0,
+          "output_blocks": 410264.0
+        },
+        {
+          "user_seconds": 22.56,
+          "system_seconds": 8.77,
+          "rss_kib": 152848.0,
+          "input_blocks": 22680.0,
+          "output_blocks": 410264.0
+        }
+      ]
+    },
+    "work": [
+      {
+        "case": "original",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 65537,
+            "edge_full_reads": 521,
+            "edge_projected_columns": 11,
+            "edge_reads": 585,
+            "edge_rows_returned": 65537,
+            "edge_rows_scanned": 531465,
+            "emitted": 65537,
+            "hop": 1,
+            "input_batches": 2,
+            "input_rows": 4097,
+            "node_full_reads": 41,
+            "node_projected_columns": 6,
+            "node_reads": 45,
+            "node_rows_returned": 28923,
+            "node_rows_scanned": 32784
+          },
+          {
+            "candidates": 1048352,
+            "edge_full_reads": 8321,
+            "edge_projected_columns": 2,
+            "edge_reads": 8385,
+            "edge_rows_returned": 994175,
+            "edge_rows_scanned": 8401025,
+            "emitted": 1048352,
+            "hop": 3,
+            "input_batches": 9,
+            "input_rows": 65537,
+            "node_full_reads": 641,
+            "node_projected_columns": 2,
+            "node_reads": 645,
+            "node_rows_returned": 459368,
+            "node_rows_scanned": 524433
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      },
+      {
+        "case": "prefiltered",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 16,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 11,
+            "edge_reads": 65,
+            "edge_rows_returned": 16,
+            "edge_rows_scanned": 15361,
+            "emitted": 16,
+            "hop": 2,
+            "input_batches": 1,
+            "input_rows": 1,
+            "node_full_reads": 1,
+            "node_projected_columns": 6,
+            "node_reads": 5,
+            "node_rows_returned": 16,
+            "node_rows_scanned": 17
+          },
+          {
+            "candidates": 256,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 2,
+            "edge_reads": 65,
+            "edge_rows_returned": 256,
+            "edge_rows_scanned": 65537,
+            "emitted": 256,
+            "hop": 4,
+            "input_batches": 1,
+            "input_rows": 16,
+            "node_full_reads": 1,
+            "node_projected_columns": 2,
+            "node_reads": 5,
+            "node_rows_returned": 256,
+            "node_rows_scanned": 257
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      },
+      {
+        "case": "range",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 65537,
+            "edge_full_reads": 521,
+            "edge_projected_columns": 11,
+            "edge_reads": 585,
+            "edge_rows_returned": 65537,
+            "edge_rows_scanned": 531465,
+            "emitted": 65537,
+            "hop": 1,
+            "input_batches": 2,
+            "input_rows": 4097,
+            "node_full_reads": 41,
+            "node_projected_columns": 6,
+            "node_reads": 45,
+            "node_rows_returned": 28923,
+            "node_rows_scanned": 32784
+          },
+          {
+            "candidates": 1048352,
+            "edge_full_reads": 8321,
+            "edge_projected_columns": 2,
+            "edge_reads": 8385,
+            "edge_rows_returned": 994175,
+            "edge_rows_scanned": 8401025,
+            "emitted": 1048352,
+            "hop": 3,
+            "input_batches": 9,
+            "input_rows": 65537,
+            "node_full_reads": 641,
+            "node_projected_columns": 2,
+            "node_reads": 645,
+            "node_rows_returned": 459368,
+            "node_rows_scanned": 524433
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      }
+    ],
+    "syscalls": {
+      "read_bytes": 8149233916,
+      "write_bytes": 130790402,
+      "syscalls": {
+        "read": {
+          "calls": 1901324,
+          "bytes": 6447918794,
+          "errors": 0
+        },
+        "pread64": {
+          "calls": 3320189,
+          "bytes": 1692100676,
+          "errors": 0
+        },
+        "write": {
+          "calls": 25039,
+          "bytes": 121575956,
+          "errors": 0
+        },
+        "fsync": {
+          "calls": 1347,
+          "bytes": 0,
+          "errors": 0
+        },
+        "copy_file_range": {
+          "calls": 1330,
+          "bytes": 9214446,
+          "errors": 0
+        },
+        "readv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "preadv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "sendfile": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pwrite64": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "writev": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pwritev": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        }
+      },
+      "csr_direct_read_bytes": 9577462,
+      "csr_copy_bytes": 1324020,
+      "csr_syscalls": {
+        "read": {
+          "calls": 310,
+          "bytes": 9577462,
+          "errors": 0
+        },
+        "copy_file_range": {
+          "calls": 36,
+          "bytes": 1324020,
+          "errors": 0
+        },
+        "fsync": {
+          "calls": 36,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pread64": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "readv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "preadv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "sendfile": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        }
+      },
+      "unresolved_calls": 0,
+      "scope": "successful syscall return bytes across process tree, including non-file descriptors; copy/sendfile counted once as read and once as write; CSR classification from -yy descriptor paths including resumed calls; not physical I/O"
+    },
+    "sampled_workspace": [
+      {
+        "case": "original",
+        "baseline": [
+          {
+            "allocated_bytes": 41250816,
+            "logical_bytes": 27783012,
+            "unique_files": 4248
+          },
+          {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "unique_files": 0
+          }
+        ],
+        "sampled_overlapping_allocated_peak_bytes": 53239808,
+        "sampled_private_temporary_allocated_peak_bytes": 11988992,
+        "samples": 437,
+        "maximum_sample_gap_seconds": 0.07780275004915893,
+        "vanished_files": 9,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d"
+      },
+      {
+        "case": "prefiltered",
+        "baseline": [
+          {
+            "allocated_bytes": 41250816,
+            "logical_bytes": 27783012,
+            "unique_files": 4248
+          },
+          {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "unique_files": 0
+          }
+        ],
+        "sampled_overlapping_allocated_peak_bytes": 53882880,
+        "sampled_private_temporary_allocated_peak_bytes": 12632064,
+        "samples": 42,
+        "maximum_sample_gap_seconds": 0.07283752399962395,
+        "vanished_files": 1,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d"
+      }
+    ]
+  },
+  "candidate": {
+    "probe": {
+      "source": "6cc56556827bdfd5bce63b58579cbed47758d426",
+      "integrated_core_source": "5fc68e568893110cca97b0eb2c797d306b264e27",
+      "sha256": "68c7ec667f823ec8d070ccddefef02dccf247c5b3445fb8e323904914e4a8da4",
+      "profile": "release optimized; RUSTFLAGS,CARGO_ENCODED_RUSTFLAGS,LLVM_PROFILE_FILE unset",
+      "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+      "limitations": "Diagnostic mode explains before execution and enables work counters; those timings are not uninstrumented latency observations. Normal mode remains the five-query latency probe."
+    },
+    "observations": {
+      "original": {
+        "first_ns": [
+          268168064,
+          269601562,
+          264391772
+        ],
+        "first_median_ns": 268168064,
+        "reused_ns": [
+          256217495,
+          255659085,
+          254264148,
+          254255888,
+          254400760,
+          253479983,
+          252756220,
+          253081245,
+          242510623,
+          259105711,
+          261547517,
+          253803049
+        ],
+        "reused_median_ns": 254260018.0,
+        "process_open_plus_five_queries": [
+          {
+            "user_seconds": 1.08,
+            "system_seconds": 1.05,
+            "maximum_rss_kib": 101544
+          },
+          {
+            "user_seconds": 1.07,
+            "system_seconds": 1.02,
+            "maximum_rss_kib": 100236
+          },
+          {
+            "user_seconds": 1.11,
+            "system_seconds": 1.01,
+            "maximum_rss_kib": 101504
+          }
+        ]
+      },
+      "range": {
+        "first_ns": [
+          275802051,
+          252652357,
+          268054983
+        ],
+        "first_median_ns": 268054983,
+        "reused_ns": [
+          256771166,
+          255975641,
+          256053443,
+          255408270,
+          259751853,
+          256282897,
+          255515382,
+          256683264,
+          256596533,
+          255216947,
+          255265838,
+          254861980
+        ],
+        "reused_median_ns": 256014542.0,
+        "process_open_plus_five_queries": [
+          {
+            "user_seconds": 1.12,
+            "system_seconds": 1.02,
+            "maximum_rss_kib": 100652
+          },
+          {
+            "user_seconds": 1.1,
+            "system_seconds": 1.01,
+            "maximum_rss_kib": 100560
+          },
+          {
+            "user_seconds": 1.1,
+            "system_seconds": 1.01,
+            "maximum_rss_kib": 100956
+          }
+        ]
+      }
+    },
+    "work": [
+      {
+        "case": "original",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 16,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 11,
+            "edge_reads": 65,
+            "edge_rows_returned": 16,
+            "edge_rows_scanned": 15361,
+            "emitted": 16,
+            "hop": 1,
+            "input_batches": 1,
+            "input_rows": 1,
+            "node_full_reads": 1,
+            "node_projected_columns": 6,
+            "node_reads": 5,
+            "node_rows_returned": 16,
+            "node_rows_scanned": 17
+          },
+          {
+            "candidates": 256,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 2,
+            "edge_reads": 65,
+            "edge_rows_returned": 256,
+            "edge_rows_scanned": 65537,
+            "emitted": 256,
+            "hop": 3,
+            "input_batches": 1,
+            "input_rows": 16,
+            "node_full_reads": 1,
+            "node_projected_columns": 2,
+            "node_reads": 5,
+            "node_rows_returned": 256,
+            "node_rows_scanned": 257
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      },
+      {
+        "case": "prefiltered",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 16,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 11,
+            "edge_reads": 65,
+            "edge_rows_returned": 16,
+            "edge_rows_scanned": 15361,
+            "emitted": 16,
+            "hop": 2,
+            "input_batches": 1,
+            "input_rows": 1,
+            "node_full_reads": 1,
+            "node_projected_columns": 6,
+            "node_reads": 5,
+            "node_rows_returned": 16,
+            "node_rows_scanned": 17
+          },
+          {
+            "candidates": 256,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 2,
+            "edge_reads": 65,
+            "edge_rows_returned": 256,
+            "edge_rows_scanned": 65537,
+            "emitted": 256,
+            "hop": 4,
+            "input_batches": 1,
+            "input_rows": 16,
+            "node_full_reads": 1,
+            "node_projected_columns": 2,
+            "node_reads": 5,
+            "node_rows_returned": 256,
+            "node_rows_scanned": 257
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      },
+      {
+        "case": "range",
+        "rows": 256,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d",
+        "hops": [
+          {
+            "candidates": 16,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 11,
+            "edge_reads": 65,
+            "edge_rows_returned": 16,
+            "edge_rows_scanned": 15361,
+            "emitted": 16,
+            "hop": 1,
+            "input_batches": 1,
+            "input_rows": 1,
+            "node_full_reads": 1,
+            "node_projected_columns": 6,
+            "node_reads": 5,
+            "node_rows_returned": 16,
+            "node_rows_scanned": 17
+          },
+          {
+            "candidates": 256,
+            "edge_full_reads": 1,
+            "edge_projected_columns": 2,
+            "edge_reads": 65,
+            "edge_rows_returned": 256,
+            "edge_rows_scanned": 65537,
+            "emitted": 256,
+            "hop": 3,
+            "input_batches": 1,
+            "input_rows": 16,
+            "node_full_reads": 1,
+            "node_projected_columns": 2,
+            "node_reads": 5,
+            "node_rows_returned": 256,
+            "node_rows_scanned": 257
+          }
+        ],
+        "memory_reserved_before": 0,
+        "memory_reserved_after": 747880,
+        "returned_batch_bytes": 21040,
+        "execution_batch_rows": 8192
+      }
+    ],
+    "syscalls": {
+      "read_bytes": 232779339,
+      "write_bytes": 32998388,
+      "syscalls": {
+        "read": {
+          "calls": 22016,
+          "bytes": 97815647,
+          "errors": 0
+        },
+        "pread64": {
+          "calls": 377229,
+          "bytes": 125749246,
+          "errors": 0
+        },
+        "write": {
+          "calls": 4333,
+          "bytes": 23783942,
+          "errors": 0
+        },
+        "fsync": {
+          "calls": 1347,
+          "bytes": 0,
+          "errors": 0
+        },
+        "copy_file_range": {
+          "calls": 1330,
+          "bytes": 9214446,
+          "errors": 0
+        },
+        "readv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "preadv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "sendfile": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pwrite64": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "writev": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pwritev": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        }
+      },
+      "csr_direct_read_bytes": 9577462,
+      "csr_copy_bytes": 1324020,
+      "csr_syscalls": {
+        "read": {
+          "calls": 310,
+          "bytes": 9577462,
+          "errors": 0
+        },
+        "copy_file_range": {
+          "calls": 36,
+          "bytes": 1324020,
+          "errors": 0
+        },
+        "fsync": {
+          "calls": 36,
+          "bytes": 0,
+          "errors": 0
+        },
+        "pread64": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "readv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "preadv": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        },
+        "sendfile": {
+          "calls": 0,
+          "bytes": 0,
+          "errors": 0
+        }
+      },
+      "unresolved_calls": 0,
+      "scope": "successful syscall return bytes across process tree, including non-file descriptors; copy/sendfile counted once as read and once as write; CSR classification from -yy descriptor paths including resumed calls; not physical I/O"
+    },
+    "sampled_workspace": [
+      {
+        "case": "original",
+        "baseline": [
+          {
+            "allocated_bytes": 41250816,
+            "logical_bytes": 27783012,
+            "unique_files": 4248
+          },
+          {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "unique_files": 0
+          }
+        ],
+        "sampled_overlapping_allocated_peak_bytes": 52596736,
+        "sampled_private_temporary_allocated_peak_bytes": 11345920,
+        "samples": 42,
+        "maximum_sample_gap_seconds": 0.07846011302899569,
+        "vanished_files": 0,
+        "fingerprint": "e0c6639970436d9b74acdb9f94f7c9eff85d4de4e169004655427a46b921565d"
+      }
+    ]
+  },
+  "selection_protocol": {
+    "workload": "Existing deterministic eight-route 4097-node/65537-edge public two-hop fixture, selective start property, exact 256-path oracle; equality and equivalent range; explicit WITH is a control only.",
+    "exploratory_baseline": "Query-scoped diagnostic run: original 65537+1048352 candidates and 8932490 edge rows scanned; explicit prefilter 16+256 candidates and 80898 edge rows scanned. Diagnostic timings do not establish accepted latency benefit.",
+    "minimum_useful_work_improvement": "Eliminate expansion of the 4096 rejected start nodes: first-hop input 1 and candidates16, second-hop input16 and candidates256 on this fixture. The repair must optimize the original public query; changing users' query text is not implementation.",
+    "minimum_latency_benefit": "Repeated uninstrumented original versus explicit-prefilter controls must show separated first-query and reused-facade ranges. A selected implementation should reach control maximum plus the original observed range, for each category; fill absolute nanosecond thresholds after baseline collection and before implementation evaluation.",
+    "maximum_query_costs": "Successful syscall read/write bytes and sampled overlapping private-file allocation must not exceed the corresponding original baseline. Observed process RSS ceiling is original maximum plus its observed range; this is an investigation threshold, not a hard memory bound.",
+    "maximum_maintenance_costs": "No added persistent artifacts or mutation/rebuild/replay/compaction work for a planner-only repair. Verify unchanged persisted files and existing lifecycle/cancellation/error contracts.",
+    "measurement": "Three separate read processes per case, five queries per facade, alternating case order across repetitions; fsync+POSIX_FADV_DONTNEED private files only. Separate syscall tracing and workspace sampling. Freeze and hash executables before all subprocesses; no overlapping builds.",
+    "correctness_boundary": "Required fixed expansion; qualified unchanged input references and explicitly eligible deterministic non-erroring predicates. Preserve residual predicates, optional scopes, edge/destination references, volatility/errors, nulls, duplicates, order/LIMIT and property joins. No broad unqualified-name-only hook.",
+    "derived_thresholds_before_implementation": {
+      "maximum_first_query_median_ns": 1062367774,
+      "maximum_reused_facade_median_ns": 698343326,
+      "maximum_process_cpu_seconds_open_plus_five_queries": 2.51,
+      "maximum_observed_process_rss_kib": 154948,
+      "first_and_reused_ranges_separate": true,
+      "maximum_successful_syscall_read_bytes": 8149233916,
+      "maximum_successful_syscall_write_bytes": 130790402,
+      "maximum_sampled_overlapping_allocated_bytes": 53239808,
+      "maximum_sampled_private_temporary_allocated_bytes": 11988992
+    },
+    "temporary_control_constraint": "Equivalent control sampled peak 53882880 overlapping/12632064 temporary exceeds initial no-increase ceiling by643072 bytes. Selected repair must resolve or quantify this cost before acceptance. No threshold revision made.",
+    "selected_repair_issue": 1241
+  },
+  "method": {
+    "host": "OVHC-AGENCY",
+    "cpu": "AMD Ryzen 7 3800X, 16 logical CPUs",
+    "memory_kib": 131786392,
+    "filesystem": "native ext4, 4096-byte allocation blocks",
+    "rustc": "1.96.0 (ac68faa20 2026-05-25)",
+    "datafusion": "54.1.0",
+    "arrow_parquet": "58.4.0",
+    "fixture": "4097 nodes, 65537 edges, eight routes, deterministic random UUIDs and nullable properties; independent sorted full-path oracle, 256 result rows",
+    "latency": "Three fresh processes per case, five queries per facade, alternating case order. fsync+POSIX_FADV_DONTNEED on private fixture before each process; advisory, not proof of physically cold media.",
+    "traces": "Separate complete strace -f -qq -yy -s 0 with read/pread/vector/write/copy_file_range/sendfile/fsync/fdatasync. Parse completed and resumed syscall returns, count copy once read and once write. Zero unresolved calls and errors. Not physical I/O.",
+    "workspace": "Separate 5-ms requested scans of fixture plus private TMPDIR. Deduplicate globally by device/inode, shared files attributed first to fixture. Regular files only, directories and unlinked-open files excluded. Maximum observed gaps 77.8 ms baseline, 78.5 ms candidate. Non-atomic sampled observations, not hard bounds.",
+    "freeze": "Copy successful release executable and verify SHA256 before/after every measurement; no builds overlapped measured runs. Test-only lifecycle additions after measured commit do not change production code or read-mode probe."
+  },
+  "reproduction": [
+    "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+    "GF_CSR_PROBE_ROOT=<private admitted root> GF_CSR_PROBE_MODE=prepare <frozen executable> --exact csr_cold_public_query_probe --nocapture --test-threads=1",
+    "GF_CSR_PROBE_ROOT=<same root> GF_CSR_PROBE_MODE=read GF_CSR_PROBE_QUERY=original <frozen executable> --exact csr_cold_public_query_probe --nocapture --test-threads=1",
+    "Use GF_CSR_PROBE_QUERY=range for equivalent range; GF_CSR_PROBE_DIAGNOSTICS=1 only for separate work-counter runs.",
+    "cargo test --release -p graphforge-api --test permanent_storage_budgets",
+    "cargo test -p graphforge-rel input_predicates --lib"
+  ],
+  "honest_failures": [
+    {
+      "source": "506106581b92b573bc78ea7246f99cb7ca787696",
+      "binary_sha256": "712ef13b4de5b98604c6495654e98f45e789ae62957aca724a560811bc4c9b13",
+      "result": "First prototype appended after projection pruning preserved exact results but reduced no original/range work; superseded, never claimed as improvement."
+    },
+    {
+      "result": "Initial lifecycle fixture used nonexistent property values and exposed empty REMOVE frontier panic. Corrected fixture now performs actual mutations; independent panic is tracked as epic blocker #1242, not suppressed or fixed in this PR."
+    }
+  ],
+  "limitations": [
+    "Explicit-WITH baseline control temporary sample exceeded initial ceiling by643072 bytes. Actual original-query candidate sampled52596736 overlapping/11345920 temporary versus baseline53239808/11988992, meeting the unchanged observation ceiling; no hard peak guarantee or precise disk saving is inferred from sampling.",
+    "Nonzero747880 logical reserved bytes after query is a retained session accounting observation, not proof of a leak or total process memory. Process/native RSS is measured separately.",
+    "No new persisted artifact or writer path; no storage compression gain is attributed to this planner repair.",
+    "All five #1207 decisions and integrated S20/S22 remain outstanding; no S24/S26 run is authorized."
+  ],
+  "official_sources": [
+    "https://docs.rs/datafusion/54.1.0/datafusion/",
+    "https://docs.rs/parquet/58.4.0/parquet/"
+  ]
+}

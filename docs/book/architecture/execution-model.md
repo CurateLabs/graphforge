@@ -77,6 +77,32 @@ GraphPlan (Graph IR)
 
 ---
 
+## Predicates before fixed expansion
+
+The Rust execution session runs `FixedExpandInputPredicates` immediately after
+DataFusion's filter pushdown and before projection pruning. It moves eligible
+predicates across required fixed `ExpandNode` boundaries only when every
+referenced qualified column is preserved by the input. Comparisons of matching
+primitive types and null checks retain their existing evaluation semantics;
+recognized Cypher range comparisons retain their UDF implementation. Property
+joins remain in the plan and subsequent standard optimizer passes place the
+inserted filters through those joins.
+
+An unrecognized, volatile, potentially failing, or mixed-OR expression blocks
+movement of the entire filter. Fixed-hop relationship-disjoint checks are
+recognized by implementation type and exact UInt64 operands and remain residual.
+Destination/edge references cannot cross their producing expansion. Optional,
+variable-length and path operators have no new pushdown permission. This rule
+changes neither persisted representations nor authentication and recovery paths.
+
+The public eight-route fixture asserts 16 first-hop and 256 second-hop candidates
+for its selective equality and range queries, with an independent exact UUID
+oracle. Mutation, active snapshots, reopen and portable round trips exercise the
+same predicates. Source-bound CPU, syscall I/O, process RSS and sampled disk
+comparisons are recorded in
+[the #1241 evidence](../../development/evidence/input-predicates-1241.json).
+Timing observations are not CI assertions; sampled peaks are not hard bounds.
+
 ## List expression execution
 
 `graphforge-rel` keeps quantifier and list-comprehension UDF execution in the
