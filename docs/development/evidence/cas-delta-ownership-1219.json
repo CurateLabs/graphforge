@@ -1,0 +1,89 @@
+{
+  "issue": 1219,
+  "runtime_source_commit": "36bc94505baef9125ad254c4b707aac2383ea090",
+  "base_main_commit": "4a03ead3ca449409840a950eb02b5495436e43bf",
+  "host": "OVHC-AGENCY",
+  "kernel": "7.0.0-30-generic",
+  "filesystem": "process-root ext4, 4096-byte allocation blocks",
+  "rust": "1.96.0",
+  "arrow_parquet": "58.4.0",
+  "test_filter": "cas_ --nocapture --test-threads=1",
+  "scope": "Two compiled API integration tests: node-only public construction/composite/reopen/compaction/portable round trip and direct delta preparation/publication/retry at 33 and 4097 nodes. Compilation excluded.",
+  "runtime": {
+    "elapsed_seconds": 5.38,
+    "user_cpu_seconds": 4.1,
+    "system_cpu_seconds": 0.98,
+    "peak_rss_kib": 142932,
+    "filesystem_input_blocks_512": 54064,
+    "filesystem_output_blocks_512": 28672,
+    "exit_status": 0
+  },
+  "allocation_fixtures": [
+    {
+      "base_bytes": 14018,
+      "nodes": 33,
+      "private_control_and_run_allocated_bytes": 24576,
+      "replay_batch_rows": 7,
+      "replay_logical_memory_limit_bytes": 2097152,
+      "shared_bytes": 11460
+    },
+    {
+      "base_bytes": 545130,
+      "nodes": 4097,
+      "private_control_and_run_allocated_bytes": 188416,
+      "replay_batch_rows": 7,
+      "replay_logical_memory_limit_bytes": 2097152,
+      "shared_bytes": 379901
+    }
+  ],
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 23719,
+        "bytes": 52242032,
+        "errors": 0
+      },
+      "pread64": {
+        "calls": 9160,
+        "bytes": 5676030,
+        "errors": 0
+      },
+      "write": {
+        "calls": 1618,
+        "bytes": 7877661,
+        "errors": 0
+      },
+      "fsync": {
+        "calls": 3731,
+        "bytes": 0,
+        "errors": 0
+      },
+      "copy_file_range": {
+        "calls": 456,
+        "bytes": 2334021,
+        "errors": 0
+      }
+    },
+    "returned_read_bytes": 60252083,
+    "returned_write_bytes": 10211682
+  },
+  "measurement_notes": [
+    "Syscall I/O is a separate strace run (20.51 seconds including instrumentation). read/pread64/readv/preadv and copy_file_range/sendfile successful returned lengths count as reads; write/pwrite64/writev/pwritev and copy_file_range/sendfile count as writes. Includes all process file descriptors, startup, authentication, queries, export, verify, import and test output; not physical device traffic.",
+    "RSS and CPU come from untraced /usr/bin/time -v over the prebuilt test binary; filesystem blocks are kernel-accounted I/O and depend on cache state.",
+    "Private allocation sums prepared base files whose physical identities differ from their CAS objects plus the new run. Node/property payloads must retain identical file identities. Does not include transient fingerprint replay output, generation metadata, CAS manifest objects or directory allocation.",
+    "The 2 MiB bound is the existing logical replay admission limit, not a bound on total process RSS or native codec contexts.",
+    "Deterministic budgets: private controls/run <=262144 bytes for each fixture; one run <=4096 bytes; seven-row replay batches with existing 2097152-byte logical memory limit; exact immutable node/property inode reuse and parent inventory preservation."
+  ],
+  "validation": {
+    "api_cas_tests": 2,
+    "api_composite_tests": 19,
+    "api_bulk_construction_tests": 30,
+    "storage_delta_compaction_integration_tests": 10,
+    "storage_delta_journal_integration_tests": 16,
+    "storage_delta_unit_and_crash_tests": 10,
+    "api_resumable_surface_tests": 1,
+    "workspace_clippy": "passed",
+    "pre_push_fast": "passed",
+    "gate_registry": "passed"
+  }
+}
