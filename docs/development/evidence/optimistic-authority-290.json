@@ -1,0 +1,163 @@
+{
+  "issue": 290,
+  "purpose": "Correct bounded optimistic rebase when property authority changes before staging",
+  "production_base": "5fc68e568893110cca97b0eb2c797d306b264e27",
+  "regression_revision": "03a39348848037caac8480aba0d187002b1ee952",
+  "repair_revision": "36a386b20d8432b254cbb34f49461c4620ff9f0e",
+  "ci_failure": {
+    "pr": 1243,
+    "head": "547ec4c98bbfdc6764ba642f9d71b28eeb73b34b",
+    "run": 34537860496,
+    "job": 103073636722,
+    "lane": "Node Binding",
+    "tests": 277,
+    "passed": 276,
+    "failed": 1,
+    "test": "write-mode options validate and optimistic agents publish exactly once",
+    "error": "GF_IDEMPOTENCY_CONFLICT: property mutation authority changed",
+    "census": "All independent applicable lanes completed. Bazel, Python binding, Windows locks, macOS durability, native aggregate and quality/policy lanes passed. CI Gate failed as aggregate. Concurrency Matrix and Bazel Diagnostics skipped under existing conditions."
+  },
+  "cause": "seal_property_windows classified CURRENT-generation drift as TransactionConflict; the composite publisher rebases only WriteConflict.",
+  "repair": "Classify only that stale authority boundary as WriteConflict. Existing bounded optimistic rebase and rollback perform the recovery. Genuine operation identity conflicts remain unchanged.",
+  "fixture": {
+    "mechanism": "One-shot thread-local test hook after authenticated property inventory capture. A separate optimistic facade synchronously publishes a distinct node before the original stages its property window. No timing race, sleep, or retry loop is used by the test.",
+    "assertions": [
+      "Competitor advances CURRENT and hook runs once",
+      "One allowed rebase publishes both exact UUID/name pairs once",
+      "Immediate query and reopen preserve both pairs",
+      "Exact receipt retry and conflicting-content refusal do not advance CURRENT",
+      "Zero rebase budget returns GF_REBASE_EXHAUSTED with only the competitor published"
+    ],
+    "isolation": "Hook is taken before invoking the competitor, cleared by a drop guard, and serialized with the existing optimistic publication fixtures."
+  },
+  "environment": {
+    "TMPDIR": "/home/ubuntu/graphforge-native-tmp-1195",
+    "CARGO_TARGET_DIR": "/home/ubuntu/code/graphforge-target-1195",
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "validation": [
+    {
+      "command": "cargo test -p graphforge-api --lib optimistic_property_authority_race",
+      "revision": "03a39348",
+      "exit_code": 101,
+      "passed": 0,
+      "failed": 2,
+      "ignored": 0,
+      "observed": "Both fail with GF_IDEMPOTENCY_CONFLICT; successful-rebase case reports the exact property authority drift message."
+    },
+    {
+      "command": "cargo test -p graphforge-api --lib composite_publish::tests",
+      "revision": "36a386b20d8432b254cbb34f49461c4620ff9f0e",
+      "exit_code": 0,
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "command": "cargo clippy --workspace -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "make pre-push-fast",
+      "exit_code": 0
+    },
+    {
+      "command": "make gate-registry-check",
+      "exit_code": 0
+    },
+    {
+      "command": "make pre-push-preflight",
+      "exit_code": 0
+    },
+    {
+      "command": "pnpm --filter @curatelabs/graphforge build",
+      "exit_code": 0,
+      "profile": "release"
+    },
+    {
+      "command": "TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 pnpm --filter @curatelabs/graphforge test",
+      "exit_code": 0,
+      "passed": 277,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "note": "Includes the exact optimistic agents acceptance test that failed CI."
+    },
+    {
+      "command": "cargo test --workspace",
+      "revision": "36a386b20d8432b254cbb34f49461c4620ff9f0e",
+      "exit_code": 101,
+      "api_unit_passed": 739,
+      "bdd_scenarios_passed": 118,
+      "opencypher_tck_passed": 3897,
+      "opencypher_tck_regressions": 0,
+      "fixed_hop_passed": 17,
+      "fixed_hop_existing_release_only_ignored": 2,
+      "permanent_storage_passed": 47,
+      "construction_ladder_small_fixture_passed": 30,
+      "storage_passed": 1096,
+      "storage_failed": 2,
+      "storage_existing_ignored": 2,
+      "failures": [
+        "Known #1192 hardcoded /tmp filesystem admission",
+        "Existing stale-authority storage test expected TransactionConflict; corrected below"
+      ]
+    },
+    {
+      "command": "make pre-push",
+      "revision": "36a386b20d8432b254cbb34f49461c4620ff9f0e",
+      "exit_code": 2,
+      "preflight": "passed",
+      "policy_static": "passed",
+      "rust_quality": "passed",
+      "api_unit_passed": 739,
+      "opencypher_tck_passed": 3897,
+      "opencypher_tck_regressions": 0,
+      "fixed_hop_passed": 17,
+      "permanent_storage_passed": 47,
+      "construction_ladder_small_fixture_passed": 30,
+      "storage_passed": 1095,
+      "storage_failed": 2,
+      "storage_existing_ignored": 2,
+      "failures": [
+        "Known #1192 hardcoded /tmp filesystem admission",
+        "Existing stale-authority storage test expected TransactionConflict; corrected below"
+      ],
+      "not_reached": [
+        "Python wrapper coverage",
+        "Node wrapper coverage",
+        "Final coverage thresholds"
+      ]
+    },
+    {
+      "command": "cargo test -p graphforge-storage --lib writer::tests::staged_property_mutation_conflicts_after_intervening_project_publication -- --exact",
+      "revision": "a12a5d73a16c14953cc2bacbd78d5c50a390f6d5",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "scope": "Only the expected error variant changed; unchanged CURRENT bytes, generation and baseline property checks all execute and pass. Production code is unchanged from the broad and binding runs."
+    }
+  ],
+  "limits": "No storage, query-latency, memory or I/O improvement is claimed for this correctness repair.",
+  "node_provenance": {
+    "source_commit": "36a386b20d8432b254cbb34f49461c4620ff9f0e",
+    "artifacts": [
+      {
+        "path": "/home/ubuntu/code/graphforge-290/crates/graphforge-bindings-node/graphforge.linux-x64-gnu.node",
+        "sha256": "36df9743a03db279b178b7e99bf69019fa6a9eba571e9eaaba8b2a21126f19ef"
+      }
+    ]
+  },
+  "corrected_storage_expectation_revision": "a12a5d73a16c14953cc2bacbd78d5c50a390f6d5",
+  "known_local_limitation": {
+    "issue": 1192,
+    "state_at_verification": "OPEN",
+    "test": "project_generation::tests::wave9_participant_inventory_rejects_links_and_special_files",
+    "cause": "The test explicitly uses tempdir_in(\"/tmp\"), overriding the admitted TMPDIR. On this host /tmp is tmpfs, refused during native filesystem admission before the inventory assertions.",
+    "error": "GF_UNSUPPORTED_FILESYSTEM: phase=CLASSIFY outcome=rejected cause=filesystem_class_unproven",
+    "unchanged": "project_generation.rs is unchanged from the production base. No skip, assertion weakening or filesystem-admission change is included."
+  },
+  "local_gate_claim": "Full local gates were run and are not claimed green. Their failure census is retained, and the changed error expectation passed its focused regression. Exact-head required CI remains the merge gate.",
+  "merge_requirement": "Required CI and CI Gate must pass at the exact PR head before merge; this file records pre-PR local evidence."
+}
