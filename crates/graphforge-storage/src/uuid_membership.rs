@@ -12264,12 +12264,17 @@ pub(crate) mod tests {
             let aliases = tempfile::tempdir().unwrap();
             let nodes = [(Uuid::from_u128(1), 1), (Uuid::from_u128(2), u64::MAX - 1)];
             crate::generation::force_bump_topology_generation_for_test(source.path()).unwrap();
-            append_uuid_membership_delta(source.path(), 1, &nodes, &[]).unwrap();
+            write_node_parquet_with_ids(
+                &source.path().join("topology/nodes.parquet"),
+                &nodes.map(|(uuid, _)| uuid),
+                &nodes.map(|(_, surrogate)| surrogate),
+            );
+            rebuild_uuid_membership_indexes(source.path(), UuidIndexBuildLimits::default())
+                .unwrap();
             let root = source.path().join(INDEX_DIR);
-            let mut snapshot =
-                AuthenticatedUuidIndexSnapshot::open_at_generation(source.path(), 1).unwrap();
-            let records = snapshot
-                .manifest
+            let manifest: Manifest =
+                serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+            let records = manifest
                 .runs
                 .iter()
                 .flat_map(|run| [run.identities.clone(), run.node_surrogates.clone()])
@@ -12288,6 +12293,14 @@ pub(crate) mod tests {
                     fs::set_permissions(&path, permissions).unwrap();
                 }
             }
+            if scenario == "manifest_link" {
+                fs::hard_link(root.join(MANIFEST), aliases.path().join(MANIFEST)).unwrap();
+            }
+            // Match hydration: establish aliases before retaining immutable
+            // handles. Windows prevents adding links through held handles that
+            // intentionally deny DELETE sharing.
+            let mut snapshot =
+                AuthenticatedUuidIndexSnapshot::open_at_generation(source.path(), 1).unwrap();
             match scenario {
                 "valid" => {
                     snapshot.revalidate().unwrap();
@@ -12354,7 +12367,6 @@ pub(crate) mod tests {
                     }
                 }
                 "manifest_link" => {
-                    fs::hard_link(root.join(MANIFEST), aliases.path().join(MANIFEST)).unwrap();
                     assert!(snapshot.revalidate().is_err());
                 }
                 _ => unreachable!(),
