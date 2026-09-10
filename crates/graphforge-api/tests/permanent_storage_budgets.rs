@@ -5728,3 +5728,73 @@ fn compressed_csr_public_mutation_snapshot_and_portable_queries() {
     verify_graph(&reopened, fixture, &nodes, &edges);
     verify_csr_two_hop_queries(&reopened, &edges, fixture.routes);
 }
+
+/// The default case proves the oracle in CI. Source-frozen measurement runs use
+/// separate `prepare` and `read` processes and a private GF_CSR_PROBE_ROOT.
+#[test]
+fn csr_cold_public_query_probe() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("GF_CSR_PROBE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("probe"));
+    let mode = std::env::var("GF_CSR_PROBE_MODE").unwrap_or_else(|_| "all".into());
+    assert!(matches!(mode.as_str(), "all" | "prepare" | "read"));
+    let source = root.join("source");
+    let oracle_path = root.join("oracle.json");
+    if mode != "read" {
+        assert!(
+            !source.exists(),
+            "probe preparation requires a fresh private root"
+        );
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = Fixture {
+            name: "csr_cold_public_query",
+            nodes: 4097,
+            edges: 65537,
+            routes: 8,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: true,
+            heterogeneous: false,
+        };
+        let (nodes, edges) = rows(fixture);
+        let mut expected = Vec::new();
+        for first in edges.iter().filter(|edge| edge.1 == nodes[1].0) {
+            for second in edges
+                .iter()
+                .filter(|edge| edge.1 == first.2 && edge.0 != first.0)
+            {
+                expected.push([first.1, first.0, first.2, second.0, second.2]);
+            }
+        }
+        expected.sort();
+        assert!(!expected.is_empty());
+        std::fs::write(&oracle_path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        construct(&source, fixture, &nodes, &edges);
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        graph.rebuild_adjacency(None).unwrap();
+    }
+    if mode != "prepare" {
+        let expected: Vec<[Uuid; 5]> =
+            serde_json::from_slice(&std::fs::read(oracle_path).unwrap()).unwrap();
+        let opened = Instant::now();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let open_ns = opened.elapsed().as_nanos();
+        let query = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score = -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+        let mut query_ns = Vec::new();
+        for _ in 0..5 {
+            let started = Instant::now();
+            let result = graph.execute(query).unwrap();
+            query_ns.push(started.elapsed().as_nanos());
+            assert_eq!(csr_two_hop_rows(&result.batches), expected);
+        }
+        println!(
+            "CSR_COLD_PUBLIC_QUERY {}",
+            json!({
+                "mode":mode,"open_elapsed_ns":open_ns,"query_elapsed_ns":query_ns,
+                "rows":expected.len(),"fingerprint":digest_hex(&serde_json::to_vec(&expected).unwrap()),
+                "cache_scope":"first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded"
+            })
+        );
+    }
+}
