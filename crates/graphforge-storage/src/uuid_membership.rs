@@ -12803,6 +12803,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn packed_membership_rebuild_reopen_and_tombstone_preserve_full_width_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = [
+            Uuid::from_u128(2),
+            Uuid::from_u128(u128::MAX - 1),
+            Uuid::from_u128(u128::MAX),
+        ];
+        let ids = [u64::from(u32::MAX), u64::from(u32::MAX) + 1, u64::MAX];
+        write_node_parquet_with_ids(&dir.path().join("topology/nodes.parquet"), &nodes, &ids);
+        let edge = Uuid::from_u128(1);
+        write_uuid_parquet(
+            &dir.path().join("topology/edges/R.parquet"),
+            "edge_uuid",
+            &[edge],
+        );
+        rebuild_uuid_membership_indexes(
+            dir.path(),
+            UuidIndexBuildLimits {
+                scan_batch_rows: 1,
+                run_records: 1,
+                merge_fan_in: 2,
+            },
+        )
+        .unwrap();
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index.lookup_node_surrogates(&nodes).unwrap().0,
+            ids.map(Some)
+        );
+        assert_eq!(index.probe(UuidIndexKind::Edge, &[edge]).unwrap().0, [true]);
+        drop(index);
+        crate::generation::force_bump_topology_generation_for_test(dir.path()).unwrap();
+        append_uuid_membership_delta_with_tombstones(
+            dir.path(),
+            1,
+            &[],
+            &[],
+            &[(nodes[2], u64::MAX)],
+            &[],
+        )
+        .unwrap();
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            index.lookup_node_surrogates(&nodes).unwrap().0,
+            [Some(ids[0]), Some(ids[1]), None]
+        );
+        assert_eq!(index.probe(UuidIndexKind::Edge, &[edge]).unwrap().0, [true]);
+    }
+
+    #[test]
     fn duplicate_and_zero_node_surrogates_fail_closed_across_bounded_runs() {
         let limits = UuidIndexBuildLimits {
             scan_batch_rows: 1,
