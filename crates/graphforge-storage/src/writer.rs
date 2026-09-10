@@ -6750,7 +6750,7 @@ pub(crate) fn seal_property_windows(
             let current = crate::resolve_project_generation(container_root)?;
             if current.generation_uuid() != *expected {
                 return Err(GfError::Project {
-                    code: ProjectErrorCode::TransactionConflict,
+                    code: ProjectErrorCode::WriteConflict,
                     message: format!(
                         "property mutation authority changed: expected={} current={}",
                         expected,
@@ -9248,7 +9248,7 @@ mod tests {
         assert!(matches!(
             error,
             GfError::Project {
-                code: ProjectErrorCode::TransactionConflict,
+                code: ProjectErrorCode::WriteConflict,
                 ..
             }
         ));
