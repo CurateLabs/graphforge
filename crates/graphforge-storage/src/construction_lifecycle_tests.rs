@@ -509,6 +509,7 @@ mod lifecycle_budget {
                 let append = census(session.root.path());
                 session.seal().unwrap();
                 let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+                let shape_peak = session.evidence().storage_transient_peak_total_allocated_bytes;
                 assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
                 assert!(session.evidence().merge_passes >= 3);
                 let shaped = census(session.root.path());
@@ -540,13 +541,27 @@ mod lifecycle_budget {
                     .evidence()
                     .storage_transient_peak_total_allocated_bytes;
                 if version == 8 {
-                    before = Some((current, peak));
+                    before = Some((current, peak, shape_peak));
                 } else {
-                    let (old_current, old_peak) = before.unwrap();
-                    // Removing both full predecessor representations must at least
-                    // halve payload retention and lower the actual simultaneous peak.
+                    let (old_current, old_peak, old_shape_peak) = before.unwrap();
+                    // Compression can move both variants' maximum into shaping,
+                    // before retirement can reduce it. Keep the strict retention
+                    // benefit, no peak regression against the compressed control,
+                    // and a strict reduction against the source-bound uncompressed
+                    // v8 baseline in construction-supersession.md (#1195).
                     assert!(current * 2 < old_current);
-                    assert!(peak < old_peak);
+                    assert!(peak <= old_peak);
+                    let uncompressed_peak = match scale {
+                        1 => 23_425_024,
+                        2 => 44_494_848,
+                        4 => 86_634_496,
+                        _ => unreachable!("fixed fixture scales"),
+                    };
+                    assert!(peak < uncompressed_peak);
+                    if peak == old_peak {
+                        assert_eq!(peak, shape_peak);
+                        assert_eq!(old_peak, old_shape_peak);
+                    }
                     assert_eq!(
                         session.evidence().current_merge_temporary_allocated_bytes,
                         0

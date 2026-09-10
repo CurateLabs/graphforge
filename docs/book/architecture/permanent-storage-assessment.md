@@ -119,3 +119,39 @@ checked independently, so added CSR cannot hide growing topology or manifests.
 Final production repairs also require recovery, snapshot, corruption and resource
 budgets appropriate to their changed surface. Larger-scale confirmation reuses
 #900's admitted ladder; this assessment does not authorize S24/S26 execution.
+
+## Construction Parquet repair (#1202)
+
+New permanent construction payloads use Zstd level 1, including the runtime
+catalog produced during shaping and copied into the publication. Row-group,
+dictionary, schema, hashing, cache-release and durability behavior stay as before.
+Accepted input and private merge Parquet are outside this permanent-output policy.
+This repair does not yet change mutation or delta replay writers; their separate
+resource admission requires the publishing-policy follow-up requested under #1194.
+
+[Repair measurements](../../development/evidence/permanent-parquet-1202.json)
+record source `87a5b19f` on the same host and toolchain as the assessment. All five
+facade tests passed, including exact reopen/query/export/full-verify/clean-import
+oracles and every production column's codec. Random-ID Parquet payloads remain
+below 80% of their same-layout uncompressed control.
+
+| Fixture | Baseline permanent allocation | New permanent allocation | New Parquet payload | New Parquet allocation |
+| --- | ---: | ---: | ---: | ---: |
+| Sequential | 8,388,608 | 4,112,384 | 973,925 | 1,097,728 |
+| Random | 8,929,280 | 7,585,792 | 4,015,814 | 4,145,152 |
+| Eight property routes, CSR built | 20,840,448 | 18,644,992 | 7,845,372 | 10,743,808 |
+| Heterogeneous properties | 14,929,920 | 13,086,720 | 6,398,839 | 7,467,008 |
+
+The serial assessment took 393.65 seconds and peaked at 270,208 KiB RSS, versus
+449.10 seconds and 268,780 KiB before the repair. These are exploratory whole-test
+measurements, not isolated codec costs or proof of a timing improvement. Raw
+results include per-fixture encode/decode times and process filesystem I/O;
+process I/O includes queries and portable copies and is not a publication-only
+byte counter.
+
+The paired lifecycle test also passes at 1x/2x/4x. Compression moves the maximum
+allocation into shaping: the reclaimed and retained controls can now tie at that
+phase. The test verifies both measured phase peaks when they tie, no increase
+against the compressed retained control, strict reduction against the frozen
+pre-compression control, and the original strict retained-allocation reduction.
+Compression does not retroactively remove a historical shaping peak.
