@@ -892,7 +892,7 @@ fn ensure_rebase_compatible(
     Ok(())
 }
 
-fn administrative_contract(
+pub(crate) fn administrative_contract(
     generation: &ResolvedProjectGeneration,
 ) -> Result<AdministrativeContract, GfError> {
     let mut contract = generation

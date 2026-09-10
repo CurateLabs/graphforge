@@ -6373,8 +6373,8 @@ impl GraphForge {
         &self,
         request: transaction::GraphDeltaCompactionInput,
     ) -> Result<transaction::GraphDeltaCompactionReportOutput> {
-        let graph = self.open_write_guard()?;
-        transaction::compact(&graph, request, None)
+        let mut graph = self.open_write_guard()?;
+        transaction::compact(&mut graph, request, None)
     }
 
     /// Remove all nodes and edges (in-memory instances only).

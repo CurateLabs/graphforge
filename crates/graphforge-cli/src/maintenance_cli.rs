@@ -353,7 +353,7 @@ pub(crate) fn run_transaction(
 }
 
 pub(crate) fn run_maintenance(
-    graph: &GraphForge,
+    graph: &mut GraphForge,
     command: MaintenanceCommand,
     json: bool,
     output: &mut dyn Write,

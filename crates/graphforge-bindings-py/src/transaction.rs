@@ -616,7 +616,7 @@ pub(crate) mod ops {
     }
 
     pub(crate) fn compact_graph_delta<'py>(
-        forge: &GraphForge,
+        forge: &mut GraphForge,
         py: Python<'py>,
         transaction_uuid: &str,
         generation_uuid: &str,

@@ -294,7 +294,31 @@ pub fn compact_graph_delta_with_mode(
     cancel: Option<&AtomicBool>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
-    compact_graph_delta_after_prepare(container_root, request, cancel, mode, |_| Ok(()))
+    compact_graph_delta_after_prepare(container_root, request, cancel, mode, None, |_| Ok(()))
+}
+
+/// Compact only from the facade's expected parent, or replay an already
+/// committed exact request. The parent check precedes replay preparation;
+/// publication still uses the storage transaction's normal conflict checks.
+///
+/// # Errors
+/// Returns a write conflict for a stale parent and the errors of
+/// [`compact_graph_delta_with_mode`] for compaction and publication failures.
+pub fn compact_graph_delta_for_parent_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &GraphDeltaCompactionRequest,
+    cancel: Option<&AtomicBool>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+    expected_parent: Uuid,
+) -> Result<GraphDeltaCompactionReport, GfError> {
+    compact_graph_delta_after_prepare(
+        container_root,
+        request,
+        cancel,
+        mode,
+        Some(expected_parent),
+        |_| Ok(()),
+    )
 }
 
 fn compact_graph_delta_after_prepare(
@@ -302,6 +326,7 @@ fn compact_graph_delta_after_prepare(
     request: &GraphDeltaCompactionRequest,
     cancel: Option<&AtomicBool>,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
+    expected_parent: Option<Uuid>,
     before_stage: impl FnOnce(&Path) -> Result<(), GfError>,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
     let started = Instant::now();
@@ -325,6 +350,12 @@ fn compact_graph_delta_after_prepare(
     }
 
     let parent = resolve_project_generation(root)?;
+    if expected_parent.is_some_and(|expected| expected != parent.generation_uuid()) {
+        return Err(GfError::Project {
+            code: ProjectErrorCode::WriteConflict,
+            message: "project generation changed before facade compaction".into(),
+        });
+    }
     let prepared = prepare_compaction(root, &parent, request, cancel)?;
     check_cancel(cancel)?;
 
@@ -1017,6 +1048,7 @@ mod crash_oracle_tests {
             &request,
             None,
             crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            None,
             |_| Ok(()),
         )
         .unwrap_err();
@@ -1042,6 +1074,49 @@ mod crash_oracle_tests {
             .unwrap()
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn expected_parent_compaction_rejects_a_newer_current_before_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        publish_graph_base(root.path());
+        let expected_parent = publish_one_node_delta(root.path());
+        let (competitor, staged) = stage_graph_clone(root.path());
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: GraphDeltaCompactionLimits::default(),
+            cleanup_after_commit: false,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+        let error = compact_graph_delta_after_prepare(
+            root.path(),
+            &request,
+            None,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            Some(expected_parent),
+            |_| panic!("stale parent must fail before preparation"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_WRITE_CONFLICT");
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            competitor
+        );
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
         );
     }
 

@@ -416,6 +416,12 @@ pub use search_index::SearchIndexOptions;
 // GraphForge
 // ---------------------------------------------------------------------------
 
+struct PreparedGenerationReadAuthority {
+    properties: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
+    ordinal: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
+    adjacency: Arc<graphforge_exec::PersistentAdjacencyProvider>,
+}
+
 struct GenerationPropertyAuthority {
     generation_uuid: uuid::Uuid,
     inventory: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
@@ -1011,33 +1017,54 @@ impl GraphForge {
         Arc::clone(&authority.inventory)
     }
 
-    fn install_property_generation(
+    fn prepare_generation_read_authority(
         &self,
         generation: &ResolvedProjectGeneration,
-    ) -> Result<(), GfError> {
-        let replacement = property_inventory_for_hydrated_generation(generation, &self.dir)?;
-        let ordinal_replacement = ordinal_identity_handle(generation, &self.dir)?;
-        let adjacency_replacement = Arc::new(adjacency_provider_for_graph(
-            &self.dir,
+        graph_root: &Path,
+    ) -> Result<PreparedGenerationReadAuthority, GfError> {
+        let properties = property_inventory_for_hydrated_generation(generation, graph_root)?;
+        let ordinal = ordinal_identity_handle(generation, graph_root)?;
+        let adjacency = Arc::new(adjacency_provider_for_graph(
+            graph_root,
             self.ontology_mode,
-            Arc::clone(&replacement),
+            Arc::clone(&properties),
         )?);
+        Ok(PreparedGenerationReadAuthority {
+            properties,
+            ordinal,
+            adjacency,
+        })
+    }
+
+    fn install_prepared_generation_read_authority(
+        &self,
+        generation_uuid: uuid::Uuid,
+        prepared: PreparedGenerationReadAuthority,
+    ) {
         *self
             .property_authority
             .lock()
             .expect("property authority lock poisoned") = GenerationPropertyAuthority {
-            generation_uuid: generation.generation_uuid(),
-            inventory: Arc::clone(&replacement),
+            generation_uuid,
+            inventory: prepared.properties,
         };
         *self
             .current_generation_uuid
             .lock()
-            .expect("generation UUID lock poisoned") = generation.generation_uuid();
+            .expect("generation UUID lock poisoned") = generation_uuid;
         *self
             .adjacency_provider
             .write()
-            .expect("adjacency provider lock poisoned") = adjacency_replacement;
-        self.ordinal_identities.replace(ordinal_replacement);
+            .expect("adjacency provider lock poisoned") = prepared.adjacency;
+        self.ordinal_identities.replace(prepared.ordinal);
+    }
+
+    fn install_property_generation(
+        &self,
+        generation: &ResolvedProjectGeneration,
+    ) -> Result<(), GfError> {
+        let prepared = self.prepare_generation_read_authority(generation, &self.dir)?;
+        self.install_prepared_generation_read_authority(generation.generation_uuid(), prepared);
         Ok(())
     }
 
@@ -1982,11 +2009,18 @@ impl GraphForge {
         // stream is demand-driven and may outlive this call; holding the slot
         // for the full consumer lifetime would serialize all streaming clients.
         drop(admission);
-        Ok(self.graph_visibility.health.guard_stream(shape_stream(
-            stream,
-            self.ontology_mode,
-            self.ontology.as_ref(),
-        )))
+        Ok(self.finish_public_stream(stream))
+    }
+
+    fn finish_public_stream(&self, stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
+        Box::pin(WorkspacePinnedStream {
+            stream: self.graph_visibility.health.guard_stream(shape_stream(
+                stream,
+                self.ontology_mode,
+                self.ontology.as_ref(),
+            )),
+            _workspace: Arc::clone(&self.workspace_guard),
+        })
     }
 
     /// Streaming query plus a [`RuntimeGuard`] that keeps the instance's
@@ -3512,6 +3546,30 @@ impl Shaper {
             cols,
             &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count)),
         )
+    }
+}
+
+// Drop the lazy reader (and its retained descriptors) before the final
+// workspace owner. Compaction may rotate the facade while this stream lives.
+struct WorkspacePinnedStream {
+    stream: SendableRecordBatchStream,
+    _workspace: Arc<tempfile::TempDir>,
+}
+
+impl futures::Stream for WorkspacePinnedStream {
+    type Item = datafusion::error::Result<arrow::record_batch::RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.stream.as_mut().poll_next(context)
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for WorkspacePinnedStream {
+    fn schema(&self) -> arrow::datatypes::SchemaRef {
+        self.stream.schema()
     }
 }
 

@@ -1385,7 +1385,7 @@ fn run_with_allocation(
                 .map_err(Into::into);
         }
         Command::Maintenance { command } => {
-            return maintenance_cli::run_maintenance(&graph, command, cli.json, output)
+            return maintenance_cli::run_maintenance(&mut graph, command, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }

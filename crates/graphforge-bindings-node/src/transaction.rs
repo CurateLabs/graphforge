@@ -675,7 +675,7 @@ pub(crate) fn preview_compaction(
 }
 
 pub(crate) fn compact(
-    graph: &graphforge_api::GraphForge,
+    graph: &mut graphforge_api::GraphForge,
     input: GraphDeltaCompactionInput,
     cancellation: Option<&CancellationToken>,
 ) -> Result<GraphDeltaCompactionReportOutput> {

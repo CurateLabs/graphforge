@@ -1,0 +1,264 @@
+{
+  "issue": 1231,
+  "source_commit": "269fa1dcb74db73555d0a79975c56b099dd34cb9",
+  "baseline_source_commit": "4e397d250ba77c1aaa7e493c857dadd667f638c0",
+  "workload": "Public constructed N33 and N4097/E129/two routes, CAS and adjacency-backed generation-owned, nullable node properties, one/two deltas, partial-chain refusal, compaction, exact retry, same-handle SET/CREATE/DELETE, lazy old stream, stable UUID/surrogates, reopen/export/full verify/clean import; four crash/returned-error cases at CURRENT boundaries.",
+  "command": [
+    "permanent_storage_budgets",
+    "facade_compaction_",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "fixture_budgets": [
+    {
+      "multiple_deltas": false,
+      "nodes": 33,
+      "owned": false,
+      "parquet_bytes": 26126,
+      "hydration": {
+        "files_validated": 24,
+        "bytes_validated": 34174,
+        "files_copied": 8,
+        "bytes_copied": 4093,
+        "files_opened_in_place": 0,
+        "files_reused": 16,
+        "bytes_reused": 30081,
+        "application_read_bytes": 38546,
+        "application_read_calls": 27,
+        "application_write_bytes": 4093,
+        "application_write_calls": 6,
+        "fsync_calls": 16,
+        "file_fsync_calls": 8,
+        "directory_fsync_calls": 8
+      },
+      "compaction": {
+        "input_runs": 1,
+        "compacted_runs": 1,
+        "retained_suffix_runs": 0,
+        "input_rows": 2,
+        "output_rows": 162,
+        "input_bytes": 522,
+        "output_bytes": 34174,
+        "spill_bytes": 0,
+        "peak_memory_bytes": 1568,
+        "elapsed_ms": 167
+      }
+    },
+    {
+      "multiple_deltas": false,
+      "nodes": 4097,
+      "owned": false,
+      "parquet_bytes": 204213,
+      "hydration": {
+        "files_validated": 35,
+        "bytes_validated": 574079,
+        "files_copied": 8,
+        "bytes_copied": 166775,
+        "files_opened_in_place": 0,
+        "files_reused": 27,
+        "bytes_reused": 407304,
+        "application_read_bytes": 741133,
+        "application_read_calls": 44,
+        "application_write_bytes": 166775,
+        "application_write_calls": 8,
+        "fsync_calls": 16,
+        "file_fsync_calls": 8,
+        "directory_fsync_calls": 8
+      },
+      "compaction": {
+        "input_runs": 1,
+        "compacted_runs": 1,
+        "retained_suffix_runs": 0,
+        "input_rows": 2,
+        "output_rows": 4226,
+        "input_bytes": 522,
+        "output_bytes": 574079,
+        "spill_bytes": 0,
+        "peak_memory_bytes": 1568,
+        "elapsed_ms": 467
+      }
+    },
+    {
+      "multiple_deltas": true,
+      "nodes": 33,
+      "owned": true,
+      "parquet_bytes": 28308,
+      "hydration": {
+        "files_validated": 37,
+        "bytes_validated": 59655,
+        "files_copied": 37,
+        "bytes_copied": 59655,
+        "files_opened_in_place": 0,
+        "files_reused": 0,
+        "bytes_reused": 0,
+        "application_read_bytes": 59934,
+        "application_read_calls": 34,
+        "application_write_bytes": 59655,
+        "application_write_calls": 33,
+        "fsync_calls": 74,
+        "file_fsync_calls": 74,
+        "directory_fsync_calls": 0
+      },
+      "compaction": {
+        "input_runs": 2,
+        "compacted_runs": 2,
+        "retained_suffix_runs": 0,
+        "input_rows": 3,
+        "output_rows": 162,
+        "input_bytes": 860,
+        "output_bytes": 59655,
+        "spill_bytes": 0,
+        "peak_memory_bytes": 2460,
+        "elapsed_ms": 180
+      }
+    },
+    {
+      "multiple_deltas": true,
+      "nodes": 4097,
+      "owned": true,
+      "parquet_bytes": 206416,
+      "hydration": {
+        "files_validated": 48,
+        "bytes_validated": 790203,
+        "files_copied": 48,
+        "bytes_copied": 790203,
+        "files_opened_in_place": 0,
+        "files_reused": 0,
+        "bytes_reused": 0,
+        "application_read_bytes": 790482,
+        "application_read_calls": 49,
+        "application_write_bytes": 790203,
+        "application_write_calls": 44,
+        "fsync_calls": 96,
+        "file_fsync_calls": 96,
+        "directory_fsync_calls": 0
+      },
+      "compaction": {
+        "input_runs": 2,
+        "compacted_runs": 2,
+        "retained_suffix_runs": 0,
+        "input_rows": 3,
+        "output_rows": 4226,
+        "input_bytes": 860,
+        "output_bytes": 790203,
+        "spill_bytes": 0,
+        "peak_memory_bytes": 2460,
+        "elapsed_ms": 580
+      }
+    }
+  ],
+  "runtime": {
+    "elapsed_seconds": 63.58,
+    "user_seconds": 60.11,
+    "system_seconds": 6.51,
+    "peak_rss_kib": 160248,
+    "filesystem_input_512_byte_blocks": 140976,
+    "filesystem_output_512_byte_blocks": 306752,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 264897,
+        "bytes": 556546211
+      },
+      "pread64": {
+        "calls": 362673,
+        "bytes": 111618601
+      },
+      "write": {
+        "calls": 21830,
+        "bytes": 96740240
+      },
+      "fsync": {
+        "calls": 19952,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 6444,
+        "bytes": 29804243
+      }
+    },
+    "read_bytes": 697969055,
+    "write_bytes": 126544483,
+    "errors": [
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      },
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      },
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      },
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      },
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      },
+      {
+        "syscall": "read",
+        "result": -1,
+        "detail": "EAGAIN (Resource temporarily unavailable)"
+      }
+    ],
+    "elapsed_seconds": 166.92
+  },
+  "workspace_observation": {
+    "command": [
+      "/tmp/gf1231-measure-bin",
+      "facade_compaction_",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 16953344,
+    "sampled_path_logical_peak_bytes": 14558966,
+    "sampled_file_count_peak": 971,
+    "samples": 4819,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.02311074099270627,
+    "vanished_files_during_scan": 74,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "cas_refresh_write_bytes": 196608,
+    "cas_refresh_read_bytes": 1048576,
+    "cas_refresh_copied_files": 8,
+    "cas_refresh_fsync_calls": 16,
+    "owned_refresh_write_bytes": 1048576,
+    "owned_refresh_read_bytes": 2097152,
+    "owned_refresh_copied_files": 64,
+    "owned_refresh_fsync_calls": 128,
+    "compaction_staged_output_bytes": 1048576,
+    "reported_compaction_logical_state_bytes": 4096,
+    "reported_spill_bytes": 0,
+    "post_mutation_parquet_payload_bytes": 1048576,
+    "hydration_sequential_copy_buffer_bytes": 65536
+  },
+  "limitations": [
+    "The baseline fails its first post-compaction SET; no valid complete baseline runtime or performance improvement comparison exists.",
+    "Timing/RSS and syscall I/O include setup, authentication, mutations, queries and portable work, and are whole-fixture observations rather than isolated refresh costs or process admission limits.",
+    "CAS shares immutable payloads. Generation-owned graph files retain their existing streaming private-copy ownership rule; the two fixtures differ by adjacency publication and delta count and are not a controlled performance comparison.",
+    "The reported compaction logical-state estimate excludes whole-process and native-codec memory; existing replay admission remains authoritative.",
+    "Runtime, syscall and sampled workspace measurements use separate serial executions.",
+    "Workspace sampling counts overlapping retained/private/portable artifacts, deduplicates inode allocation, and may miss unlinked/short-lived peaks or directory allocation; it is not an exact temporary-only bound.",
+    "Compression, dictionary, row-group and streaming policies are unchanged. All current permanent Parquet columns are checked for Zstd after compaction and subsequent mutations."
+  ]
+}

@@ -451,9 +451,23 @@ fn looks_like_atomicwrite_temp(path: &Path) -> bool {
 pub fn recover_project_transactions(
     container_root: impl AsRef<Path>,
 ) -> Result<ProjectRecoveryReport, GfError> {
-    let admission = crate::filesystem_admission::admit_project_lifecycle(
+    recover_project_transactions_with_mode(
         container_root,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Recover transactions using the lifecycle mode established by the facade.
+///
+/// # Errors
+/// Returns the same admission and recovery errors as [`recover_project_transactions`].
+pub fn recover_project_transactions_with_mode(
+    container_root: impl AsRef<Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectRecoveryReport, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;

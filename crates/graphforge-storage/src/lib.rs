@@ -158,9 +158,9 @@ pub use graph_delta_compaction::{
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus,
     MAX_COMPACTION_CANCELLATION_CHECK_ROWS, MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES,
     MAX_COMPACTION_MEMORY_BYTES, MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES,
-    compact_graph_delta, compact_graph_delta_with_mode, graph_delta_compaction_status,
-    graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
-    preview_graph_delta_compaction_with_mode,
+    compact_graph_delta, compact_graph_delta_for_parent_with_mode, compact_graph_delta_with_mode,
+    graph_delta_compaction_status, graph_delta_compaction_status_with_mode,
+    preview_graph_delta_compaction, preview_graph_delta_compaction_with_mode,
 };
 
 pub mod project_generation;
@@ -204,7 +204,8 @@ pub use project_recovery::{
     ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
     ProjectRecoveryReport, open_or_initialize_ephemeral_project_with_recovery,
     open_or_initialize_project_with_recovery, recover_project_on_open,
-    recover_project_transactions, remove_durable_project_root,
+    recover_project_transactions, recover_project_transactions_with_mode,
+    remove_durable_project_root,
 };
 
 pub mod project_retention;
