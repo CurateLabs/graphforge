@@ -142,3 +142,36 @@ Orphan maintenance runs only from the union of selected authenticated v5 and v4
 authority. It removes an unreferenced single-link artifact by retained identity,
 defers linked or over-budget candidates, and never treats an untrusted sibling
 manifest as reachability evidence.
+
+## Packed membership evidence (#1203)
+
+[Raw integrated measurements](../../development/evidence/packed-membership-1203.json)
+use source `d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60`, including the merged
+construction Zstd repair. The four permanent fixtures and full-width boundary
+test pass exact query/reopen/export/full-verify/clean-import checks.
+
+For 4,097 nodes and 65,537 edges, membership payload falls from 2,228,288 to
+1,216,554 bytes: 487,438 bytes of reserved padding and 524,296 bytes of defined-zero
+live-edge fields. For 8,193 nodes it falls from 2,359,360 to 1,318,954 bytes.
+Node reverse-surrogate records remain 24 bytes and the ordinal facet keeps its
+independent current schema.
+
+| Fixture | After Parquet repair: permanent allocation | With packed membership |
+| --- | ---: | ---: |
+| Sequential | 4,112,384 | 3,096,576 |
+| Random | 7,585,792 | 6,541,312 |
+| Eight property routes, CSR built | 18,644,992 | 17,633,280 |
+| Heterogeneous properties | 13,086,720 | 12,075,008 |
+
+The serial integrated assessment took 391.33 seconds and peaked at 247,332 KiB
+RSS on the same ext4 host, versus 393.65 seconds and 270,208 KiB after the Parquet
+repair. These are whole-test measurements, including reads and portable copies;
+they do not establish an isolated codec CPU improvement. Raw process I/O is
+recorded separately from logical storage counters.
+
+Production-path regressions cover full-width rebuild/reopen/probes and a
+`u64::MAX` tombstone, current-format crash recovery, retained snapshots, framing
+corruption and bounded merge/probe work. The write-counter boundary test uses
+123,361 live edges: exactly 2,097,137 payload bytes and three whole-record writes,
+verified through both append paths. Dividing total bytes by 1 MiB would incorrectly
+report two writes.
