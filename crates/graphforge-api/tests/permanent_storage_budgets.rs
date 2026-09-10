@@ -923,3 +923,53 @@ fn assess(f: Fixture) {
             "adjacency_codec_experiment":adjacency_experiment,"parquet_experiment":experiment,"identity_padding_experiment":identity_experiment,"manifest_bucket_experiment":manifest_experiment})
     );
 }
+
+#[test]
+fn public_mutation_replaces_shared_constructed_payloads() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "shared_payload_mutation",
+        nodes: 33,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let query =
+        "MATCH (n) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+    let expected = graph.execute(query).unwrap();
+    let old_stream = graph.execute_stream(query).unwrap();
+    graph
+        .execute("MATCH (n) WHERE n.score IS NOT NULL SET n.score = n.score + 1")
+        .unwrap();
+    for node in &mut nodes {
+        node.2 = node.2.map(|score| score + 1);
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+    use futures::TryStreamExt as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old_batches: Vec<RecordBatch> = runtime.block_on(old_stream.try_collect()).unwrap();
+    assert_eq!(
+        old_batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>(),
+        expected
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>()
+    );
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+}

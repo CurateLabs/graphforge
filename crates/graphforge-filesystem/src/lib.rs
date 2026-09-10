@@ -1492,14 +1492,52 @@ impl StableDirectory {
             Err(error) => return Err(error),
         };
         let result = if target_exists {
-            replace_file_platform(&self.file, temporary, target, Some(expected_temporary))
-                .map_err(|error| io::Error::other(error.to_string()))
+            replace_file_platform(
+                &self.file,
+                temporary,
+                target,
+                Some(expected_temporary),
+                None,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))
         } else {
             install_new_file_platform(&self.file, temporary, target, Some(expected_temporary))
         };
         result?;
         self.revalidate_named()?;
         self.open_child_file(target).map(|_| ())
+    }
+
+    /// Atomically replace an authenticated prior child, which may share its inode
+    /// with immutable payloads or active snapshots. The source must be private.
+    /// Callers must authenticate the prior contents and serialize publishers;
+    /// this operation checks identity and never writes to the prior inode.
+    pub fn replace_authenticated_child(
+        &self,
+        temporary: &OsStr,
+        expected_temporary: FileIdentity,
+        target: &OsStr,
+        expected_target: FileIdentity,
+    ) -> io::Result<()> {
+        validate_child_name(temporary)?;
+        validate_child_name(target)?;
+        self.revalidate_named()?;
+        replace_file_platform(
+            &self.file,
+            temporary,
+            target,
+            Some(expected_temporary),
+            Some(expected_target),
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        self.revalidate_named()?;
+        let installed = self.open_child_file(target)?;
+        if file_identity(&installed)? != expected_temporary || file_link_count(&installed)? != 1 {
+            return Err(io::Error::other(
+                "authenticated replacement identity changed",
+            ));
+        }
+        Ok(())
     }
 
     /// Atomically install a retained temporary child without replacing an
@@ -2265,7 +2303,7 @@ pub fn replace_file(
 ) -> Result<(), ReplaceFileError> {
     verify_single_component(source_name).map_err(ReplaceFileError::NotReplaced)?;
     verify_single_component(target_name).map_err(ReplaceFileError::NotReplaced)?;
-    replace_file_platform(directory, source_name, target_name, None)
+    replace_file_platform(directory, source_name, target_name, None, None)
 }
 
 /// Atomically install a new regular file without replacing an existing entry.
@@ -2391,6 +2429,7 @@ fn replace_file_platform(
     source_name: &OsStr,
     target_name: &OsStr,
     expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
     use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, statat};
 
@@ -2414,8 +2453,17 @@ fn replace_file_platform(
     .map_err(ReplaceFileError::NotReplaced)?;
     verify_regular_metadata(&source.metadata().map_err(ReplaceFileError::NotReplaced)?)
         .map_err(ReplaceFileError::NotReplaced)?;
-    verify_regular_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
-        .map_err(ReplaceFileError::NotReplaced)?;
+    let target_metadata = target.metadata().map_err(ReplaceFileError::NotReplaced)?;
+    if let Some(expected) = expected_target {
+        verify_space_usage_metadata(&target_metadata).map_err(ReplaceFileError::NotReplaced)?;
+        if unix_identity(&target).map_err(ReplaceFileError::NotReplaced)? != expected {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "rename target differs from the authenticated expected identity",
+            )));
+        }
+    } else {
+        verify_regular_metadata(&target_metadata).map_err(ReplaceFileError::NotReplaced)?;
+    }
     let source_identity = unix_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
     if expected_source.is_some_and(|expected| expected != source_identity) {
         return Err(ReplaceFileError::NotReplaced(io::Error::other(
@@ -2589,8 +2637,15 @@ fn replace_file_platform(
     source_name: &OsStr,
     target_name: &OsStr,
     expected_source: Option<FileIdentity>,
+    expected_target: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
-    windows::replace_file(directory, source_name, target_name, expected_source)
+    windows::replace_file(
+        directory,
+        source_name,
+        target_name,
+        expected_source,
+        expected_target,
+    )
 }
 
 #[cfg(windows)]
@@ -2616,6 +2671,7 @@ fn replace_file_platform(
     _source_name: &OsStr,
     _target_name: &OsStr,
     _expected_source: Option<FileIdentity>,
+    _expected_target: Option<FileIdentity>,
 ) -> Result<(), ReplaceFileError> {
     Err(ReplaceFileError::NotReplaced(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -3018,6 +3074,7 @@ mod windows {
         source_name: &OsStr,
         target_name: &OsStr,
         expected_source: Option<FileIdentity>,
+        expected_target: Option<FileIdentity>,
     ) -> Result<(), ReplaceFileError> {
         let (_directory_guard, directory_path) =
             guarded_directory_path(directory).map_err(ReplaceFileError::NotReplaced)?;
@@ -3039,15 +3096,27 @@ mod windows {
         }
 
         let target = open_identity_handle(&target_path).map_err(ReplaceFileError::NotReplaced)?;
-        verify_open_regular(&target).map_err(ReplaceFileError::NotReplaced)?;
+        if expected_target.is_some() {
+            verify_space_usage_metadata(&target.metadata().map_err(ReplaceFileError::NotReplaced)?)
+                .map_err(ReplaceFileError::NotReplaced)?;
+        } else {
+            verify_open_regular(&target).map_err(ReplaceFileError::NotReplaced)?;
+        }
         let target_before = file_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
-        if identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before {
+        if expected_target.is_some_and(|expected| expected != target_before)
+            || identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before
+        {
             return Err(ReplaceFileError::NotReplaced(io::Error::other(
                 "rename target identity changed during open",
             )));
         }
 
-        let result = rename_handle(&source, target_path.as_os_str(), true);
+        let result = rename_handle(
+            &source,
+            target_path.as_os_str(),
+            true,
+            expected_target.is_some(),
+        );
         let opened_source_after = file_identity(&source).ok();
         let opened_target_after = file_identity(&target).ok();
         let source_after = identity(&source_path).ok();
@@ -3114,7 +3183,7 @@ mod windows {
         }
 
         before_rename();
-        let result = rename_handle(&source, target_path.as_os_str(), false);
+        let result = rename_handle(&source, target_path.as_os_str(), false, false);
         let opened_after = file_identity(&source).ok();
         let source_after = identity(&source_path).ok();
         let target_after = identity(&target_path).ok();
@@ -3232,8 +3301,10 @@ mod windows {
         source: &File,
         target_path: &OsStr,
         replace_if_exists: bool,
+        authenticated_target: bool,
     ) -> io::Result<()> {
-        let mut rename = RenameInformation::new(target_path, replace_if_exists)?;
+        let mut rename =
+            RenameInformation::new(target_path, replace_if_exists, authenticated_target)?;
         // SAFETY: `rename` owns an aligned, initialized FILE_RENAME_INFO buffer
         // for the duration of the call. The absolute target path was resolved
         // from the retained directory handle, and the source was opened with
@@ -3267,7 +3338,11 @@ mod windows {
     }
 
     impl RenameInformation {
-        fn new(target_name: &OsStr, replace_if_exists: bool) -> io::Result<Self> {
+        fn new(
+            target_name: &OsStr,
+            replace_if_exists: bool,
+            authenticated_target: bool,
+        ) -> io::Result<Self> {
             let target = target_name.encode_wide().collect::<Vec<_>>();
             if target.is_empty() {
                 return Err(io::Error::new(
@@ -3303,8 +3378,10 @@ mod windows {
             // FileNameLength excludes the retained zero terminator.
             unsafe {
                 if replace_if_exists {
-                    (*information).Anonymous.Flags =
-                        FILE_RENAME_REPLACE_IF_EXISTS_FLAG | FILE_RENAME_POSIX_SEMANTICS_FLAG;
+                    (*information).Anonymous.Flags = FILE_RENAME_REPLACE_IF_EXISTS_FLAG | FILE_RENAME_POSIX_SEMANTICS_FLAG
+                        // FILE_RENAME_IGNORE_READONLY_ATTRIBUTE replaces the name
+                        // without changing attributes on the shared prior inode.
+                        | if authenticated_target { 0x40 } else { 0 };
                 } else {
                     (*information).Anonymous.ReplaceIfExists = false;
                 }
@@ -3774,7 +3851,7 @@ mod windows {
             let old_target = open_identity_handle(&target_path).unwrap();
             let old_target_identity = file_identity(&old_target).unwrap();
 
-            rename_handle(&source, target_path.as_os_str(), true).unwrap();
+            rename_handle(&source, target_path.as_os_str(), true, false).unwrap();
 
             assert_eq!(file_identity(&source).unwrap(), source_identity);
             assert_eq!(file_identity(&old_target).unwrap(), old_target_identity);
@@ -3787,7 +3864,7 @@ mod windows {
         fn rename_information_buffer_meets_win32_layout_contract() {
             let target_path = OsStr::new(r"C:\durability-probe\published");
             let target = target_path.encode_wide().collect::<Vec<_>>();
-            let mut rename = RenameInformation::new(target_path, false).unwrap();
+            let mut rename = RenameInformation::new(target_path, false, false).unwrap();
             let information = rename.as_mut_ptr();
 
             assert_eq!(
@@ -3811,7 +3888,7 @@ mod windows {
                 assert_eq!(*file_name.add(target.len()), 0);
             }
 
-            let mut replacement = RenameInformation::new(target_path, true).unwrap();
+            let mut replacement = RenameInformation::new(target_path, true, false).unwrap();
             // SAFETY: `replacement` owns a live initialized buffer.
             unsafe {
                 assert_eq!(
@@ -4182,6 +4259,18 @@ mod tests {
             "replace-target" => {
                 stable.replace_child(OsStr::new("regular"), regular_identity, OsStr::new("fifo"))
             }
+            "authenticated-source" => stable.replace_authenticated_child(
+                OsStr::new("fifo"),
+                fifo_identity,
+                OsStr::new("regular"),
+                regular_identity,
+            ),
+            "authenticated-target" => stable.replace_authenticated_child(
+                OsStr::new("regular"),
+                regular_identity,
+                OsStr::new("fifo"),
+                fifo_identity,
+            ),
             "native-replace-source" => replace_file(
                 &directory_handle(&root),
                 OsStr::new("fifo"),
@@ -4222,6 +4311,8 @@ mod tests {
             "native-replace-source",
             "native-replace-target",
             "native-install-source",
+            "authenticated-source",
+            "authenticated-target",
         ] {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("regular"), b"regular").unwrap();
@@ -4672,6 +4763,177 @@ mod tests {
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(&path)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn authenticated_replacement_preserves_shared_payload_and_open_snapshot() {
+        use std::io::Read as _;
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("target"), b"old payload").unwrap();
+        std::fs::hard_link(root.path().join("target"), root.path().join("cas")).unwrap();
+        std::fs::write(root.path().join("temporary"), b"new payload").unwrap();
+        let mut permissions = std::fs::metadata(root.path().join("cas"))
+            .unwrap()
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(root.path().join("cas"), permissions).unwrap();
+        // Match Parquet readers: File::open shares deletion on Windows.
+        // Retained authentication capabilities intentionally deny deletion.
+        let mut snapshot = File::open(root.path().join("target")).unwrap();
+        let prior = file_identity(&snapshot).unwrap();
+        let staged = path_identity(&root.path().join("temporary")).unwrap();
+        assert!(
+            stable
+                .replace_child(OsStr::new("temporary"), staged, OsStr::new("target"))
+                .is_err()
+        );
+        stable
+            .replace_authenticated_child(
+                OsStr::new("temporary"),
+                staged,
+                OsStr::new("target"),
+                prior,
+            )
+            .unwrap();
+        stable.sync().unwrap();
+        let mut old = Vec::new();
+        snapshot.read_to_end(&mut old).unwrap();
+        assert_eq!(old, b"old payload");
+        assert_eq!(
+            std::fs::read(root.path().join("cas")).unwrap(),
+            b"old payload"
+        );
+        assert_eq!(path_identity(&root.path().join("cas")).unwrap(), prior);
+        assert_eq!(
+            std::fs::read(root.path().join("target")).unwrap(),
+            b"new payload"
+        );
+        assert_eq!(path_identity(&root.path().join("target")).unwrap(), staged);
+        assert!(!root.path().join("temporary").exists());
+        assert!(
+            std::fs::metadata(root.path().join("cas"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticated_replacement_respects_retained_authentication_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("target"), b"old").unwrap();
+        std::fs::hard_link(root.path().join("target"), root.path().join("cas")).unwrap();
+        std::fs::write(root.path().join("temporary"), b"new").unwrap();
+        let guard = stable.open_child_file(OsStr::new("target")).unwrap();
+        let prior = file_identity(&guard).unwrap();
+        let staged = path_identity(&root.path().join("temporary")).unwrap();
+        assert!(
+            stable
+                .replace_authenticated_child(
+                    OsStr::new("temporary"),
+                    staged,
+                    OsStr::new("target"),
+                    prior
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join("target")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(root.path().join("temporary")).unwrap(),
+            b"new"
+        );
+        drop(guard);
+        stable
+            .replace_authenticated_child(
+                OsStr::new("temporary"),
+                staged,
+                OsStr::new("target"),
+                prior,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(root.path().join("target")).unwrap(), b"new");
+        assert_eq!(std::fs::read(root.path().join("cas")).unwrap(), b"old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_replacement_rejects_symlinks_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("regular"), b"payload").unwrap();
+        std::os::unix::fs::symlink("regular", root.path().join("symlink")).unwrap();
+        std::fs::create_dir(root.path().join("directory")).unwrap();
+        let regular = path_identity(&root.path().join("regular")).unwrap();
+        for name in ["symlink", "directory"] {
+            let invalid = path_identity(&root.path().join(name)).unwrap();
+            assert!(
+                stable
+                    .replace_authenticated_child(
+                        OsStr::new(name),
+                        invalid,
+                        OsStr::new("regular"),
+                        regular
+                    )
+                    .is_err()
+            );
+            assert!(
+                stable
+                    .replace_authenticated_child(
+                        OsStr::new("regular"),
+                        regular,
+                        OsStr::new(name),
+                        invalid
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("regular")).unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn authenticated_replacement_rejects_substitution_and_shared_source() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("target"), b"old").unwrap();
+        std::fs::write(root.path().join("temporary"), b"new").unwrap();
+        std::fs::write(root.path().join("other"), b"other").unwrap();
+        let prior = path_identity(&root.path().join("target")).unwrap();
+        let staged = path_identity(&root.path().join("temporary")).unwrap();
+        let other = path_identity(&root.path().join("other")).unwrap();
+        for (source, target) in [(other, prior), (staged, other)] {
+            assert!(
+                stable
+                    .replace_authenticated_child(
+                        OsStr::new("temporary"),
+                        source,
+                        OsStr::new("target"),
+                        target
+                    )
+                    .is_err()
+            );
+        }
+        std::fs::hard_link(root.path().join("temporary"), root.path().join("alias")).unwrap();
+        assert!(
+            stable
+                .replace_authenticated_child(
+                    OsStr::new("temporary"),
+                    staged,
+                    OsStr::new("target"),
+                    prior
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join("target")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(root.path().join("temporary")).unwrap(),
+            b"new"
         );
     }
 

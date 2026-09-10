@@ -453,7 +453,8 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
     match parent.open_child_file(&temporary) {
         Ok(temp) => {
             authenticate_staged_file(&temp, entry)?;
-            authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
+            let prior =
+                authenticate_prior_destination(&parent, &target, entry.prior_destination.as_ref())?;
             let expected = graphforge_filesystem::file_identity(&temp).map_err(storage)?;
             drop(temp);
             let authority = if entry.destination == crate::route_component::TABLE_FILE {
@@ -465,9 +466,13 @@ fn install(root_path: &Path, root: &StableDirectory, entry: &Entry) -> Result<()
             } else {
                 "graph data"
             };
-            parent
-                .replace_child(&temporary, expected, &target)
-                .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?;
+            match prior {
+                Some(prior) => {
+                    parent.replace_authenticated_child(&temporary, expected, &target, prior)
+                }
+                None => parent.install_child(&temporary, expected, &target),
+            }
+            .map_err(|error| storage(format!("rewrite {authority} install: {error}")))?;
             parent.sync().map_err(storage)?;
             authenticate_installed_destination(&parent, &target, entry)?;
         }
@@ -498,9 +503,9 @@ fn authenticate_prior_destination(
     parent: &StableDirectory,
     target: &std::ffi::OsStr,
     prior: Option<&AuthenticatedFile>,
-) -> Result<(), GfError> {
+) -> Result<Option<FileIdentity>, GfError> {
     match (parent.open_child_file(target), prior) {
-        (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         (Ok(file), Some(prior)) => {
             let identity = graphforge_filesystem::file_identity(&file).map_err(storage)?;
             if (identity.volume_serial, hex(&identity.file_id))
@@ -509,7 +514,7 @@ fn authenticate_prior_destination(
             {
                 return Err(storage("rewrite destination changed after intent"));
             }
-            Ok(())
+            Ok(Some(identity))
         }
         (Err(error), Some(_)) if error.kind() == std::io::ErrorKind::NotFound => {
             Err(storage("rewrite destination disappeared after intent"))
@@ -1817,9 +1822,38 @@ mod tests {
             ("rewrite.before_generation_authority", true),
             ("rewrite.after_generation_authority", true),
         ];
-        for (phase, committed) in phases {
-            let root = TempDir::new().unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+        for shared in [false, true] {
+            for (phase, committed) in phases {
+                let root = TempDir::new().unwrap();
+                let mut old_payloads = Vec::new();
+                if shared {
+                    for (index, relative) in destinations.iter().enumerate() {
+                        let path = root.path().join(relative);
+                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        let schema =
+                            Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+                        let batch = RecordBatch::try_new(
+                            Arc::clone(&schema),
+                            vec![Arc::new(Int64Array::from(vec![-1_i64]))],
+                        )
+                        .unwrap();
+                        let mut writer = parquet::arrow::ArrowWriter::try_new(
+                            File::create(&path).unwrap(),
+                            schema,
+                            None,
+                        )
+                        .unwrap();
+                        writer.write(&batch).unwrap();
+                        writer.close().unwrap();
+                        let alias = root.path().join(format!("cas-{index}"));
+                        std::fs::hard_link(&path, &alias).unwrap();
+                        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                        permissions.set_readonly(true);
+                        std::fs::set_permissions(&path, permissions).unwrap();
+                        old_payloads.push((alias, std::fs::read(&path).unwrap()));
+                    }
+                }
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--exact")
                 .arg("durable_rewrite::tests::subprocess_crash_matrix_preserves_generation_last_and_reopens_idempotently")
                 .arg("--nocapture")
@@ -1828,52 +1862,81 @@ mod tests {
                 .env("GRAPHFORGE_PROJECT_FAILPOINT", phase)
                 .status()
                 .unwrap();
-            assert_eq!(
-                status.code(),
-                Some(crate::project_failpoint::exit_code()),
-                "{phase}"
-            );
-
-            let first = crate::generation::read_topology_generation(root.path()).unwrap();
-            crate::staging::remove_stale_temps(root.path()).unwrap();
-            let second = crate::generation::read_topology_generation(root.path()).unwrap();
-            assert_eq!(
-                (first, second),
-                if committed { (1, 1) } else { (0, 0) },
-                "{phase}"
-            );
-            for (index, relative) in destinations.iter().enumerate() {
-                let path = root.path().join(relative);
-                assert_eq!(path.exists(), committed, "{phase}: {relative}");
-                if committed {
-                    let mut reader =
-                        ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
-                            .unwrap()
-                            .build()
-                            .unwrap();
-                    let batch = reader.next().unwrap().unwrap();
-                    let values = batch
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .unwrap();
-                    assert_eq!(
-                        values.value(0),
-                        i64::try_from(index).unwrap() + 10,
-                        "{phase}: {relative}"
-                    );
-                    assert!(reader.next().is_none(), "{phase}: duplicate payload");
-                }
-            }
-            assert!(!root.path().join(JOURNAL).exists(), "{phase}");
-            for relative in ["topology", "properties", "edge_properties"] {
-                assert!(
-                    std::fs::read_dir(root.path().join(relative))
-                        .unwrap()
-                        .filter_map(Result::ok)
-                        .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
-                    "{phase}: temp cleanup"
+                assert_eq!(
+                    status.code(),
+                    Some(crate::project_failpoint::exit_code()),
+                    "{phase}"
                 );
+
+                let first = crate::generation::read_topology_generation(root.path()).unwrap();
+                crate::staging::remove_stale_temps(root.path()).unwrap();
+                let second = crate::generation::read_topology_generation(root.path()).unwrap();
+                assert_eq!(
+                    (first, second),
+                    if committed { (1, 1) } else { (0, 0) },
+                    "{phase}"
+                );
+                for (index, relative) in destinations.iter().enumerate() {
+                    let path = root.path().join(relative);
+                    assert_eq!(path.exists(), committed || shared, "{phase}: {relative}");
+                    if committed {
+                        let mut reader =
+                            ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+                                .unwrap()
+                                .build()
+                                .unwrap();
+                        let batch = reader.next().unwrap().unwrap();
+                        let values = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap();
+                        assert_eq!(
+                            values.value(0),
+                            i64::try_from(index).unwrap() + 10,
+                            "{phase}: {relative}"
+                        );
+                        assert!(reader.next().is_none(), "{phase}: duplicate payload");
+                    }
+                }
+                for (alias, bytes) in old_payloads {
+                    assert!(std::fs::metadata(&alias).unwrap().permissions().readonly());
+                    assert_eq!(
+                        std::fs::read(alias).unwrap(),
+                        bytes,
+                        "{phase}: shared payload changed"
+                    );
+                }
+                if shared && !committed {
+                    for relative in destinations {
+                        let reader = ParquetRecordBatchReaderBuilder::try_new(
+                            File::open(root.path().join(relative)).unwrap(),
+                        )
+                        .unwrap()
+                        .build()
+                        .unwrap();
+                        let batch = reader.into_iter().next().unwrap().unwrap();
+                        assert_eq!(
+                            batch
+                                .column(0)
+                                .as_any()
+                                .downcast_ref::<Int64Array>()
+                                .unwrap()
+                                .value(0),
+                            -1
+                        );
+                    }
+                }
+                assert!(!root.path().join(JOURNAL).exists(), "{phase}");
+                for relative in ["topology", "properties", "edge_properties"] {
+                    assert!(
+                        std::fs::read_dir(root.path().join(relative))
+                            .unwrap()
+                            .filter_map(Result::ok)
+                            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+                        "{phase}: temp cleanup"
+                    );
+                }
             }
         }
     }
