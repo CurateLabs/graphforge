@@ -2002,11 +2002,16 @@ fn assert_exploratory_edge_windows(source: &Path, expected_files: usize, expecte
     let mut rows = 0;
     for entry in entries {
         let path = graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
-            .unwrap()
-            .with_batch_size(7)
-            .build()
-            .unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        assert!(builder.metadata().file_metadata().num_rows() <= 1024);
+        assert!(
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .all(|group| group.num_rows() <= 1024)
+        );
+        let reader = builder.with_batch_size(7).build().unwrap();
         for batch in reader {
             let batch = batch.unwrap();
             assert!(batch.num_rows() <= 7);
@@ -2076,11 +2081,36 @@ fn exploratory_construction_groups_bounded_windows_by_physical_route() {
         assert_eq!(evidence.prior_topology_rows_decoded, 0);
         assert!(evidence.encode_application_read_bytes > 0);
         assert!(evidence.encode_application_write_bytes > 0);
-        assert!(evidence.total_application_read_bytes().unwrap() <= evidence.write_bytes * 80);
+        assert!(
+            evidence.peak_batch_bytes <= GraphConstructionBudgets::default().max_batch_bytes as u64
+        );
+        assert!(evidence.peak_batch_bytes <= 128 * 1024);
+        assert!(evidence.peak_accounted_live_bytes <= 4 * 1024 * 1024);
+        assert!(evidence.encode_application_read_bytes <= 1536 * 1024);
+        assert!(evidence.encode_application_write_bytes <= 512 * 1024);
+        assert!(evidence.total_application_read_bytes().unwrap() <= 16 * 1024 * 1024);
+        assert!(evidence.canonical_output_bytes <= 256 * 1024);
+        assert!(evidence.staged_and_retained_disk_bytes <= 640 * 1024);
+        assert!(evidence.storage_transient_peak_total_allocated_bytes <= 2 * 1024 * 1024);
     }
+    let measured = |e: &graphforge_api::GraphConstructionEvidence| {
+        json!({
+            "input_rows": e.input_rows,
+            "canonical_output_bytes": e.canonical_output_bytes,
+            "encode_read_bytes": e.encode_application_read_bytes,
+            "encode_write_bytes": e.encode_application_write_bytes,
+            "total_read_bytes": e.total_application_read_bytes().unwrap(),
+            "staged_and_retained_disk_bytes": e.staged_and_retained_disk_bytes,
+            "peak_batch_rows": e.peak_batch_rows,
+            "peak_batch_bytes": e.peak_batch_bytes,
+            "peak_accounted_live_bytes": e.peak_accounted_live_bytes,
+            "peak_merge_temporary_bytes": e.peak_merge_temporary_bytes,
+            "temporary_allocation_peak_bytes": e.storage_transient_peak_total_allocated_bytes,
+        })
+    };
     println!(
         "PHYSICAL_ROUTE_WINDOW_RESOURCES {}",
-        json!({"parent":parent_evidence,"child":child_evidence})
+        json!({"parent":measured(&parent_evidence),"child":measured(&child_evidence)})
     );
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
@@ -2202,18 +2232,18 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
     let source = root.path().join("source");
     let fixture = Fixture {
         name: "mixed_semantic_routes",
-        nodes: 66,
+        nodes: 33,
         edges: 258,
-        routes: 2,
+        routes: 1,
         identifiers: Identifiers::Random,
         properties: false,
         adjacency: false,
         heterogeneous: false,
     };
-    let (nodes, mut edges) = rows(fixture);
+    let (mut nodes, mut edges) = rows(fixture);
     construct(&source, fixture, &nodes, &edges[..129]);
     let ontology = root.path().join("routes.yaml");
-    std::fs::write(&ontology, "ontology_id: mixed\nversion: \"1\"\nentity_types:\n  - name: Node0\n    abstract: false\n  - name: Node1\n    abstract: false\nrelation_types:\n  - name: NEW_TYPED\n    src: Node0\n    dst: Node1\nproperties:\n  - owner: Node0\n    name: score\n    type: int64\n    nullable: true\n").unwrap();
+    std::fs::write(&ontology, "ontology_id: https://example.test/mixed\nversion: \"1\"\nentity_types:\n  - name: NewNode\n    abstract: false\nrelation_types:\n  - name: NEW_TYPED\n    src: NewNode\n    dst: NewNode\nproperties:\n  - owner: NewNode\n    name: score\n    type: int64\n    nullable: true\n").unwrap();
     let mut graph = GraphForge::new(source.to_str()).unwrap();
     graph
         .adopt_ontology(AdoptOntologyRequest {
@@ -2226,10 +2256,58 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         })
         .unwrap();
     drop(graph);
-    for edge in &mut edges[129..] {
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let candidate = graph.workspace_ontology_composition().unwrap().unwrap();
+    let request = graphforge_api::CompositionChangeRequest {
+        context: WriteContext {
+            operation_uuid: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        },
+        expected_project_generation_uuid: graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+        candidate,
+        data_disposition: graphforge_api::CompositionDataDisposition::RequireConforming,
+    };
+    let preview = graph
+        .preview_ontology_composition_change(&request, None)
+        .unwrap();
+    assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+    graph
+        .publish_ontology_composition_change(&request, &preview, None)
+        .unwrap();
+    drop(graph);
+    let child_nodes = (0..33)
+        .map(|row| (id(3, row, true), "NewNode".to_owned(), None))
+        .collect::<Vec<_>>();
+    let changed_node = child_nodes[0].0;
+    for (row, edge) in edges[129..].iter_mut().enumerate() {
         edge.3 = "NEW_TYPED".into();
+        edge.1 = child_nodes[row % child_nodes.len()].0;
+        edge.2 = child_nodes[(row + 1) % child_nodes.len()].0;
     }
-    construct(&source, fixture, &[], &edges[129..]);
+    construct(&source, fixture, &child_nodes, &edges[129..]);
+    nodes.extend(child_nodes.into_iter().map(|mut node| {
+        node.1 = "mixed:entity:NewNode".into();
+        node
+    }));
+    let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let bindings = graphforge_storage::semantic_storage_bindings(&current)
+        .unwrap()
+        .unwrap();
+    let relation = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.local_id == "NEW_TYPED"
+        })
+        .unwrap();
+    assert_eq!(relation.symbol.display(), "mixed:relation:NEW_TYPED");
+    for edge in &mut edges[129..] {
+        edge.3.clone_from(&relation.route);
+    }
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let schemas = |source: &Path| {
@@ -2281,7 +2359,7 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
                 actor_uuid: None,
             },
             graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
-                node_uuid: nodes[0].0,
+                node_uuid: changed_node,
                 property: "score".into(),
                 value: PropValue::Int(123),
             }],
@@ -2303,6 +2381,8 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         )
         .unwrap();
     assert_eq!(before, schemas(&source));
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
     let score_query = "MATCH (n) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
     let expected_score = graph.execute(score_query).unwrap();
@@ -2314,7 +2394,7 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
             .sum::<usize>(),
         1
     );
-    assert_eq!(uuid_at(&expected_score.batches[0], 0, 0), nodes[0].0);
+    assert_eq!(uuid_at(&expected_score.batches[0], 0, 0), changed_node);
     assert_eq!(int_at(&expected_score.batches[0], 1, 0), Some(123));
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
@@ -2335,4 +2415,70 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
                 .collect::<Vec<_>>()
         );
     }
+}
+
+#[test]
+fn exploratory_coalesced_routes_reject_oversized_encoding_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "long_routes",
+        nodes: 2,
+        edges: 64,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &[]);
+    let before = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut session = graph
+        .begin_graph_construction(GraphConstructionBudgets {
+            max_batch_rows: 64,
+            max_batch_bytes: 16 * 1024,
+            max_run_records: 256,
+            merge_fan_in: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    for (row, edge) in edges.iter_mut().enumerate() {
+        edge.3 = format!("R{}_{}", row % 2, "x".repeat(197));
+    }
+    for (chunk, rows) in edges.chunks(4).enumerate() {
+        let batch = RecordBatch::try_new(
+            CONSTRUCTION_EDGE_SCHEMA.clone(),
+            vec![
+                uuids(rows.iter().map(|row| row.0)),
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|row| row.3.as_str()),
+                )),
+                uuids(rows.iter().map(|row| row.1)),
+                uuids(rows.iter().map(|row| row.2)),
+            ],
+        )
+        .unwrap();
+        session
+            .append_edges(&format!("edges-{chunk}"), &batch)
+            .unwrap();
+    }
+    let error = session.seal_and_publish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("decoded canonical batch exceeds encoding budget"),
+        "{error}"
+    );
+    let after = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert_eq!(before.generation_uuid(), after.generation_uuid());
+    assert_eq!(
+        before.graph_files_inventory().unwrap(),
+        after.graph_files_inventory().unwrap()
+    );
+    drop(session);
+    drop(graph);
+    let reopened = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&reopened, fixture, &nodes, &[]);
 }
