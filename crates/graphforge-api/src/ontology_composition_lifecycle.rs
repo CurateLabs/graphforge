@@ -811,7 +811,26 @@ fn runtime_symbols(
     cancellation: Option<&CancellationToken>,
 ) -> Result<(BTreeSet<String>, bool), GfError> {
     let current = graph.generation_for_read()?;
-    let persisted = crate::load_runtime_catalog(&current.graph_tree_root())?;
+    let persisted = if current.declared_graph_files_inventory()?.is_some() {
+        crate::load_runtime_catalog(&current.graph_tree_root())?
+    } else if let Some(inventory) = current.graph_files_inventory()? {
+        if let Some(entry) = inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path == "topology/runtime_catalog.parquet")
+        {
+            let file = graphforge_storage::open_graph_object_by_digest(
+                current.container_root(),
+                &entry.content_sha256,
+                entry.byte_length,
+            )?;
+            crate::decode_runtime_catalog(file, std::path::Path::new(&entry.relative_path))?
+        } else {
+            crate::RuntimeCatalog::new()
+        }
+    } else {
+        crate::load_runtime_catalog(&current.graph_tree_root())?
+    };
     let live = graph
         .runtime_catalog
         .lock()

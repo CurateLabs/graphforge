@@ -2616,14 +2616,21 @@ fn load_runtime_catalog(dir: &std::path::Path) -> Result<RuntimeCatalog, GfError
 
 /// Read and decode every batch of `runtime_catalog.parquet` into a [`RuntimeCatalog`].
 fn read_runtime_catalog(path: &std::path::Path) -> Result<RuntimeCatalog, GfError> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-
     let file = std::fs::File::open(path).map_err(|e| {
         GfError::Storage(format!(
             "failed to open runtime catalog {}: {e}",
             path.display()
         ))
     })?;
+    decode_runtime_catalog(file, path)
+}
+
+fn decode_runtime_catalog<T: parquet::file::reader::ChunkReader + 'static>(
+    file: T,
+    path: &std::path::Path,
+) -> Result<RuntimeCatalog, GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| {
             GfError::Storage(format!("malformed runtime catalog {}: {e}", path.display()))

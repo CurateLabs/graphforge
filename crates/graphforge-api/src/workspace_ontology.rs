@@ -341,7 +341,7 @@ fn publish_workspace_records_inner(
             "project generation changed before ontology publication".into(),
         ));
     }
-    let carries_graph_tree = parent
+    let has_graph_files = parent
         .participant_snapshot(
             graphforge_storage::GRAPH_CAPABILITY_ID,
             graphforge_storage::GRAPH_FILES_FAMILY,
@@ -404,9 +404,16 @@ fn publish_workspace_records_inner(
             .collect(),
         participants,
     };
+    let generation_owned = parent.declared_graph_files_inventory()?.is_some();
+    let publication_lease =
+        if candidate_graph_root.is_none() && has_graph_files && !generation_owned {
+            Some(graphforge_storage::begin_graph_object_publication(&root)?)
+        } else {
+            None
+        };
     let selected_graph_root = candidate_graph_root
         .map(std::path::Path::to_path_buf)
-        .or_else(|| carries_graph_tree.then(|| parent.graph_tree_root()));
+        .or_else(|| generation_owned.then(|| parent.graph_tree_root()));
     let receipt = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
         &root,
         &request,
@@ -430,7 +437,11 @@ fn publish_workspace_records_inner(
             if let Some(token) = cancellation {
                 token.checkpoint()?;
             }
-            validated.publish()?
+            if let Some(lease) = &publication_lease {
+                validated.publish_with_graph_objects(lease)?
+            } else {
+                validated.publish()?
+            }
         }
     };
     *graph
