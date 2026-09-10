@@ -2407,6 +2407,18 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         )
         .unwrap();
     assert_eq!(before, schemas(&source));
+    graph
+        .execute("MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL SET n.score = 124")
+        .unwrap();
+    let created = graph
+        .execute("CREATE (n:`mixed:NewNode`) RETURN n.node_uuid")
+        .unwrap();
+    nodes.push((
+        uuid_at(&created.batches[0], 0, 0),
+        "mixed:entity:NewNode".into(),
+        None,
+    ));
+    assert_eq!(before, schemas(&source));
     drop(graph);
     let graph = GraphForge::new(source.to_str()).unwrap();
     verify_graph(&graph, fixture, &nodes, &edges);
@@ -2422,7 +2434,7 @@ fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
         1
     );
     assert_eq!(uuid_at(&expected_score.batches[0], 0, 0), changed_node);
-    assert_eq!(int_at(&expected_score.batches[0], 1, 0), Some(123));
+    assert_eq!(int_at(&expected_score.batches[0], 1, 0), Some(124));
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
     for path in [&source, &root.path().join("imported")] {
