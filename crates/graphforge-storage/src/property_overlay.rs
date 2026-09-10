@@ -2543,6 +2543,7 @@ fn read_property_targets(
     }
     let mut unresolved = targets.clone();
     let mut found = BTreeMap::new();
+    let mut retained_bytes = 0;
     let mut metrics = PropertyOverlayMetrics::default();
     let Some(fragments) = inventory.routes.get(&(kind, route.to_owned())) else {
         return Ok(TargetPropertyRows {
@@ -2632,7 +2633,7 @@ fn read_property_targets(
             page_reservation_bytes,
             replay: replay_budget.is_some(),
         };
-        admission.check(0, found.values().map(snapshot_charge).sum())?;
+        admission.check(0, retained_bytes)?;
         metrics.decoder_page_reservation_bytes = metrics
             .decoder_page_reservation_bytes
             .max(page_reservation_bytes);
@@ -2648,7 +2649,7 @@ fn read_property_targets(
             &mut metrics,
             admission,
             targeted_batch_rows,
-            found.values().map(snapshot_charge).sum(),
+            retained_bytes,
         )?;
         let validation_bytes = counts.bytes.load(Ordering::Relaxed);
         let validation_read_calls = counts.blocks.load(Ordering::Relaxed);
@@ -2668,6 +2669,7 @@ fn read_property_targets(
                 &counts,
                 &mut unresolved,
                 &mut found,
+                &mut retained_bytes,
                 &mut metrics,
             )?;
         }
@@ -2696,6 +2698,11 @@ fn read_property_targets(
     metrics.physical_bytes = metrics
         .physical_bytes
         .saturating_add(metrics.authentication_bytes);
+    #[cfg(test)]
+    assert_eq!(
+        retained_bytes,
+        found.values().map(snapshot_charge).sum::<u64>()
+    );
     metrics.logical_rows = u64::try_from(found.len()).unwrap_or(u64::MAX);
     metrics.peak_buffered_rows = metrics.decoder_peak_rows;
     Ok(TargetPropertyRows {
@@ -2801,6 +2808,7 @@ fn decode_target_row_groups(
     counts: &Arc<ReadCounts>,
     unresolved: &mut std::collections::BTreeSet<[u8; 16]>,
     found: &mut BTreeMap<[u8; 16], PropertySnapshotRow>,
+    retained_bytes: &mut u64,
     metrics: &mut PropertyOverlayMetrics,
 ) -> Result<(), GfError> {
     let reader = open_counted_retained_property_builder(
@@ -2814,12 +2822,7 @@ fn decode_target_row_groups(
     .map_err(parquet_error)?;
     for batch in reader {
         let batch = batch.map_err(authenticated_arrow_error)?;
-        charge_target_batch(
-            metrics,
-            &batch,
-            options.admission,
-            found.values().map(snapshot_charge).sum(),
-        )?;
+        charge_target_batch(metrics, &batch, options.admission, *retained_bytes)?;
         let decoded = decode_snapshot_batch(&batch, options.kind.uuid_field())?;
         if decoded
             .iter()
@@ -2833,9 +2836,14 @@ fn decode_target_row_groups(
             batch.get_array_memory_size() as u64,
             decoded
                 .iter()
-                .chain(found.values())
                 .map(snapshot_charge)
-                .sum(),
+                .sum::<u64>()
+                .checked_add(*retained_bytes)
+                .ok_or_else(|| {
+                    options
+                        .admission
+                        .error("property target memory charge overflow")
+                })?,
         )?;
         metrics.decoder_peak_bytes = metrics
             .decoder_peak_bytes
@@ -2846,6 +2854,15 @@ fn decode_target_row_groups(
                 if row.tombstone {
                     metrics.tombstones = metrics.tombstones.saturating_add(1);
                 } else {
+                    // Unresolved UUIDs are removed once, so each retained live
+                    // snapshot contributes exactly once across all fragments.
+                    *retained_bytes = retained_bytes
+                        .checked_add(snapshot_charge(&row))
+                        .ok_or_else(|| {
+                            options
+                                .admission
+                                .error("property target memory charge overflow")
+                        })?;
                     found.insert(row.uuid, row);
                 }
             }
@@ -3665,7 +3682,20 @@ fn record_charge(record: &SpoolRecord) -> u64 {
         .saturating_add(values)
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count actual serialization work on this test thread, without changing
+    // production counters or depending on elapsed time and host load.
+    static SNAPSHOT_CHARGE_CALLS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 pub(crate) fn snapshot_charge(row: &PropertySnapshotRow) -> u64 {
+    #[cfg(test)]
+    SNAPSHOT_CHARGE_CALLS.with(|calls| {
+        if let Some(count) = calls.get() {
+            calls.set(Some(count + 1));
+        }
+    });
     let values = serde_json::to_vec(&row.values).map_or(u64::MAX, |encoded| {
         u64::try_from(encoded.len()).unwrap_or(u64::MAX)
     });
@@ -6049,6 +6079,42 @@ mod tests {
             }
             assert_eq!(metrics.per_record_seeks, 0);
             prior_bytes = metrics.physical_bytes;
+
+            let inventory = authenticated_property_inventory_for_route(
+                dir.path(),
+                PropertyRouteKind::Node,
+                "Person",
+            )
+            .unwrap();
+            for targets in [BTreeSet::from([uuids[0]]), uuids.iter().copied().collect()] {
+                SNAPSHOT_CHARGE_CALLS.with(|calls| calls.set(Some(0)));
+                let selected = read_authenticated_property_targets_for_inventory(
+                    &inventory,
+                    PropertyRouteKind::Node,
+                    "Person",
+                    &targets,
+                )
+                .unwrap();
+                let charge_calls = SNAPSHOT_CHARGE_CALLS.with(|calls| calls.replace(None).unwrap());
+                assert_eq!(selected.present, targets);
+                assert_eq!(
+                    selected.rows.keys().copied().collect::<BTreeSet<_>>(),
+                    targets
+                );
+                assert_eq!(selected.metrics.physical_rows, (rows * 2) as u64);
+                assert_eq!(selected.metrics.decoder_peak_rows, 2);
+                // Each decoded row is charged for its individual limit, live
+                // decode admission, and peak evidence. Each retained target is
+                // charged when inserted and once by the independent test-only
+                // final counter audit. Rescanning all retained rows for every
+                // two-row batch exceeds this linear work ceiling.
+                assert!(
+                    charge_calls <= 3 * rows + 2 * targets.len(),
+                    "rows={rows} targets={} charge_calls={charge_calls}",
+                    targets.len()
+                );
+                assert!(charge_calls >= rows, "counter must observe real row work");
+            }
         }
         assert_eq!(byte_deltas.len(), 2);
         assert!(
