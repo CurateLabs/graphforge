@@ -717,12 +717,13 @@ fn stream_replay_edges(
         .into_iter()
         .map(|(route, _)| route)
         .collect::<std::collections::BTreeSet<_>>();
+    let exploratory = relations.contains("_exploratory");
     relations.extend(
         overlay
             .edges
             .values()
             .filter_map(Option::as_ref)
-            .map(|edge| edge.rel_type.clone()),
+            .map(|edge| replay_edge_physical_route(edge, inventory, exploratory).to_owned()),
     );
     let relation_authority_bytes = relations.iter().fold(0_usize, |sum, relation| {
         sum.saturating_add(64).saturating_add(relation.len())
@@ -734,10 +735,25 @@ fn stream_replay_edges(
         let mut existing_overlay = HashSet::new();
         let mut base_max = 0_u64;
         let mut base_rows = 0_usize;
+        let mut output_schema: Option<SchemaRef> = None;
+        let mut maximum_row_bytes = 128_usize;
+        let expected_schema = if relation == "_exploratory" {
+            crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone()
+        } else {
+            TYPED_EDGE_SCHEMA.clone()
+        };
         for (_, source_path) in &source_paths {
             let input = fs::File::open(source_path).map_err(|error| io_err(&error))?;
-            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
-                .map_err(pq_err)?
+            let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(pq_err)?;
+            if builder.schema().fields() != expected_schema.fields()
+                || output_schema
+                    .as_ref()
+                    .is_some_and(|schema| schema != builder.schema())
+            {
+                return Err(pq_err("canonical edge route schemas differ"));
+            }
+            output_schema = Some(builder.schema().clone());
+            let reader = builder
                 .with_batch_size(limits.max_batch_rows)
                 .build()
                 .map_err(pq_err)?;
@@ -763,6 +779,19 @@ fn stream_replay_edges(
                             "GF_UNSUPPORTED_PROJECT_FORMAT: retained edge references deleted node",
                         ));
                     }
+                    if relation == "_exploratory" {
+                        let types = batch
+                            .column_by_name("rel_type_name")
+                            .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                            .ok_or_else(|| {
+                                pq_err("canonical exploratory relationship is incompatible")
+                            })?;
+                        if types.is_null(row) || types.value(row).is_empty() {
+                            return Err(pq_err("canonical exploratory relationship is absent"));
+                        }
+                        maximum_row_bytes =
+                            maximum_row_bytes.max(128_usize.saturating_add(types.value(row).len()));
+                    }
                     let id = ids.value(row);
                     if id <= base_max {
                         return Err(pq_err("canonical edge_id order is not strictly increasing"));
@@ -783,10 +812,22 @@ fn stream_replay_edges(
                 }
             }
         }
+        let output_schema = output_schema.unwrap_or(expected_schema);
+        if relation == "_exploratory" {
+            maximum_row_bytes = maximum_row_bytes.max(
+                overlay
+                    .edges
+                    .values()
+                    .filter_map(Option::as_ref)
+                    .map(|edge| 128_usize.saturating_add(edge.rel_type.len()))
+                    .max()
+                    .unwrap_or(128),
+            );
+        }
         let mut new_ids = HashSet::new();
         for (uuid, row) in &overlay.edges {
             if let Some(row) = row
-                && row.rel_type == relation
+                && replay_edge_physical_route(row, inventory, exploratory) == relation
                 && !existing_overlay.contains(uuid.as_str())
                 && (row.edge_id <= base_max || !new_ids.insert(row.edge_id))
             {
@@ -797,9 +838,9 @@ fn stream_replay_edges(
         }
         let maximum_edge_rows = base_rows.saturating_add(overlay.edges.len());
         let edge_writer_reservation = replay_writer_reservation(
-            TYPED_EDGE_SCHEMA.as_ref(),
+            output_schema.as_ref(),
             maximum_edge_rows,
-            128,
+            maximum_row_bytes,
             limits.max_batch_rows,
         )?;
         let route_authority_bytes = existing_overlay
@@ -825,7 +866,7 @@ fn stream_replay_edges(
         let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
         let mut writer = parquet::arrow::ArrowWriter::try_new(
             output,
-            TYPED_EDGE_SCHEMA.clone(),
+            output_schema.clone(),
             Some(replay_writer_properties(limits.max_batch_rows)),
         )
         .map_err(pq_err)?;
@@ -848,9 +889,17 @@ fn stream_replay_edges(
                 for row in 0..batch.num_rows() {
                     let uuid = canonical_uuid(uuids.value(row), "edge_uuid")?;
                     match overlay.edges.get(&uuid) {
-                        Some(Some(replacement)) if replacement.rel_type == relation => writer
-                            .write(&replay_edge_batch(&[replacement])?)
-                            .map_err(pq_err)?,
+                        Some(Some(replacement))
+                            if replay_edge_physical_route(replacement, inventory, exploratory)
+                                == relation =>
+                        {
+                            writer
+                                .write(&replay_edge_batch_with_schema(
+                                    &[replacement],
+                                    &output_schema,
+                                )?)
+                                .map_err(pq_err)?;
+                        }
                         Some(_) => {}
                         None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
                     }
@@ -861,14 +910,17 @@ fn stream_replay_edges(
             .edges
             .iter()
             .filter(|(uuid, row)| {
-                row.as_ref().is_some_and(|edge| edge.rel_type == relation)
-                    && !existing_overlay.contains(uuid.as_str())
+                row.as_ref().is_some_and(|edge| {
+                    replay_edge_physical_route(edge, inventory, exploratory) == relation
+                }) && !existing_overlay.contains(uuid.as_str())
             })
             .filter_map(|(_, row)| row.as_ref())
             .collect();
         appended.sort_by_key(|edge| edge.edge_id);
         for chunk in appended.chunks(limits.max_batch_rows) {
-            writer.write(&replay_edge_batch(chunk)?).map_err(pq_err)?;
+            writer
+                .write(&replay_edge_batch_with_schema(chunk, &output_schema)?)
+                .map_err(pq_err)?;
             writer.flush().map_err(pq_err)?;
         }
         writer.close().map_err(pq_err)?;
@@ -895,6 +947,32 @@ fn canonical_uuid(bytes: &[u8], field: &str) -> Result<String, GfError> {
     uuid::Uuid::from_slice(bytes)
         .map(|value| value.hyphenated().to_string())
         .map_err(|error| pq_err(format!("canonical {field} is invalid: {error}")))
+}
+
+fn replay_edge_physical_route<'a>(
+    edge: &'a crate::graph_delta_journal::ReplayEdgeRow,
+    inventory: &crate::AuthenticatedPropertyInventory,
+    exploratory: bool,
+) -> &'a str {
+    if exploratory && !inventory.has_edge_route(&edge.rel_type) {
+        "_exploratory"
+    } else {
+        &edge.rel_type
+    }
+}
+
+fn replay_edge_batch_with_schema(
+    rows: &[&crate::graph_delta_journal::ReplayEdgeRow],
+    schema: &SchemaRef,
+) -> Result<RecordBatch, GfError> {
+    let typed = replay_edge_batch(rows)?;
+    let mut columns = typed.columns().to_vec();
+    if schema.index_of("rel_type_name").is_ok() {
+        columns.push(Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|edge| edge.rel_type.as_str()),
+        )));
+    }
+    RecordBatch::try_new(Arc::clone(schema), columns).map_err(pq_err)
 }
 
 fn replay_edge_batch(
@@ -6491,6 +6569,127 @@ mod tests {
                 "weight"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn exploratory_replay_preserves_routes_and_full_width_ids_for_edge_changes() {
+        use crate::graph_delta_journal::{GraphDeltaJournalLimits, ReplayEdgeRow, ReplayOverlay};
+        let base = TempDir::new().unwrap();
+        let left = new_v7();
+        let right = new_v7();
+        let first = new_v7();
+        let deleted = new_v7();
+        let added = new_v7();
+        let left_id = u64::MAX - 2;
+        let right_id = u64::MAX - 1;
+        let first_id = u64::from(u32::MAX) - 1;
+        let mut writer = GraphWriter::open_at(base.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.next_node_id = left_id;
+        writer.next_edge_id = first_id;
+        writer
+            .create_node(left, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer
+            .create_node(right, EntityTypeId::decode(0).unwrap())
+            .unwrap();
+        writer.create_edge(first, "KNOWS", &left, &right).unwrap();
+        writer.create_edge(deleted, "LIKES", &left, &right).unwrap();
+        writer.flush().unwrap();
+        let original = crate::graph_delta_journal::load_base_state(base.path()).unwrap();
+        let edge = |uuid: Uuid, id, rel_type: &str, reversed| ReplayEdgeRow {
+            edge_uuid: uuid.to_string(),
+            edge_id: id,
+            rel_type: rel_type.into(),
+            src_uuid: if reversed { right } else { left }.to_string(),
+            dst_uuid: if reversed { left } else { right }.to_string(),
+            src_id: if reversed { right_id } else { left_id },
+            dst_id: if reversed { left_id } else { right_id },
+            created_at_micros: TS,
+        };
+        let mut overlay = ReplayOverlay::default();
+        overlay.edges.insert(
+            first.to_string(),
+            Some(edge(first, first_id, "LIKES", true)),
+        );
+        overlay.edges.insert(deleted.to_string(), None);
+        overlay.edges.insert(
+            added.to_string(),
+            Some(edge(added, first_id + 2, "KNOWS", false)),
+        );
+        let apply = |source: &Path, overlay: &ReplayOverlay| -> Result<TempDir, GfError> {
+            let target = TempDir::new().unwrap();
+            let (inventory, _) = crate::capture_graph_files(source)?;
+            crate::graph_files::materialize_graph_tree(source, &inventory, target.path())?;
+            write_replay_overlay_streaming(
+                source,
+                &inventory,
+                target.path(),
+                overlay,
+                GraphDeltaJournalLimits {
+                    max_batch_rows: 1,
+                    max_replay_memory_bytes: 2 * 1024 * 1024,
+                    ..Default::default()
+                },
+            )?;
+            Ok(target)
+        };
+        let target = apply(base.path(), &overlay).unwrap();
+        let actual = crate::graph_delta_journal::load_base_state(target.path()).unwrap();
+        assert_eq!(actual.node_ids, original.node_ids);
+        assert_eq!(actual.node_ids[&left.to_string()], left_id);
+        assert_eq!(actual.node_ids[&right.to_string()], right_id);
+        assert_eq!(
+            actual.edge_ids[&first.to_string()],
+            (first_id, right_id, left_id)
+        );
+        assert_eq!(
+            actual.edge_ids[&added.to_string()],
+            (first_id + 2, left_id, right_id)
+        );
+        assert_eq!(
+            actual.edges[&first.to_string()],
+            (right.to_string(), left.to_string(), "LIKES".into())
+        );
+        assert_eq!(
+            actual.edges[&added.to_string()],
+            (left.to_string(), right.to_string(), "KNOWS".into())
+        );
+        assert!(!actual.edges.contains_key(&deleted.to_string()));
+        let again = apply(target.path(), &ReplayOverlay::default()).unwrap();
+        assert_eq!(
+            crate::graph_delta_journal::load_base_state(again.path()).unwrap(),
+            actual
+        );
+        assert_eq!(
+            crate::graph_delta_journal::load_base_state(base.path()).unwrap(),
+            original
+        );
+        let mut changed = overlay.clone();
+        changed
+            .edges
+            .get_mut(&first.to_string())
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .edge_id += 1;
+        assert!(
+            apply(base.path(), &changed)
+                .unwrap_err()
+                .to_string()
+                .contains("edge surrogate changed")
+        );
+        let duplicate = new_v7();
+        let mut duplicated = overlay;
+        duplicated.edges.insert(
+            duplicate.to_string(),
+            Some(edge(duplicate, first_id + 2, "LIKES", false)),
+        );
+        assert!(
+            apply(base.path(), &duplicated)
+                .unwrap_err()
+                .to_string()
+                .contains("new edge surrogate is not monotonic")
         );
     }
 

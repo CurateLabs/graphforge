@@ -1593,8 +1593,11 @@ fn encode_edges(
                 shape.runtime_catalog_now_micros,
             )?;
             account_batch(&canonical, budgets, evidence)?;
-            for (route, output_indexes) in groups {
-                let mut selected = select_rows(&canonical, &output_indexes)?;
+            // Canonical ordering belongs to the physical route. Several
+            // logical exploratory relationships can share that route.
+            let mut physical_groups = BTreeMap::<(String, bool, bool), Vec<u32>>::new();
+            let mut logical_routes = vec![""; canonical.num_rows()];
+            for (route, output_indexes) in &groups {
                 let runtime_route = if ontology_mode == OntologyMode::Exploratory {
                     "_exploratory"
                 } else {
@@ -1605,32 +1608,57 @@ fn encode_edges(
                     semantic_bindings,
                     SymbolKind::Relation,
                     SemanticRouteKind::Relation,
-                    &route,
+                    route,
                     runtime_route,
                 )?;
-                let topology_route =
-                    if owner.symbol.is_none() && ontology_mode == OntologyMode::Exploratory {
-                        let routes = StringArray::from(vec![route.as_str(); selected.num_rows()]);
-                        let mut columns = selected.columns().to_vec();
-                        columns.push(Arc::new(routes));
-                        selected = RecordBatch::try_new(
-                            crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(),
-                            columns,
-                        )
-                        .map_err(storage)?;
-                        "_exploratory"
-                    } else {
-                        owner.topology_route.as_str()
-                    };
-                if owner.symbol.is_some() {
+                let exploratory =
+                    owner.symbol.is_none() && ontology_mode == OntologyMode::Exploratory;
+                let topology_route = if exploratory {
+                    "_exploratory"
+                } else {
+                    owner.topology_route.as_str()
+                };
+                if exploratory {
+                    for index in output_indexes {
+                        logical_routes[*index as usize] = route;
+                    }
+                }
+                physical_groups
+                    .entry((
+                        topology_route.to_owned(),
+                        owner.symbol.is_some(),
+                        exploratory,
+                    ))
+                    .or_default()
+                    .extend(output_indexes);
+            }
+            for ((topology_route, qualified, exploratory), mut output_indexes) in physical_groups {
+                output_indexes.sort_unstable();
+                let mut selected = select_rows(&canonical, &output_indexes)?;
+                if exploratory {
+                    let routes = StringArray::from_iter_values(
+                        output_indexes
+                            .iter()
+                            .map(|index| logical_routes[*index as usize]),
+                    );
+                    let mut columns = selected.columns().to_vec();
+                    columns.push(Arc::new(routes));
+                    selected = RecordBatch::try_new(
+                        crate::schemas::EXPLORATORY_EDGE_SCHEMA.clone(),
+                        columns,
+                    )
+                    .map_err(storage)?;
+                }
+                if qualified {
                     selected = with_route_metadata_batch(
                         &selected,
-                        topology_route,
+                        &topology_route,
                         semantic_context
                             .expect("qualified owner has context")
                             .fingerprint(),
                     )?;
                 }
+                account_batch(&selected, budgets, evidence)?;
                 let ids = selected
                     .column_by_name("edge_id")
                     .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
@@ -1639,7 +1667,7 @@ fn encode_edges(
                 let last = ids.value(ids.len() - 1);
                 let path = format!(
                     "topology/edges/{}/{first:020}-{last:020}.parquet",
-                    encoded_route_component(route_table, topology_route)?
+                    encoded_route_component(route_table, &topology_route)?
                 );
                 artifacts.push(write_parquet(
                     output,

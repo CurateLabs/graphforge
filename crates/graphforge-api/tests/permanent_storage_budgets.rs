@@ -97,7 +97,12 @@ fn uuids(ids: impl Iterator<Item = Uuid>) -> ArrayRef {
     Arc::new(FixedSizeBinaryArray::try_from_iter(ids.map(|id| *id.as_bytes())).unwrap())
 }
 
-fn construct(path: &Path, f: Fixture, nodes: &[Node], edges: &[Edge]) {
+fn construct(
+    path: &Path,
+    f: Fixture,
+    nodes: &[Node],
+    edges: &[Edge],
+) -> graphforge_api::GraphConstructionEvidence {
     let graph = GraphForge::new(path.to_str()).unwrap();
     let mut session = graph
         .begin_graph_construction(GraphConstructionBudgets {
@@ -158,6 +163,7 @@ fn construct(path: &Path, f: Fixture, nodes: &[Node], edges: &[Edge]) {
             .unwrap();
     }
     session.seal_and_publish().unwrap();
+    session.progress().evidence.clone()
 }
 
 fn uuid_at(batch: &RecordBatch, column: usize, row: usize) -> Uuid {
@@ -1977,4 +1983,516 @@ fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
             .map(|batch| batch.columns())
             .collect::<Vec<_>>()
     );
+}
+
+fn assert_exploratory_edge_windows(source: &Path, expected_files: usize, expected_rows: usize) {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let entries = inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/edges/"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries.len(),
+        expected_files,
+        "one fragment per physical route and bounded window"
+    );
+    let mut previous = 0_u64;
+    let mut rows = 0;
+    for entry in entries {
+        let path = graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        assert!(builder.metadata().file_metadata().num_rows() <= 1024);
+        assert!(
+            builder
+                .metadata()
+                .row_groups()
+                .iter()
+                .all(|group| group.num_rows() <= 1024)
+        );
+        let reader = builder.with_batch_size(7).build().unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            assert!(batch.num_rows() <= 7);
+            assert!(batch.column_by_name("rel_type_name").is_some());
+            let ids = batch
+                .column_by_name("edge_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::UInt64Array>()
+                .unwrap();
+            for id in ids.values() {
+                assert!(
+                    *id > previous,
+                    "physical fragments must concatenate in strict surrogate order"
+                );
+                previous = *id;
+                rows += 1;
+            }
+        }
+    }
+    assert_eq!(rows, expected_rows);
+}
+
+#[test]
+fn exploratory_construction_groups_bounded_windows_by_physical_route() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "physical_route_windows",
+        nodes: 66,
+        edges: 4097,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (nodes, edges) = rows(fixture);
+    let parent_evidence = construct(&source, fixture, &nodes, &edges[..2048]);
+    assert_exploratory_edge_windows(&source, 2, 2048);
+    let parent = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    let child_evidence = construct(&source, fixture, &[], &edges[2048..]);
+    assert_exploratory_edge_windows(&source, 5, 4097);
+    let child = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    for entry in parent
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/edges/"))
+    {
+        assert!(
+            child.files.contains(entry),
+            "parent edge payloads remain byte-identical"
+        );
+    }
+    for evidence in [&parent_evidence, &child_evidence] {
+        assert!(evidence.peak_batch_rows <= 1024);
+        assert!(evidence.peak_run_records <= 4096);
+        assert!(evidence.peak_merge_inputs <= 2);
+        assert_eq!(evidence.prior_topology_rows_decoded, 0);
+        assert!(evidence.encode_application_read_bytes > 0);
+        assert!(evidence.encode_application_write_bytes > 0);
+        assert!(
+            evidence.peak_batch_bytes <= GraphConstructionBudgets::default().max_batch_bytes as u64
+        );
+        assert!(evidence.peak_batch_bytes <= 128 * 1024);
+        assert!(evidence.peak_accounted_live_bytes <= 4 * 1024 * 1024);
+        assert!(evidence.encode_application_read_bytes <= 1536 * 1024);
+        assert!(evidence.encode_application_write_bytes <= 512 * 1024);
+        assert!(evidence.total_application_read_bytes().unwrap() <= 16 * 1024 * 1024);
+        assert!(evidence.canonical_output_bytes <= 256 * 1024);
+        assert!(evidence.staged_and_retained_disk_bytes <= 640 * 1024);
+        assert!(evidence.storage_transient_peak_total_allocated_bytes <= 2 * 1024 * 1024);
+    }
+    let measured = |e: &graphforge_api::GraphConstructionEvidence| {
+        json!({
+            "input_rows": e.input_rows,
+            "canonical_output_bytes": e.canonical_output_bytes,
+            "encode_read_bytes": e.encode_application_read_bytes,
+            "encode_write_bytes": e.encode_application_write_bytes,
+            "total_read_bytes": e.total_application_read_bytes().unwrap(),
+            "staged_and_retained_disk_bytes": e.staged_and_retained_disk_bytes,
+            "peak_batch_rows": e.peak_batch_rows,
+            "peak_batch_bytes": e.peak_batch_bytes,
+            "peak_accounted_live_bytes": e.peak_accounted_live_bytes,
+            "peak_merge_temporary_bytes": e.peak_merge_temporary_bytes,
+            "temporary_allocation_peak_bytes": e.storage_transient_peak_total_allocated_bytes,
+        })
+    };
+    println!(
+        "PHYSICAL_ROUTE_WINDOW_RESOURCES {}",
+        json!({"parent":measured(&parent_evidence),"child":measured(&child_evidence)})
+    );
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+}
+
+#[test]
+fn exploratory_parent_construction_replays_and_compacts_exact_routes() {
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_policy",
+        nodes: 66,
+        edges: 4097,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges[..2048]);
+    construct(&source, fixture, &[], &edges[2048..]);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let snapshot_query = "MATCH (n) RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+    let expected_snapshot = graph.execute(snapshot_query).unwrap();
+    let (old_stream, _, _snapshot_guard) = graph
+        .execute_stream_owned(snapshot_query, &Default::default())
+        .unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: nodes[0].0,
+                property: "score".into(),
+                value: PropValue::Int(123),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    nodes[0].2 = Some(123);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::from_u128(121305),
+                generation_uuid: Uuid::from_u128(121306),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    use futures::TryStreamExt as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old_batches: Vec<RecordBatch> = runtime.block_on(old_stream.try_collect()).unwrap();
+    assert_eq!(
+        old_batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>(),
+        expected_snapshot
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>()
+    );
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .execute("MATCH (n) WHERE n.score IS NOT NULL SET n.score = n.score + 1")
+        .unwrap();
+    for node in &mut nodes {
+        node.2 = node.2.map(|score| score + 1);
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    let portable = root.path().join("compaction-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+}
+
+#[test]
+fn exploratory_parent_and_qualified_child_replay_preserve_semantic_routes() {
+    use graphforge_api::{
+        AdoptOntologyRequest, COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, OntologyMode, PropValue,
+        WriteContext,
+    };
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "mixed_semantic_routes",
+        nodes: 33,
+        edges: 258,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges[..129]);
+    let ontology = root.path().join("routes.yaml");
+    std::fs::write(&ontology, "ontology_id: https://example.test/mixed\nversion: \"1\"\nentity_types:\n  - name: NewNode\n    abstract: false\nrelation_types:\n  - name: NEW_TYPED\n    src: NewNode\n    dst: NewNode\nproperties:\n  - owner: NewNode\n    name: score\n    type: int64\n    nullable: true\n").unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .adopt_ontology(AdoptOntologyRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            path: ontology,
+            mode: OntologyMode::Advisory,
+        })
+        .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let candidate = graph.workspace_ontology_composition().unwrap().unwrap();
+    let request = graphforge_api::CompositionChangeRequest {
+        context: WriteContext {
+            operation_uuid: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        },
+        expected_project_generation_uuid: graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+        candidate,
+        data_disposition: graphforge_api::CompositionDataDisposition::RequireConforming,
+    };
+    let preview = graph
+        .preview_ontology_composition_change(&request, None)
+        .unwrap();
+    assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+    graph
+        .publish_ontology_composition_change(&request, &preview, None)
+        .unwrap();
+    drop(graph);
+    let child_nodes = (0..33)
+        .map(|row| (id(3, row, true), "NewNode".to_owned(), None))
+        .collect::<Vec<_>>();
+    let changed_node = child_nodes[0].0;
+    for (row, edge) in edges[129..].iter_mut().enumerate() {
+        edge.3 = "NEW_TYPED".into();
+        edge.1 = child_nodes[row % child_nodes.len()].0;
+        edge.2 = child_nodes[(row + 1) % child_nodes.len()].0;
+    }
+    construct(&source, fixture, &child_nodes, &edges[129..]);
+    nodes.extend(child_nodes.into_iter().map(|mut node| {
+        node.1 = "mixed:entity:NewNode".into();
+        node
+    }));
+    let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let bindings = graphforge_storage::semantic_storage_bindings(&current)
+        .unwrap()
+        .unwrap();
+    let relation = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.local_id == "NEW_TYPED"
+        })
+        .unwrap();
+    assert_eq!(relation.symbol.display(), "mixed:relation:NEW_TYPED");
+    for edge in &mut edges[129..] {
+        edge.3.clone_from(&relation.route);
+    }
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let schemas = |source: &Path| {
+        let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+        let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
+        let inventory = selected.graph_files_inventory().unwrap().unwrap();
+        let mut schemas = BTreeMap::new();
+        for entry in inventory
+            .files
+            .iter()
+            .filter(|entry| entry.relative_path.starts_with("topology/edges/"))
+        {
+            let path = if generation_owned {
+                selected.graph_tree_root().join(&entry.relative_path)
+            } else {
+                graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap()
+            };
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+            let schema = reader.schema().clone();
+            let key = if schema.index_of("rel_type_name").is_ok() {
+                "exploratory".to_owned()
+            } else {
+                let route = schema
+                    .metadata()
+                    .get(graphforge_storage::SEMANTIC_ROUTE_METADATA_KEY)
+                    .unwrap();
+                assert!(
+                    schema
+                        .metadata()
+                        .contains_key(graphforge_storage::SEMANTIC_COMPOSITION_METADATA_KEY)
+                );
+                route.clone()
+            };
+            if let Some(previous) = schemas.insert(key, schema.clone()) {
+                assert_eq!(previous, schema);
+            }
+        }
+        assert_eq!(schemas.len(), 2);
+        assert!(schemas.contains_key("exploratory"));
+        schemas
+    };
+    let before = schemas(&source);
+    // First write establishes qualified schema authority; the next is real GFDR.
+    for score in [122, 123] {
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                    node_uuid: changed_node,
+                    property: "score".into(),
+                    value: PropValue::Int(score),
+                }],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+    }
+    let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert_eq!(
+        graphforge_storage::list_delta_runs(
+            &delta.graph_files_inventory().unwrap().unwrap(),
+            Default::default()
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(before, schemas(&source));
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let score_query =
+        "MATCH (n:`mixed:NewNode`) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score";
+    let expected_score = graph.execute(score_query).unwrap();
+    assert_eq!(
+        expected_score
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(uuid_at(&expected_score.batches[0], 0, 0), changed_node);
+    assert_eq!(int_at(&expected_score.batches[0], 1, 0), Some(123));
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+    for path in [&source, &root.path().join("imported")] {
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .execute(score_query)
+                .unwrap()
+                .batches
+                .iter()
+                .map(|batch| batch.columns())
+                .collect::<Vec<_>>(),
+            expected_score
+                .batches
+                .iter()
+                .map(|batch| batch.columns())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn exploratory_coalesced_routes_reject_oversized_encoding_before_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "long_routes",
+        nodes: 2,
+        edges: 64,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &[]);
+    let before = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut session = graph
+        .begin_graph_construction(GraphConstructionBudgets {
+            max_batch_rows: 64,
+            max_batch_bytes: 16 * 1024,
+            max_run_records: 256,
+            merge_fan_in: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    for (row, edge) in edges.iter_mut().enumerate() {
+        edge.3 = format!("R{}_{}", row % 2, "x".repeat(197));
+    }
+    for (chunk, rows) in edges.chunks(4).enumerate() {
+        let batch = RecordBatch::try_new(
+            CONSTRUCTION_EDGE_SCHEMA.clone(),
+            vec![
+                uuids(rows.iter().map(|row| row.0)),
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|row| row.3.as_str()),
+                )),
+                uuids(rows.iter().map(|row| row.1)),
+                uuids(rows.iter().map(|row| row.2)),
+            ],
+        )
+        .unwrap();
+        session
+            .append_edges(&format!("edges-{chunk}"), &batch)
+            .unwrap();
+    }
+    let error = session.seal_and_publish().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("decoded canonical batch exceeds encoding budget"),
+        "{error}"
+    );
+    let after = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert_eq!(before.generation_uuid(), after.generation_uuid());
+    assert_eq!(
+        before.graph_files_inventory().unwrap(),
+        after.graph_files_inventory().unwrap()
+    );
+    drop(session);
+    drop(graph);
+    let reopened = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&reopened, fixture, &nodes, &[]);
 }

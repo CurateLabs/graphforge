@@ -1,0 +1,109 @@
+{
+  "issue": 1218,
+  "source_commit": "13699caebd45a97e2da2cbb4575a91be1fe9f9e9",
+  "base_commit": "2b63f4c957596fee342b33fa11e3cf6a6f2f99b3",
+  "deterministic_ceilings": {
+    "batch_rows": 1024,
+    "run_bytes": 4096,
+    "merge_fan_in": 2,
+    "prior_topology_decode_bytes": 0,
+    "peak_batch_bytes": 131072,
+    "peak_accounted_live_bytes": 4194304,
+    "temporary_allocation_peak_bytes": 2097152,
+    "encode_read_bytes": 1572864,
+    "encode_write_bytes": 524288,
+    "total_read_bytes": 16777216,
+    "canonical_output_bytes": 262144,
+    "staged_and_retained_disk_bytes": 655360
+  },
+  "construction_counters": {
+    "child": {
+      "canonical_output_bytes": 189915,
+      "encode_read_bytes": 1042455,
+      "encode_write_bytes": 363917,
+      "input_rows": 2049,
+      "peak_accounted_live_bytes": 2805232,
+      "peak_batch_bytes": 103396,
+      "peak_batch_rows": 1024,
+      "peak_merge_temporary_bytes": 802816,
+      "staged_and_retained_disk_bytes": 476148,
+      "temporary_allocation_peak_bytes": 1302528,
+      "total_read_bytes": 7319877
+    },
+    "parent": {
+      "canonical_output_bytes": 160479,
+      "encode_read_bytes": 927188,
+      "encode_write_bytes": 302218,
+      "input_rows": 2114,
+      "peak_accounted_live_bytes": 2805218,
+      "peak_batch_bytes": 103396,
+      "peak_batch_rows": 1024,
+      "peak_merge_temporary_bytes": 729088,
+      "staged_and_retained_disk_bytes": 479256,
+      "temporary_allocation_peak_bytes": 1224704,
+      "total_read_bytes": 5827068
+    }
+  },
+  "runtime": {
+    "elapsed_seconds": 14.86,
+    "user_seconds": 10.57,
+    "system_seconds": 2.77,
+    "peak_rss_kib": 146584,
+    "filesystem_input_512_byte_blocks": 148784,
+    "filesystem_output_512_byte_blocks": 84416,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 66324,
+        "bytes": 151277668
+      },
+      "pread64": {
+        "calls": 16796,
+        "bytes": 8114399
+      },
+      "write": {
+        "calls": 6029,
+        "bytes": 27923873
+      },
+      "fsync": {
+        "calls": 10288,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 580,
+        "bytes": 4093666
+      }
+    },
+    "read_bytes": 163485733,
+    "write_bytes": 32017539,
+    "errors": []
+  },
+  "trace_elapsed_seconds": 55.29,
+  "validation": {
+    "public_exploratory_passed": 4,
+    "public_qualified_ownership_passed": 5,
+    "construction_passed": 99,
+    "replay_passed": 23,
+    "delta_compaction_passed": 10,
+    "workspace_clippy": "passed",
+    "fast_pre_push": "passed",
+    "gate_registry": "passed",
+    "independent_review": "no blocking findings"
+  },
+  "commands": {
+    "public": "cargo test -p graphforge-api --test permanent_storage_budgets exploratory_ -- --nocapture",
+    "construction": "cargo test -p graphforge-storage --lib graph_construction",
+    "replay": "cargo test -p graphforge-storage --lib replay",
+    "delta": "cargo test -p graphforge-storage --lib graph_delta",
+    "runtime": "/usr/bin/time -v <prebuilt permanent_storage_budgets binary> exploratory_ --nocapture --test-threads=1",
+    "trace": "strace -f -qq -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync <same binary/filter>"
+  },
+  "limitations": [
+    "Construction counters do not measure whole-process RSS or all query/replay/import temporary allocation.",
+    "Logical groups and selected Arrow batch coexist only inside the existing bounded ID window.",
+    "Kernel I/O is cache dependent. Separate syscall trace includes startup, query, verification, import and test output.",
+    "No encoding defaults or unsupported topology-journal authority changed; #1213/#1221 retain those scopes."
+  ]
+}
