@@ -2449,6 +2449,40 @@ pub fn read_authenticated_property_snapshots_for_inventory(
     Ok((result.rows, result.metrics))
 }
 
+/// Selected logical values and tombstone-inclusive ownership from one read.
+pub struct PropertyTargetSnapshots {
+    /// Latest live snapshots for requested UUIDs only.
+    pub rows: BTreeMap<[u8; 16], PropertySnapshotRow>,
+    /// Requested UUIDs with a physical owner, including newest tombstones.
+    pub present: BTreeSet<[u8; 16]>,
+    /// Exact admission, authentication and decode work for this read.
+    pub metrics: PropertyOverlayMetrics,
+}
+
+impl PropertyTargetSnapshots {
+    /// Materialize selected live edge rows in their declared Arrow representation.
+    /// Uses the canonical property encoder, including tagged and temporal values.
+    pub fn edge_batch(&self, schema: &arrow::datatypes::Schema) -> Result<RecordBatch, GfError> {
+        crate::writer::edge_property_snapshots_batch(schema, &self.rows)
+    }
+}
+
+/// Read selected values and owner presence without a second fragment scan.
+/// Uses the same authenticated decoder and resource limits as mutation reads.
+pub fn read_authenticated_property_targets_for_inventory(
+    inventory: &AuthenticatedPropertyInventory,
+    kind: PropertyRouteKind,
+    route: &str,
+    targets: &BTreeSet<[u8; 16]>,
+) -> Result<PropertyTargetSnapshots, GfError> {
+    let result = read_property_targets(inventory, kind, route, targets, None)?;
+    Ok(PropertyTargetSnapshots {
+        present: targets.difference(&result.unresolved).copied().collect(),
+        rows: result.rows,
+        metrics: result.metrics,
+    })
+}
+
 /// Resolve authenticated target row presence, including newest tombstones.
 /// Unlike live snapshot reads, a removed row still proves its physical owner.
 /// Uses the same schema, UUID ordering, tombstone-value and resource validation.
@@ -5308,6 +5342,33 @@ mod tests {
         );
         assert_eq!(work.fragments_considered, 2);
         assert_eq!(work.tombstones, 1);
+        let selected = read_authenticated_property_targets_for_inventory(
+            &inventory,
+            PropertyRouteKind::Edge,
+            "REL",
+            &targets,
+        )
+        .unwrap();
+        assert_eq!(selected.present, present);
+        assert_eq!(selected.rows, live);
+        assert_eq!(
+            selected.metrics, work,
+            "combined values and ownership scan once"
+        );
+        let schema = Schema::new(vec![
+            Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("value", DataType::Int64, true),
+            Field::new("null_only", DataType::Null, true),
+        ]);
+        let batch = selected.edge_batch(&schema).unwrap();
+        assert_eq!(
+            batch.num_rows(),
+            1,
+            "tombstones never revive a property row"
+        );
+        assert_eq!(batch.column(1).null_count(), 1);
+        assert_eq!(batch.column(2).logical_null_count(), 1);
+        assert_eq!(batch.schema().as_ref(), &schema);
         drop(inventory);
         // Re-admit a deliberately malformed fixture so this checks row
         // validation, rather than merely failing its prior digest authority.

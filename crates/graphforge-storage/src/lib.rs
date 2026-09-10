@@ -398,9 +398,10 @@ pub use property_overlay::{
     AuthenticatedPropertyInventory, PROPERTY_OVERLAY_FORMAT, PROPERTY_OVERLAY_FORMAT_KEY,
     PROPERTY_TOMBSTONE_FIELD, PropertyFragmentId, PropertyInventoryOpenMetrics,
     PropertyOverlayLimits, PropertyOverlayMetrics, PropertyRouteKind, PropertySnapshotRow,
-    enumerate_property_fragments, read_authenticated_property_presence_for_inventory,
-    read_authenticated_property_snapshots_for, read_authenticated_property_snapshots_for_inventory,
-    visit_authenticated_property_snapshots,
+    PropertyTargetSnapshots, enumerate_property_fragments,
+    read_authenticated_property_presence_for_inventory, read_authenticated_property_snapshots_for,
+    read_authenticated_property_snapshots_for_inventory,
+    read_authenticated_property_targets_for_inventory, visit_authenticated_property_snapshots,
 };
 
 pub mod catalog;

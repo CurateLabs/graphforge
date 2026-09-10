@@ -2977,19 +2977,85 @@ fn build_edge_list_column(
     Ok(Arc::new(list))
 }
 
+fn read_target_edge_properties(
+    inventory: &graphforge_storage::AuthenticatedPropertyInventory,
+    stem: &str,
+    targets: &std::collections::BTreeSet<[u8; 16]>,
+    property_names: &[String],
+    owners: &mut std::collections::BTreeSet<[u8; 16]>,
+) -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
+    let selected = graphforge_storage::read_authenticated_property_targets_for_inventory(
+        inventory,
+        graphforge_storage::PropertyRouteKind::Edge,
+        stem,
+        targets,
+    )?;
+    if selected.present.iter().any(|uuid| !owners.insert(*uuid)) {
+        return Err(GfError::Project {
+            code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+            message: "edge properties have multiple authenticated owners".into(),
+        });
+    }
+    let schema = inventory.route_schema(graphforge_storage::PropertyRouteKind::Edge, stem);
+    match schema {
+        Some(schema) => {
+            let indices = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| {
+                    field.name() == "edge_uuid" || property_names.contains(field.name())
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let projected = schema
+                .project(&indices)
+                .map_err(GfError::from_execution_error)?;
+            Ok(vec![selected.edge_batch(&projected)?])
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+fn edge_property_stems(
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
+    dir: &Path,
+    rel_type_name: &str,
+) -> Vec<String> {
+    if rel_type_name == "*" {
+        match inventory {
+            Some(inventory) => inventory
+                .routes(graphforge_storage::PropertyRouteKind::Edge)
+                .map(str::to_owned)
+                .collect(),
+            None => graphforge_storage::list_edge_property_stems(dir),
+        }
+    } else {
+        let mut candidates = vec![rel_type_name.to_owned()];
+        let has_shared = match inventory {
+            Some(inventory) => inventory
+                .route_schema(graphforge_storage::PropertyRouteKind::Edge, "_exploratory")
+                .is_some(),
+            None => graphforge_storage::list_edge_property_stems(dir)
+                .iter()
+                .any(|stem| stem == "_exploratory"),
+        };
+        if rel_type_name != "_exploratory" && has_shared {
+            candidates.push("_exploratory".to_owned());
+        }
+        candidates.sort();
+        candidates
+    }
+}
+
 /// Build one child array per edge-property struct field (#755), in field order.
 ///
-/// Reads the relation's `edge_properties/<REL>.parquet` once (keyed by
-/// `edge_uuid`), then `take`s each property column at the row matching each
-/// flattened hop's `edge_uuid` — `None` for an edge with no property row yields a
-/// NULL (LEFT-join semantics). A field advertised in the schema but absent on disk
-/// becomes an all-NULL column. Returns an empty Vec when there are no prop fields.
+/// Authenticates candidate owners and retains values for flattened hop UUIDs.
+/// Named traversals select the logical route and shared construction route;
+/// wildcard traversals select every route. Tombstones participate in ownership
+/// refusal but never contribute values. Missing properties become NULL under
+/// the lowering's nullable union schema. Returns no children without properties.
 /// `hop_edge_uuids` is in flattened hop order (matching the topology children).
-///
-/// A wildcard traversal (`*`, #1023) reads EVERY relation's property file:
-/// each hop's values come from the file owning its `edge_uuid` (an edge belongs
-/// to exactly one relation), coalesced per field — NULL where the owning
-/// relation lacks the column, matching the lowering's nullable union schema.
 fn build_edge_prop_children(
     inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     rel_type_name: &str,
@@ -3008,20 +3074,10 @@ fn build_edge_prop_children(
         return Ok(Vec::new());
     }
 
-    // Read each property file once and concat to a single batch per relation
-    // (absent files contribute nothing). Typed traversals read one file; a
-    // wildcard reads all of them, in the lowering's sorted-stem order.
-    let stems: Vec<String> = if rel_type_name == "*" {
-        match inventory {
-            Some(inventory) => inventory
-                .routes(graphforge_storage::PropertyRouteKind::Edge)
-                .map(str::to_owned)
-                .collect(),
-            None => graphforge_storage::list_edge_property_stems(dir),
-        }
-    } else {
-        vec![rel_type_name.to_owned()]
-    };
+    // Resolve selected rows once per candidate route, then assemble hop order.
+    let stems = edge_property_stems(inventory, dir, rel_type_name);
+    let targets = hop_edge_uuids.iter().copied().collect();
+    let mut owners = std::collections::BTreeSet::new();
     let mut prop_batches_by_rel = Vec::with_capacity(stems.len());
     let property_names = prop_fields
         .iter()
@@ -3029,15 +3085,12 @@ fn build_edge_prop_children(
         .collect::<Vec<_>>();
     for stem in &stems {
         let batches = match inventory {
-            Some(inventory) => graphforge_storage::read_edge_properties_projected_from_inventory(
-                dir,
-                inventory,
-                stem,
-                &property_names,
-            ),
-            None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names),
-        }
-        .map_err(|e| exec_err(e.to_string()))?;
+            Some(inventory) => {
+                read_target_edge_properties(inventory, stem, &targets, &property_names, &mut owners)
+            }
+            None => graphforge_storage::read_edge_properties_projected(dir, stem, &property_names)
+                .map_err(|e| exec_err(e.to_string())),
+        }?;
         if let Some(first) = batches.first() {
             prop_batches_by_rel.push(
                 concat_batches(&first.schema(), &batches).map_err(|e| exec_err(e.to_string()))?,
@@ -3046,7 +3099,7 @@ fn build_edge_prop_children(
     }
 
     // edge_uuid -> (owning batch, row within it). An edge belongs to exactly
-    // one relation, so first-wins is a no-op for well-formed data.
+    // one physical owner; duplicate ownership is corruption, not precedence.
     let mut uuid_to_loc: HashMap<[u8; 16], (usize, u32)> = HashMap::new();
     for (bi, b) in prop_batches_by_rel.iter().enumerate() {
         let key = b
@@ -3069,11 +3122,16 @@ fn build_edge_prop_children(
             }
             let mut u = [0u8; 16];
             u.copy_from_slice(key.value(r));
-            uuid_to_loc.entry(u).or_insert((
+            let location = (
                 bi,
                 u32::try_from(r)
                     .map_err(|_| exec_err(format!("edge-property row {r} exceeds u32")))?,
-            ));
+            );
+            if uuid_to_loc.insert(u, location).is_some() {
+                return Err(exec_err(
+                    "edge properties have multiple physical owners".into(),
+                ));
+            }
         }
     }
 

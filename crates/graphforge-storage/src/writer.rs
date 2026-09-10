@@ -6644,6 +6644,52 @@ fn property_snapshot_fragment_schema(
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 
+pub(crate) fn edge_property_snapshots_batch(
+    schema: &Schema,
+    snapshots: &BTreeMap<[u8; 16], crate::PropertySnapshotRow>,
+) -> Result<RecordBatch, GfError> {
+    if snapshots.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::new(schema.clone())));
+    }
+    let rows = snapshots
+        .values()
+        .map(|row| EdgePropRow {
+            edge_uuid: row.uuid,
+            props: row
+                .values
+                .iter()
+                .filter(|(name, _)| schema.column_with_name(name).is_some())
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let indices = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.data_type() != &DataType::Null)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let concrete = schema.project(&indices).map_err(pq_err)?;
+    let batch = property_rows_batch_with_schema(&concrete, EDGE_PROPERTY_UUID_FIELD, &rows)?;
+    let columns = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if field.data_type() == &DataType::Null {
+                arrow::array::new_null_array(&DataType::Null, rows.len())
+            } else {
+                Arc::clone(
+                    batch
+                        .column_by_name(field.name())
+                        .expect("projected property field"),
+                )
+            }
+        })
+        .collect();
+    RecordBatch::try_new(Arc::new(schema.clone()), columns).map_err(pq_err)
+}
+
 fn property_snapshot_chunk_with_schema(
     base: &Schema,
     fragment_schema: SchemaRef,
@@ -8483,6 +8529,77 @@ mod tests {
             x.data_type(),
             &DataType::Struct(heterogeneous_scalar_fields())
         );
+
+        // The targeted edge reader uses the same canonical encoder in memory.
+        // Verify its tagged values and temporal fields survive that boundary,
+        // including explicit Null and negative timestamp/duration components.
+        let rows = [
+            IrLiteral::Null,
+            IrLiteral::Int(1),
+            IrLiteral::Str("two".into()),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let uuid = Uuid::from_u128(index as u128 + 1).into_bytes();
+            (
+                uuid,
+                crate::PropertySnapshotRow {
+                    uuid,
+                    tombstone: false,
+                    values: BTreeMap::from([
+                        ("x".into(), value),
+                        ("at".into(), IrLiteral::DateTime(-1_234_567 + index as i64)),
+                        (
+                            "elapsed".into(),
+                            IrLiteral::Duration {
+                                months: -2,
+                                days: 3,
+                                seconds: -4,
+                                nanos: 5,
+                            },
+                        ),
+                    ]),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+        let selected = crate::PropertyTargetSnapshots {
+            present: rows.keys().copied().collect(),
+            rows,
+            metrics: Default::default(),
+        };
+        let edge_schema = Schema::new_with_metadata(
+            vec![
+                uuid_field(EDGE_PROPERTY_UUID_FIELD),
+                Field::new("x", DataType::Struct(heterogeneous_scalar_fields()), true),
+                crate::schemas::ts_field("at"),
+                Field::new(
+                    "elapsed",
+                    DataType::Struct(crate::schemas::duration_struct_fields()),
+                    true,
+                ),
+            ],
+            HashMap::from([("fixture".into(), "targeted-edge-types".into())]),
+        );
+        let encoded = selected.edge_batch(&edge_schema).unwrap();
+        assert_eq!(encoded.schema().as_ref(), &edge_schema);
+        let mut decoded = BTreeMap::new();
+        decode_property_batch(&encoded, EDGE_PROPERTY_UUID_FIELD, |uuid, values| {
+            assert!(decoded.insert(uuid, values).is_none());
+        })
+        .unwrap();
+        let expected = selected
+            .rows
+            .iter()
+            .map(|(uuid, row)| {
+                (
+                    *uuid,
+                    row.values.clone().into_iter().collect::<HashMap<_, _>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(decoded, expected);
     }
 
     #[test]
