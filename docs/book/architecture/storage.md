@@ -1,5 +1,8 @@
 # Storage Architecture
 
+See the [permanent storage assessment](permanent-storage-assessment.md) for
+source-backed ownership baselines, lossless codec experiments and regression budgets.
+
 **Status:** v0.5.0 — Parquet project storage shipped
 **Last Updated:** 2026-08-30
 

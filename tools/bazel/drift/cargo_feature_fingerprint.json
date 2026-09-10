@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "5c9c967f919fba3cad7a2104bd99d926ccf5b6c0e68d599cb23a0e590419ccdc",
+  "sha256": "1f73c7e20543f5cdb8657e4e3a8d0a9cace73beff21fb280429fd4077c4bcf58",
   "entries": [
     {
       "name": "graphforge-api",
@@ -16,6 +16,18 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "arrow",
+          "req": "^58",
+          "features": [
+            "ipc_compression",
+            "prettyprint"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {
