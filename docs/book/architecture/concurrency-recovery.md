@@ -228,7 +228,12 @@ There are four CI surfaces for concurrency and durability contracts:
    behavior; the oracle is reusable by recovery, delta, compaction, and final
    certification. Authoritative graph delta runs (#752 / ADR 0019) publish only
    through the same `CURRENT` contract; they never recover by scanning newest
-   logs. After CURRENT selects a generation, normal and checkpoint opens verify
+   logs. GFDR supports property operations only. Request admission precedes
+   idempotent transaction shortcuts; persisted decoding and direct-run
+   prevalidation reject topology records. Journal recovery repairs selected or
+   abandoned publication attempts and never applies an arbitrary uncommitted
+   topology record to CURRENT. See the [publishing boundary](storage.md#current-publishing-contract).
+   After CURRENT selects a generation, normal and checkpoint opens verify
    its inventory and complete GFDR chain, replay canonical Parquet plus typed
    records inside a private workspace, and publish no partial read view on
    corruption, unsupported versions, or resource-limit failure. Recovery-on-open

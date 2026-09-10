@@ -2202,16 +2202,14 @@ mod tests {
     fn write_identity_delta(tree: &Path, raw: u32) {
         const RECORD_START: usize = 84;
         const PAYLOAD_LENGTH: usize = RECORD_START + 25;
-        const PAYLOAD_START: usize = PAYLOAD_LENGTH + 4;
         let op = crate::GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
-            kind: crate::GraphDeltaOpKind::UpsertNode,
-            payload: crate::GraphDeltaPayload::UpsertNodeV2 {
+            kind: crate::GraphDeltaOpKind::SetNodeProperty,
+            payload: crate::GraphDeltaPayload::SetNodeProperty {
                 node_uuid: Uuid::now_v7().to_string(),
-                node_id: 2,
-                type_ids: vec![graphforge_value::EntityTypeId::decode(0).unwrap()],
-                created_at_micros: 1,
-                updated_at_micros: 1,
+                property_stem: "_untyped".into(),
+                key: "score".into(),
+                value: crate::encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(1)).unwrap(),
             },
         };
         let bytes = crate::encode_delta_run(
@@ -2222,13 +2220,16 @@ mod tests {
             crate::GraphDeltaJournalLimits::default(),
         )
         .unwrap();
-        let length =
-            u32::from_le_bytes(bytes[PAYLOAD_LENGTH..PAYLOAD_START].try_into().unwrap()) as usize;
-        let mut payload: serde_json::Value =
-            serde_json::from_slice(&bytes[PAYLOAD_START..PAYLOAD_START + length]).unwrap();
-        payload["type_ids"] = serde_json::json!([raw]);
+        // Forge a checksum-valid but unsupported topology record without using
+        // the publisher's rejected topology encoder.
+        let payload = serde_json::json!({
+            "kind": "upsert_node_v2", "node_uuid": Uuid::now_v7().to_string(),
+            "node_id": 2, "type_ids": [raw],
+            "created_at_micros": 1, "updated_at_micros": 1
+        });
         let payload = serde_json::to_vec(&payload).unwrap();
         let mut framed = bytes[..PAYLOAD_LENGTH].to_vec();
+        framed[RECORD_START + 22] = crate::GraphDeltaOpKind::UpsertNode as u8;
         framed.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
         framed.extend_from_slice(&payload);
         let checksum = Sha256::digest(&framed[RECORD_START..]);
@@ -2242,11 +2243,35 @@ mod tests {
 
     #[test]
     fn invalid_delta_identity_package_preserves_pristine_target_authority() {
-        for raw in [u32::MAX, 0x8000_0000, 0xc000_0000] {
+        for raw in [0, u32::MAX, 0x8000_0000, 0xc000_0000] {
             let (_owner, package) = identity_package(|tree| write_identity_delta(tree, raw));
             assert_identity_package_rejected(&package);
         }
-        let (_owner, package) = identity_package(|tree| write_identity_delta(tree, 0));
+        let (_owner, package) = identity_package(|tree| {
+            let state = crate::graph_delta_journal::load_base_state(tree).unwrap();
+            let op = crate::GraphDeltaOp {
+                operation_uuid: Uuid::now_v7(),
+                kind: crate::GraphDeltaOpKind::SetNodeProperty,
+                payload: crate::GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: state.nodes.keys().next().unwrap().clone(),
+                    property_stem: "_untyped".into(),
+                    key: "score".into(),
+                    value: crate::encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(7))
+                        .unwrap(),
+                },
+            };
+            let bytes = crate::encode_delta_run(
+                1,
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                &[op],
+                Default::default(),
+            )
+            .unwrap();
+            let path = tree.join(crate::delta_run_relative_path(1));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        });
         let target = tempfile::tempdir().unwrap();
         import_complete_portable_v2(
             &package,

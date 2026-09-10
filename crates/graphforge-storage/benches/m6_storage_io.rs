@@ -81,13 +81,15 @@ fn publish_delta(root: &std::path::Path) {
             run_uuid: Uuid::now_v7(),
             operations: vec![GraphDeltaOp {
                 operation_uuid: Uuid::now_v7(),
-                kind: GraphDeltaOpKind::UpsertNode,
-                payload: GraphDeltaPayload::UpsertNodeV2 {
-                    node_uuid: Uuid::from_u128(2).to_string(),
-                    node_id: 2,
-                    type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
-                    created_at_micros: 2,
-                    updated_at_micros: 2,
+                kind: GraphDeltaOpKind::SetNodeProperty,
+                payload: GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: Uuid::from_u128(1).to_string(),
+                    property_stem: "1".into(),
+                    key: "rank".into(),
+                    value: graphforge_storage::encode_graph_delta_value(
+                        &graphforge_ir::IrLiteral::Int(7),
+                    )
+                    .unwrap(),
                 },
             }],
             limits: GraphDeltaJournalLimits::default(),

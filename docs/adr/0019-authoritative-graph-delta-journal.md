@@ -1,5 +1,14 @@
 # ADR 0019: Authoritative durable graph delta journal
 
+> Current contract amendment (#1221): GFDR supports only node/edge property
+> set/remove. Topology upserts/deletes are rejected before publication and by
+> decoding/replay, even when identity metadata is present. Public topology uses
+> canonical publication. Earlier topology/compatibility descriptions below are
+> historical; pre-v1 backward readers and migrations are not provided. The
+> [current publishing contract](../book/architecture/storage.md#current-publishing-contract)
+> is authoritative for supported operation kinds and conformance.
+
+
 **Status:** Accepted
 **Date:** 2026-08-15
 **Build target:** v0.5.x (M6)

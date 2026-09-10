@@ -896,6 +896,12 @@ mod crash_oracle_tests {
             1_700_000_000_000_000,
         )
         .unwrap();
+        writer
+            .create_node(
+                Uuid::from_u128(1221),
+                graphforge_value::EntityTypeId::decode(1).unwrap(),
+            )
+            .unwrap();
         writer.flush().unwrap();
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
@@ -953,13 +959,13 @@ mod crash_oracle_tests {
                 run_uuid: Uuid::now_v7(),
                 operations: vec![GraphDeltaOp {
                     operation_uuid: Uuid::now_v7(),
-                    kind: crate::GraphDeltaOpKind::UpsertNode,
-                    payload: crate::GraphDeltaPayload::UpsertNodeV2 {
-                        node_uuid: Uuid::now_v7().hyphenated().to_string(),
-                        node_id: 1,
-                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
-                        created_at_micros: 1,
-                        updated_at_micros: 1,
+                    kind: crate::GraphDeltaOpKind::SetNodeProperty,
+                    payload: crate::GraphDeltaPayload::SetNodeProperty {
+                        node_uuid: Uuid::from_u128(1221).to_string(),
+                        property_stem: "_untyped".into(),
+                        key: "score".into(),
+                        value: crate::encode_graph_delta_value(&graphforge_ir::IrLiteral::Int(1))
+                            .unwrap(),
                     },
                 }],
                 limits: GraphDeltaJournalLimits::default(),

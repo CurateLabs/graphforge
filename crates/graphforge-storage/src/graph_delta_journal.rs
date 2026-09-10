@@ -96,7 +96,8 @@ impl Default for GraphDeltaJournalLimits {
     }
 }
 
-/// Supported authoritative mutation kinds for current graph surfaces.
+/// Framed mutation discriminants. Only property mutations are admitted by GFDR.
+/// Topology discriminants are recognized solely to reject unsupported records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
@@ -291,12 +292,26 @@ impl GraphDeltaPayload {
         Ok(payload)
     }
 
-    fn validate_typed_values(&self) -> Result<(), GfError> {
+    fn validate_journal_support(&self) -> Result<(), GfError> {
         match self {
-            Self::UpsertNode { .. } | Self::UpsertEdge { .. } => Err(GfError::Project {
+            Self::UpsertNode { .. }
+            | Self::UpsertNodeV2 { .. }
+            | Self::DeleteNode { .. }
+            | Self::UpsertEdge { .. }
+            | Self::UpsertEdgeV2 { .. }
+            | Self::DeleteEdge { .. } => Err(GfError::Project {
                 code: ProjectErrorCode::UnsupportedProjectFormat,
-                message: "unsupported lossless-metadata-free GFDR topology payload".into(),
+                message:
+                    "GFDR supports property mutations only; topology requires canonical publication"
+                        .into(),
             }),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_typed_values(&self) -> Result<(), GfError> {
+        self.validate_journal_support()?;
+        match self {
             Self::SetNodeProperty {
                 property_stem,
                 value,
@@ -989,6 +1004,7 @@ pub fn apply_delta_runs(
     runs: &[GraphDeltaRun],
     limits: GraphDeltaJournalLimits,
 ) -> Result<GraphDeltaReplayEvidence, GfError> {
+    validate_replay_payloads(runs)?;
     let mut evidence = GraphDeltaReplayEvidence::default();
     for run in runs {
         evidence.runs_replayed = evidence.runs_replayed.saturating_add(1);
@@ -1010,11 +1026,26 @@ pub fn apply_delta_runs(
     Ok(evidence)
 }
 
+// Runs can be supplied directly without decoding. Inspect the complete input
+// before touching caller state, including records whose operation UUID is known.
+fn validate_replay_payloads(runs: &[GraphDeltaRun]) -> Result<(), GfError> {
+    for record in runs.iter().flat_map(|run| &run.records) {
+        record.payload.validate_journal_support()?;
+        if record.payload.expected_kind() != record.kind {
+            return Err(validation(
+                "graph delta operation kind does not match payload",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)] // Exhaustive payload handling is one fail-closed state machine.
 fn build_replay_overlay(
     runs: &[GraphDeltaRun],
     limits: GraphDeltaJournalLimits,
 ) -> Result<(ReplayOverlay, GraphDeltaReplayEvidence), GfError> {
+    validate_replay_payloads(runs)?;
     let mut overlay = ReplayOverlay::default();
     let mut evidence = GraphDeltaReplayEvidence::default();
     let mut operations = BTreeMap::<Uuid, GraphDeltaPayload>::new();
@@ -1462,6 +1493,7 @@ fn prepare_graph_delta_inner(
     catalog: Option<&graphforge_ir::RuntimeCatalog>,
 ) -> Result<PreparedGraphDelta, GfError> {
     for op in &request.operations {
+        op.payload.validate_journal_support()?;
         if op.payload.expected_kind() != op.kind {
             return Err(validation(
                 "graph delta operation kind does not match payload",
@@ -1620,6 +1652,7 @@ fn publish_graph_delta_after_prepare(
     let admitted_root = admission.root().to_owned();
     let container_root = admitted_root.as_path();
     for op in &request.operations {
+        op.payload.validate_journal_support()?;
         if op.payload.expected_kind() != op.kind {
             return Err(validation(
                 "graph delta operation kind does not match payload",
@@ -2206,7 +2239,7 @@ mod crash_oracle_tests {
     fn publish_graph_base(root: &Path) {
         crate::open_or_initialize_project(root).unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let node_uuid = Uuid::now_v7().hyphenated().to_string();
+        let node_uuid = Uuid::from_u128(1221).hyphenated().to_string();
         let mut state = ReconstructedGraphState::default();
         state
             .nodes
@@ -2256,13 +2289,12 @@ mod crash_oracle_tests {
             run_uuid: Uuid::now_v7(),
             operations: vec![GraphDeltaOp {
                 operation_uuid: Uuid::now_v7(),
-                kind: GraphDeltaOpKind::UpsertNode,
-                payload: GraphDeltaPayload::UpsertNodeV2 {
-                    node_uuid: Uuid::now_v7().hyphenated().to_string(),
-                    node_id: 1,
-                    type_ids: vec![EntityTypeId::decode(1).unwrap()],
-                    created_at_micros: 1,
-                    updated_at_micros: 1,
+                kind: GraphDeltaOpKind::SetNodeProperty,
+                payload: GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: Uuid::from_u128(1221).to_string(),
+                    property_stem: "_untyped".into(),
+                    key: "score".into(),
+                    value: encode_graph_delta_value(&IrLiteral::Int(1)).unwrap(),
                 },
             }],
             limits: GraphDeltaJournalLimits::default(),
@@ -2330,12 +2362,7 @@ mod crash_oracle_tests {
     fn prepared_delta_fails_busy_behind_a_live_current_writer() {
         let root = tempfile::tempdir().unwrap();
         publish_graph_base(root.path());
-        let mut prepared = one_node_request();
-        let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut prepared.operations[0].payload
-        else {
-            unreachable!();
-        };
-        *node_id = 2;
+        let prepared = one_node_request();
         let (concurrent_generation, concurrent) = stage_graph_clone(root.path());
 
         let error = publish_graph_delta_after_prepare(
@@ -2386,7 +2413,8 @@ mod checked_identity_tests {
     fn v2_memberships_preserve_integer_bytes_and_reject_other_domains() {
         let wire = br#"{"kind":"upsert_node_v2","node_uuid":"node","node_id":1,"type_ids":[0,1073741823,1073741824,2147483647],"created_at_micros":1,"updated_at_micros":2}"#;
         assert_eq!(
-            GraphDeltaPayload::decode(wire).unwrap().encode().unwrap(),
+            serde_json::to_vec(&serde_json::from_slice::<GraphDeltaPayload>(wire).unwrap())
+                .unwrap(),
             wire
         );
         for invalid in [2147483648_u32, 3221225472, u32::MAX] {
@@ -2398,17 +2426,16 @@ mod checked_identity_tests {
     }
 
     #[test]
-    fn initial_absent_primary_survives_label_replay_and_canonical_compaction() {
+    fn absent_primary_round_trip_and_topology_replay_refusal_preserve_state() {
         let uuid = Uuid::now_v7().to_string();
-        let initial = node_record(&uuid, vec![]);
-        let update = node_record(&uuid, vec![EntityTypeId::decode(1073741825).unwrap()]);
+        let labels = vec![EntityTypeId::decode(1073741825).unwrap()];
         let mut state = ReconstructedGraphState::default();
-        apply_one(&mut state, &initial).unwrap();
-        apply_one(&mut state, &update).unwrap();
-        assert_eq!(
-            state.node_primary_types[&uuid],
-            PrimaryEntityTypeId::absent()
-        );
+        state.nodes.insert(uuid.clone(), labels);
+        state
+            .node_primary_types
+            .insert(uuid.clone(), PrimaryEntityTypeId::absent());
+        state.node_ids.insert(uuid.clone(), u64::from(u32::MAX) + 1);
+        state.node_timestamps.insert(uuid.clone(), (1, 2));
         let base = tempfile::tempdir().unwrap();
         crate::writer::write_reconstructed_graph(base.path(), &state).unwrap();
         let reopened = load_base_state(base.path()).unwrap();
@@ -2416,49 +2443,39 @@ mod checked_identity_tests {
             reopened.node_primary_types[&uuid],
             PrimaryEntityTypeId::absent()
         );
-        assert_eq!(reopened.nodes[&uuid], state.nodes[&uuid]);
+        assert_eq!(reopened.nodes, state.nodes);
+        assert_eq!(reopened.node_ids, state.node_ids);
 
+        let topology = node_record(&uuid, vec![]);
+        // Even a matching previously applied UUID cannot bypass admission.
+        state.applied_operations.insert(
+            topology.operation_uuid.to_string(),
+            topology.payload.clone(),
+        );
+        let before = state.clone();
+        let property = GraphDeltaRecord {
+            kind: GraphDeltaOpKind::SetNodeProperty,
+            payload: GraphDeltaPayload::SetNodeProperty {
+                node_uuid: uuid,
+                property_stem: "_untyped".into(),
+                key: "score".into(),
+                value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
+            },
+            ..node_record("unused", vec![])
+        };
         let run = GraphDeltaRun {
             run_sequence: 1,
             run_uuid: Uuid::now_v7(),
             transaction_uuid: Uuid::now_v7(),
-            records: vec![initial, update.clone()],
+            records: vec![property, topology],
             bytes: vec![],
         };
-        let (overlay, _) =
-            build_replay_overlay(&[run], GraphDeltaJournalLimits::default()).unwrap();
-        assert_eq!(
-            overlay.nodes[&uuid].as_ref().unwrap().primary_type,
-            PrimaryEntityTypeId::absent()
-        );
-
-        // A standalone update has no primary field. The canonical base remains
-        // authoritative even when the update's first membership is nonempty.
-        let run = GraphDeltaRun {
-            run_sequence: 1,
-            run_uuid: Uuid::now_v7(),
-            transaction_uuid: Uuid::now_v7(),
-            records: vec![update],
-            bytes: vec![],
-        };
-        let (overlay, _) =
-            build_replay_overlay(&[run], GraphDeltaJournalLimits::default()).unwrap();
-        let target = tempfile::tempdir().unwrap();
-        let (inventory, _) = capture_graph_files(base.path()).unwrap();
-        crate::graph_files::materialize_graph_tree(base.path(), &inventory, target.path()).unwrap();
-        crate::writer::write_replay_overlay_streaming(
-            base.path(),
-            &inventory,
-            target.path(),
-            &overlay,
-            GraphDeltaJournalLimits::default(),
-        )
-        .unwrap();
-        let compacted = load_base_state(target.path()).unwrap();
-        assert_eq!(
-            compacted.node_primary_types[&uuid],
-            PrimaryEntityTypeId::absent()
-        );
-        assert_eq!(compacted.nodes[&uuid], state.nodes[&uuid]);
+        let runs = [run];
+        let error =
+            apply_delta_runs(&mut state, &runs, GraphDeltaJournalLimits::default()).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
+        assert_eq!(state, before, "no earlier property mutation may leak");
+        let error = build_replay_overlay(&runs, GraphDeltaJournalLimits::default()).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
     }
 }

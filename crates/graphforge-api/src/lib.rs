@@ -4025,6 +4025,15 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
         graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+        let created = graph
+            .execute("CREATE (n:Person) RETURN n.node_uuid")
+            .unwrap();
+        let ids = created.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
+        let node_uuid = uuid::Uuid::from_slice(ids.value(0)).unwrap().to_string();
         drop(graph);
         graphforge_storage::publish_graph_delta(
             project.path(),
@@ -4034,13 +4043,15 @@ mod tests {
                 run_uuid: uuid::Uuid::new_v4(),
                 operations: vec![GraphDeltaOp {
                     operation_uuid: uuid::Uuid::new_v4(),
-                    kind: GraphDeltaOpKind::UpsertNode,
-                    payload: GraphDeltaPayload::UpsertNodeV2 {
-                        node_uuid: uuid::Uuid::new_v4().hyphenated().to_string(),
-                        node_id: 2,
-                        type_ids: vec![graphforge_value::EntityTypeId::decode(1).unwrap()],
-                        created_at_micros: 2,
-                        updated_at_micros: 2,
+                    kind: GraphDeltaOpKind::SetNodeProperty,
+                    payload: GraphDeltaPayload::SetNodeProperty {
+                        node_uuid,
+                        property_stem: "_untyped".into(),
+                        key: "rank".into(),
+                        value: graphforge_storage::encode_graph_delta_value(
+                            &graphforge_ir::IrLiteral::Int(7),
+                        )
+                        .unwrap(),
                     },
                 }],
                 limits: GraphDeltaJournalLimits::default(),
@@ -4065,6 +4076,27 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(total, 2);
+        let ranks = reopened
+            .execute("MATCH (n:Person) WHERE n.rank = 7 RETURN n.rank AS rank")
+            .unwrap();
+        assert_eq!(
+            ranks
+                .batches
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            ranks.batches[0]
+                .column_by_name("rank")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            7
+        );
         assert!(!reopened.dir.join("deltas").exists());
         assert!(reopened.graph_open_evidence().files_reused > 0);
         assert!(reopened.graph_open_evidence().files_copied > 0);
