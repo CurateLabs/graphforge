@@ -1,5 +1,5 @@
 {
-  "status": "Implemented candidate meets measured selection budgets; repository regression and exact-head CI gate are recorded separately before merge.",
+  "status": "Implemented candidate meets measured selection budgets. Changed-surface local tests passed; full local gates retain existing #1192 failure. Authoritative exact-head PR CI is the merge gate.",
   "baseline": {
     "source": "5fc68e568893110cca97b0eb2c797d306b264e27",
     "probe": {
@@ -769,5 +769,55 @@
     "candidate_syscall_read_bytes_amortized_per_query_including_open": 46555867.8,
     "query_count": 5,
     "result_rows_per_query": 256
+  },
+  "validation": {
+    "environment": "TMPDIR=<native ext4 private temporary directory>; CARGO_TARGET_DIR=<isolated target>; CARGO_BUILD_JOBS=4",
+    "commands": [
+      {
+        "command": "cargo test -p graphforge-rel input_predicates --lib",
+        "result": "PASS: six boundary tests"
+      },
+      {
+        "command": "cargo test --release -p graphforge-api --test permanent_storage_budgets",
+        "result": "PASS: 48 tests"
+      },
+      {
+        "command": "cargo test --release -p graphforge-api --test fixed_hop_limit --test e2e_baseline --test value_semantics",
+        "result": "PASS: 17 fixed-hop tests (two existing ignored), 187 end-to-end tests, 11 value-semantics tests"
+      },
+      {
+        "command": "cargo clippy --workspace -- -D warnings",
+        "result": "PASS"
+      },
+      {
+        "command": "cargo fmt --all -- --check",
+        "result": "PASS after final Rust edit"
+      },
+      {
+        "command": "make pre-push-fast",
+        "result": "PASS"
+      },
+      {
+        "command": "make gate-registry-check",
+        "result": "PASS, including 14 registry tests"
+      },
+      {
+        "command": "cargo test --workspace",
+        "result": "Exit101: sole failure in storage unit suite is existing #1192 wave9_participant_inventory_rejects_links_and_special_files; 1097 storage tests passed, two existing ignored. Earlier changed-surface tests passed, including six optimizer boundaries, 48 permanent facade tests, 17 fixed-hop tests, 118 BDD scenarios and 3897/3897 TCK scenarios with zero regressions. This is not a green workspace claim."
+      },
+      {
+        "command": "make pre-push",
+        "result": "Exit2: rust-tests-coverage-native stops at the same existing #1192 test; storage suite1096 passed, one failed, two existing ignored. The instrumented run passed 118BDD/3897TCK scenarios, 48permanent facade tests and17fixed-hop tests. Python/Node wrapper coverage and final threshold stages did not run after this prerequisite failed; full pre-push is not claimed green."
+      }
+    ],
+    "known_local_failure": {
+      "issue": 1192,
+      "file": "crates/graphforge-storage/src/project_generation.rs",
+      "line": 2576,
+      "cause": "Test uses tempdir_in(\"/tmp\"), overriding TMPDIR. /tmp is tmpfs; native project admission rejects it with UnsupportedFilesystem / filesystem_class_unproven before the test assertion. Production and test code in this path are unchanged from main.",
+      "disposition": "Preserve failure evidence and the existing issue; do not weaken filesystem admission, skip the test or include an unrelated repair in #1241."
+    },
+    "preflight_repairs": "Installed missing worktree development dependencies with uv sync --locked --all-extras --inexact and pnpm install --frozen-lockfile; subsequent preflight and Rust quality stages passed.",
+    "ci_gate": "Authoritative merge requirement: required exact-head CI and github-status/CI Gate must pass on the GitHub PR, with CLEAN merge state, no unresolved review threads and closing reference exactly #1241."
   }
 }
