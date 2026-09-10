@@ -127,5 +127,29 @@
     "Filesystem sampling deduplicates hardlinked inodes across retained generations, private staging and portable artifacts. It excludes directory blocks and can miss unlinked open files or shorter-lived peaks; it is not a hard temporary-only disk bound.",
     "Preflight adds one constant-work operation-discriminant check per operation and a complete direct-run support/kind scan before changing supplied state; it creates no second decoded graph collection.",
     "Initial small construction fixtures were actually single-shard and failed the new flat assertion. Superseded flat setup attempts used invalid composite UUID versions and then explicit tagged Null properties. Those failed runs are not acceptance or performance evidence; final flat cases use deterministic UUIDv7 and absent nullable properties."
-  ]
+  ],
+  "validation": {
+    "public_conformance_cases": {
+      "passed": 4,
+      "failed": 0,
+      "measurement_runs": 3
+    },
+    "storage_unit_suite": {
+      "passed": 1086,
+      "failed": 1,
+      "ignored": 2,
+      "failure": "project_generation::tests::wave9_participant_inventory_rejects_links_and_special_files hardcodes /tmp; open_or_initialize_project refuses the host filesystem with GF_UNSUPPORTED_FILESYSTEM cause=filesystem_class_unproven before the test assertions. The full suite is not green."
+    },
+    "fast_checks": "passed",
+    "gate_registry": "passed",
+    "independent_source_and_evidence_review": "no outstanding verified finding",
+    "journal_integration": {
+      "passed": 18,
+      "failed": 0
+    },
+    "compaction_integration": {
+      "passed": 10,
+      "failed": 0
+    }
+  }
 }
