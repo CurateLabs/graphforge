@@ -1,0 +1,97 @@
+{
+  "issue": 1224,
+  "source_commit": "df3a707de2bc3d8ec1979b56b60e3e059758cef1",
+  "base_commit": "cba602dc81665824b7eb4dd2b8757a024b2eb3d3",
+  "deterministic_budgets": {
+    "changed_parquet_bytes_limit": 65536,
+    "unchanged_topology_reencoded_bytes": 0,
+    "fixtures": [
+      {
+        "qualified_nodes": 33,
+        "base_bytes": 11620,
+        "changed_parquet_bytes": 4393
+      },
+      {
+        "qualified_nodes": 4097,
+        "base_bytes": 457292,
+        "changed_parquet_bytes": 4393
+      },
+      {
+        "runtime_nodes": 33,
+        "qualified_nodes": 33,
+        "runtime_edges": 129,
+        "qualified_edges": 129,
+        "base_bytes": 40573,
+        "changed_parquet_bytes": 4494
+      }
+    ]
+  },
+  "runtime": {
+    "elapsed_seconds": 12.51,
+    "user_seconds": 8.7,
+    "system_seconds": 2.62,
+    "peak_rss_kib": 139224,
+    "filesystem_input_512_byte_blocks": 126224,
+    "filesystem_output_512_byte_blocks": 53288,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 79263,
+        "bytes": 141358267
+      },
+      "pread64": {
+        "calls": 11411,
+        "bytes": 3919887
+      },
+      "write": {
+        "calls": 4495,
+        "bytes": 11802976
+      },
+      "fsync": {
+        "calls": 9671,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 1250,
+        "bytes": 3575055
+      }
+    },
+    "read_bytes": 148853209,
+    "write_bytes": 15378031,
+    "errors": []
+  },
+  "trace_elapsed_seconds": 51.97,
+  "commands": {
+    "public": "cargo test -p graphforge-api --test permanent_storage_budgets composite_qualified_ -- --nocapture",
+    "api": "cargo test -p graphforge-api --lib",
+    "storage": "cargo test -p graphforge-storage --lib",
+    "publication": "cargo test -p graphforge-storage --lib project_publication::tests",
+    "generation_regression": "cargo test -p graphforge-storage --lib replay_advances_property_authority_across_unequal_route_generations",
+    "clippy": "cargo clippy --workspace -- -D warnings",
+    "runtime": "/usr/bin/time -v <prebuilt permanent_storage_budgets binary> composite_qualified_ --nocapture --test-threads=1",
+    "trace": "strace -f -qq -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync <same binary/filter>"
+  },
+  "validation": {
+    "public_passed": 5,
+    "api_unit_passed": 734,
+    "publication_passed": 45,
+    "unequal_route_generations_passed": 1,
+    "storage_unit_passed": 1074,
+    "storage_unit_ignored_existing": 2,
+    "storage_unit_failed": 1,
+    "storage_failure": "Unchanged wave9_participant_inventory_rejects_links_and_special_files hard-codes /tmp; host /tmp is tmpfs; admission rejects before hostile-file assertion.",
+    "workspace_clippy": "passed",
+    "pre_push_fast": "passed",
+    "gate_registry": "passed"
+  },
+  "limitations": [
+    "Owner maps retain requested identities; existing full-topology validation and full identity sets remain. No new second topology scan.",
+    "Changed Parquet bytes do not bound whole-process I/O, peak temporary allocation, native codec memory or RSS; #1213 owns composed budgets.",
+    "Mixed fixture proves canonical optimistic values and no-run compaction refusal. #1218 owns mixed-edge GFDR compaction integration.",
+    "Existing constructed-parent composite topology mutation UUID authority defect remains #1221.",
+    "No permanent encoding settings changed.",
+    "Runtime and syscall runs are separate; syscall totals include startup, query, portable verification/import and test output. Kernel I/O is cache dependent."
+  ]
+}
