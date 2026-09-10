@@ -210,3 +210,45 @@ syscall byte counts are different quantities. Compilation is excluded. Reproduce
 with the prebuilt `permanent_storage_budgets` binary and
 `cas_ --nocapture --test-threads=1`, using native-root `TMPDIR`; run `/usr/bin/time -v`
 separately from `strace -f -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync`.
+
+## Workspace publication ownership (#1222)
+
+Source `47505945dcdcf4711aa6710ac192b2616e20558a` fixes two CAS ownership
+assumptions in workspace operations: publication now selects a generation tree
+only for a generation-owned graph participant, and composition preflight reads
+the manifest-selected CAS runtime catalog. CAS publication retains its lease
+through CURRENT. Catalog decoding uses the existing authenticated file reader
+with a fixed 1 MiB authentication buffer and a retained read lease; it does not
+allocate a whole encoded-catalog copy or materialize the graph.
+
+The public fixture constructs 33 nodes and 129 exploratory edges, adopts a
+URI-identified Advisory ontology with disjoint new names, retries adoption,
+clears and re-adopts before any qualified bindings exist, and reopens. It then
+uses public composition preview/publication to establish bindings, constructs
+33 new qualified nodes and 129 edges, updates graph directedness, and proves
+exact query results through export, full verification and clean import.
+The original 18 graph files (20,842 bytes) retain their inventory entries and
+inode identities across adoption; no original graph payload is re-encoded.
+The test independently binds the stored relation route to its qualified symbol.
+
+| Measurement | Result |
+| --- | ---: |
+| Prebuilt public test elapsed / user / system | 2.03 / 1.12 / 0.61 s |
+| Peak process RSS | 129,120 KiB |
+| Syscall read / write bytes | 10,162,546 / 1,396,254 |
+| Kernel input / output blocks (512 bytes) | 14,360 / 8,048 |
+| Successful fsync calls in separate trace | 2,259 |
+
+The separate trace takes 11.65 s with instrumentation. Process I/O includes
+startup, verification, import and test output; kernel I/O is cache-dependent.
+These measurements do not establish portable CPU/RSS or temporary-disk peak
+budgets. Encoding-policy resource assessment remains #1213. The focused public
+test, 53 ontology-related API tests, production workspace Clippy, fast pre-push
+and gate-registry checks pass. Commands and raw measurements are in
+[`workspace-cas-ownership-1222.json`](../../development/evidence/workspace-cas-ownership-1222.json).
+
+Same-name ontology promotion changes graph and ordinal authorities after
+workspace publication, and clearing authority for retained typed data can
+leave semantic bindings without their composition. Both are recorded under
+#1221 with public reproducers. This ownership-only repair does not claim those
+complete graph-contract failures are resolved.

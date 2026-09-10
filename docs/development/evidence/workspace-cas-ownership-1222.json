@@ -1,0 +1,82 @@
+{
+  "issue": 1222,
+  "source_commit": "47505945dcdcf4711aa6710ac192b2616e20558a",
+  "base_commit": "cddc04c30312ba4e064337882600384997974b76",
+  "fixture": {
+    "parent_nodes": 33,
+    "parent_edges": 129,
+    "child_nodes": 33,
+    "child_edges": 129,
+    "identifiers": "deterministic random UUIDs",
+    "ontology_id": "https://example.test/mixed",
+    "mode": "Advisory",
+    "retained_name_promotion": false
+  },
+  "deterministic_evidence": {
+    "retained_graph_files": 18,
+    "retained_graph_bytes": 20842,
+    "adoption_reencoded_graph_payload_bytes": 0,
+    "payload_inode_identities_preserved": true,
+    "graph_inventory_preserved": true,
+    "non_workspace_participants_preserved": true,
+    "capabilities_preserved": true,
+    "adoption_retry_same_generation": true,
+    "catalog_authentication_buffer_bytes": 1048576
+  },
+  "runtime": {
+    "elapsed_seconds": 2.03,
+    "user_seconds": 1.12,
+    "system_seconds": 0.61,
+    "peak_rss_kib": 129120,
+    "filesystem_input_512_byte_blocks": 14360,
+    "filesystem_output_512_byte_blocks": 8048,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 16239,
+        "bytes": 10159186
+      },
+      "pread64": {
+        "calls": 4,
+        "bytes": 3360
+      },
+      "write": {
+        "calls": 1415,
+        "bytes": 1396254
+      },
+      "fsync": {
+        "calls": 2259,
+        "bytes": 0
+      }
+    },
+    "read_bytes": 10162546,
+    "write_bytes": 1396254,
+    "errors": []
+  },
+  "trace_elapsed_seconds": 11.65,
+  "commands": {
+    "public": "cargo test -p graphforge-api --test permanent_storage_budgets workspace_publication_preserves_constructed_cas_payloads -- --exact --nocapture",
+    "ontology": "cargo test -p graphforge-api --lib ontology",
+    "clippy": "cargo clippy --workspace -- -D warnings",
+    "runtime": "/usr/bin/time -v <prebuilt permanent_storage_budgets binary> workspace_publication_preserves_constructed_cas_payloads --exact --nocapture --test-threads=1",
+    "trace": "strace -f -qq -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync <same prebuilt binary and filter>"
+  },
+  "validation": {
+    "public_tests_passed": 1,
+    "ontology_tests_passed": 53,
+    "ontology_elapsed_seconds": 0.71,
+    "clippy": "passed, 42.49 seconds",
+    "pre_push_fast": "passed",
+    "gate_registry": "passed, 14 tests"
+  },
+  "limits": [
+    "Zero re-encoding is asserted for adoption of the existing graph, not subsequent new qualified construction.",
+    "Runtime measurements exclude compilation. Trace timing includes instrumentation and is not normal runtime.",
+    "Syscall bytes cover all process descriptors, including startup, query, portable verification and test output; they are not physical device traffic. Kernel filesystem blocks depend on cache state.",
+    "The existing reader authenticates with a fixed 1 MiB buffer; Parquet decoding and runtime-catalog materialization retain their existing costs. No whole encoded-catalog Vec or full graph materialization is added.",
+    "This is a bounded ownership repair measurement, not a cross-platform CPU/RSS or temporary-disk peak budget. Full encoding-policy tradeoffs remain in #1213.",
+    "Same-name ontology promotion and clearing authority for retained typed data remain explicit #1221 contract failures; this evidence does not claim those operations are fixed."
+  ]
+}

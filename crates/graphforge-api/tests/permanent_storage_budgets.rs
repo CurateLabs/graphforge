@@ -1273,3 +1273,178 @@ fn cas_delta_preparation_reuses_payloads_with_bounded_private_allocation() {
         );
     }
 }
+
+#[test]
+fn workspace_publication_preserves_constructed_cas_payloads() {
+    use graphforge_api::{AdoptOntologyRequest, ClearOntologyRequest, OntologyMode, WriteContext};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "workspace_cas",
+        nodes: 33,
+        edges: 258,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges[..129]);
+    let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(selected.declared_graph_files_inventory().unwrap().is_none());
+    let before = selected.graph_files_inventory().unwrap().unwrap();
+    let identities = before
+        .files
+        .iter()
+        .map(|entry| {
+            let file = File::open(
+                graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap(),
+            )
+            .unwrap();
+            (
+                entry.relative_path.clone(),
+                graphforge_filesystem::file_identity(&file).unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let ontology = root.path().join("routes.yaml");
+    std::fs::write(&ontology, "ontology_id: https://example.test/mixed\nversion: \"1\"\nentity_types:\n  - name: NewNode\n    abstract: false\nrelation_types:\n  - name: NEW_TYPED\n    src: NewNode\n    dst: NewNode\n").unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let context = WriteContext {
+        operation_uuid: OperationId(Uuid::now_v7()),
+        actor_uuid: None,
+    };
+    let request = AdoptOntologyRequest {
+        context,
+        path: ontology,
+        mode: OntologyMode::Advisory,
+    };
+    graph.adopt_ontology(request.clone()).unwrap();
+    let adopted = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(adopted.declared_graph_files_inventory().unwrap().is_none());
+    assert_eq!(before, adopted.graph_files_inventory().unwrap().unwrap());
+    for entry in &before.files {
+        let file = File::open(
+            graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            identities[&entry.relative_path],
+            graphforge_filesystem::file_identity(&file).unwrap()
+        );
+    }
+    assert_eq!(selected.capabilities(), adopted.capabilities());
+    for participant in selected
+        .participant_snapshots()
+        .unwrap()
+        .into_iter()
+        .filter(|participant| participant.capability_id != "workspace")
+    {
+        assert_eq!(
+            adopted
+                .participant_snapshot(&participant.capability_id, &participant.record_family_id)
+                .unwrap()
+                .unwrap()
+                .bytes,
+            participant.bytes
+        );
+    }
+    graph.adopt_ontology(request.clone()).unwrap();
+    assert_eq!(
+        adopted.generation_uuid(),
+        graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid()
+    );
+    verify_graph(&graph, fixture, &nodes, &edges[..129]);
+    graph
+        .clear_ontology(ClearOntologyRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+        })
+        .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges[..129]);
+    let mut readopt = request;
+    readopt.context.operation_uuid = OperationId(Uuid::now_v7());
+    graph.adopt_ontology(readopt).unwrap();
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    assert_eq!(graph.ontology_mode(), OntologyMode::Advisory);
+    verify_graph(&graph, fixture, &nodes, &edges[..129]);
+    drop(graph);
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    let candidate = graph.workspace_ontology_composition().unwrap().unwrap();
+    let request = graphforge_api::CompositionChangeRequest {
+        context: WriteContext {
+            operation_uuid: OperationId(Uuid::now_v7()),
+            actor_uuid: None,
+        },
+        expected_project_generation_uuid: graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        expected_composition_fingerprint: Some(candidate.composition_fingerprint.clone()),
+        candidate,
+        data_disposition: graphforge_api::CompositionDataDisposition::RequireConforming,
+    };
+    let preview = graph
+        .preview_ontology_composition_change(&request, None)
+        .unwrap();
+    assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+    graph
+        .publish_ontology_composition_change(&request, &preview, None)
+        .unwrap();
+    drop(graph);
+    let child_nodes = (0..33)
+        .map(|row| (id(3, row, true), "NewNode".to_owned(), None))
+        .collect::<Vec<_>>();
+    for (row, edge) in edges[129..].iter_mut().enumerate() {
+        edge.3 = "NEW_TYPED".into();
+        edge.1 = child_nodes[row % child_nodes.len()].0;
+        edge.2 = child_nodes[(row + 1) % child_nodes.len()].0;
+    }
+    construct(&source, fixture, &child_nodes, &edges[129..]);
+    nodes.extend(child_nodes.into_iter().map(|mut node| {
+        node.1 = "mixed:entity:NewNode".into();
+        node
+    }));
+    let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let bindings = graphforge_storage::semantic_storage_bindings(&current)
+        .unwrap()
+        .unwrap();
+    let relation = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.local_id == "NEW_TYPED"
+        })
+        .unwrap();
+    assert_eq!(relation.symbol.display(), "mixed:relation:NEW_TYPED");
+    // The unqualified relationship projection exposes the stored route. Bind
+    // it independently to the declared qualified symbol, not a query result.
+    for edge in &mut edges[129..] {
+        edge.3.clone_from(&relation.route);
+    }
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    graph
+        .set_graph_directedness(
+            &WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            Some(graphforge_storage::GraphDirectedness::Directed),
+        )
+        .unwrap();
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+    println!(
+        "WORKSPACE_CAS_REUSE {}",
+        json!({"retained_files":before.files.len(),"retained_bytes":before.total_byte_length,"reencoded_graph_payload_bytes":0})
+    );
+}

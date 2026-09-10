@@ -106,22 +106,22 @@ pub use graph_manifest::{
     reason = "private CAS construction is consumed by the staged #932 integration"
 )]
 mod graph_object_store;
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use graph_object_store::graph_object_path;
+#[cfg(any(test, feature = "test-support"))]
+pub use graph_object_store::graph_object_path;
 pub use graph_object_store::{
-    GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals, GraphPublicationIo,
-    materialize_graph_objects,
+    AuthenticatedGraphObject, GRAPH_OBJECT_IO_BUFFER_BYTES, GraphObjectIoTotals,
+    GraphObjectPublicationLease, GraphPublicationIo, begin_graph_object_publication,
+    materialize_graph_objects, open_graph_object_by_digest,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_object_store::{
     GraphManifestState, append_graph_files_v2, install_graph_object_bytes, read_graph_object,
 };
 pub(crate) use graph_object_store::{
-    GraphObjectPublicationLease, graph_object_publication_is_live, read_graph_object_by_digest,
-    verify_graph_object,
+    graph_object_publication_is_live, read_graph_object_by_digest, verify_graph_object,
 };
-#[cfg(not(any(test, feature = "test-support")))]
-pub(crate) use graph_object_store::{begin_graph_object_publication, graph_object_path};
-#[cfg(any(test, feature = "test-support"))]
-pub use graph_object_store::{begin_graph_object_publication, graph_object_path};
 
 pub mod semantic_bindings;
 pub use semantic_bindings::{

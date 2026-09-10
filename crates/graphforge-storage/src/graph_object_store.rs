@@ -3082,7 +3082,7 @@ pub fn read_graph_object_by_digest(
 }
 
 /// Open and stream-authenticate one immutable CAS object without allocating its payload.
-pub(crate) struct AuthenticatedGraphObject {
+pub struct AuthenticatedGraphObject {
     file: File,
     authenticated_length: u64,
     _cas: std::sync::Arc<ReadOnlyCasRoot>,
@@ -3275,7 +3275,12 @@ impl ChunkReader for AuthenticatedGraphObject {
     }
 }
 
-pub(crate) fn open_graph_object_by_digest(
+/// Retain and stream-authenticate the exact immutable object selected by a graph manifest.
+/// The returned Parquet reader keeps its CAS read lease and file descriptor alive.
+///
+/// # Errors
+/// Rejects changed ownership, length or digest and reports filesystem failures.
+pub fn open_graph_object_by_digest(
     root: &Path,
     digest: &str,
     expected_length: u64,
