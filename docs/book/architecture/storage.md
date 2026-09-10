@@ -636,7 +636,8 @@ Conventions:
 
 ### Bounded CSR compression
 
-Every production shard publisher uses Arrow IPC Zstd with the existing full-width
+Every production shard publisher uses Arrow IPC Zstd (the pinned Arrow default
+compression level 3) with the existing full-width
 `UInt64` IDs and `Int64` offsets. The standard IPC raw-buffer marker is permitted
 when compression would expand a buffer; it is part of the current codec, not a
 legacy file fallback. Configured shard limits remain upper bounds and are capped
@@ -1167,3 +1168,43 @@ and separately sampled overlapping filesystem owners are reported with their
 measurement limits. The candidate point-in-time whole-project census includes
 21,979,136 allocated file bytes plus 1,257,472 directory bytes; no equivalent
 baseline census or whole-project reduction is claimed.
+
+
+### Bounded CSR allocation and cost evidence (#1205)
+
+The fixed eight-route public lifecycle fixture uses 4,097 nodes, 65,537 edges,
+random full-width identities and nullable properties. Frozen release executables
+compare the uncompressed current baseline with the bounded compressed writer;
+both produce the same semantic fingerprint through reopen, export, full
+verification and clean import.
+
+| Measurement | Uncompressed baseline | Bounded Zstd |
+|---|---:|---:|
+| Actual CSR payload bytes (18 shards) | 4,920,564 | 1,324,020 |
+| Actual CSR allocated bytes | 4,972,544 | 1,363,968 |
+| CSR metadata logical bytes | 10,329 | 11,431 |
+| Attributed permanent allocated bytes | 15,151,104 | 11,542,528 |
+| Whole-project file allocation, point census | 44,806,144 | 41,197,568 |
+| Whole-lifecycle process peak RSS, KiB | 220,400 | 238,252 |
+| Whole-lifecycle syscall read bytes | 2,309,281,609 | 2,098,377,656 |
+| Whole-lifecycle syscall write bytes | 357,447,042 | 328,689,815 |
+| Sampled overlapping workspace allocated peak | 89,038,848 | 74,625,024 |
+| Cold-probe direct CSR read bytes | 35,552,246 | 9,577,462 |
+| Cold-probe first-query median, seconds | 3.855 | 3.891 |
+
+Payload and allocation both meet the deterministic 70% reduction budget. The
+whole-lifecycle RSS increase is a measured cost, not a decoded-memory improvement.
+The cold probe executes exact 256-row two-hop public queries in three fresh
+processes, with four subsequent queries per facade. Its predeclared timing, RSS
+and syscall-I/O investigation thresholds pass; this is not a latency improvement
+claim or a noisy CI timing gate. Private-file cache advice does not guarantee OS
+cache eviction. Syscall traffic is not physical I/O.
+
+The workspace sampler deduplicates overlapping file owners by device/inode and
+includes project, staging and portable state. It excludes directory blocks and
+open-unlinked files and can miss short peaks; the largest observed sampling gaps
+are approximately 62 ms and 59 ms. These are sampled workspace peaks, not hard
+temporary-disk bounds. The separate point census includes retained generations.
+See [`bounded-csr-1205.json`](../../development/evidence/bounded-csr-1205.json)
+for frozen source/executable hashes, exact observations, commands, decoded bounds,
+CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
