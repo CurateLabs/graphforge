@@ -204,7 +204,8 @@ pub use project_recovery::{
     ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
     ProjectRecoveryReport, open_or_initialize_ephemeral_project_with_recovery,
     open_or_initialize_project_with_recovery, recover_project_on_open,
-    recover_project_transactions, remove_durable_project_root,
+    recover_project_transactions, recover_project_transactions_with_mode,
+    remove_durable_project_root,
 };
 
 pub mod project_retention;

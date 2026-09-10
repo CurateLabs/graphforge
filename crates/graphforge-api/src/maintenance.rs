@@ -124,7 +124,7 @@ impl GraphForge {
         // After publication (including a returned error), refresh from actual
         // durable authority rather than reinstalling the previous working tree.
         let refresh = (|| {
-            let current = self.generation_for_read()?;
+            let mut current = self.generation_for_read()?;
             if current.generation_uuid() == expected_parent {
                 return Ok(());
             }
@@ -144,6 +144,19 @@ impl GraphForge {
             }
             // CURRENT authenticates the manifest's transaction and parent even
             // when the publication journal has not yet reached Published.
+            if result.is_err()
+                && current.generation_uuid() == request.generation_uuid
+                && current.transaction_uuid() == request.transaction_uuid
+            {
+                // Finish the selected journal using normal recovery so an
+                // immediate exact retry finds its receipt instead of trying
+                // to compact an already folded, empty delta chain.
+                graphforge_storage::recover_project_transactions_with_mode(
+                    &root,
+                    self.lifecycle_mode,
+                )?;
+                current = self.generation_for_read()?;
+            }
             if crate::composite_publish::administrative_contract(&current)?
                 != crate::composite_publish::administrative_contract(&parent)?
             {

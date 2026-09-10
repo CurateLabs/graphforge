@@ -3901,6 +3901,20 @@ fn facade_compaction_fault_child() {
         exact_rows(runtime.block_on(stream.try_collect::<Vec<_>>()).unwrap()),
         before
     );
+    if graphforge_storage::resolve_project_generation(Path::new(&source))
+        .unwrap()
+        .generation_uuid()
+        == facade_compaction_fault_request().generation_uuid
+    {
+        assert!(
+            graph
+                .compact_graph_delta(&facade_compaction_fault_request(), None)
+                .unwrap()
+                .publication
+                .unwrap()
+                .idempotent_replay
+        );
+    }
     // This transaction is outside the injected operation's scope. Success
     // proves the same facade selected the committed compaction, when present.
     graph.execute("MATCH (n:Node0) SET n.score = 31").unwrap();
