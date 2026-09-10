@@ -1,0 +1,131 @@
+{
+  "issue": 1221,
+  "source_commit": "2a1eb8b48cf1eed6525feb307261f2fbebc53d77",
+  "executable_sha256": "3de8dec2401d4355caef7a5929dcecef2a1d5c380a71148abe2649b3f10cfd67",
+  "workload": "Four public Rust-facade cases: 33 nodes via flat composite CREATE and 4097 nodes via sharded construction; 129 edges and two routes; exploratory and ontology-promoted. Unsupported topology GFDR refusal preserves published files, followed by actual property GFDR, compaction, canonical node/edge CREATE/DELETE/reopen/CREATE with consumed-ID continuity, exact query, export/full verify, clean import and subsequent mutation.",
+  "command": [
+    "permanent_storage_budgets",
+    "publishing_contract_",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "runtime": {
+    "elapsed_seconds": 56.61,
+    "user_seconds": 55.58,
+    "system_seconds": 5.36,
+    "peak_rss_kib": 162652,
+    "filesystem_input_512_byte_blocks": 92088,
+    "filesystem_output_512_byte_blocks": 363200,
+    "exit_status": 0
+  },
+  "case_counters": [
+    {
+      "compaction_output_bytes": 33615,
+      "logical_replay_peak_bytes": 3014,
+      "nodes": 33,
+      "routes": 2,
+      "typed": false
+    },
+    {
+      "compaction_output_bytes": 46780,
+      "logical_replay_peak_bytes": 3005,
+      "nodes": 33,
+      "routes": 2,
+      "typed": true
+    },
+    {
+      "compaction_output_bytes": 575998,
+      "logical_replay_peak_bytes": 3062,
+      "nodes": 4097,
+      "routes": 2,
+      "typed": false
+    },
+    {
+      "compaction_output_bytes": 875986,
+      "logical_replay_peak_bytes": 3005,
+      "nodes": 4097,
+      "routes": 2,
+      "typed": true
+    }
+  ],
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 212291,
+        "bytes": 729715862
+      },
+      "pread64": {
+        "calls": 264063,
+        "bytes": 107527816
+      },
+      "write": {
+        "calls": 20541,
+        "bytes": 112492012
+      },
+      "fsync": {
+        "calls": 16978,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 8254,
+        "bytes": 45174151
+      }
+    },
+    "read_bytes": 882417829,
+    "write_bytes": 157666163,
+    "errors": [],
+    "elapsed_seconds": 145.89
+  },
+  "workspace_observation": {
+    "command": [
+      "/tmp/gf1221-contract-measure-bin",
+      "publishing_contract_",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 21864448,
+    "sampled_path_logical_peak_bytes": 18537409,
+    "sampled_file_count_peak": 1393,
+    "samples": 4610,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.03055325400782749,
+    "vanished_files_during_scan": 68,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "public_compaction_output_bytes": 2097152,
+    "public_compaction_logical_replay_peak_bytes": 8192,
+    "storage_resource_ladder_nodes": [
+      260,
+      516,
+      1028
+    ],
+    "storage_replay_batch_rows": 7,
+    "storage_replay_memory_admission_bytes": 2097152,
+    "storage_decoder_spool_logical_and_allocated_ceiling_bytes": 262144,
+    "storage_logical_replay_state_growth_ceiling_bytes": 128,
+    "unsupported_topology_published_file_changes": 0
+  },
+  "reused_measurements": [
+    "permanent-storage assessment: #1213 encoding",
+    "#1219 CAS replay/compaction",
+    "#1224 authenticated property ownership",
+    "#1229 atomic ontology promotion",
+    "#1231 complete facade refresh"
+  ],
+  "limitations": [
+    "No valid comparable complete pre-repair lifecycle baseline is claimed. This contract change enforces unsupported topology refusal and preserves existing supported paths; material optimization evidence is owned by the linked repairs.",
+    "Runtime, syscall and filesystem sampling are separate serial executions of the same frozen binary. Unrelated merged-tree validation was running concurrently; wall time is not an isolated benchmark.",
+    "Whole-process RSS includes overlapping native/Arrow/engine owners but is an observed peak, not a hard bound. Logical replay estimates exclude those owners.",
+    "Syscall byte totals count successful application transfers including copy_file_range in both directions, not physical device traffic. OS filesystem block counters are reported separately.",
+    "Filesystem sampling deduplicates hardlinked inodes across retained generations, private staging and portable artifacts. It excludes directory blocks and can miss unlinked open files or shorter-lived peaks; it is not a hard temporary-only disk bound.",
+    "Preflight adds one constant-work operation-discriminant check per operation and a complete direct-run support/kind scan before changing supplied state; it creates no second decoded graph collection.",
+    "Initial small construction fixtures were actually single-shard and failed the new flat assertion. Superseded flat setup attempts used invalid composite UUID versions and then explicit tagged Null properties. Those failed runs are not acceptance or performance evidence; final flat cases use deterministic UUIDv7 and absent nullable properties."
+  ]
+}

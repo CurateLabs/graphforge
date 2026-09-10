@@ -1052,3 +1052,28 @@ metadata, batch and memory limits remain enforced. Logical counters do not
 claim process/native RSS bounds; sampled overlapping allocation is not a hard
 peak bound. Source-bound integrated S20/S22 accounting remains the epic's later
 measurement, not an outcome inferred from this contract test.
+
+### Publishing-contract acceptance evidence
+
+[The frozen four-case measurement](../../development/evidence/publishing-contract-1221.json)
+records 55.58 s user CPU, 5.36 s system CPU and 162,652 KiB observed process
+peak RSS. Separate syscall tracing recorded 882,417,829 bytes read and
+157,666,163 bytes written; separate pathname sampling observed 21,864,448
+allocated bytes at its largest sample, deduplicating shared inodes across
+retained, private and portable files. These are complete lifecycle observations,
+not isolated rejection costs or hard temporary-disk limits. The evidence records
+OS block counters, sample gaps, overlapping validation activity and failed
+superseded fixture attempts. No incomparable baseline improvement is claimed.
+
+| Contract outcome | Direct evidence |
+| --- | --- |
+| Supported producers, complete authorities and encoding selection | The producer matrix above; shared-policy and per-path budgets in the permanent-storage assessment. Participant-only paths explicitly exclude topology allocation. |
+| Unsupported topology refuses before authority changes | `topology_payloads_reject_before_encoding_preparation_or_publication`, `topology_cannot_bypass_published_retry_or_mutate_direct_replay_state`, `committed_checksum_valid_invalid_memberships_reject_without_authority_mutation`, and `topology_overlay_refusal_preserves_routes_and_full_width_ids`. These cover all topology variants, retry/direct-replay bypasses, authenticated persisted records and unchanged target bytes. |
+| Flat/sharded and exploratory/ontology public lifecycle | The four `publishing_contract_*` cases above assert the selected topology layout after optional adoption. They preserve exact node/edge UUIDs, endpoints, nullable values, route counts and consumed node/edge IDs across deletion, reopen, CREATE, export/full verification, clean import and subsequent mutation. |
+| Authentication and recovery remain enforced | Existing journal checksum/order/missing-run tests; compaction cancellation, checkpoint retention, cleanup and exact retry; portable import crash windows and pristine-target corruption refusal. Merged #1219, #1224, #1229 and #1231 supply public active-snapshot and returned-error lifecycle coverage. |
+| Resource bounds remain meaningful | `streaming_resource_ladder_is_independent_of_base_rows` uses 260/516/1,028 nodes, seven-row batches, 2 MiB replay admission and at most 256 KiB logical/allocated decoder spool. It compares exact output with the non-spooling path and limits logical replay-state growth to 128 bytes. Public conformance enforces 2 MiB compaction output and 8 KiB logical replay-state ceilings. These counters exclude process/native memory. |
+| Portable current-format identity correctness | `valid_identity_package_keeps_absent_primary_and_runtime_catalog_bytes`, `invalid_delta_identity_package_preserves_pristine_target_authority`, and `absent_primary_round_trip_and_topology_replay_refusal_preserve_state` distinguish valid full-width identities from unsupported topology replay. |
+
+This ledger maps ordinary implementation criteria to their existing tests. It
+adds no release-certification requirement and does not claim final capacity
+completion; integrated S20/S22 evidence remains under #1194.
