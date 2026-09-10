@@ -3101,6 +3101,11 @@ fn build_edge_prop_children(
             let Some(col) = b.column_by_name(field.name()) else {
                 continue;
             };
+            // A route whose last value was removed advertises Null. Its
+            // contribution is null in the concrete union type as well.
+            if col.data_type() == &arrow::datatypes::DataType::Null {
+                continue;
+            }
             let taken = take(col, &take_by_batch[bi], None).map_err(|e| exec_err(e.to_string()))?;
             child = if prop_batches_by_rel.len() == 1 {
                 // Single relation: `take` alone reproduces the #755 behavior.

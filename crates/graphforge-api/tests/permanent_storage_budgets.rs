@@ -4038,3 +4038,328 @@ fn facade_compaction_faults_preserve_authority_and_allow_mutation() {
         }
     }
 }
+
+#[test]
+fn composite_constructed_edge_properties_preserve_authenticated_owner() {
+    use futures::TryStreamExt;
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "constructed_edge_property_owner",
+            nodes: node_count,
+            edges: 129,
+            routes: 2,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (mut nodes, mut edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        for with_properties in [true, false] {
+            let properties = if with_properties {
+                " {weight: 3, text: 'ordinary'}"
+            } else {
+                ""
+            };
+            let created = graph.execute(&format!(
+                "CREATE (a:Node0 {{score: 1}})-[r:REL0{properties}]->(b:Node1 {{score: 2}}) RETURN a.node_uuid, b.node_uuid, r.edge_uuid"
+            )).unwrap();
+            let batch = &created.batches[0];
+            let source_uuid = uuid_at(batch, 0, 0);
+            let target_uuid = uuid_at(batch, 1, 0);
+            nodes.push((source_uuid, "Node0".into(), Some(1)));
+            nodes.push((target_uuid, "Node1".into(), Some(2)));
+            edges.push((
+                uuid_at(batch, 2, 0),
+                source_uuid,
+                target_uuid,
+                "REL0".into(),
+                with_properties.then_some(3),
+                with_properties.then(|| "ordinary".into()),
+            ));
+        }
+        graph
+            .execute("MATCH (a)-[r]->(b) RETURN r.edge_uuid, r.weight, r.text")
+            .expect("mixed construction/ordinary properties before composite mutation");
+        let ordinary = edges[129].0;
+        let empty = edges[130].0;
+        graph
+            .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: graphforge_api::WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: ordinary,
+                        property: "weight".into(),
+                        value: graphforge_api::PropValue::Int(23),
+                    },
+                    graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
+                        edge_uuid: ordinary,
+                        property: "text".into(),
+                    },
+                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: empty,
+                        property: "weight".into(),
+                        value: graphforge_api::PropValue::Int(29),
+                    },
+                    graphforge_api::CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: edges[0].0,
+                        property: "weight".into(),
+                        value: graphforge_api::PropValue::Int(19),
+                    },
+                    graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
+                        edge_uuid: edges[1].0,
+                        property: "text".into(),
+                    },
+                ],
+                knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+        edges[129].4 = Some(23);
+        edges[129].5 = None;
+        edges[130].4 = Some(29);
+        edges[0].4 = Some(19);
+        edges[1].5 = None;
+        verify_graph(&graph, fixture, &nodes, &edges);
+        let published = publishing_parquet_inventory(&source);
+        assert!(
+            published["parquet_bytes"].as_u64().unwrap() <= 1024 * 1024,
+            "{published}"
+        );
+        assert!(
+            published["parquet_allocated_bytes"].as_u64().unwrap() <= 2 * 1024 * 1024,
+            "{published}"
+        );
+        let mut path_values = graph
+            .execute("MATCH (a)-[r*1..1]->(b) RETURN r")
+            .unwrap()
+            .batches
+            .into_iter()
+            .flat_map(|batch| {
+                let paths = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(|row| {
+                        let path = paths.value(row);
+                        let edge = path
+                            .as_any()
+                            .downcast_ref::<arrow::array::StructArray>()
+                            .unwrap();
+                        assert_eq!(edge.len(), 1);
+                        let uuid = edge
+                            .column_by_name("edge_uuid")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap();
+                        let weight = edge
+                            .column_by_name("weight")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap();
+                        let text = edge
+                            .column_by_name("text")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        (
+                            Uuid::from_slice(uuid.value(0)).unwrap(),
+                            (!weight.is_null(0)).then(|| weight.value(0)),
+                            (!text.is_null(0)).then(|| text.value(0).to_owned()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        path_values.sort();
+        let mut expected_values = edges
+            .iter()
+            .map(|edge| (edge.0, edge.4, edge.5.clone()))
+            .collect::<Vec<_>>();
+        expected_values.sort();
+        assert_eq!(path_values, expected_values);
+        if node_count == 4097 {
+            let snapshot = graph
+                .execute_stream("MATCH (a)-[r]->(b) RETURN r.edge_uuid, r.weight")
+                .unwrap();
+            let report = graph
+                .compact_graph_delta(
+                    &graphforge_storage::GraphDeltaCompactionRequest {
+                        transaction_uuid: Uuid::now_v7(),
+                        generation_uuid: Uuid::now_v7(),
+                        through_run_sequence: None,
+                        limits: graphforge_storage::GraphDeltaCompactionLimits::default(),
+                        cleanup_after_commit: false,
+                        cleanup_policy: graphforge_storage::ProjectRetentionPolicy::default(),
+                        cleanup_limits: graphforge_storage::ProjectRetentionLimits::default(),
+                    },
+                    None,
+                )
+                .unwrap();
+            assert!(report.output_bytes <= 1024 * 1024, "{report:?}");
+            assert!(report.peak_memory_bytes <= 16 * 1024, "{report:?}");
+            assert_eq!(report.spill_bytes, 0);
+            let compacted = publishing_parquet_inventory(&source);
+            assert!(
+                compacted["parquet_bytes"].as_u64().unwrap() <= 1024 * 1024,
+                "{compacted}"
+            );
+            assert!(
+                compacted["parquet_allocated_bytes"].as_u64().unwrap() <= 2 * 1024 * 1024,
+                "{compacted}"
+            );
+            verify_graph(&graph, fixture, &nodes, &edges);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut snapshot = snapshot;
+            let mut old = BTreeMap::new();
+            while let Some(batch) = runtime.block_on(snapshot.try_next()).unwrap() {
+                for row in 0..batch.num_rows() {
+                    assert!(
+                        old.insert(uuid_at(&batch, 0, row), int_at(&batch, 1, row))
+                            .is_none()
+                    );
+                }
+            }
+            assert_eq!(old, edges.iter().map(|edge| (edge.0, edge.4)).collect());
+        }
+        drop(graph);
+        round_trip(root.path(), &source, fixture, &nodes, &edges);
+    }
+}
+
+#[test]
+fn composite_property_owner_scope_rejects_unnamed_public_edges() {
+    let graph = GraphForge::new(None).unwrap();
+    let error = graph
+        .execute("CREATE (:Node)-[r {weight: 1}]->(:Node) RETURN r.edge_uuid")
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a created relationship must have exactly one type")
+    );
+    let count = graph.execute("MATCH (n) RETURN count(n)").unwrap();
+    assert_eq!(int_at(&count.batches[0], 0, 0), Some(0));
+}
+
+#[test]
+fn edge_property_union_preserves_null_positions_and_concrete_type_errors() {
+    for removed_first in [0, 1] {
+        let graph = GraphForge::new(None).unwrap();
+        let mut ids = Vec::new();
+        for relation in ["A", "z"] {
+            let result = graph
+                .execute(&format!(
+                    "CREATE (:Node)-[r:{relation} {{value: 'kept'}}]->(:Node) RETURN r.edge_uuid"
+                ))
+                .unwrap();
+            ids.push(uuid_at(&result.batches[0], 0, 0));
+        }
+        for removed in [removed_first, 1 - removed_first] {
+            graph
+                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                    context: graphforge_api::WriteContext {
+                        operation_uuid: OperationId(Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    graph_mutations: vec![
+                        graphforge_api::CompositeGraphMutation::RemoveEdgeProperty {
+                            edge_uuid: ids[removed],
+                            property: "value".into(),
+                        },
+                    ],
+                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+                })
+                .unwrap();
+            let all_null = removed != removed_first;
+            let result = graph
+                .execute("MATCH ()-[r]->() RETURN r.edge_uuid, r.value")
+                .unwrap();
+            let mut observed = BTreeMap::new();
+            for batch in result.batches {
+                for row in 0..batch.num_rows() {
+                    let uuid = uuid_at(&batch, 0, row);
+                    let expected_null = all_null || uuid == ids[removed_first];
+                    assert_eq!(
+                        batch
+                            .column(1)
+                            .logical_nulls()
+                            .is_some_and(|nulls| nulls.is_null(row)),
+                        expected_null,
+                        "removed_first={removed_first} removed={removed} type={:?} values={:?}",
+                        batch.column(1).data_type(),
+                        batch.column(1)
+                    );
+                    observed.insert(uuid, expected_null);
+                }
+            }
+            assert_eq!(observed.len(), 2);
+            let result = graph.execute("MATCH ()-[r*1..1]->() RETURN r").unwrap();
+            let mut paths = BTreeMap::new();
+            for batch in result.batches {
+                let lists = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap();
+                for row in 0..lists.len() {
+                    let path = lists.value(row);
+                    let edge = path
+                        .as_any()
+                        .downcast_ref::<arrow::array::StructArray>()
+                        .unwrap();
+                    let uuid = edge
+                        .column_by_name("edge_uuid")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<FixedSizeBinaryArray>()
+                        .unwrap();
+                    let value = edge.column_by_name("value");
+                    assert_eq!(
+                        value.is_none(),
+                        all_null,
+                        "relationship structs omit properties with no remaining live owner"
+                    );
+                    paths.insert(
+                        Uuid::from_slice(uuid.value(0)).unwrap(),
+                        value.is_none_or(|value| {
+                            value.logical_nulls().is_some_and(|nulls| nulls.is_null(0))
+                        }),
+                    );
+                }
+            }
+            assert_eq!(paths, observed);
+        }
+    }
+    let graph = GraphForge::new(None).unwrap();
+    graph
+        .execute("CREATE (:Node)-[:A {value: 1}]->(:Node)")
+        .unwrap();
+    graph
+        .execute("CREATE (:Node)-[:z {value: 'text'}]->(:Node)")
+        .unwrap();
+    for query in [
+        "MATCH ()-[r]->() RETURN r.value",
+        "MATCH ()-[r*1..1]->() RETURN r",
+    ] {
+        assert!(
+            graph.execute(query).is_err(),
+            "incompatible concrete types must remain an error: {query}"
+        );
+    }
+}
