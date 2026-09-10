@@ -1978,3 +1978,161 @@ fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
             .collect::<Vec<_>>()
     );
 }
+
+fn assert_exploratory_edge_windows(source: &Path, expected_files: usize, expected_rows: usize) {
+    let selected = graphforge_storage::resolve_project_generation(source).unwrap();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let entries = inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/edges/"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries.len(),
+        expected_files,
+        "one fragment per physical route and bounded window"
+    );
+    let mut previous = 0_u64;
+    let mut rows = 0;
+    for entry in entries {
+        let path = graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+            .unwrap()
+            .with_batch_size(7)
+            .build()
+            .unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            assert!(batch.num_rows() <= 7);
+            assert!(batch.column_by_name("rel_type_name").is_some());
+            let ids = batch
+                .column_by_name("edge_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::UInt64Array>()
+                .unwrap();
+            for id in ids.values() {
+                assert!(
+                    *id > previous,
+                    "physical fragments must concatenate in strict surrogate order"
+                );
+                previous = *id;
+                rows += 1;
+            }
+        }
+    }
+    assert_eq!(rows, expected_rows);
+}
+
+#[test]
+fn exploratory_construction_groups_bounded_windows_by_physical_route() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "physical_route_windows",
+        nodes: 66,
+        edges: 258,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges[..129]);
+    assert_exploratory_edge_windows(&source, 1, 129);
+    let parent = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    construct(&source, fixture, &[], &edges[129..]);
+    assert_exploratory_edge_windows(&source, 2, 258);
+    let child = graphforge_storage::resolve_project_generation(&source)
+        .unwrap()
+        .graph_files_inventory()
+        .unwrap()
+        .unwrap();
+    for entry in parent
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.starts_with("topology/edges/"))
+    {
+        assert!(
+            child.files.contains(entry),
+            "parent edge payloads remain byte-identical"
+        );
+    }
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+}
+
+#[test]
+fn exploratory_parent_construction_replays_and_compacts_exact_routes() {
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_policy",
+        nodes: 66,
+        edges: 258,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges[..129]);
+    construct(&source, fixture, &[], &edges[129..]);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: nodes[0].0,
+                property: "score".into(),
+                value: PropValue::Int(123),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    drop(graph);
+    nodes[0].2 = Some(123);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    graph
+        .compact_graph_delta(
+            &GraphDeltaCompactionRequest {
+                transaction_uuid: Uuid::from_u128(121305),
+                generation_uuid: Uuid::from_u128(121306),
+                through_run_sequence: None,
+                limits: GraphDeltaCompactionLimits::default(),
+                cleanup_after_commit: false,
+                cleanup_policy: ProjectRetentionPolicy::default(),
+                cleanup_limits: ProjectRetentionLimits::default(),
+            },
+            None,
+        )
+        .unwrap();
+    drop(graph);
+    let portable = root.path().join("compaction-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+}

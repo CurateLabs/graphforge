@@ -383,6 +383,10 @@ impl AuthenticatedPropertyInventory {
             .collect()
     }
 
+    pub(crate) fn has_edge_route(&self, route: &str) -> bool {
+        self.edge_routes.contains_key(route)
+    }
+
     pub(crate) fn edge_rewrite_files(&self) -> impl Iterator<Item = (&str, &Path, &str)> {
         self.edge_routes.iter().flat_map(|(route, files)| {
             files.iter().map(move |file| {
