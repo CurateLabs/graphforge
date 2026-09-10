@@ -1,0 +1,132 @@
+{
+  "issue": 1228,
+  "source_commit": "ad7a867bc836bf3c7381f3a1f70a71914237b349",
+  "baseline_source_commit": "ec7758535ffe7c2a013d5d2808215b19f3008404",
+  "workload": "Public constructed CAS N33 and N4097/E129, 9 CREATEs, DELETE, CREATE, retained snapshot, reopen/query/export/full verify/clean import; hydration probe inspects exact controls and shared immutable UUID inodes.",
+  "hydration": [
+    {
+      "control_allocated_bytes": 4096,
+      "control_bytes": 1429,
+      "shared_immutable_run_bytes": 3810,
+      "nodes": 33,
+      "edges": 129,
+      "materialization": {
+        "files_validated": 20,
+        "bytes_validated": 28036,
+        "files_copied": 8,
+        "bytes_copied": 4093,
+        "files_opened_in_place": 0,
+        "files_reused": 12,
+        "bytes_reused": 23943,
+        "application_read_bytes": 32408,
+        "application_read_calls": 23,
+        "application_write_bytes": 4093,
+        "application_write_calls": 6,
+        "fsync_calls": 16,
+        "file_fsync_calls": 8,
+        "directory_fsync_calls": 8,
+        "strategy": "PrivateMaterialize"
+      }
+    },
+    {
+      "control_allocated_bytes": 4096,
+      "control_bytes": 1440,
+      "shared_immutable_run_bytes": 202946,
+      "nodes": 4097,
+      "edges": 129,
+      "materialization": {
+        "files_validated": 28,
+        "bytes_validated": 562496,
+        "files_copied": 8,
+        "bytes_copied": 166775,
+        "files_opened_in_place": 0,
+        "files_reused": 20,
+        "bytes_reused": 395721,
+        "application_read_bytes": 729550,
+        "application_read_calls": 37,
+        "application_write_bytes": 166775,
+        "application_write_calls": 8,
+        "fsync_calls": 16,
+        "file_fsync_calls": 8,
+        "directory_fsync_calls": 8,
+        "strategy": "PrivateMaterialize"
+      }
+    }
+  ],
+  "runtime": {
+    "elapsed_seconds": 18.12,
+    "user_seconds": 15.91,
+    "system_seconds": 2.3,
+    "peak_rss_kib": 153872,
+    "filesystem_input_512_byte_blocks": 39592,
+    "filesystem_output_512_byte_blocks": 101216,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 89191,
+        "bytes": 263229459
+      },
+      "pread64": {
+        "calls": 42062,
+        "bytes": 17141117
+      },
+      "write": {
+        "calls": 4411,
+        "bytes": 21361539
+      },
+      "fsync": {
+        "calls": 8052,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 3876,
+        "bytes": 17430648
+      }
+    },
+    "read_bytes": 297801224,
+    "write_bytes": 38792187,
+    "errors": [],
+    "elapsed_seconds": 52.38
+  },
+  "workspace_observation": {
+    "command": [
+      "/home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2",
+      "cas_uuid_canonical_create_after_construction_preserves_authorities",
+      "--exact",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 21532672,
+    "sampled_path_logical_peak_bytes": 17923892,
+    "sampled_file_count_peak": 1271,
+    "samples": 1317,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.02411847101757303,
+    "vanished_files_during_scan": 26,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "deterministic_budgets": {
+    "mutable_control_logical_bytes": 2048,
+    "mutable_control_allocated_bytes": 8192,
+    "all_private_hydration_write_bytes": 196608,
+    "sequential_copy_buffer_bytes": 65536,
+    "unchanged_immutable_uuid_payload_copy_bytes": 0,
+    "unchanged_immutable_uuid_payload_reencoded_bytes": 0
+  },
+  "limitations": [
+    "The baseline fails its first CREATE; there is no valid before/after timing comparison and no performance improvement claim.",
+    "Process measurements include startup, both sizes, all mutations, queries, authentication and portable operations; they are observations, not RSS or CPU-time admission guarantees.",
+    "Syscall, runtime and sampled disk evidence use separate executions. Syscall totals count requested application bytes; OS block counters describe filesystem I/O.",
+    "Existing v4 ordinal artifacts are private and included in total hydration writes; only v5 mutable controls are newly copied.",
+    "Unlinked open files and short-lived peaks can be missed by workspace pathname sampling; this is not an exact temporary-only disk ceiling.",
+    "Shared runs are authenticated with bounded I/O; zero copying does not mean zero authentication reads."
+  ]
+}
