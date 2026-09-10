@@ -40,6 +40,8 @@ fs4 = "1.1"
 uuid = { workspace = true }
 
 [dev-dependencies]
+# Assessment-only IPC codec experiments; production writers remain unchanged.
+arrow = { workspace = true, features = ["ipc_compression"] }
 cucumber = { workspace = true }
 tokio = { workspace = true }
 graphforge-cypher = { path = "../graphforge-cypher" }

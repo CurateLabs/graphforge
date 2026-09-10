@@ -1,5 +1,5 @@
 {
-  "checksum": "30f5fd15462196c741cda03c05604373758ae8a21e39b725b483719429012b26",
+  "checksum": "6a40a06e42157027df4fb5b43e623e477cd821b17bd6a2670363a11b508a094b",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -1081,6 +1081,7 @@
             "default",
             "ffi",
             "ipc",
+            "ipc_compression",
             "json",
             "prettyprint",
             "pyarrow"
