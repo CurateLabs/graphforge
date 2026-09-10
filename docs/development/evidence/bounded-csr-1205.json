@@ -1037,7 +1037,17 @@
       "repair": "Regeneration adds only zstd to graphforge-storage dependencies in benchmarks/Cargo.lock. pre-push-fast now checks locked benchmark metadata before compilation.",
       "measurement_impact": "No production-code or measured executable change. Initial failed CI is retained; a corrected-head complete CI run is required.",
       "local_regression": "cargo test --locked --manifest-path benchmarks/Cargo.toml -p graphforge-benchmark-certify --lib tests::command_owned_cache_direct_files_preserve_read_only_inputs -- --exact --nocapture: 1 passed on native Linux; Windows execution remains a CI requirement.",
-      "fast_checks": "make pre-push-fast and make gate-registry-check pass after the repair."
+      "fast_checks": "make pre-push-fast and make gate-registry-check pass after the repair.",
+      "complete_census": {
+        "independent_causes": 1,
+        "failed_jobs": [
+          103038520770,
+          103038520763
+        ],
+        "downstream_gate": "CI Gate failed because these required jobs failed.",
+        "linux_failure": "Bazel Bootstrap completed its authoritative Rust test step, then the real tiny/ownership-growth lifecycle producer refused the same stale benchmarks/Cargo.lock under --locked.",
+        "other_lanes": "All other applicable independent lanes passed, including concurrency, both bindings and macOS durability."
+      }
     }
   }
 }
