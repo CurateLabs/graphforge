@@ -3394,6 +3394,10 @@ fn run_remove_phase(
                 item.target.0
             ))
         })?;
+        // No matched batches means no mutation; retain the known property schema.
+        if frontier.batches.is_empty() {
+            continue;
+        }
         let existing = frontier.df_schema.index_of_column_by_name(
             Some(&datafusion::common::TableReference::bare(format!(
                 "var_{}",

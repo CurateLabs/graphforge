@@ -5591,7 +5591,21 @@ fn exercise_empty_remove_frontier(edge: bool) {
             .downcast_ref::<UInt64Array>()
             .unwrap();
         assert_eq!(removed.value(0), 0);
-        assert_eq!(rows(&gf, read).batches, before.batches);
+        let after = rows(&gf, read);
+        assert_eq!(after.schema.fields(), before.schema.fields());
+        let mut before_metadata = before.schema.metadata().clone();
+        let mut after_metadata = after.schema.metadata().clone();
+        // Query IDs identify executions, independently of the graph identities.
+        assert_ne!(
+            before_metadata.remove("graphforge.query_id"),
+            after_metadata.remove("graphforge.query_id")
+        );
+        assert_eq!(after_metadata, before_metadata);
+        assert_eq!(after.batches.len(), before.batches.len());
+        for (after, before) in after.batches.iter().zip(&before.batches) {
+            assert_eq!(after.num_rows(), before.num_rows());
+            assert_eq!(after.columns(), before.columns());
+        }
     }
     let empty_return = rows(
         &gf,
@@ -5600,6 +5614,15 @@ fn exercise_empty_remove_frontier(edge: bool) {
         ),
     );
     assert_eq!(empty_return.stats.rows_produced, 0);
+    assert_eq!(empty_return.schema.field(0).data_type(), &DataType::Int64);
+    let missing_return = rows(
+        &gf,
+        &format!(
+            "MATCH {pattern} WHERE {target}.score = 999 REMOVE {target}.missing RETURN {target}.missing"
+        ),
+    );
+    assert_eq!(missing_return.stats.rows_produced, 0);
+    assert_eq!(missing_return.schema.field(0).data_type(), &DataType::Null);
     rows(
         &gf,
         &format!("MATCH {pattern} WHERE {target}.score = 1 SET {target}.score = 2"),
