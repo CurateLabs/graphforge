@@ -207,7 +207,9 @@ impl GraphForge {
     /// Publish explicit ontology absence and return the project to exploratory mode.
     ///
     /// # Errors
-    /// Returns a structured publication or idempotency error.
+    /// Returns a structured validation error if a semantic-bindings participant
+    /// still requires composition authority (including empty bindings), or a
+    /// publication or idempotency error.
     pub fn clear_ontology(&mut self, request: ClearOntologyRequest) -> Result<(), GfError> {
         let ClearOntologyRequest { context } = request;
         let mut configuration = current_configuration(self)?;
@@ -341,6 +343,22 @@ fn publish_workspace_records_inner(
             "project generation changed before ontology publication".into(),
         ));
     }
+    // Every semantic-bindings participant, including an empty one, is owned
+    // by its persisted composition. Refuse removal before creating staging
+    // files or publication journals; clear must leave the facade unchanged.
+    if composition.is_none()
+        && (semantic_bindings.is_some()
+            || parent
+                .participant_snapshot(
+                    graphforge_storage::GRAPH_CAPABILITY_ID,
+                    graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY,
+                )?
+                .is_some())
+    {
+        return Err(GfError::Validation(
+            "semantic bindings require their persisted ontology composition".into(),
+        ));
+    }
     let has_graph_files = parent
         .participant_snapshot(
             graphforge_storage::GRAPH_CAPABILITY_ID,
@@ -472,6 +490,16 @@ fn validate_workspace_record_inventory(
     if ontology_count != 1 || configuration_count != 1 || composition_count > 1 {
         return Err(GfError::Validation(
             "workspace generation must contain exactly one ontology and one configuration".into(),
+        ));
+    }
+    if composition_count != 1
+        && metadata.iter().any(|entry| {
+            entry.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
+                && entry.record_family_id == graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY
+        })
+    {
+        return Err(GfError::Validation(
+            "semantic bindings require their persisted ontology composition".into(),
         ));
     }
     Ok(())
@@ -747,6 +775,89 @@ mod tests {
         assert!(
             validate_workspace_record_inventory(&[configuration.clone(), configuration]).is_err()
         );
+    }
+
+    #[test]
+    fn workspace_inventory_retains_composition_for_semantic_bindings() {
+        let ontology = staged_workspace(graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY);
+        let configuration = staged_workspace(graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY);
+        let composition =
+            staged_workspace(graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY);
+        for row_count in [0, 4] {
+            let mut bindings = staged_workspace(graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY);
+            bindings.capability_id = graphforge_storage::GRAPH_CAPABILITY_ID.into();
+            bindings.row_count = row_count;
+            assert!(
+                validate_workspace_record_inventory(&[
+                    ontology.clone(),
+                    configuration.clone(),
+                    bindings.clone(),
+                ])
+                .is_err()
+            );
+            assert!(
+                validate_workspace_record_inventory(&[
+                    ontology.clone(),
+                    configuration.clone(),
+                    composition.clone(),
+                    bindings,
+                ])
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_candidate_bindings_without_composition_refuse_before_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let mut graph = GraphForge::new(root.path().to_str()).unwrap();
+        let parent = graph.resolved_generation.generation_uuid();
+        let inventory = graph.resolved_generation.participant_snapshots().unwrap();
+        let ontology = graph.workspace_ontology().unwrap();
+        let configuration = graph.workspace_configuration().unwrap();
+        let bindings = graphforge_storage::SemanticStorageBindings {
+            contract_version: graphforge_storage::GRAPH_SEMANTIC_BINDINGS_VERSION,
+            composition_fingerprint: "invalid-unowned-candidate".into(),
+            bindings: vec![],
+        };
+        let error = publish_workspace_records(
+            &mut graph,
+            uuid::Uuid::from_u128(1230001),
+            None,
+            &ontology,
+            &configuration,
+            None,
+            Some(&bindings),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, GfError::Validation(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("semantic bindings require their persisted ontology composition")
+        );
+        let selected = graphforge_storage::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(selected.generation_uuid(), parent);
+        assert_eq!(selected.participant_snapshots().unwrap(), inventory);
+        let token = crate::CancellationToken::new();
+        token.cancel();
+        assert!(
+            publish_workspace_records(
+                &mut graph,
+                uuid::Uuid::from_u128(1230002),
+                None,
+                &ontology,
+                &configuration,
+                None,
+                None,
+                None,
+                Some(&token),
+            )
+            .is_err()
+        );
+        assert_eq!(graph.resolved_generation.generation_uuid(), parent);
     }
 
     #[test]

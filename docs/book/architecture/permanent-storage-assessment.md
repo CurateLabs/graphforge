@@ -624,3 +624,54 @@ required exact-head native CI remains the platform/merge authority.
 This ownership repair does not make same-name adoption atomic (#1229), define
 bound-composition removal (#1230), refresh a facade after compaction (#1231), or
 complete the canonical publishing-contract gate (#1221).
+
+### Composition authority removal boundary (#1230)
+
+A workspace generation may not remove its composition while retaining a
+`graph/semantic_bindings` participant. This includes an empty binding list:
+current-format authentication pins that participant to its composition
+fingerprint regardless of whether qualified rows exist. Workspace publication
+now returns `GfError::Validation` before participant staging or publication
+journals if either retained or candidate bindings lack a composition. Staged
+inventory validation independently checks the cross-participant requirement.
+No binding or graph data is discarded. Unbound ontology clear remains supported.
+
+Public fixtures construct 33 and 4,097 exploratory nodes with 129 edges, adopt
+a disjoint ontology and publish its composition, then attempt clear before and
+after constructing two qualified nodes with non-null/null Int64 properties.
+Repeated refusal preserves CURRENT, every participant, facade configuration and
+ontology state, retained query results, every durable file digest/allocation and
+original readonly CAS inode identities. Exact graph and qualified properties
+survive reopen, export, full portable verification and clean import. Each
+refusal has deterministic zero-new-file, zero-changed-file-byte and
+zero-new-allocated-file-byte budgets. Source inspection establishes refusal
+before staging; file snapshots alone do not detect transient files or directory
+allocation. The operation still performs the existing authentication reads.
+
+Four subprocess cases cover process exit and returned error immediately before
+and after CURRENT replacement for eligible unbound clear. Reopen selects the
+expected old or cleared generation, exact retry succeeds, unchanged graph
+payloads retain their CAS identities, and a subsequent public CREATE survives a
+complete portable round trip. Unit tests cover empty candidate bindings,
+zero/nonzero binding row counts in staged metadata, and cancellation before
+publication. Existing composition certification verifies stale parents and
+forged plans without weakening reader authentication.
+
+Source `f1cf815577d07a697ce1ad505aa3fd2cd6db1cb0` and raw observations are in
+[`bound-ontology-clear-1230.json`](../../development/evidence/bound-ontology-clear-1230.json).
+The full refusal fixture took 9.83 s elapsed, 6.67 s user and 1.77 s system,
+with 136,936 KiB peak RSS. Separate syscall tracing recorded 132,373,775 read
+bytes, 16,648,242 write bytes and 5,862 successful fsync calls with no traced
+errors. OS filesystem input/output were 140,000/46,504 512-byte blocks. These
+include construction, composition, file hashing, queries and portable work;
+they are not isolated refusal costs or whole-process admission budgets.
+
+A separate 978-sample scan observed 6,479,872 bytes of unique-inode workspace
+allocation, with a maximum sample interval of 15.3 ms and 27 vanished-file
+races. It includes retained generations, private workspaces and portable
+artifacts; unlinked files and shorter peaks can be missed. This is not an exact
+temporary-only ceiling. The baseline publishes an unreadable project, so no
+valid complete-runtime baseline comparison or performance improvement is
+claimed. Compression, dictionary, row-group and streaming policies remain
+unchanged. Same-name promotion (#1229), post-compaction facade refresh (#1231)
+and the canonical publishing-contract close gate (#1221) remain separate.

@@ -3312,3 +3312,304 @@ fn cas_uuid_publication_faults_recover_and_allow_retry() {
         }
     }
 }
+
+#[test]
+fn bound_ontology_clear_refuses_before_publication_and_preserves_graph() {
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "bound_ontology_clear",
+            nodes: node_count,
+            edges: 129,
+            routes: 1,
+            identifiers: Identifiers::Random,
+            properties: false,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (mut nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        configure_composite_ontology(root.path(), &source, true);
+        for populated in [false, true] {
+            if populated {
+                let children = vec![
+                    (id(3, 0, true), "NewNode".into(), Some(17)),
+                    (id(3, 1, true), "NewNode".into(), None),
+                ];
+                construct(
+                    &source,
+                    Fixture {
+                        properties: true,
+                        ..fixture
+                    },
+                    &children,
+                    &[],
+                );
+                nodes.extend(children.into_iter().map(|mut node| {
+                    node.1 = "mixed:entity:NewNode".into();
+                    // Unlabelled projection excludes ontology properties; verify
+                    // the qualified nullable score independently below.
+                    node.2 = None;
+                    node
+                }));
+            }
+            let mut graph = GraphForge::new(source.to_str()).unwrap();
+            let parent = graphforge_storage::resolve_project_generation(&source).unwrap();
+            let bindings = graphforge_storage::semantic_storage_bindings(&parent)
+                .unwrap()
+                .unwrap();
+            assert!(!bindings.bindings.is_empty());
+            let participants = parent.participant_snapshots().unwrap();
+            let ontology = graph.workspace_ontology().unwrap();
+            let composition = graph.workspace_ontology_composition().unwrap();
+            let configuration = graph.workspace_configuration().unwrap();
+            let objects = cas_uuid_parent_objects(&source);
+            let query = "MATCH (n) RETURN n.node_uuid ORDER BY n.node_uuid";
+            let expected = graph.execute(query).unwrap();
+            let stream = graph.execute_stream(query).unwrap();
+            let files = clear_publication_files(&source);
+            let request = graphforge_api::ClearOntologyRequest {
+                context: graphforge_api::WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+            };
+            for _ in 0..2 {
+                let error = graph.clear_ontology(request.clone()).unwrap_err();
+                assert!(
+                    matches!(error, graphforge_core::GfError::Validation(_)),
+                    "{error:?}"
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains("semantic bindings require their persisted ontology composition"),
+                    "{error}"
+                );
+                assert_eq!(clear_publication_files(&source), files);
+                let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+                assert_eq!(selected.generation_uuid(), parent.generation_uuid());
+                assert_eq!(selected.participant_snapshots().unwrap(), participants);
+                assert_eq!(graph.workspace_ontology().unwrap(), ontology);
+                assert_eq!(graph.workspace_ontology_composition().unwrap(), composition);
+                assert_eq!(graph.workspace_configuration().unwrap(), configuration);
+                assert_eq!(
+                    graph.ontology_mode(),
+                    graphforge_api::OntologyMode::Advisory
+                );
+            }
+            cas_uuid_assert_parent_objects(&source, &objects);
+            use futures::TryStreamExt as _;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let retained: Vec<RecordBatch> = runtime.block_on(stream.try_collect()).unwrap();
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|batch| batch.columns())
+                    .collect::<Vec<_>>(),
+                expected
+                    .batches
+                    .iter()
+                    .map(|batch| batch.columns())
+                    .collect::<Vec<_>>()
+            );
+            verify_graph(&graph, fixture, &nodes, &edges);
+            if populated {
+                let values = graph.execute("MATCH (n:`mixed:NewNode`) RETURN n.node_uuid, n.score ORDER BY n.node_uuid").unwrap();
+                assert_eq!(values.stats.rows_produced, 2);
+                let scores = values
+                    .batches
+                    .iter()
+                    .flat_map(|batch| {
+                        (0..batch.num_rows())
+                            .map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    scores,
+                    BTreeMap::from([(id(3, 0, true), Some(17)), (id(3, 1, true), None)])
+                );
+            }
+            drop(graph);
+            let portable = root.path().join(format!("portable-{populated}"));
+            std::fs::create_dir(&portable).unwrap();
+            round_trip(&portable, &source, fixture, &nodes, &edges);
+            if populated {
+                for path in [&source, &portable.join("imported")] {
+                    let graph = GraphForge::new(path.to_str()).unwrap();
+                    let values = graph
+                        .execute("MATCH (n:`mixed:NewNode`) RETURN n.node_uuid, n.score")
+                        .unwrap();
+                    let scores = values
+                        .batches
+                        .iter()
+                        .flat_map(|batch| {
+                            (0..batch.num_rows())
+                                .map(|row| (uuid_at(batch, 0, row), int_at(batch, 1, row)))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    assert_eq!(
+                        scores,
+                        BTreeMap::from([(id(3, 0, true), Some(17)), (id(3, 1, true), None)])
+                    );
+                }
+            }
+            println!(
+                "BOUND_CLEAR_BUDGET {}",
+                json!({"nodes":node_count,"qualified_rows_present":populated,"retained_files":files.len(),"new_files":0,"changed_file_bytes":0,"new_allocated_bytes":0})
+            );
+        }
+    }
+}
+
+// Snapshot all durable files, including CURRENT and publication journals. A
+// refused clear must not stage a candidate or allocate a replacement payload.
+fn clear_publication_files(root: &Path) -> BTreeMap<std::path::PathBuf, (String, u64)> {
+    let mut files = BTreeMap::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+            } else {
+                let file = File::open(&path).unwrap();
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    (
+                        digest_hex(&std::fs::read(&path).unwrap()),
+                        graphforge_filesystem::file_space_usage(&file)
+                            .unwrap()
+                            .allocated_bytes,
+                    ),
+                );
+            }
+        }
+    }
+    files
+}
+
+fn unbound_clear_request() -> graphforge_api::ClearOntologyRequest {
+    graphforge_api::ClearOntologyRequest {
+        context: graphforge_api::WriteContext {
+            operation_uuid: OperationId(Uuid::from_u128(1230003)),
+            actor_uuid: None,
+        },
+    }
+}
+
+#[test]
+fn unbound_ontology_clear_fault_child() {
+    let Ok(source) = std::env::var("GF_UNBOUND_CLEAR_ROOT") else {
+        return;
+    };
+    let mut graph = GraphForge::new(Some(&source)).unwrap();
+    let error = graph.clear_ontology(unbound_clear_request()).unwrap_err();
+    assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+}
+
+#[test]
+fn unbound_ontology_clear_recovers_and_retries_without_rewriting_payloads() {
+    for boundary in [
+        "project.before_current_replace",
+        "project.after_current_replace",
+    ] {
+        for returned_error in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            let fixture = Fixture {
+                name: "unbound_clear_recovery",
+                nodes: 33,
+                edges: 129,
+                routes: 1,
+                identifiers: Identifiers::Random,
+                properties: false,
+                adjacency: false,
+                heterogeneous: false,
+            };
+            let (nodes, edges) = rows(fixture);
+            construct(&source, fixture, &nodes, &edges);
+            let ontology = root.path().join("ontology.yaml");
+            std::fs::write(&ontology, "ontology_id: clear\nversion: \"1\"\nentity_types:\n  - name: Unused\n    abstract: false\nrelation_types: []\n").unwrap();
+            let mut graph = GraphForge::new(source.to_str()).unwrap();
+            graph
+                .adopt_ontology(graphforge_api::AdoptOntologyRequest {
+                    context: graphforge_api::WriteContext {
+                        operation_uuid: OperationId(Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    path: ontology,
+                    mode: graphforge_api::OntologyMode::Advisory,
+                })
+                .unwrap();
+            drop(graph);
+            let parent = graphforge_storage::resolve_project_generation(&source).unwrap();
+            let inventory = parent.graph_files_inventory().unwrap();
+            let objects = cas_uuid_parent_objects(&source);
+            let hook = format!("{boundary}{}", if returned_error { ".error" } else { "" });
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "unbound_ontology_clear_fault_child",
+                    "--nocapture",
+                ])
+                .env("GF_UNBOUND_CLEAR_ROOT", &source)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", &hook)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if returned_error { 0 } else { 86 }),
+                "{hook}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut graph = GraphForge::new(source.to_str()).unwrap();
+            let recovered = graphforge_storage::resolve_project_generation(&source).unwrap();
+            assert_eq!(
+                recovered.generation_uuid() != parent.generation_uuid(),
+                boundary == "project.after_current_replace"
+            );
+            assert_eq!(
+                graph.ontology_mode(),
+                if boundary == "project.after_current_replace" {
+                    graphforge_api::OntologyMode::Exploratory
+                } else {
+                    graphforge_api::OntologyMode::Advisory
+                }
+            );
+            verify_graph(&graph, fixture, &nodes, &edges);
+            for _ in 0..2 {
+                graph.clear_ontology(unbound_clear_request()).unwrap();
+            }
+            assert_eq!(
+                graph.ontology_mode(),
+                graphforge_api::OntologyMode::Exploratory
+            );
+            assert_eq!(
+                graphforge_storage::resolve_project_generation(&source)
+                    .unwrap()
+                    .graph_files_inventory()
+                    .unwrap(),
+                inventory
+            );
+            cas_uuid_assert_parent_objects(&source, &objects);
+            let created = graph
+                .execute("CREATE (n:Node0) RETURN n.node_uuid")
+                .unwrap();
+            let mut expected = nodes.clone();
+            expected.push((uuid_at(&created.batches[0], 0, 0), "Node0".into(), None));
+            verify_graph(&graph, fixture, &expected, &edges);
+            drop(graph);
+            round_trip(root.path(), &source, fixture, &expected, &edges);
+        }
+    }
+}
