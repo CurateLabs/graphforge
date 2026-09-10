@@ -187,7 +187,7 @@ fn int_at(batch: &RecordBatch, column: usize, row: usize) -> Option<i64> {
             .column(column)
             .as_any()
             .downcast_ref::<Int64Array>()
-            .unwrap()
+            .unwrap_or_else(|| panic!("expected Int64 at column {column}: {:?}", batch.schema()))
             .value(row)
     })
 }
@@ -5193,7 +5193,77 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
         heterogeneous: false,
     };
     let (mut nodes, mut edges) = rows(fixture);
-    construct(&source, fixture, &nodes, &edges);
+    if count > 4096 {
+        construct(&source, fixture, &nodes, &edges);
+    } else {
+        // Empty-project composite CREATE publishes flat topology; construction
+        // sessions publish shards even when the input fits in a single shard.
+        // Composite CREATE requires UUIDv7. Preserve deterministic fixture bytes
+        // apart from the version/variant bits, including every endpoint.
+        let uuid7 = |uuid: Uuid| {
+            let mut bytes = *uuid.as_bytes();
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        };
+        for node in &mut nodes {
+            node.0 = uuid7(node.0);
+        }
+        for edge in &mut edges {
+            edge.0 = uuid7(edge.0);
+            edge.1 = uuid7(edge.1);
+            edge.2 = uuid7(edge.2);
+        }
+        let mut graph = GraphForge::new(source.to_str()).unwrap();
+        let graph_mutations = nodes
+            .iter()
+            .map(|(uuid, label, score)| Mutation::CreateNode {
+                node_uuid: *uuid,
+                label: label.clone(),
+                properties: score
+                    .map(|value| ("score".into(), PropValue::Int(value)))
+                    .into_iter()
+                    .collect(),
+            })
+            .chain(
+                edges
+                    .iter()
+                    .map(
+                        |(uuid, source, target, route, weight, text)| Mutation::CreateEdge {
+                            edge_uuid: *uuid,
+                            source_uuid: *source,
+                            target_uuid: *target,
+                            rel_type: route.clone(),
+                            properties: weight
+                                .map(|value| ("weight".into(), PropValue::Int(value)))
+                                .into_iter()
+                                .chain(
+                                    text.clone()
+                                        .map(|value| ("text".into(), PropValue::Str(value))),
+                                )
+                                .collect(),
+                        },
+                    ),
+            )
+            .collect();
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(Uuid::now_v7()),
+                    actor_uuid: None,
+                },
+                graph_mutations,
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+    }
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    if typed {
+        graph
+            .adopt_ontology(promotion_request(root.path()))
+            .unwrap();
+    }
     let initial = graphforge_storage::resolve_project_generation(&source).unwrap();
     let inventory = initial.graph_files_inventory().unwrap().unwrap();
     let node_shards = inventory
@@ -5206,12 +5276,14 @@ fn exercise_publishing_contract(count: usize, typed: bool) {
             node_shards > 1,
             "large fixture must use sharded node authority"
         );
-    }
-    let mut graph = GraphForge::new(source.to_str()).unwrap();
-    if typed {
-        graph
-            .adopt_ontology(promotion_request(root.path()))
-            .unwrap();
+    } else {
+        assert_eq!(node_shards, 0, "small fixture must use flat node authority");
+        assert!(
+            inventory
+                .files
+                .iter()
+                .any(|entry| entry.relative_path == "topology/nodes.parquet")
+        );
     }
     publishing_contract_verify(&graph, &nodes, &edges);
     let initial_ids = cas_uuid_node_surrogates(&source);

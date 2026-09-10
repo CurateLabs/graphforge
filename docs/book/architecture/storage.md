@@ -1026,11 +1026,16 @@ persistence without a graph publisher, external query sinks, and test/benchmark
 fixtures are not permanent graph publishers. They cannot establish production
 support for a topology journal operation.
 
-`permanent_storage_budgets::publishing_contract_alternates_supported_paths_and_refuses_topology_journals`
-checks flat/sharded, exploratory/ontology-promoted, two-route construction,
-actual property GFDR, compaction, canonical topology mutation, reopening,
+The four `permanent_storage_budgets` tests
+`publishing_contract_alternates_supported_paths_and_refuses_topology_journals`,
+`publishing_contract_flat_ontology`, `publishing_contract_sharded_exploratory`
+and `publishing_contract_sharded_ontology` use `exercise_publishing_contract`
+to check flat/sharded, exploratory/ontology-promoted, two-route graphs. The flat
+cases use public composite CREATE on an empty project; the sharded cases use
+public construction sessions. All four exercise actual property GFDR,
+compaction, canonical topology mutation, reopening,
 export/full verification, clean import and subsequent mutation. It compares
-UUIDs, routes, endpoints, nullable typed values and node allocation continuity.
+UUIDs, routes, endpoints, nullable typed values and node/edge allocation continuity.
 The neighboring compaction/promotion/owner fixtures add active snapshots,
 interrupted publication, cancellation, retries and full-width identity coverage.
 Storage journal tests additionally cover forged persisted records, direct-run
