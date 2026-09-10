@@ -511,6 +511,8 @@ impl GraphForge {
             };
             let property_inventory =
                 crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
+            #[cfg(test)]
+            after_property_inventory_capture_for_test();
             apply_graph_mutations(
                 self,
                 request,
@@ -665,6 +667,21 @@ impl GraphForge {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_PROPERTY_INVENTORY_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_property_inventory_capture_for_test() {
+    // Take before invoking: the competing publisher enters this boundary too.
+    let hook = AFTER_PROPERTY_INVENTORY_CAPTURE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 
@@ -2753,6 +2770,122 @@ mod tests {
                 .sum::<usize>(),
             2
         );
+    }
+
+    fn assert_exact_people(graph: &GraphForge, mut expected: Vec<(Uuid, String)>) {
+        let result = graph
+            .execute("MATCH (n:Person) RETURN n.node_uuid AS id, n.name AS name")
+            .unwrap();
+        let mut actual = Vec::new();
+        for batch in result.batches {
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .unwrap();
+            let names = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    Uuid::from_slice(ids.value(row)).unwrap(),
+                    names.value(row).to_owned(),
+                ));
+            }
+        }
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    fn exercise_property_authority_rebase(max_rebases: u32) {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                AFTER_PROPERTY_INVENTORY_CAPTURE.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        let _clear_hook = ClearHook;
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new_with_options(
+            directory.path().to_str(),
+            optimistic_options(max_rebases),
+        )
+        .unwrap();
+        let competitor =
+            GraphForge::new_with_options(directory.path().to_str(), optimistic_options(1)).unwrap();
+        let before = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+        let captured = std::rc::Rc::new(std::cell::Cell::new(None));
+        let observed = captured.clone();
+        let root = directory.path().to_path_buf();
+        AFTER_PROPERTY_INVENTORY_CAPTURE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                assert!(observed.get().is_none(), "hook must run once");
+                competitor
+                    .publish_composite_transaction(graph_request(153, 154, "Grace"))
+                    .unwrap();
+                let winner = graphforge_storage::resolve_project_generation(&root)
+                    .unwrap()
+                    .generation_uuid();
+                assert_ne!(winner, before);
+                observed.set(Some(winner));
+            }));
+        });
+        let request = graph_request(151, 152, "Ada");
+        let result = graph.publish_composite_transaction(request.clone());
+        let winner = captured
+            .get()
+            .expect("competitor published after inventory capture");
+        let after = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+        let mut expected = vec![(uuid7(154), "Grace".to_owned())];
+        if max_rebases == 0 {
+            assert_eq!(result.unwrap_err().code(), "GF_REBASE_EXHAUSTED");
+            assert_eq!(after, winner);
+        } else {
+            let receipt = result.unwrap();
+            assert_ne!(after, winner);
+            expected.push((uuid7(152), "Ada".to_owned()));
+            assert_exact_people(&graph, expected.clone());
+            assert_eq!(
+                graph.publish_composite_transaction(request).unwrap(),
+                receipt
+            );
+            assert_eq!(
+                graph
+                    .publish_composite_transaction(graph_request(151, 152, "changed"))
+                    .unwrap_err()
+                    .code(),
+                "GF_IDEMPOTENCY_CONFLICT"
+            );
+            assert_eq!(
+                graphforge_storage::resolve_project_generation(directory.path())
+                    .unwrap()
+                    .generation_uuid(),
+                after
+            );
+        }
+        drop(graph);
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        assert_exact_people(&reopened, expected);
+    }
+
+    #[test]
+    fn optimistic_property_authority_race_rebases_exactly_once() {
+        exercise_property_authority_rebase(1);
+    }
+
+    #[test]
+    fn optimistic_property_authority_race_obeys_rebase_budget() {
+        exercise_property_authority_rebase(0);
     }
 
     #[test]
