@@ -717,7 +717,7 @@
     "latency": "Three fresh processes per case, five queries per facade, alternating case order. fsync+POSIX_FADV_DONTNEED on private fixture before each process; advisory, not proof of physically cold media.",
     "traces": "Separate complete strace -f -qq -yy -s 0 with read/pread/vector/write/copy_file_range/sendfile/fsync/fdatasync. Parse completed and resumed syscall returns, count copy once read and once write. Zero unresolved calls and errors. Not physical I/O.",
     "workspace": "Separate 5-ms requested scans of fixture plus private TMPDIR. Deduplicate globally by device/inode, shared files attributed first to fixture. Regular files only, directories and unlinked-open files excluded. Maximum observed gaps 77.8 ms baseline, 78.5 ms candidate. Non-atomic sampled observations, not hard bounds.",
-    "freeze": "Copy successful release executable and verify SHA256 before/after every measurement; no builds overlapped measured runs. Test-only lifecycle additions after measured commit do not change production code or read-mode probe."
+    "freeze": "Copy successful release executable and verify SHA256 before/after every measurement; no builds overlapped measured runs. Later changes add tests/documentation, a static rule-name lifetime and relocation of the identical optimizer-rule factory; the recorded executable/source remain the measured artifact, not an unmeasured final-head timing claim."
   },
   "reproduction": [
     "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
@@ -741,10 +741,20 @@
     "Explicit-WITH baseline control temporary sample exceeded initial ceiling by643072 bytes. Actual original-query candidate sampled52596736 overlapping/11345920 temporary versus baseline53239808/11988992, meeting the unchanged observation ceiling; no hard peak guarantee or precise disk saving is inferred from sampling.",
     "Nonzero747880 logical reserved bytes after query is a retained session accounting observation, not proof of a leak or total process memory. Process/native RSS is measured separately.",
     "No new persisted artifact or writer path; no storage compression gain is attributed to this planner repair.",
-    "All five #1207 decisions and integrated S20/S22 remain outstanding; no S24/S26 run is authorized."
+    "Completion of the five-candidate #1207 assessment and integrated S20/S22 remain outstanding; no S24/S26 run is authorized."
   ],
   "official_sources": [
     "https://docs.rs/datafusion/54.1.0/datafusion/",
     "https://docs.rs/parquet/58.4.0/parquet/"
-  ]
+  ],
+  "normalized_work": {
+    "baseline_expansion_candidates_per_result_row": 4351.12890625,
+    "candidate_expansion_candidates_per_result_row": 1.0625,
+    "baseline_edge_rows_scanned_per_result_row": 34892.5390625,
+    "candidate_edge_rows_scanned_per_result_row": 316.0078125,
+    "baseline_syscall_read_bytes_amortized_per_query_including_open": 1629846783.2,
+    "candidate_syscall_read_bytes_amortized_per_query_including_open": 46555867.8,
+    "query_count": 5,
+    "result_rows_per_query": 256
+  }
 }

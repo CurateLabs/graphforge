@@ -17,6 +17,18 @@ use graphforge_plan::ExpandNode;
 #[derive(Debug)]
 pub struct FixedExpandInputPredicates;
 
+/// Preserve DataFusion defaults and place graph input filtering before projection pruning.
+#[must_use]
+pub fn optimizer_rules() -> Vec<Arc<dyn OptimizerRule + Send + Sync>> {
+    let mut rules = datafusion::optimizer::Optimizer::new().rules;
+    let position = rules
+        .iter()
+        .position(|rule| rule.name() == "push_down_filter")
+        .expect("pinned DataFusion optimizer includes filter pushdown");
+    rules.insert(position + 1, Arc::new(FixedExpandInputPredicates));
+    rules
+}
+
 fn atom_type(expr: &Expr, schema: &DFSchema) -> Option<DataType> {
     match expr {
         Expr::Column(column) if column.relation.is_some() => expr.get_type(schema).ok(),
@@ -86,7 +98,7 @@ fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
 }
 
 impl OptimizerRule for FixedExpandInputPredicates {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "graphforge_fixed_expand_input_predicates"
     }
 
