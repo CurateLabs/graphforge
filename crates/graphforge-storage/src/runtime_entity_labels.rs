@@ -98,6 +98,33 @@ pub fn write_runtime_entity_label_encoding_marker(dir: &Path) -> Result<(), GfEr
     Ok(())
 }
 
+/// Persist observed runtime names by replacing the private workspace alias.
+/// A catalog hydrated from CAS must never be truncated in place.
+///
+/// # Errors
+/// Propagates Parquet encoding, authenticated replacement, and durability errors.
+pub fn persist_runtime_catalog(dir: &Path, catalog: &RuntimeCatalog) -> Result<(), GfError> {
+    let topology = dir.join("topology");
+    std::fs::create_dir_all(&topology).map_err(|error| storage_err(error.to_string()))?;
+    let batch = catalog.to_record_batch();
+    let temporary = tempfile::NamedTempFile::new_in(&topology)
+        .map_err(|error| storage_err(error.to_string()))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(temporary.as_file(), batch.schema(), None)
+            .map_err(|error| storage_err(error.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|error| storage_err(error.to_string()))?;
+    writer
+        .close()
+        .map_err(|error| storage_err(error.to_string()))?;
+    let mut staged = crate::RewriteBatch::new();
+    staged.stage_file(&topology.join("runtime_catalog.parquet"), temporary.path())?;
+    staged.stage_bytes(&encoding_path(dir), &runtime_entity_label_encoding_bytes()?)?;
+    crate::generation::commit_topology_aware(staged, dir)?;
+    Ok(())
+}
+
 /// Shared marker bytes for reconciliation and authenticated construction artifacts.
 pub(crate) fn runtime_entity_label_encoding_bytes() -> Result<Vec<u8>, GfError> {
     let marker = EncodingMarker {

@@ -1240,6 +1240,64 @@ pub fn append_graph_files_v2(
     )
 }
 
+/// Publish a private replay candidate using its authenticated route contract.
+pub(crate) fn replace_replayed_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    inventory: &GraphFilesInventory,
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let changed = inventory
+        .files
+        .iter()
+        .filter(|entry| {
+            state.entries.get(&entry.relative_path).is_none_or(|old| {
+                old.content_sha256 != entry.content_sha256 || old.byte_length != entry.byte_length
+            })
+        })
+        .map(|entry| PathBuf::from(&entry.relative_path))
+        .collect::<Vec<_>>();
+    let tombstones = state
+        .entries
+        .keys()
+        .filter(|path| {
+            inventory
+                .files
+                .binary_search_by(|entry| entry.relative_path.cmp(path))
+                .is_err()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    append_replayed_graph_files(lease, workspace, state, inventory, &changed, &tombstones)
+}
+
+/// Append selected replay outputs without changing their authenticated route contract.
+pub(crate) fn append_replayed_graph_files(
+    lease: &GraphObjectPublicationLease,
+    workspace: &Path,
+    state: &mut GraphManifestState,
+    inventory: &GraphFilesInventory,
+    sealed_paths: &[PathBuf],
+    tombstones: &[String],
+) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
+    let routes = crate::route_component::authenticate_manifest_routes(
+        inventory.format_version,
+        &inventory.files,
+        |entry| {
+            crate::graph_files::read_route_table_counted(workspace, entry).map(|(bytes, _)| bytes)
+        },
+    )?;
+    append_graph_files_v2_inner(
+        lease,
+        workspace,
+        state,
+        sealed_paths,
+        None,
+        tombstones,
+        routes.as_ref(),
+    )
+}
+
 /// Seal a verified mapped import into a fresh CAS root, checking exact table closure.
 pub(crate) fn append_mapped_import_graph_files(
     lease: &GraphObjectPublicationLease,

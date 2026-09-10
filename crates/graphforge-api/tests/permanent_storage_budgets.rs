@@ -973,3 +973,303 @@ fn public_mutation_replaces_shared_constructed_payloads() {
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
 }
+
+#[test]
+fn cas_construction_composite_mutation_and_compaction_preserve_values() {
+    use graphforge_storage::{
+        GraphDeltaCompactionLimits, GraphDeltaCompactionRequest, ProjectRetentionLimits,
+        ProjectRetentionPolicy,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "publishing_policy",
+        nodes: 66,
+        edges: 0,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let initial = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(initial.declared_graph_files_inventory().unwrap().is_none());
+    let base = initial.graph_files_inventory().unwrap().unwrap();
+
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    use graphforge_api::{
+        COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeGraphMutation,
+        CompositeKnowledgeParticipants, CompositeTransactionRequest, PropValue, WriteContext,
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let snapshot_query =
+        "MATCH (n) WHERE n.score IS NOT NULL RETURN n.node_uuid, n.score ORDER BY n.node_uuid";
+    let expected_snapshot = graph.execute(snapshot_query).unwrap();
+    let old_stream = graph.execute_stream(snapshot_query).unwrap();
+    graph
+        .publish_composite_transaction(CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: nodes[0].0,
+                property: "score".into(),
+                value: PropValue::Int(123),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        })
+        .unwrap();
+    use futures::TryStreamExt as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old_batches: Vec<RecordBatch> = runtime.block_on(old_stream.try_collect()).unwrap();
+    assert_eq!(
+        old_batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>(),
+        expected_snapshot
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>()
+    );
+    drop(graph);
+    nodes[0].2 = Some(123);
+    let delta = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(delta.declared_graph_files_inventory().unwrap().is_none());
+    let delta_inventory = delta.graph_files_inventory().unwrap().unwrap();
+    for entry in base
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path != "topology/runtime_catalog.parquet")
+    {
+        assert!(
+            delta_inventory.files.contains(entry),
+            "delta must preserve base entry {}",
+            entry.relative_path
+        );
+    }
+    assert_eq!(delta_inventory.file_count, base.file_count + 1);
+    let participants = delta
+        .participant_snapshots()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| !(entry.capability_id == "graph" && entry.record_family_id == "files"))
+        .collect::<Vec<_>>();
+
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let request = GraphDeltaCompactionRequest {
+        transaction_uuid: Uuid::from_u128(121305),
+        generation_uuid: Uuid::from_u128(121306),
+        through_run_sequence: None,
+        limits: GraphDeltaCompactionLimits::default(),
+        cleanup_after_commit: false,
+        cleanup_policy: ProjectRetentionPolicy::default(),
+        cleanup_limits: ProjectRetentionLimits::default(),
+    };
+    let cancelled = graphforge_api::CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        graph
+            .compact_graph_delta(&request, Some(&cancelled))
+            .is_err()
+    );
+    assert_eq!(
+        graphforge_storage::resolve_project_generation(&source)
+            .unwrap()
+            .generation_uuid(),
+        delta.generation_uuid()
+    );
+    let preview = graph
+        .preview_graph_delta_compaction(&request, None)
+        .unwrap();
+    assert!(preview.dry_run);
+    let compacted_report = graph.compact_graph_delta(&request, None).unwrap();
+    assert_eq!(
+        preview.state_fingerprint,
+        compacted_report.state_fingerprint
+    );
+    let repeated = graph.compact_graph_delta(&request, None).unwrap();
+    let replayed_receipt = repeated.publication.unwrap();
+    let committed_receipt = compacted_report.publication.unwrap();
+    assert!(replayed_receipt.idempotent_replay);
+    assert!(!committed_receipt.idempotent_replay);
+    assert_eq!(
+        replayed_receipt.transaction_uuid,
+        committed_receipt.transaction_uuid
+    );
+    assert_eq!(
+        replayed_receipt.generation_uuid,
+        committed_receipt.generation_uuid
+    );
+    assert_eq!(
+        replayed_receipt.generation_manifest_sha256,
+        committed_receipt.generation_manifest_sha256
+    );
+    drop(graph);
+    let compacted = graphforge_storage::resolve_project_generation(&source).unwrap();
+    assert!(
+        compacted
+            .declared_graph_files_inventory()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(compacted.capabilities(), delta.capabilities());
+    assert_eq!(
+        compacted
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| !(entry.capability_id == "graph" && entry.record_family_id == "files"))
+            .collect::<Vec<_>>(),
+        participants
+    );
+    assert!(
+        graphforge_storage::list_delta_runs(
+            &compacted.graph_files_inventory().unwrap().unwrap(),
+            graphforge_storage::GraphDeltaJournalLimits::default(),
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let portable = root.path().join("compaction-portable");
+    std::fs::create_dir(&portable).unwrap();
+    round_trip(&portable, &source, fixture, &nodes, &edges);
+}
+
+#[test]
+fn cas_delta_preparation_reuses_payloads_with_bounded_private_allocation() {
+    use graphforge_storage::{
+        GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
+        GraphDeltaPublishRequest,
+    };
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "cas_delta_allocation",
+            nodes: node_count,
+            edges: 0,
+            routes: 1,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: false,
+        };
+        let (nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let parent = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let base = parent.graph_files_inventory().unwrap().unwrap();
+        let request = GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: vec![GraphDeltaOp {
+                operation_uuid: Uuid::now_v7(),
+                kind: GraphDeltaOpKind::SetNodeProperty,
+                payload: GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: nodes[0].0.to_string(),
+                    property_stem: "_untyped".into(),
+                    key: "score".into(),
+                    value: graphforge_storage::encode_graph_delta_value(
+                        &graphforge_ir::IrLiteral::Int(123),
+                    )
+                    .unwrap(),
+                },
+            }],
+            limits: GraphDeltaJournalLimits {
+                max_batch_rows: 7,
+                max_replay_memory_bytes: 2 * 1024 * 1024,
+                ..GraphDeltaJournalLimits::default()
+            },
+        };
+        let prepared = graphforge_storage::prepare_graph_delta(&parent, &request).unwrap();
+        assert!(prepared.graph_tree_source().is_none());
+        assert!(prepared.preserved_base_parquet_digests);
+        assert_eq!(prepared.unchanged_base_files, base.file_count);
+        let mut shared_bytes = 0_u64;
+        let mut private_allocated = 0_u64;
+        for entry in &base.files {
+            let object = File::open(
+                graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap(),
+            )
+            .unwrap();
+            let private =
+                File::open(prepared.graph_tree_root().join(&entry.relative_path)).unwrap();
+            assert_eq!(private.metadata().unwrap().len(), entry.byte_length);
+            if graphforge_filesystem::file_identity(&object).unwrap()
+                == graphforge_filesystem::file_identity(&private).unwrap()
+            {
+                shared_bytes += entry.byte_length;
+            } else {
+                private_allocated += graphforge_filesystem::file_space_usage(&private)
+                    .unwrap()
+                    .allocated_bytes;
+            }
+            if entry.relative_path.starts_with("topology/nodes/")
+                || entry.relative_path.starts_with("properties/")
+            {
+                assert_eq!(
+                    graphforge_filesystem::file_identity(&object).unwrap(),
+                    graphforge_filesystem::file_identity(&private).unwrap(),
+                    "{} must reuse its CAS payload",
+                    entry.relative_path
+                );
+            }
+        }
+        let run = File::open(
+            prepared
+                .graph_tree_root()
+                .join(graphforge_storage::delta_run_relative_path(1)),
+        )
+        .unwrap();
+        private_allocated += graphforge_filesystem::file_space_usage(&run)
+            .unwrap()
+            .allocated_bytes;
+        assert!(shared_bytes > 0);
+        assert!(
+            private_allocated <= 256 * 1024,
+            "private control/run allocation must stay bounded: {private_allocated}"
+        );
+        assert!(run.metadata().unwrap().len() <= 4096);
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(&source)
+                .unwrap()
+                .generation_uuid(),
+            parent.generation_uuid()
+        );
+        assert_eq!(parent.graph_files_inventory().unwrap().unwrap(), base);
+        drop(run);
+        drop(prepared);
+        let receipt = graphforge_storage::publish_graph_delta(&source, &request).unwrap();
+        assert!(receipt.preserved_base_parquet_digests);
+        assert_eq!(receipt.unchanged_base_files, base.file_count);
+        let repeated = graphforge_storage::publish_graph_delta(&source, &request).unwrap();
+        assert!(repeated.publication.idempotent_replay);
+        assert_eq!(repeated.state_fingerprint, receipt.state_fingerprint);
+        let mut conflict = request.clone();
+        conflict.generation_uuid = Uuid::now_v7();
+        assert!(graphforge_storage::publish_graph_delta(&source, &conflict).is_err());
+        let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+        assert_eq!(selected.generation_uuid(), request.generation_uuid);
+        assert!(selected.declared_graph_files_inventory().unwrap().is_none());
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let mut expected_nodes = nodes.clone();
+        expected_nodes[0].2 = Some(123);
+        verify_graph(&graph, fixture, &expected_nodes, &edges);
+        println!(
+            "CAS_DELTA_ALLOCATION {}",
+            json!({"nodes":node_count,"base_bytes":base.total_byte_length,"shared_bytes":shared_bytes,"private_control_and_run_allocated_bytes":private_allocated,"replay_batch_rows":7,"replay_logical_memory_limit_bytes":2*1024*1024})
+        );
+    }
+}
