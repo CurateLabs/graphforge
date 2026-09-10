@@ -314,3 +314,65 @@ fails filesystem admission before its hostile-file assertions. Required Bazel
 PR CI remains the merge authority. Composite topology creation on an already
 constructed CAS parent still exposes the UUID authority defect tracked in
 #1221; no authentication check was relaxed to admit that operation.
+
+## Exploratory construction and replay layout (#1218)
+
+Source `13699caebd45a97e2da2cbb4575a91be1fe9f9e9` coalesces logical
+relationship groups into their physical route inside each existing bounded
+construction ID window. Previously two exploratory logical types produced
+individually sorted fragments with overlapping ID ranges in `_exploratory`;
+replay correctly rejected their concatenation. The encoder now sorts only the
+selected window's indexes and preserves each row's relationship name. It does
+not introduce a full-graph sort or a compatibility reader.
+
+Replay retains the authenticated source schema for both node and edge output,
+including qualified route/composition metadata. Exploratory rows retain the
+physical `rel_type_name` column; typed rows retain their physical route. Resource
+charges include variable relationship names. Full-width IDs, UUIDs, endpoints,
+replacement identity, duplicate rejection and strict cross-fragment ordering
+remain enforced. Encoding defaults are unchanged here; replay compression is
+still the policy repair in #1213.
+
+Four public fixtures cover retained-parent construction with 66 nodes and 4,097
+random-ID edges across two logical relationships, property delta publication,
+actual compaction, active snapshots, subsequent mutation, exact query, reopen,
+export, full verification and clean import. The mixed fixture contains 33
+exploratory and 33 qualified nodes, with 129 edges in each domain. It establishes
+qualified property authority, publishes a second update, asserts exactly one
+GFDR run, compacts, and checks both physical edge schemas and the exact value
+123 through reopen and portable import. A separate long-route fixture admits
+small input chunks but rejects the oversized coalesced Arrow batch before
+publication, preserving CURRENT and the exact parent graph.
+
+The retained-parent fixture has two first-generation edge fragments and three
+additional child fragments, each at most 1,024 rows. The reader check uses
+seven-row batches and verifies strictly increasing IDs across fragments.
+Deterministic ceilings and observed counters are:
+
+| Counter | Ceiling | Parent | Child |
+| --- | ---: | ---: | ---: |
+| Peak Arrow batch bytes | 131,072 | 103,396 | 103,396 |
+| Accounted live bytes | 4,194,304 | 2,805,218 | 2,805,232 |
+| Temporary allocated peak bytes | 2,097,152 | 1,224,704 | 1,302,528 |
+| Encode read bytes | 1,572,864 | 927,188 | 1,042,455 |
+| Encode write bytes | 524,288 | 302,218 | 363,917 |
+| Total construction read bytes | 16,777,216 | 5,827,068 | 7,319,877 |
+| Canonical output bytes | 262,144 | 160,479 | 189,915 |
+| Staged plus retained logical bytes | 655,360 | 479,256 | 476,148 |
+
+Batch rows stay at most 1,024, run bytes at most 4,096, merge fan-in at most two,
+and prior topology payload decoding is zero. These counters describe the
+construction subsystem. Retained logical groups and the selected physical
+Arrow batch coexist inside the bounded window; the Arrow counter alone is not
+a whole-process RSS measurement. The full public fixture process takes 14.86 s
+elapsed (10.57 s user, 2.77 s system), peaks at 146,584 KiB RSS, and records
+148,784 input / 84,416 output kernel blocks of 512 bytes. Startup, query, replay,
+portable verification and import are included. Raw syscall I/O and commands are
+in [`exploratory-replay-1218.json`](../../development/evidence/exploratory-replay-1218.json).
+
+Validation: four public regressions, 99 construction tests, 23 replay-focused
+tests, ten delta/compaction tests, production workspace Clippy, fast pre-push,
+formatting and gate-registry checks pass. Independent review verifies the
+retained #1224 property-generation repair and real mixed GFDR coverage. #1221
+still owns unsupported topology-journal authority and constructed-parent
+composite topology mutation; this repair does not broaden that support.
