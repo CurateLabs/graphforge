@@ -449,6 +449,15 @@ intent. Paths must be canonical descendants; substitution, traversal,
 duplicate names, and cross-root state fail closed, while the named rewrite lock
 also requires one link.
 
+A hydrated destination may be a read-only hardlink to a published CAS payload.
+After authenticating its prior identity and contents, the rewrite uses an
+explicit shared-destination replacement capability. The temporary source must
+remain a private single-link regular file; the replacement checks both expected
+identities and preserves the old inode, bytes, attributes, and open snapshots.
+On Windows this path alone uses `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE`; it
+never clears attributes shared with CAS aliases. An absent prior destination
+uses no-replace installation. Ordinary filesystem replacement stays strict.
+
 The intent is bounded to 16,384 entries and 8 MiB. Its sole generation-authority
 entry is `topology/generation.json`, whose JSON is bounded to 4 KiB and must
 encode the exact next topology/search pair. Data files are installed and
