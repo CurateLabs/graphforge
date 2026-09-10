@@ -3814,6 +3814,24 @@ pub(crate) fn relationship_disjoint(left: DfExpr, right: DfExpr) -> DfExpr {
     CYPHER_RELATIONSHIP_DISJOINT.call(vec![left, right])
 }
 
+// Exact fixed-hop residual admitted by the input-predicate optimizer. Do not
+// identify UDFs by name: another implementation may use the same name.
+pub(crate) fn is_fixed_relationship_disjoint(
+    expr: &DfExpr,
+    schema: &datafusion::common::DFSchema,
+) -> bool {
+    use datafusion::logical_expr::ExprSchemable;
+    let DfExpr::ScalarFunction(function) = expr else {
+        return false;
+    };
+    function.func.inner().downcast_ref::<CypherRelationshipDisjoint>().is_some()
+        && function.args.len() == 2
+        && function.args.iter().all(|arg| {
+            matches!(arg, DfExpr::Column(column) if column.relation.is_some() && column.name == "edge_id")
+                && arg.get_type(schema).ok() == Some(DataType::UInt64)
+        })
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CypherRelationshipDisjoint {
     signature: Signature,

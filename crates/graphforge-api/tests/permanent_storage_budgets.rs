@@ -5781,6 +5781,16 @@ fn csr_cold_public_query_probe() {
         let graph = GraphForge::new(source.to_str()).unwrap();
         let open_ns = opened.elapsed().as_nanos();
         let query = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score = -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+        if std::env::var_os("GF_CSR_PROBE_DIAGNOSTICS").is_some() {
+            query_efficiency_diagnostics(&graph, query, &expected);
+            return;
+        }
+        let selected_case =
+            std::env::var("GF_CSR_PROBE_QUERY").unwrap_or_else(|_| "original".into());
+        let (_, query) = query_efficiency_cases(query)
+            .into_iter()
+            .find(|(name, _)| *name == selected_case)
+            .expect("known probe query case");
         let mut query_ns = Vec::new();
         for _ in 0..5 {
             let started = Instant::now();
@@ -5791,10 +5801,55 @@ fn csr_cold_public_query_probe() {
         println!(
             "CSR_COLD_PUBLIC_QUERY {}",
             json!({
-                "mode":mode,"open_elapsed_ns":open_ns,"query_elapsed_ns":query_ns,
+                "mode":mode,"case":selected_case,"open_elapsed_ns":open_ns,"query_elapsed_ns":query_ns,
                 "rows":expected.len(),"fingerprint":digest_hex(&serde_json::to_vec(&expected).unwrap()),
                 "cache_scope":"first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded"
             })
+        );
+    }
+}
+
+// Aggregate-only diagnostics for #1207. Run this exact probe in a dedicated
+// process; query-scoped demand capture excludes concurrent unbound executions.
+fn query_efficiency_cases(original: &str) -> [(&'static str, &str); 3] {
+    let prefiltered = "MATCH (a) WHERE a.score = -2047 WITH a MATCH (a)-[r]->(b)-[s]->(c) RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    let range = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score >= -2047 AND a.score <= -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    [
+        ("original", original),
+        ("prefiltered", prefiltered),
+        ("range", range),
+    ]
+}
+
+fn query_efficiency_diagnostics(graph: &GraphForge, original: &str, expected: &[[Uuid; 5]]) {
+    for (name, query) in query_efficiency_cases(original) {
+        let plan = graph
+            .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+            .unwrap();
+        let started = Instant::now();
+        let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
+        let elapsed_ns = started.elapsed().as_nanos();
+        let result = result.unwrap();
+        assert_eq!(csr_two_hop_rows(&result.batches), expected);
+        let hops: Vec<_> = captured.hops.iter().map(|(id, hop)| json!({
+            "hop":id,"input_rows":hop.input_rows,"input_batches":hop.input_batches,
+            "candidates":hop.candidates_generated,"emitted":hop.rows_emitted,
+            "edge_reads":hop.edge_reads_completed,"edge_full_reads":hop.edge_full_reads,
+            "edge_rows_scanned":hop.edge_rows_scanned,"edge_rows_returned":hop.edge_rows_returned,
+            "node_reads":hop.node_reads_completed,"node_full_reads":hop.node_full_reads,
+            "node_rows_scanned":hop.node_rows_scanned,"node_rows_returned":hop.node_rows_returned,
+            "edge_projected_columns":hop.edge_projected_columns,"node_projected_columns":hop.node_projected_columns
+        })).collect();
+        let filters: Vec<_> = captured.filters.values().map(|f| json!({"ordinal":f.ordinal,
+            "relationship_uniqueness":f.relationship_uniqueness,"input_rows":f.input_rows,"output_rows":f.output_rows})).collect();
+        println!(
+            "QUERY_EFFICIENCY_DIAGNOSTICS {}",
+            json!({"case":name,"rows":expected.len(),
+            "fingerprint":digest_hex(&serde_json::to_vec(expected).unwrap()),"elapsed_ns":elapsed_ns,
+            "hops":hops,"filters":filters,"hydration":captured.hydration,
+            "memory_reserved_before":captured.memory_reserved_before,"memory_reserved_after":captured.memory_reserved_after,
+            "returned_batch_bytes":captured.returned_batch_bytes,"execution_batch_rows":captured.execution_batch_rows,
+            "plan":plan.replace("-2047", "<fixture literal>")})
         );
     }
 }

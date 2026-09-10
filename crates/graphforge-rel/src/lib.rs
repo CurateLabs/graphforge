@@ -20,6 +20,8 @@ pub use expr::{ExprLowerer, LoweringError, VarMap, ir_literal_to_scalar, scalar_
 pub mod lowerer;
 pub use lowerer::GraphPlanLowerer;
 
+pub mod input_predicates;
+
 pub mod calendar;
 
 pub mod temporal;
