@@ -4779,7 +4779,9 @@ mod tests {
             .permissions();
         permissions.set_readonly(true);
         std::fs::set_permissions(root.path().join("cas"), permissions).unwrap();
-        let mut snapshot = stable.open_child_file(OsStr::new("target")).unwrap();
+        // Match Parquet readers: File::open shares deletion on Windows.
+        // Retained authentication capabilities intentionally deny deletion.
+        let mut snapshot = File::open(root.path().join("target")).unwrap();
         let prior = file_identity(&snapshot).unwrap();
         let staged = path_identity(&root.path().join("temporary")).unwrap();
         assert!(
@@ -4816,6 +4818,45 @@ mod tests {
                 .permissions()
                 .readonly()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn authenticated_replacement_respects_retained_authentication_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = StableDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("target"), b"old").unwrap();
+        std::fs::hard_link(root.path().join("target"), root.path().join("cas")).unwrap();
+        std::fs::write(root.path().join("temporary"), b"new").unwrap();
+        let guard = stable.open_child_file(OsStr::new("target")).unwrap();
+        let prior = file_identity(&guard).unwrap();
+        let staged = path_identity(&root.path().join("temporary")).unwrap();
+        assert!(
+            stable
+                .replace_authenticated_child(
+                    OsStr::new("temporary"),
+                    staged,
+                    OsStr::new("target"),
+                    prior
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join("target")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(root.path().join("temporary")).unwrap(),
+            b"new"
+        );
+        drop(guard);
+        stable
+            .replace_authenticated_child(
+                OsStr::new("temporary"),
+                staged,
+                OsStr::new("target"),
+                prior,
+            )
+            .unwrap();
+        assert_eq!(std::fs::read(root.path().join("target")).unwrap(), b"new");
+        assert_eq!(std::fs::read(root.path().join("cas")).unwrap(), b"old");
     }
 
     #[cfg(unix)]

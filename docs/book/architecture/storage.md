@@ -453,7 +453,9 @@ A hydrated destination may be a read-only hardlink to a published CAS payload.
 After authenticating its prior identity and contents, the rewrite uses an
 explicit shared-destination replacement capability. The temporary source must
 remain a private single-link regular file; the replacement checks both expected
-identities and preserves the old inode, bytes, attributes, and open snapshots.
+identities and preserves the old inode, bytes, attributes, and ordinary query
+readers. Windows retained authentication guards still deny deletion and must
+be released before replacement; their sharing protections remain unchanged.
 On Windows this path alone uses `FILE_RENAME_IGNORE_READONLY_ATTRIBUTE`; it
 never clears attributes shared with CAS aliases. An absent prior destination
 uses no-replace installation. Ordinary filesystem replacement stays strict.
