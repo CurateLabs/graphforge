@@ -155,3 +155,58 @@ phase. The test verifies both measured phase peaks when they tie, no increase
 against the compressed retained control, strict reduction against the frozen
 pre-compression control, and the original strict retained-allocation reduction.
 Compression does not retroactively remove a historical shaping peak.
+
+## Delta and compaction ownership repair (#1219)
+
+Construction publishes mapped CAS roots. Delta preparation and compaction had
+assumed generation-owned graph directories, so direct construction → composite
+property mutation failed before replay. Current production emits both ownership
+forms. The repair resolves the declared authority, authenticates CAS payloads,
+and links immutable inputs into a private workspace. A delta seals its new run
+into the shared manifest. Compaction seals changed files and removes delta-run
+entries while retaining unchanged objects, capabilities and other participants.
+Publication retains its CAS lease through CURRENT and releases it before cleanup.
+
+Runtime catalog persistence now replaces the private alias through the existing
+durable rewrite protocol. Catalog and label-encoding marker commit together.
+Composite deltas include observed runtime names in their candidate; introducing
+a property can legitimately change the catalog digest. Node/property payloads
+remain byte-identical when appending a delta. The catalog writer retains its
+previous Parquet defaults; shared encoding policy remains #1213.
+
+[Measured ownership evidence](../../development/evidence/cas-delta-ownership-1219.json)
+uses runtime source `36bc94505baef9125ad254c4b707aac2383ea090`. Two compiled API
+regressions pass public construction, composite and direct storage publication,
+reopen/query, cancellation before publication, active query snapshots,
+idempotent retries, compaction, export, full verify and clean import. Node-only
+fixtures isolate ownership from the multi-relationship replay repair in #1218.
+The existing delta/compaction integration suites also pass (26 tests), alongside
+10 unit/crash tests, 19 composite tests and 30 bulk-construction tests. A focused
+storage test installs real CAS catalog/marker objects and verifies that durable
+persistence replaces both private aliases while preserving the original objects;
+the Windows and macOS native CI lanes run this exact test.
+
+| Nodes | Base logical bytes | Reused payload bytes | Private controls + run allocated |
+| ---: | ---: | ---: | ---: |
+| 33 | 14,018 | 11,460 | 24,576 |
+| 4,097 | 545,130 | 379,901 | 188,416 |
+
+Both allocation fixtures assert identical CAS/private file identities for node
+and property payloads, unchanged parent inventories, a run no larger than 4 KiB,
+and private control/run allocation no larger than 256 KiB. They use seven-row
+batches and the existing 2 MiB logical replay limit. Mutable membership controls
+still require private copies, so their allocation grows with the fixture.
+These are scoped preparation budgets, not total temporary-disk or process-memory
+bounds. Fingerprinting still materializes a replay view; compaction now publishes
+its existing private replay output without making a second complete staging copy.
+
+The untraced serial binary took 5.38 seconds (4.10 user, 0.98 system), with
+142,932 KiB peak RSS. Kernel filesystem accounting reported 54,064 input and
+28,672 output blocks of 512 bytes. A separate syscall trace counted 60,252,083
+returned read bytes and 10,211,682 returned write bytes, including startup,
+authentication, both fixtures, queries and the portable round trip. These are
+observations, not portable CPU/I/O thresholds; cache-dependent physical I/O and
+syscall byte counts are different quantities. Compilation is excluded. Reproduce
+with the prebuilt `permanent_storage_budgets` binary and
+`cas_ --nocapture --test-threads=1`, using native-root `TMPDIR`; run `/usr/bin/time -v`
+separately from `strace -f -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync`.

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arrow::array::{
     Array, FixedSizeBinaryArray, ListArray, StringArray, TimestampMicrosecondArray, UInt32Array,
@@ -28,6 +28,7 @@ use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
     published_project_transaction, stage_project_generation_from_admitted_parent,
 };
+#[cfg(test)]
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
 /// Run file format identity implemented by this release.
@@ -638,6 +639,7 @@ pub struct GraphDeltaPublicationReceipt {
 /// complete project generation. Preparation never stages or publishes CURRENT.
 pub struct PreparedGraphDelta {
     workspace: tempfile::TempDir,
+    publication_lease: Option<crate::GraphObjectPublicationLease>,
     /// Authenticated `graph/files` participant for the prepared tree.
     pub files_participant: crate::ProjectParticipant,
     /// Sequence assigned to the appended run.
@@ -655,6 +657,36 @@ impl PreparedGraphDelta {
     #[must_use]
     pub fn graph_tree_root(&self) -> &Path {
         self.workspace.path()
+    }
+
+    /// Select the owning tree only when the participant declares that ownership.
+    #[must_use]
+    pub fn graph_tree_source(&self) -> Option<&Path> {
+        self.publication_lease
+            .is_none()
+            .then(|| self.workspace.path())
+    }
+
+    /// Revalidate the retained CAS publication capability before CURRENT changes.
+    pub fn revalidate_for_publish(&self) -> Result<(), GfError> {
+        if let Some(lease) = &self.publication_lease {
+            lease.revalidate_for_publish()?;
+        }
+        Ok(())
+    }
+
+    /// Publish a validated candidate with its declared ownership capability.
+    ///
+    /// # Errors
+    /// Propagates publication and retained-CAS authentication errors.
+    pub fn publish(
+        &self,
+        validated: crate::ValidatedProjectGeneration,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        match &self.publication_lease {
+            Some(lease) => validated.publish_with_graph_objects(lease),
+            None => validated.publish(),
+        }
     }
 }
 
@@ -1286,6 +1318,110 @@ fn bounded_materialized_fingerprint(
     Ok(hasher.finalize().into())
 }
 
+/// An authenticated input for the existing path-based replay implementation.
+/// CAS payloads are linked into a private workspace; the selected generation
+/// remains the authority and retains its ownership throughout publication.
+pub(crate) struct DeltaReplaySource {
+    root: PathBuf,
+    pub(crate) inventory: GraphFilesInventory,
+    workspace: Option<tempfile::TempDir>,
+}
+
+pub(crate) fn generation_with_replaced_graph(
+    parent: &crate::ResolvedProjectGeneration,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    graph: crate::ProjectParticipant,
+) -> Result<ProjectGenerationRequest, GfError> {
+    let mut participants = parent
+        .participant_snapshots()?
+        .into_iter()
+        .filter(|snapshot| {
+            snapshot.capability_id != crate::GRAPH_CAPABILITY_ID
+                || snapshot.record_family_id != crate::GRAPH_FILES_FAMILY
+        })
+        .map(|snapshot| {
+            let encoding = match snapshot.encoding.as_str() {
+                "parquet" => crate::ProjectParticipantEncoding::Parquet,
+                "arrow" => crate::ProjectParticipantEncoding::Arrow,
+                "json" => crate::ProjectParticipantEncoding::Json,
+                _ => return Err(corrupt("parent participant encoding is unsupported")),
+            };
+            Ok(crate::ProjectParticipant {
+                capability_id: snapshot.capability_id,
+                capability_version: snapshot.capability_version,
+                record_family_id: snapshot.record_family_id,
+                record_version: snapshot.record_version,
+                encoding,
+                schema_fingerprint: snapshot.schema_fingerprint,
+                row_count: snapshot.row_count,
+                bytes: snapshot.bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, GfError>>()?;
+    participants.push(graph);
+    Ok(ProjectGenerationRequest {
+        transaction_uuid,
+        generation_uuid,
+        capabilities: parent
+            .capabilities()
+            .into_iter()
+            .map(|capability| ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect(),
+        participants,
+    })
+}
+
+impl DeltaReplaySource {
+    pub(crate) fn open(parent: &crate::ResolvedProjectGeneration) -> Result<Self, GfError> {
+        let inventory = parent
+            .graph_files_inventory()?
+            .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
+        match parent.declared_graph_files_participant()? {
+            Some(crate::GraphFilesParticipant::V1(_)) => Ok(Self {
+                root: parent.graph_tree_root(),
+                inventory,
+                workspace: None,
+            }),
+            Some(crate::GraphFilesParticipant::V2(_)) => {
+                let workspace = tempfile::tempdir().map_err(|error| {
+                    GfError::Storage(format!("create authenticated delta input: {error}"))
+                })?;
+                crate::materialize_graph_objects(
+                    parent.container_root(),
+                    &inventory,
+                    workspace.path(),
+                )?;
+                let (inventory, _) = capture_graph_files(workspace.path())?;
+                Ok(Self {
+                    root: workspace.path().to_owned(),
+                    inventory,
+                    workspace: Some(workspace),
+                })
+            }
+            None => Err(validation("parent generation lacks graph/files inventory")),
+        }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn into_workspace(self) -> Result<tempfile::TempDir, GfError> {
+        if let Some(workspace) = self.workspace {
+            return Ok(workspace);
+        }
+        let workspace = tempfile::tempdir().map_err(|error| {
+            GfError::Storage(format!("create graph delta staging directory: {error}"))
+        })?;
+        crate::graph_files::materialize_graph_tree(&self.root, &self.inventory, workspace.path())?;
+        Ok(workspace)
+    }
+}
+
 /// Prepare one owning base-plus-run graph tree without staging or publishing it.
 ///
 /// # Errors
@@ -1294,6 +1430,26 @@ fn bounded_materialized_fingerprint(
 pub fn prepare_graph_delta(
     parent: &crate::ResolvedProjectGeneration,
     request: &GraphDeltaPublishRequest,
+) -> Result<PreparedGraphDelta, GfError> {
+    prepare_graph_delta_inner(parent, request, None)
+}
+
+/// Prepare a delta together with runtime names observed by the owning facade.
+///
+/// # Errors
+/// Returns authentication, encoding, idempotency, and resource-limit errors.
+pub fn prepare_graph_delta_with_runtime_catalog(
+    parent: &crate::ResolvedProjectGeneration,
+    request: &GraphDeltaPublishRequest,
+    catalog: &graphforge_ir::RuntimeCatalog,
+) -> Result<PreparedGraphDelta, GfError> {
+    prepare_graph_delta_inner(parent, request, Some(catalog))
+}
+
+fn prepare_graph_delta_inner(
+    parent: &crate::ResolvedProjectGeneration,
+    request: &GraphDeltaPublishRequest,
+    catalog: Option<&graphforge_ir::RuntimeCatalog>,
 ) -> Result<PreparedGraphDelta, GfError> {
     for op in &request.operations {
         if op.payload.expected_kind() != op.kind {
@@ -1305,9 +1461,10 @@ pub fn prepare_graph_delta(
     let parent_inventory = parent
         .graph_files_inventory()?
         .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
-    let parent_tree = parent.graph_tree_root();
-    verify_graph_tree(&parent_tree, &parent_inventory)?;
-    let parent_runs = load_verified_delta_runs(&parent_tree, &parent_inventory, request.limits)?;
+    let source = DeltaReplaySource::open(parent)?;
+    let parent_tree = source.root();
+    let source_inventory = &source.inventory;
+    let parent_runs = load_verified_delta_runs(parent_tree, source_inventory, request.limits)?;
     let committed_ops = parent_runs
         .iter()
         .flat_map(|run| run.records.iter())
@@ -1334,34 +1491,12 @@ pub fn prepare_graph_delta(
         &request.operations,
         request.limits,
     )?;
-    let workspace = tempfile::tempdir().map_err(|error| {
-        GfError::Storage(format!("create graph delta staging directory: {error}"))
-    })?;
-    for entry in &parent_inventory.files {
-        let source = crate::graph_files::resolve_v1_inventory_entry(&parent_tree, entry)?;
-        let relative = crate::graph_files::canonical_inventory_relative_path(&entry.relative_path)?;
-        let destination = workspace.path().join(relative);
-        if let Some(parent_dir) = destination.parent() {
-            fs::create_dir_all(parent_dir)
-                .map_err(|error| storage("create delta staging parent", parent_dir, error))?;
-        }
-        fs::copy(&source, &destination)
-            .map_err(|error| storage("copy parent graph file", &source, error))?;
+    let workspace = source.into_workspace()?;
+    write_prepared_run(workspace.path(), next_sequence, &run_bytes)?;
+    if let Some(catalog) = catalog {
+        crate::runtime_entity_labels::persist_runtime_catalog(workspace.path(), catalog)?;
     }
-    let new_path = workspace
-        .path()
-        .join(delta_run_relative_path(next_sequence));
-    if let Some(parent_dir) = new_path.parent() {
-        fs::create_dir_all(parent_dir)
-            .map_err(|error| storage("create deltas directory", parent_dir, error))?;
-    }
-    let mut file =
-        File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
-    file.write_all(&run_bytes)
-        .map_err(|error| storage("write delta run", &new_path, error))?;
-    file.sync_all()
-        .map_err(|error| storage("flush delta run", &new_path, error))?;
-    let (inventory, files_participant) = capture_graph_files(workspace.path())?;
+    let (inventory, mut files_participant) = capture_graph_files(workspace.path())?;
     let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory)?;
     let parent_base_count = count_base_files(&parent_inventory)?;
     let preserved_base_parquet_digests = base_parquet_digests_preserved(
@@ -1372,14 +1507,62 @@ pub fn prepare_graph_delta(
     )?;
     let state_fingerprint =
         bounded_materialized_fingerprint(workspace.path(), &inventory, request.limits)?;
+    let publication_lease = match parent.declared_graph_files_participant()? {
+        Some(crate::GraphFilesParticipant::V2(root)) => {
+            let lease = crate::begin_graph_object_publication(parent.container_root())?;
+            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
+                &lease,
+                root,
+                crate::GraphManifestLimits::default(),
+            )?;
+            let mut sealed = vec![PathBuf::from(delta_run_relative_path(next_sequence))];
+            if catalog.is_some() {
+                sealed.extend([
+                    PathBuf::from("topology/runtime_catalog.parquet"),
+                    PathBuf::from("topology/runtime_entity_label_encoding.json"),
+                ]);
+            }
+            let (root, _) = crate::graph_object_store::append_replayed_graph_files(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &inventory,
+                &sealed,
+                &[],
+            )?;
+            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
+            Some(lease)
+        }
+        _ => None,
+    };
     Ok(PreparedGraphDelta {
         workspace,
+        publication_lease,
         files_participant,
         run_sequence: next_sequence,
         preserved_base_parquet_digests,
         unchanged_base_files,
         state_fingerprint,
     })
+}
+
+fn write_prepared_run(
+    workspace: &Path,
+    next_sequence: u64,
+    run_bytes: &[u8],
+) -> Result<(), GfError> {
+    let new_path = workspace.join(delta_run_relative_path(next_sequence));
+    if let Some(parent_dir) = new_path.parent() {
+        fs::create_dir_all(parent_dir)
+            .map_err(|error| storage("create deltas directory", parent_dir, error))?;
+    }
+    let mut file =
+        File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
+    file.write_all(run_bytes)
+        .map_err(|error| storage("write delta run", &new_path, error))?;
+    file.sync_all()
+        .map_err(|error| storage("flush delta run", &new_path, error))?;
+    Ok(())
 }
 
 /// Publish one small-write generation that preserves unchanged base Parquet.
@@ -1446,11 +1629,9 @@ fn publish_graph_delta_after_prepare(
         let inventory = resolved
             .graph_files_inventory()?
             .ok_or_else(|| corrupt("published generation missing graph inventory"))?;
-        let state_fingerprint = bounded_materialized_fingerprint(
-            &resolved.graph_tree_root(),
-            &inventory,
-            request.limits,
-        )?;
+        let source = DeltaReplaySource::open(&resolved)?;
+        let state_fingerprint =
+            bounded_materialized_fingerprint(source.root(), &source.inventory, request.limits)?;
         let run_sequence = list_delta_runs(&inventory, request.limits)?.len() as u64;
         return Ok(GraphDeltaPublicationReceipt {
             publication,
@@ -1468,33 +1649,23 @@ fn publish_graph_delta_after_prepare(
     let parent = resolve_project_generation(container_root)?;
     let prepared = prepare_graph_delta(&parent, request)?;
 
-    let mut participants = empty_workspace_participants()?;
-    participants.insert(0, prepared.files_participant.clone());
-    let generation_request = ProjectGenerationRequest {
-        transaction_uuid: request.transaction_uuid,
-        generation_uuid: request.generation_uuid,
-        capabilities: vec![
-            ProjectCapability {
-                capability_id: GRAPH_CAPABILITY_ID.into(),
-                capability_version: GRAPH_CAPABILITY_VERSION,
-            },
-            ProjectCapability {
-                capability_id: "workspace".into(),
-                capability_version: 1,
-            },
-        ],
-        participants,
-    };
+    let generation_request = generation_with_replaced_graph(
+        &parent,
+        request.transaction_uuid,
+        request.generation_uuid,
+        prepared.files_participant.clone(),
+    )?;
     before_stage(container_root)?;
+    prepared.revalidate_for_publish()?;
     let publication = match stage_project_generation_from_admitted_parent(
         admission,
         parent,
         &generation_request,
-        Some(prepared.graph_tree_root()),
+        prepared.graph_tree_source(),
         None,
     )? {
         ProjectStageOutcome::Staged(staged) => {
-            staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
+            prepared.publish(staged.validate(|_| Ok(()), |_, _| Ok(()))?)?
         }
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };

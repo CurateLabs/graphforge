@@ -282,26 +282,12 @@ impl GraphForge {
         let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
 
         let publication = (|| -> Result<RecordBatch, GfError> {
-            // Select the storage route from explicit typed input before the
-            // private workspace is mutated. Capacity exhaustion deliberately
-            // falls back to canonical full-Parquet publication.
-            let prepared_delta =
-                if !optimistic && let Some(operations) = eligible_delta_operations(request)? {
-                    let delta_request = graphforge_storage::GraphDeltaPublishRequest {
-                        transaction_uuid,
-                        generation_uuid,
-                        run_uuid: graphforge_core::uuid::composite_delta_run(&transaction_uuid),
-                        operations,
-                        limits: graphforge_storage::GraphDeltaJournalLimits::default(),
-                    };
-                    match graphforge_storage::prepare_graph_delta(parent, &delta_request) {
-                        Ok(prepared) => Some(prepared),
-                        Err(error) if error.code() == "GF_RESOURCE_LIMIT" => None,
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    None
-                };
+            // Admit the typed delta operation shape before mutating the workspace.
+            let delta_operations = if optimistic {
+                None
+            } else {
+                eligible_delta_operations(request)?
+            };
             let property_inventory =
                 crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
             apply_graph_mutations(
@@ -314,6 +300,24 @@ impl GraphForge {
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
+            let prepared_delta = if let Some(operations) = delta_operations {
+                let delta_request = graphforge_storage::GraphDeltaPublishRequest {
+                    transaction_uuid,
+                    generation_uuid,
+                    run_uuid: graphforge_core::uuid::composite_delta_run(&transaction_uuid),
+                    operations,
+                    limits: graphforge_storage::GraphDeltaJournalLimits::default(),
+                };
+                match graphforge_storage::graph_delta_journal::prepare_graph_delta_with_runtime_catalog(
+                    parent, &delta_request, &next_catalog,
+                ) {
+                    Ok(prepared) => Some(prepared),
+                    Err(error) if error.code() == "GF_RESOURCE_LIMIT" => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
             let graph = match prepared_delta.as_ref() {
                 Some(prepared) => prepared.files_participant.clone(),
                 None => graphforge_storage::capture_graph_files(&self.dir)?.1,
@@ -338,31 +342,34 @@ impl GraphForge {
                     root,
                     &publication,
                     content_fingerprint,
-                    Some(
-                        prepared_delta
-                            .as_ref()
-                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
-                    ),
+                    prepared_delta
+                        .as_ref()
+                        .map_or(Some(self.dir.as_path()), |prepared| {
+                            prepared.graph_tree_source()
+                        }),
                     self.lifecycle_mode,
                 )?
             } else {
                 graphforge_storage::stage_project_generation_with_graph_tree_mode(
                     root,
                     &publication,
-                    Some(
-                        prepared_delta
-                            .as_ref()
-                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
-                    ),
+                    prepared_delta
+                        .as_ref()
+                        .map_or(Some(self.dir.as_path()), |prepared| {
+                            prepared.graph_tree_source()
+                        }),
                     self.lifecycle_mode,
                 )?
             };
+            if let Some(prepared) = &prepared_delta {
+                prepared.revalidate_for_publish()?;
+            }
             #[cfg(test)]
             optimistic_publish_barrier_for_test(optimistic);
             let outcome = match staged {
                 ProjectStageOutcome::AlreadyPublished(published) => published,
-                ProjectStageOutcome::Staged(staged) => staged
-                    .validate(
+                ProjectStageOutcome::Staged(staged) => {
+                    let validated = staged.validate(
                         |_| Ok(()),
                         |actual_parent, _| {
                             if actual_parent.generation_uuid() != expected_parent {
@@ -370,8 +377,12 @@ impl GraphForge {
                             }
                             Ok(())
                         },
-                    )?
-                    .publish()?,
+                    )?;
+                    match &prepared_delta {
+                        Some(prepared) => prepared.publish(validated)?,
+                        None => validated.publish()?,
+                    }
+                }
             };
             if outcome.generation_uuid != generation_uuid {
                 return Err(GfError::Validation(
@@ -2158,10 +2169,23 @@ mod tests {
                 .len(),
             1
         );
+        let expected_catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
+        let persisted_catalog = crate::read_runtime_catalog(
+            &published
+                .graph_tree_root()
+                .join("topology/runtime_catalog.parquet"),
+        )
+        .unwrap()
+        .to_record_batch();
+        assert_eq!(
+            persisted_catalog, expected_catalog,
+            "the newly observed nickname must be published in the runtime catalog"
+        );
         for entry in parent_graph.files.iter().filter(|entry| {
-            std::path::Path::new(&entry.relative_path)
-                .extension()
-                .is_some_and(|extension| extension == "parquet")
+            entry.relative_path != "topology/runtime_catalog.parquet"
+                && std::path::Path::new(&entry.relative_path)
+                    .extension()
+                    .is_some_and(|extension| extension == "parquet")
         }) {
             assert!(published_graph.files.iter().any(|candidate| {
                 candidate.relative_path == entry.relative_path

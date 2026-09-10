@@ -98,6 +98,33 @@ pub fn write_runtime_entity_label_encoding_marker(dir: &Path) -> Result<(), GfEr
     Ok(())
 }
 
+/// Persist observed runtime names by replacing the private workspace alias.
+/// A catalog hydrated from CAS must never be truncated in place.
+///
+/// # Errors
+/// Propagates Parquet encoding, authenticated replacement, and durability errors.
+pub fn persist_runtime_catalog(dir: &Path, catalog: &RuntimeCatalog) -> Result<(), GfError> {
+    let topology = dir.join("topology");
+    std::fs::create_dir_all(&topology).map_err(|error| storage_err(error.to_string()))?;
+    let batch = catalog.to_record_batch();
+    let temporary = tempfile::NamedTempFile::new_in(&topology)
+        .map_err(|error| storage_err(error.to_string()))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(temporary.as_file(), batch.schema(), None)
+            .map_err(|error| storage_err(error.to_string()))?;
+    writer
+        .write(&batch)
+        .map_err(|error| storage_err(error.to_string()))?;
+    writer
+        .close()
+        .map_err(|error| storage_err(error.to_string()))?;
+    let mut staged = crate::RewriteBatch::new();
+    staged.stage_file(&topology.join("runtime_catalog.parquet"), temporary.path())?;
+    staged.stage_bytes(&encoding_path(dir), &runtime_entity_label_encoding_bytes()?)?;
+    crate::generation::commit_topology_aware(staged, dir)?;
+    Ok(())
+}
+
 /// Shared marker bytes for reconciliation and authenticated construction artifacts.
 pub(crate) fn runtime_entity_label_encoding_bytes() -> Result<Vec<u8>, GfError> {
     let marker = EncodingMarker {
@@ -547,6 +574,75 @@ pub fn runtime_entity_plan_id_is_disjoint_from_ontology(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn catalog_persistence_replaces_read_only_cas_aliases() {
+        use std::fs::{self, File};
+        let source = tempfile::tempdir().unwrap();
+        let mut writer = crate::GraphWriter::open_at(
+            source.path(),
+            graphforge_core::OntologyMode::Exploratory,
+            1,
+        )
+        .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let mut catalog = graphforge_ir::RuntimeCatalog::new();
+        catalog.intern_property("before", None).unwrap();
+        super::persist_runtime_catalog(source.path(), &catalog).unwrap();
+        let (inventory, _) = crate::capture_graph_files(source.path()).unwrap();
+        let objects = tempfile::tempdir().unwrap();
+        for entry in &inventory.files {
+            let bytes = fs::read(source.path().join(&entry.relative_path)).unwrap();
+            let (digest, _) = crate::install_graph_object_bytes(objects.path(), &bytes).unwrap();
+            assert_eq!(digest, entry.content_sha256);
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        crate::materialize_graph_objects(objects.path(), &inventory, workspace.path()).unwrap();
+        let controls = [
+            "topology/runtime_catalog.parquet",
+            "topology/runtime_entity_label_encoding.json",
+        ];
+        for path in controls {
+            let file = File::open(workspace.path().join(path)).unwrap();
+            assert!(file.metadata().unwrap().permissions().readonly());
+            assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 2);
+        }
+        catalog.intern_property("after", None).unwrap();
+        super::persist_runtime_catalog(workspace.path(), &catalog).unwrap();
+        for path in controls {
+            let entry = inventory
+                .files
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .unwrap();
+            let object = crate::graph_object_path(objects.path(), &entry.content_sha256).unwrap();
+            assert_eq!(
+                fs::read(&object).unwrap(),
+                fs::read(source.path().join(path)).unwrap()
+            );
+            assert!(fs::metadata(&object).unwrap().permissions().readonly());
+            let private = File::open(workspace.path().join(path)).unwrap();
+            assert_eq!(graphforge_filesystem::file_link_count(&private).unwrap(), 1);
+            assert_ne!(
+                graphforge_filesystem::file_identity(&private).unwrap(),
+                graphforge_filesystem::file_identity(&File::open(object).unwrap()).unwrap()
+            );
+        }
+        let batches = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            File::open(workspace.path().join(controls[0])).unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert_eq!(batches, vec![catalog.to_record_batch()]);
+        assert_eq!(
+            fs::read(workspace.path().join(controls[1])).unwrap(),
+            super::runtime_entity_label_encoding_bytes().unwrap()
+        );
+    }
     use super::*;
     use crate::schemas::TOPOLOGY_NODES_SCHEMA;
     use arrow::array::{

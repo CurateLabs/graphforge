@@ -21,14 +21,17 @@ use crate::graph_delta_journal::{
 };
 use crate::graph_files::{GraphFilesInventory, capture_graph_files, verify_graph_tree};
 use crate::project_generation::resolve_project_generation;
+#[cfg(test)]
+use crate::project_publication::{ProjectCapability, ProjectGenerationRequest};
 use crate::project_publication::{
-    ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
-    published_project_transaction, stage_project_generation_from_admitted_parent,
+    ProjectPublicationReceipt, ProjectStageOutcome, published_project_transaction,
+    stage_project_generation_from_admitted_parent,
 };
 use crate::project_retention::{
     ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy,
     execute_project_cleanup_with_mode,
 };
+#[cfg(test)]
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
 /// Default peak logical memory budget for one compaction invocation.
@@ -325,59 +328,58 @@ fn compact_graph_delta_after_prepare(
     let prepared = prepare_compaction(root, &parent, request, cancel)?;
     check_cancel(cancel)?;
 
-    let staging = tempfile::tempdir().map_err(|error| {
-        GfError::Storage(format!(
-            "create graph delta compaction staging directory: {error}"
-        ))
-    })?;
-    materialize_compacted_workspace(staging.path(), &prepared, &limits, cancel)?;
+    // Replay already owns a complete private candidate. Publish that candidate
+    // directly instead of copying the entire compacted graph a second time.
+    let staging = &prepared.materialized;
     let output_bytes = directory_byte_size(staging.path())?;
     if output_bytes > limits.max_disk_bytes {
         return Err(resource_limit("compaction staged disk bytes"));
     }
 
-    let (inventory, files_participant) = capture_graph_files(staging.path())?;
-    let mut participants = empty_workspace_participants()?;
-    participants.insert(0, files_participant);
-    let generation_request = ProjectGenerationRequest {
-        transaction_uuid: request.transaction_uuid,
-        generation_uuid: request.generation_uuid,
-        capabilities: vec![
-            ProjectCapability {
-                capability_id: GRAPH_CAPABILITY_ID.into(),
-                capability_version: GRAPH_CAPABILITY_VERSION,
-            },
-            ProjectCapability {
-                capability_id: "workspace".into(),
-                capability_version: 1,
-            },
-        ],
-        participants,
-    };
+    let inventory = &prepared.materialized_inventory;
+    let (files_participant, publication_lease) =
+        compaction_graph_participant(&parent, staging.path(), inventory)?;
+    let generation_request = crate::graph_delta_journal::generation_with_replaced_graph(
+        &parent,
+        request.transaction_uuid,
+        request.generation_uuid,
+        files_participant,
+    )?;
 
     check_cancel(cancel)?;
     before_stage(root)?;
+    if let Some(lease) = &publication_lease {
+        lease.revalidate_for_publish()?;
+    }
     let publication = match stage_project_generation_from_admitted_parent(
         admission,
         parent,
         &generation_request,
-        Some(staging.path()),
+        publication_lease.is_none().then(|| staging.path()),
         None,
     )? {
         ProjectStageOutcome::Staged(staged) => {
             // Pre-publication verification authenticates the exact bounded
             // materialization planned above without rebuilding whole-graph maps.
-            verify_graph_tree(staging.path(), &inventory)?;
-            if inventory_state_fingerprint(&inventory) != prepared.expected_fingerprint {
+            verify_graph_tree(staging.path(), inventory)?;
+            if inventory_state_fingerprint(inventory) != prepared.expected_fingerprint {
                 return Err(corrupt(
                     "compacted generation fingerprint mismatch before CURRENT",
                 ));
             }
-            staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
+            let validated = staged.validate(|_| Ok(()), |_, _| Ok(()))?;
+            match &publication_lease {
+                Some(lease) => validated
+                    .publish_with_graph_objects_cancellable(lease, &mut || {
+                        cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    })?,
+                None => validated.publish()?,
+            }
         }
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
     };
 
+    drop(publication_lease);
     let cleanup = if request.cleanup_after_commit {
         Some(execute_project_cleanup_with_mode(
             root,
@@ -398,6 +400,40 @@ fn compact_graph_delta_after_prepare(
     );
     report.output_bytes = output_bytes;
     Ok(report)
+}
+
+fn compaction_graph_participant(
+    parent: &crate::ResolvedProjectGeneration,
+    workspace: &Path,
+    inventory: &GraphFilesInventory,
+) -> Result<
+    (
+        crate::ProjectParticipant,
+        Option<crate::GraphObjectPublicationLease>,
+    ),
+    GfError,
+> {
+    let mut files_participant = crate::graph_files::inventory_participant(
+        crate::graph_files::encode_inventory(inventory)?,
+        inventory.file_count,
+    )?;
+    let publication_lease = match parent.declared_graph_files_participant()? {
+        Some(crate::GraphFilesParticipant::V2(root)) => {
+            let lease = crate::begin_graph_object_publication(parent.container_root())?;
+            let (mut state, _) = crate::graph_object_store::GraphManifestState::open(
+                &lease,
+                root,
+                crate::GraphManifestLimits::default(),
+            )?;
+            let (root, _) = crate::graph_object_store::replace_replayed_graph_files(
+                &lease, workspace, &mut state, inventory,
+            )?;
+            files_participant = crate::graph_files::graph_files_root_participant(&root)?;
+            Some(lease)
+        }
+        _ => None,
+    };
+    Ok((files_participant, publication_lease))
 }
 
 /// Inspect whether CURRENT triggers compaction under `policy`.
@@ -434,15 +470,13 @@ pub fn graph_delta_compaction_status_with_mode(
     )?;
     admission.revalidate_identity()?;
     let resolved = resolve_project_generation(admission.root())?;
-    let inventory = resolved
-        .graph_files_inventory()?
-        .ok_or_else(|| validation("CURRENT generation lacks graph/files inventory"))?;
     let materialized = tempfile::tempdir().map_err(|error| {
         GfError::Storage(format!("create bounded compaction status view: {error}"))
     })?;
+    let source = crate::graph_delta_journal::DeltaReplaySource::open(&resolved)?;
     let (_, evidence) = crate::graph_delta_journal::materialize_replayed_graph_tree(
-        &resolved.graph_tree_root(),
-        &inventory,
+        source.root(),
+        &source.inventory,
         materialized.path(),
         limits,
     )?;
@@ -502,13 +536,11 @@ fn prepare_compaction(
     let limits = request.limits.validate()?;
     check_cancel(cancel)?;
 
-    let parent_inventory = parent
-        .graph_files_inventory()?
-        .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
-    let parent_tree = parent.graph_tree_root();
-    verify_graph_tree(&parent_tree, &parent_inventory)?;
+    let source = crate::graph_delta_journal::DeltaReplaySource::open(parent)?;
+    let parent_tree = source.root();
+    let parent_inventory = &source.inventory;
 
-    let runs = load_verified_delta_runs(&parent_tree, &parent_inventory, limits.journal)?;
+    let runs = load_verified_delta_runs(parent_tree, parent_inventory, limits.journal)?;
     let input_runs = runs.len() as u64;
     if input_runs == 0 {
         return Err(validation(
@@ -545,8 +577,8 @@ fn prepare_compaction(
         ))
     })?;
     let (_, replay) = crate::graph_delta_journal::materialize_replayed_graph_tree(
-        &parent_tree,
-        &parent_inventory,
+        parent_tree,
+        parent_inventory,
         materialized.path(),
         limits.journal,
     )?;
@@ -583,21 +615,6 @@ fn prepare_compaction(
         materialized,
         materialized_inventory,
     })
-}
-
-fn materialize_compacted_workspace(
-    workspace: &Path,
-    prepared: &PreparedCompaction,
-    _limits: &GraphDeltaCompactionLimits,
-    cancel: Option<&AtomicBool>,
-) -> Result<(), GfError> {
-    check_cancel(cancel)?;
-    crate::graph_files::materialize_graph_tree(
-        prepared.materialized.path(),
-        &prepared.materialized_inventory,
-        workspace,
-    )?;
-    Ok(())
 }
 
 fn inventory_state_fingerprint(inventory: &GraphFilesInventory) -> [u8; 32] {
@@ -694,9 +711,10 @@ fn replay_compaction_receipt(
     let materialized = tempfile::tempdir().map_err(|error| {
         GfError::Storage(format!("create bounded compaction receipt view: {error}"))
     })?;
+    let source = crate::graph_delta_journal::DeltaReplaySource::open(&resolved)?;
     let (_, evidence) = crate::graph_delta_journal::materialize_replayed_graph_tree(
-        &resolved.graph_tree_root(),
-        &inventory,
+        source.root(),
+        &source.inventory,
         materialized.path(),
         request.limits.journal,
     )?;

@@ -3513,28 +3513,7 @@ fn shape_stream(
 /// `GraphForge::new(path)` reloads the types/properties observed this session
 /// (#725). Best-effort directory creation; surfaces I/O / Parquet errors.
 fn persist_runtime_catalog(dir: &std::path::Path, rc: &RuntimeCatalog) -> Result<(), GfError> {
-    use parquet::arrow::ArrowWriter;
-
-    let topology = dir.join("topology");
-    std::fs::create_dir_all(&topology)
-        .map_err(|e| GfError::Storage(format!("failed to create {}: {e}", topology.display())))?;
-    let batch = rc.to_record_batch();
-    let path = topology.join("runtime_catalog.parquet");
-    let file = std::fs::File::create(&path)
-        .map_err(|e| GfError::Storage(format!("failed to write {}: {e}", path.display())))?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None)
-        .map_err(|e| GfError::Storage(e.to_string()))?;
-    writer
-        .write(&batch)
-        .map_err(|e| GfError::Storage(e.to_string()))?;
-    writer
-        .close()
-        .map_err(|e| GfError::Storage(e.to_string()))?;
-    // Persisting observed runtime entity labels implies the tagged plan/storage
-    // encoding (#702). Mark the project so reopen does not treat ontology type
-    // zero as an unmarked legacy collision with the first advisory label.
-    graphforge_storage::write_runtime_entity_label_encoding_marker(dir)?;
-    Ok(())
+    graphforge_storage::runtime_entity_labels::persist_runtime_catalog(dir, rc)
 }
 
 /// Build the schema-level metadata attached to every public result.
