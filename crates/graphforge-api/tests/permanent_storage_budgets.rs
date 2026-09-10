@@ -1934,4 +1934,47 @@ fn composite_qualified_create_then_set_preserves_node_and_edge_owners() {
     assert_eq!(int_at(&result.batches[0], 0, 0), Some(3));
     assert_eq!(int_at(&result.batches[0], 1, 0), None);
     assert_eq!(int_at(&result.batches[0], 2, 0), Some(2));
+    let current = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let bindings = graphforge_storage::semantic_storage_bindings(&current)
+        .unwrap()
+        .unwrap();
+    let relation = bindings
+        .bindings
+        .iter()
+        .find(|binding| {
+            binding.route_kind == graphforge_storage::SemanticRouteKind::Relation
+                && binding.symbol.local_id == "NEW_TYPED"
+        })
+        .unwrap();
+    let fixture = Fixture {
+        name: "qualified_composite_edge",
+        nodes: 2,
+        edges: 1,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let nodes = [
+        (a, "mixed:entity:NewNode".into(), None),
+        (b, "mixed:entity:NewNode".into(), None),
+    ];
+    let edges = [(edge, a, b, relation.route.clone(), None, None)];
+    drop(graph);
+    round_trip(root.path(), &source, fixture, &nodes, &edges);
+    let imported = GraphForge::new(root.path().join("imported").to_str()).unwrap();
+    let imported_result = imported.execute("MATCH (a:`mixed:NewNode`)-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode`) RETURN a.score, r.weight, b.score").unwrap();
+    assert_eq!(
+        imported_result
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>(),
+        result
+            .batches
+            .iter()
+            .map(|batch| batch.columns())
+            .collect::<Vec<_>>()
+    );
 }
