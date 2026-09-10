@@ -2121,6 +2121,14 @@ fn write_surrogate_tails(
     Ok(())
 }
 
+/// One codec policy for permanent construction payloads, including the catalog
+/// that is shaped privately and then published byte-for-byte.
+pub(crate) fn permanent_parquet_properties() -> Result<WriterProperties, GfError> {
+    Ok(WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::try_new(1).map_err(storage)?))
+        .build())
+}
+
 fn write_parquet(
     root: &StableDirectory,
     relative: &str,
@@ -2152,11 +2160,7 @@ fn write_parquet(
             digest: Sha256::new(),
         },
         batch.schema(),
-        Some(
-            WriterProperties::builder()
-                .set_compression(Compression::ZSTD(ZstdLevel::try_new(1).map_err(storage)?))
-                .build(),
-        ),
+        Some(permanent_parquet_properties()?),
     )
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;

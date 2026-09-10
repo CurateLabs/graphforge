@@ -4602,6 +4602,16 @@ fn write_parquet(
     batch: &RecordBatch,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<ArtifactReceipt, GfError> {
+    write_parquet_with_properties(root, name, batch, None, evidence)
+}
+
+fn write_parquet_with_properties(
+    root: &StableDirectory,
+    name: &str,
+    batch: &RecordBatch,
+    properties: Option<parquet::file::properties::WriterProperties>,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<ArtifactReceipt, GfError> {
     let temporary = artifact_temp(name);
     let file = root
         .create_replaceable_child_file(OsStr::new(&temporary))
@@ -4609,7 +4619,8 @@ fn write_parquet(
     let identity = file_identity(&file).map_err(storage)?;
     let hashing = HashingWriter::new(file)?;
     let buffered = BufWriter::with_capacity(BLOCK_BYTES, hashing);
-    let mut parquet = ArrowWriter::try_new(buffered, batch.schema(), None).map_err(storage)?;
+    let mut parquet =
+        ArrowWriter::try_new(buffered, batch.schema(), properties).map_err(storage)?;
     parquet.write(batch).map_err(storage)?;
     parquet.finish().map_err(storage)?;
     parquet.sync().map_err(storage)?;
@@ -6315,7 +6326,13 @@ fn build_runtime_catalog(
         }
     }
     let output = "shaped-runtime-catalog.parquet";
-    let receipt = write_parquet(root, output, &catalog.to_record_batch(), evidence)?;
+    let receipt = write_parquet_with_properties(
+        root,
+        output,
+        &catalog.to_record_batch(),
+        Some(crate::graph_construction_encoding::permanent_parquet_properties()?),
+        evidence,
+    )?;
     record_shape_artifact_install(evidence, &receipt)?;
     evidence.merge_fsync_operations = evidence
         .merge_fsync_operations
