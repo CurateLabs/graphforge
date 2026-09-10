@@ -998,5 +998,34 @@
     "cold_trace": "Use the same syscall set plus -yy descriptor paths on a separate cold_read process, without using its instrumented timing as latency evidence.",
     "cache_advice": "Before each of three read processes and the separate trace, fsync and POSIX_FADV_DONTNEED each unique regular file in the private fixture.",
     "workspace_sampling": "Separate lifecycle run: recursively stat the private temporary workspace, deduplicate file allocation by (st_dev, st_ino), sum st_blocks*512, record elapsed intervals and peak; requested interval 5ms."
+  },
+  "validation": {
+    "cargo_fmt_all_check": "passed after final implementation edit",
+    "cargo_clippy_workspace_deny_warnings": "passed, including full pre-push rust-quality stage",
+    "make_pre_push_fast": "passed",
+    "make_gate_registry_check": "passed: validation and14 registry tests",
+    "native_adjacency": "cargo test -p graphforge-storage -p graphforge-exec --lib adjacency:: -- --nocapture: storage58 passed/1 existing ignored, exec18 passed; subsequent final codec7/7 passed",
+    "cargo_test_workspace": {
+      "outcome": "failed on existing hardcoded /tmp filesystem admission setup",
+      "storage": "1097 passed, 1 failed, 2 existing ignored",
+      "public_permanent_storage": "47 passed",
+      "ladder_accounting": "30 passed",
+      "fixed_hop": "17 passed, 2 existing release-only ignored",
+      "public_api_unit": "737 passed",
+      "public_api_bdd": "118 scenarios passed",
+      "opencypher": "3897 passed, zero regressions"
+    },
+    "make_pre_push": {
+      "outcome": "failed at rust-tests-coverage-native on the same existing filesystem setup",
+      "storage": "1096 passed, 1 failed, 2 existing ignored",
+      "prior_stages": "preflight, policy-static and rust-quality passed"
+    },
+    "local_failure": {
+      "test": "project_generation::tests::wave9_participant_inventory_rejects_links_and_special_files",
+      "source": "crates/graphforge-storage/src/project_generation.rs:2576",
+      "cause": "The unchanged fixture explicitly creates its root with tempdir_in(\"/tmp\"); this host rejects that filesystem with GF_UNSUPPORTED_FILESYSTEM cause=filesystem_class_unproven before the link/socket assertions. TMPDIR points to admitted native storage for other tests.",
+      "policy": "No skip, weakened assertion or successful full-gate claim. Exact-head required CI remains the merge authority."
+    },
+    "independent_review": "Implementation and measurement evidence reviewed independently; no outstanding verified finding."
   }
 }
