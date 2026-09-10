@@ -377,14 +377,39 @@ materialization, lease cleanup, and GC use the distinct mutable open-or-create
 capability; materialization remains there because installing hard links mutates
 the source inode's link state.
 
-The node-v2 canonical shape has no unary branches: maximal lowercase-hex digest
-prefixes are compressed into nodes, branches have at least two distinct nibble
-children, and leaves contain the full-digest collision bucket in logical-path
-order. Empty inventory is the sole one-node empty-branch exception. Therefore
-`F > 0` distinct path digests require at most `2F - 1` manifest objects instead
-of one object per hash nibble. Resolver admission derives its structural bound
-from the authenticated root totals and rejects v1/mixed/future nodes, malformed
-or nonmaximal shapes, wrong routes, duplicate references, and corrupt objects.
+The node-v3 canonical shape uses bounded buckets of one to eight exact-path
+entries. Maximal lowercase-hex SHA-256 prefixes are compressed into nodes;
+branches have at least two distinct nibble children. Empty inventory is the
+sole one-node empty-branch exception. Each entry authenticates its logical
+path, byte length, role and payload SHA-256. Bucket order, unique paths and the
+entire ancestral hash route are checked, including when a targeted lookup is
+absent. For `F > 0` entries, the structural bound remains `2F - 1` nodes.
+Node v1/v2 and mixed/future formats are refused; this node-format change does
+not change the separate graph-files root version and adds no compatibility
+reader or migration machinery.
+
+Every production manifest-object read admits at most 256 KiB before allocating
+the encoded buffer. Decoding admits at most eight entries, 4096 UTF-8 bytes per
+path, 64 bytes per digest, and sixteen branch children. The explicit field
+visitor avoids an unbounded flattened JSON intermediate and rejects the ninth
+entry. A 64-KiB decoded representation charge covers the node, bounded entry or
+child slots and their string contents. This is a logical charge, **not a hard
+native-memory bound**: parser scratch, canonical re-encoding, allocator overhead,
+read caches, and retained copy-on-write ancestors can overlap. Process RSS and
+filesystem peaks must be measured separately; route-table payload limits are
+independent of these manifest-node limits.
+
+Insertion into a bucket is local; a ninth entry partitions at its first
+SHA-256 divergence into at most seventeen nodes. An unsplittable ninth
+full-digest collision is refused. Replacement copies only the selected path.
+Deletion removes empty nodes, collapses unary branches, and coalesces a small
+subtree using a probe limited to sixteen nodes and eight entries. A lower bound
+from pending nonempty children stops oversized probes without scanning the
+subtree. Published roots and payloads remain immutable, so retained generations
+and active snapshots keep their exact authenticated inventory. The 128/256/512
+entry regression ladder bounds representative successful and absent lookups and
+replacements to four reads, and checks deletion work separately. These are
+application I/O counters, not OS I/O or native memory measurements.
 
 Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
@@ -768,10 +793,10 @@ authenticated open and never falls back to v3 when malformed or substituted.
 
 New mapped publications use a compact version-4 `graph/files` root, retaining
 the version-2 radix representation with explicit mapped-route authority. Payloads and
-fixed-depth radix nodes live once in the project content-addressed object
+compressed node-v3 radix nodes live once in the project content-addressed object
 store; a generation stores only its root reference and logical totals. Updates
-copy at most one bounded SHA-256 nibble path and retain exact-path collision
-leaves, so publication never scans or recopies prior file metadata. The private
+copy a bounded SHA-256 nibble path and split or collapse bounded buckets,
+so publication never scans or recopies the entire prior file inventory. The private
 workspace commit boundary records revision-identified sealed and tombstone
 descriptors before mutations become visible; they are acknowledged only after
 CURRENT advances. Reopen traverses the authenticated radix and hashes every
@@ -790,11 +815,11 @@ under `.graphforge-cache/` and are rejected as graph authority. Parquet write
 sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
 writers record their descriptor before making replacement bytes visible.
 
-Terminal leaves retain a sorted exact-path bucket for the theoretical case in
-which distinct path bytes have the same SHA-256 digest. Producing a real
-SHA-256 collision is cryptographically infeasible and is not a test fixture.
-Tests instead cover exact-path replacement/deletion and reject malformed leaf
-digests, ordering, duplicate references, wrong depth, and corrupt objects.
+Terminal buckets retain sorted exact paths even when distinct path bytes share
+a SHA-256 digest, up to the eight-entry bound. A real SHA-256 collision is not a
+test fixture. Tests cover exact-path replacement/deletion, bucket split/collapse,
+maximum escaped path fields, oversized encodings, duplicate paths, malformed
+routes, unsupported versions and authenticated old-root reads.
 
 ### Properties layer (warm path)
 
@@ -1077,3 +1102,36 @@ superseded fixture attempts. No incomparable baseline improvement is claimed.
 This ledger maps ordinary implementation criteria to their existing tests. It
 adds no release-certification requirement and does not claim final capacity
 completion; integrated S20/S22 evidence remains under #1194.
+
+### Bounded manifest allocation evidence (#1204)
+
+The fixed heterogeneous #1196 workload (4,097 nodes, 65,537 edges, four routes)
+now publishes 352 exact manifest entries as 209 production objects occupying
+856,064 native allocated bytes. The immediately preceding current-format
+baseline used 483 objects and 1,978,368 bytes for the same entries: a
+1,122,304-byte (56.7%) reduction. Attributed permanent allocation falls from
+9,814,016 to 8,691,712 bytes. The historical #1196 baseline remains separately
+recorded at 544 entries / 750 objects / 3,072,000 bytes; its additional 192 edge
+payload references were removed by earlier work, not by bucket encoding.
+The deterministic acceptance ceiling is 1,536,000 manifest bytes on native
+4-KiB allocation storage.
+
+Frozen executable source `36360cb8` preserves the exact semantic fingerprint
+through real public construction, reopen/query, export, full verification and
+clean import. The publishing suite additionally exercises immediate mutation,
+retained streams, subsequent imported mutation, recovery, cancellation and
+retry. Maximum-field and corruption tests, exact eight-to-nine split/collapse
+and retained-root checks, and the 128/256/512-entry update ladder cover the
+manifest boundary directly.
+
+The source-bound resource record is
+[`bounded-manifest-1204.json`](../../development/evidence/bounded-manifest-1204.json).
+Its full-fixture CPU observations include the existing codec experiments and
+portable lifecycle; they are not a query-speed benchmark. Application syscall
+reads are 1,303,689,747 baseline versus 1,301,114,860 candidate bytes; writes are
+267,812,449 versus 267,870,503 bytes. Thus the physical allocation saving does
+not imply reduced write traffic in this workload. Process RSS, OS block I/O,
+and separately sampled overlapping filesystem owners are reported with their
+measurement limits. The candidate point-in-time whole-project census includes
+21,979,136 allocated file bytes plus 1,257,472 directory bytes; no equivalent
+baseline census or whole-project reduction is claimed.

@@ -771,7 +771,7 @@ fn bucket_manifest_experiment(source: &Path) -> Value {
                     .values()
                     .map(|child| child.as_str().unwrap().to_owned()),
             ),
-            "leaf" => {}
+            "bucket" => {}
             other => panic!("unsupported assessment manifest node {other}"),
         }
         original.insert(digest, bytes);
@@ -808,7 +808,7 @@ fn bucket_manifest_experiment(source: &Path) -> Value {
     json!({"source_manifest_objects":original.len(),"source_manifest_allocated_bytes":original_allocated,
         "candidate_bucket_capacity":8,"candidate_objects":candidate.len(),"candidate_logical_bytes":candidate_logical,
         "candidate_estimated_allocated_bytes_at_4096":candidate_quantized,"authenticated_lookups_checked":entries.len(),
-        "production_format_changed":false})
+        "production_format_changed":true,"source_manifest_logical_bytes":original.values().map(Vec::len).sum::<usize>()})
 }
 
 fn validate_storage_budgets(f: Fixture, storage: &graphforge_storage::StorageAttributionSnapshot) {
@@ -889,6 +889,45 @@ fn validate_storage_budgets(f: Fixture, storage: &graphforge_storage::StorageAtt
     );
 }
 
+fn whole_project_file_census(root: &Path) -> Value {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut pending = vec![root.to_path_buf()];
+        let mut seen = BTreeSet::new();
+        let (mut files, mut logical, mut allocated, mut directory_allocated) =
+            (0_u64, 0_u64, 0_u64, 0_u64);
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(!metadata.file_type().is_symlink());
+            if !seen.insert((metadata.dev(), metadata.ino())) {
+                continue;
+            }
+            if metadata.is_dir() {
+                directory_allocated += metadata.blocks() * 512;
+                pending.extend(
+                    std::fs::read_dir(path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else {
+                assert!(metadata.is_file());
+                files += 1;
+                logical += metadata.len();
+                allocated += metadata.blocks() * 512;
+            }
+        }
+        json!({"unique_files":files,"file_logical_bytes":logical,"file_allocated_bytes":allocated,
+            "directory_allocated_bytes":directory_allocated,"deduplication":"device/inode",
+            "scope":"recursive project including retained generations, caches and private state; point-in-time, not peak"})
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        json!({"measured":false,"reason":"native inode census requires Unix"})
+    }
+}
+
 fn assess(f: Fixture) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
@@ -924,6 +963,16 @@ fn assess(f: Fixture) {
     }
     let identity_experiment = identity_padding_experiment(&source);
     let manifest_experiment = bucket_manifest_experiment(&source);
+    if f.heterogeneous {
+        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 352);
+        assert!(
+            manifest_experiment["source_manifest_allocated_bytes"]
+                .as_u64()
+                .unwrap()
+                <= 1_536_000,
+            "production manifest must halve the 3,072,000-byte #1196 native allocation baseline: {manifest_experiment}"
+        );
+    }
     if f.adjacency {
         graph.rebuild_adjacency(None).unwrap();
     }
@@ -937,11 +986,12 @@ fn assess(f: Fixture) {
         "unbuilt and built adjacency are distinct measured capabilities"
     );
     drop(graph);
+    let whole_project = whole_project_file_census(&source);
     let fingerprint = round_trip(root.path(), &source, f, &nodes, &edges);
     println!(
         "PERMANENT_STORAGE_ASSESSMENT {}",
         json!({"fixture":f.name,"nodes":f.nodes,"edges":f.edges,"routes":f.routes,"random_ids":matches!(f.identifiers, Identifiers::Random),"properties":f.properties,"heterogeneous_schemas":f.heterogeneous,"adjacency_built":f.adjacency,"unindexed_allocated_bytes":unindexed.allocated_bytes,"unindexed_categories":unindexed.categories,
-            "construction_elapsed_ns":construction_ns,"semantic_fingerprint":fingerprint,
+            "construction_elapsed_ns":construction_ns,"semantic_fingerprint":fingerprint,"whole_project":whole_project,
             "permanent": {"logical_bytes":storage.logical_bytes,"physical_logical_bytes":storage.physical_logical_bytes,"allocated_bytes":storage.allocated_bytes,"physical_objects":storage.physical_objects,"categories":storage.categories},
             "adjacency_codec_experiment":adjacency_experiment,"parquet_experiment":experiment,"identity_padding_experiment":identity_experiment,"manifest_bucket_experiment":manifest_experiment})
     );
@@ -995,6 +1045,24 @@ fn public_mutation_replaces_shared_constructed_payloads() {
     );
     drop(graph);
     round_trip(root.path(), &source, fixture, &nodes, &edges);
+    // Exercise the imported current-format manifest through a new publication,
+    // then reopen and authenticate the subsequently mutated graph.
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    imported
+        .execute("MATCH (n) WHERE n.score IS NOT NULL SET n.score = n.score + 1")
+        .unwrap();
+    for node in &mut nodes {
+        node.2 = node.2.map(|score| score + 1);
+    }
+    verify_graph(&imported, fixture, &nodes, &edges);
+    drop(imported);
+    verify_graph(
+        &GraphForge::new(imported_path.to_str()).unwrap(),
+        fixture,
+        &nodes,
+        &edges,
+    );
 }
 
 #[test]

@@ -140,7 +140,7 @@ impl ResolvedProjectGeneration {
                         crate::read_graph_object_by_digest(
                             self.container_root(),
                             digest,
-                            64 * 1024 * 1024,
+                            crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                         )
                     },
                 )?;
@@ -247,7 +247,7 @@ impl ResolvedProjectGeneration {
                         crate::graph_object_store::read_graph_object_counted(
                             self.container_root(),
                             digest,
-                            4 * 1024 * 1024,
+                            crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                             io,
                         )
                     },
@@ -337,7 +337,7 @@ impl ResolvedProjectGeneration {
                         crate::read_graph_object_by_digest(
                             self.container_root(),
                             digest,
-                            MAX_SEGMENT_BYTES,
+                            crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                         )
                     },
                 )?;
