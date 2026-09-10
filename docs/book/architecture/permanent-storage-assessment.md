@@ -552,7 +552,7 @@ admission. Required native Bazel CI remains the merge gate.
 The integrated publishing-contract census reproduced ordinary and qualified
 CREATE failures on a constructed CAS parent. Hydration shared the mutable v5
 UUID manifest and receipt, but mutation planning correctly required private
-control-file ownership. Those two controls now use the existing authenticated,
+control-file ownership. Those controls now use the existing authenticated,
 bounded private-copy path. Immutable identity and surrogate runs remain shared;
 retained reads accept extra links only while readonly, with unchanged named-file
 identity, manifest digest/generation and full-run/per-block authentication.
@@ -578,15 +578,22 @@ assert these distinct outcomes, reopen exact selected data, perform another
 mutation and complete a portable round trip. Existing storage tests continue to
 cover cancellation and unfinished private artifact cleanup.
 
-The public hydration fixtures cap the two mutable controls at 2 KiB logical and
+The public hydration fixtures cap applicable mutable controls at 2 KiB logical and
 8 KiB allocated, all private hydration writes at 192 KiB, and the existing copy
-buffer at 64 KiB. Immutable UUID payloads must have the original readonly CAS
+buffer at 64 KiB. Fresh construction has the manifest; the mutation receipt is
+created by the first topology mutation. The control-copy unit test exercises
+both. Immutable UUID payloads must have the original readonly CAS
 inode: zero payload copying or reencoding. The buffer is reused serially across
 files; control file size changes copy I/O and disk use, not this buffer size.
 These are fixture/component bounds, not a whole-process RSS guarantee. Existing
 v4 ordinal private artifacts remain included in total hydration writes; they
 are not attributed to this repair. The control-specific unit test checks exact
 read/write bytes, calls and file/directory synchronization counts.
+The existing 1x/2x/4x lifecycle qualification subtracts these exact authenticated
+control lengths before enforcing the ordinal-copy growth policy. On the fixed
+node / growing edge axis, decimal counts in control JSON may grow while ordinal
+copy bytes remain exactly fixed. The regression still rejects one unaccounted
+write byte and refuses absent or oversized control accounting.
 
 Source `ad7a867bc836bf3c7381f3a1f70a71914237b349` and raw observations are in
 [`cas-uuid-ownership-1228.json`](../../development/evidence/cas-uuid-ownership-1228.json).

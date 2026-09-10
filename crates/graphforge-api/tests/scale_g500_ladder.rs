@@ -3596,6 +3596,24 @@ fn run_integrated_certification_config(
     );
     let committed_generation = graphforge_storage::resolve_project_generation(&source)
         .expect("resolve committed ingest generation");
+    let committed_inventory = committed_generation
+        .graph_files_inventory()
+        .expect("committed inventory")
+        .expect("constructed graph inventory");
+    let manifest_bytes = committed_inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/uuid-membership/manifest.json")
+        .expect("constructed UUID manifest")
+        .byte_length;
+    // Fresh construction has no topology-mutation receipt yet. If present,
+    // its authenticated bytes are also copied privately during hydration.
+    let receipt_bytes = committed_inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/uuid-membership/topology-receipt.json")
+        .map_or(0, |entry| entry.byte_length);
+    let hydration_uuid_control_bytes = manifest_bytes + receipt_bytes;
     journal.replace_project_owner("source_project", &committed_generation);
     journal.pass("ingest", phase, Some(input_fingerprint));
 
@@ -4109,6 +4127,7 @@ fn run_integrated_certification_config(
             "clean_import": imported_storage,
             "construction": construction_storage,
             "application_io_phases": construction_phases,
+            "hydration_uuid_control_bytes": hydration_uuid_control_bytes,
             "workspace_current_allocated_bytes": workspace_current_allocated_bytes,
             "workspace_peak_allocated_bytes": workspace_peak_allocated_bytes,
             "workspace_components": workspace_components,
@@ -4371,6 +4390,7 @@ struct LifecycleLinearityObservation {
     cas_publication_io: graphforge_storage::GraphPublicationIo,
     encode_fsync_components: [u64; 4],
     hydration_files_copied: u64,
+    hydration_uuid_control_bytes: u64,
     hydration_file_fsync_operations: u64,
     hydration_directory_fsync_operations: u64,
     shape_read_component_calls: [u64; 6],
@@ -4688,6 +4708,9 @@ fn lifecycle_linearity_observation(evidence: &Value) -> LifecycleLinearityObserv
             .expect("native CAS component evidence"),
         encode_fsync_components,
         hydration_files_copied,
+        hydration_uuid_control_bytes: evidence["storage"]["hydration_uuid_control_bytes"]
+            .as_u64()
+            .expect("authenticated UUID control bytes"),
         hydration_file_fsync_operations,
         hydration_directory_fsync_operations,
         shape_read_component_calls,
@@ -5889,13 +5912,32 @@ fn validate_lifecycle_metric_policies_for_axis(
                     validate_affine_metric(&name, values, denominators)?;
                 }
                 PhaseMetricPolicy::NodeBearingBytes => {
-                    // Only private ordinal-V4 files are copied during this
-                    // fresh hydration; other immutable objects are hardlinked.
-                    // The controlled edge axis retains the identical node map.
+                    // Hydration copies private ordinal-V4 data plus mutable v5
+                    // controls. Control JSON gains count digits along either
+                    // axis; subtract its exact authenticated inventory bytes,
+                    // then retain the fixed-node-map bound on the edge axis.
+                    let mut ordinal_values = values;
+                    for (rung, observation) in observations.iter().enumerate() {
+                        let controls = observation.hydration_uuid_control_bytes;
+                        if controls == 0 || controls > 2 * 1024 {
+                            return Err(format!(
+                                "{name} UUID control bytes exceed fixture bounds: {controls}"
+                            ));
+                        }
+                        ordinal_values[rung] =
+                            values[rung].checked_sub(controls).ok_or_else(|| {
+                                format!("{name} omits authenticated UUID control copies")
+                            })?;
+                    }
                     if matches!(axis, LinearityAxis::Nodes) {
-                        validate_affine_metric(&name, values, denominators)?;
+                        validate_affine_metric(&name, ordinal_values, denominators)?;
                     } else {
-                        validate_fixed_protocol_metric(&name, values, values[0], values[0])?;
+                        validate_fixed_protocol_metric(
+                            &name,
+                            ordinal_values,
+                            ordinal_values[0],
+                            ordinal_values[0],
+                        )?;
                     }
                 }
                 PhaseMetricPolicy::BufferedCalls {
@@ -6428,6 +6470,7 @@ fn synthetic_linearity_observations_for_axis(
             },
             encode_fsync_components: [10, 5, 8, 20],
             hydration_files_copied: 19,
+            hydration_uuid_control_bytes: 100,
             hydration_file_fsync_operations: 19,
             hydration_directory_fsync_operations: 19,
             shape_read_component_calls: [factor, 0, 0, 0, 0, 0],
@@ -6852,6 +6895,35 @@ fn controlled_fixture_policies_reject_coherent_zero_and_excess_work() {
                 .unwrap()[1] = 0;
         }
         assert!(validate_lifecycle_metric_policies_for_axis(axis, &omitted_copies).is_err());
+    }
+}
+
+#[test]
+fn lifecycle_hydration_policy_accounts_exact_uuid_controls() {
+    let mut observations = synthetic_linearity_observations_for_axis(LinearityAxis::Edges);
+    for (rung, observation) in observations.iter_mut().enumerate() {
+        observation.hydration_uuid_control_bytes += rung as u64;
+        observation
+            .phases
+            .get_mut("hydration_verification")
+            .unwrap()[1] += rung as u64;
+    }
+    validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &observations)
+        .expect("exact control bytes may grow while ordinal copies remain fixed");
+    let mut unaccounted = observations.clone();
+    unaccounted[2]
+        .phases
+        .get_mut("hydration_verification")
+        .unwrap()[1] += 1;
+    assert!(
+        validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &unaccounted).is_err()
+    );
+    for controls in [0, 2 * 1024 + 1, u64::MAX] {
+        let mut invalid = observations.clone();
+        invalid[2].hydration_uuid_control_bytes = controls;
+        assert!(
+            validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &invalid).is_err()
+        );
     }
 }
 
