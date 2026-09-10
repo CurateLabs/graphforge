@@ -2044,11 +2044,13 @@ fn install_bucket_entries(
             .or_default()
             .push(entry);
     }
+    let child_depth = u8::try_from(split_depth + 1)
+        .map_err(|_| validation("manifest bucket split depth overflow"))?;
     let mut children = BTreeMap::new();
     for (edge, entries) in groups {
         children.insert(
             edge,
-            install_bucket_entries(lease, (split_depth + 1) as u8, entries, publication_io)?,
+            install_bucket_entries(lease, child_depth, entries, publication_io)?,
         );
     }
     install_manifest_node(
@@ -5765,7 +5767,7 @@ mod tests {
             .map(|index| PathBuf::from(format!("payload-{index}.parquet")))
             .collect::<Vec<_>>();
         for (index, path) in paths.iter().enumerate() {
-            fs::write(workspace.path().join(path), [index as u8]).unwrap();
+            fs::write(workspace.path().join(path), [u8::try_from(index).unwrap()]).unwrap();
         }
         let mut state = GraphManifestState::empty();
         let (eight, _) =

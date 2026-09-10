@@ -359,5 +359,8 @@
     "Candidate whole-project census separately includes directory blocks, all retained/private/cache files and deduplicated inodes. No equivalent point-in-time baseline census exists, so no whole-project before/after claim is made.",
     "The retained test-only candidate model has 138,698 logical bytes, distinct from the actual production manifest 140,370 logical bytes. Acceptance uses actual native allocation, not prototype estimates.",
     "Historical #1196 and current baseline inventories differ due to prior merged payload fragmentation changes; the direct #1204 storage comparison uses identical current 352-entry inventories."
+  ],
+  "post_measurement_changes": [
+    "Clippy-driven checked usize-to-u8 conversion for split depth, after the existing split_depth < 64 refusal; and a checked test-fixture ordinal conversion. No admitted-format or measured-workload behavior changes. Measurements remain attributed to the frozen source, not relabeled as final-head runs."
   ]
 }
