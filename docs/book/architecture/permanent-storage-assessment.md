@@ -842,3 +842,89 @@ or shorter-lived files or directory allocations. The baseline fails the required
 value assertion, so no complete baseline runtime comparison or speed improvement
 is claimed. An earlier successful measurement preceding the subsequent-import
 mutation assertion was superseded by this final workload.
+
+## Atomic ontology promotion (#1229)
+
+Same-name ontology adoption now stages labels, relationship routes, property
+ownership and identity receipts alongside the ontology/composition/configuration
+participants. Authenticated property, ordinal and adjacency readers are prepared
+before CURRENT changes. Promotion runs on a private authenticated workspace;
+ordinary reopen does not run its property/relationship moves. Changed files use
+the shared permanent Parquet policy, preserving the existing dictionary and
+row-group settings. Unchanged immutable objects remain shared.
+
+Advisory named relationships use per-name topology/property routes, including
+names absent from the ontology. Tagged unknown node labels remain runtime
+identities. Old shared exploratory property occurrences are retired only for
+UUIDs actually transferred into new destination fragments; ambiguous destination
+ownership is refused. Topology remapping/splitting batches and property-transfer target sets contain
+at most 4,096 rows. Property probes retain their existing authenticated decode
+limits. These limits are not a whole-process memory bound.
+
+Retries identify the authored request rather than regenerated physical files.
+An interrupted pre-CURRENT attempt recovers without changing the prior facade;
+a selected candidate is rehydrated from its authenticated generation after a
+post-CURRENT error. A stale handle cannot report successful retry while retaining
+old readers. Replaying an operation after a subsequent mutation does not rewind
+CURRENT. Replacement ontologies that reorder or remove existing numeric entity
+or relationship identities are refused before publication. This preserves the
+current representation without adding migration or compatibility machinery.
+
+The tests exercise 33/4,097 nodes, 129/4,097 edges, two/four mixed routes, nullable
+integer/string properties, Advisory and Strict adoption, exact UUID/endpoints,
+active streams, repeat adoption, ordinary CREATE, reopen, export, full package
+verification, clean import and subsequent ordinary/composite SET/REMOVE. A
+storage test separately seeds node IDs near `u64::MAX` and edge IDs above
+`u32::MAX`, proving exact promotion, authenticated membership and subsequent
+allocation. Unlabelled node-property reads in ontology mode remain the existing
+lowerer's unsupported multi-table-union case; the promotion oracle uses the
+correctly labelled public queries required by #1229.
+
+[Source-bound resource evidence](../../development/evidence/ontology-promotion-1229.json)
+records the frozen executable digest, source hashes, complete Parquet inventories,
+control-file inventories, CPU/RSS, selected syscall I/O and allocation sampling.
+The pre-repair baseline fails its first post-adoption query with unauthenticated
+ordinal authority. It is not a complete comparative performance baseline, and
+this correctness repair claims no speed or storage improvement from it.
+
+| Mixed fixture | Before Parquet bytes | After Parquet bytes | Changed Parquet bytes | Changed non-Parquet graph bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 33 nodes / 129 edges / 2 routes | 23,720 | 35,823 | 28,616 | 7,591 |
+| 4,097 nodes / 4,097 edges / 4 routes | 565,549 | 684,810 | 572,555 | 274,504 |
+
+Promotion creates per-route framing and source tombstone/control records. Its
+identity receipt refresh remains a correctness cost. Repeat adoption on these
+mixed graphs reencodes no Parquet, and the existing disjoint metadata-only
+fixture retains all 18 immutable files (20,842 bytes) with zero payload
+reencoding. The tests retain exact old object identity/content and enforce
+representation-derived payload/allocation/control ceilings. These budgets do
+not cap the number of retained historical generations.
+
+The frozen mixed-route executable completes both full lifecycle fixtures in
+47.42 seconds: 42.21 user / 2.42 system CPU seconds and 140,664 KiB maximum RSS.
+Linux reports 91,752 input and 173,312 output filesystem blocks (512 bytes each).
+A separate trace observes 476,600,039 bytes returned by `read`/`pread64` and
+65,772,431 by `write`/`pwrite64`, with 7,083 successful `fsync` calls. These include
+metadata and repeated authentication; they are not unique payload bytes and
+exclude untraced kernel-copy/vectored I/O.
+
+A separate 5 ms allocation observer sees a 13,410,304-byte peak, deduplicated by
+device/inode across all retained generations, private workspaces and portable
+artifacts under one TMPDIR. Its longest observed interval is 125.3 ms; brief and
+unlinked-open allocations can be missed. This is a sampled simultaneous owner
+peak, not a hard temporary-space bound. Do not add it to the overlapping
+permanent-object inventory. Runs used warm caches and could overlap validation;
+no comparative timing claim follows from these observations.
+
+Reproduce on an admitted native filesystem, with an isolated Cargo target:
+
+```sh
+cargo test -p graphforge-api --test permanent_storage_budgets --no-run
+# Copy the reported executable before tracing or subprocess measurements.
+cp /path/to/reported/executable /path/to/frozen-promotion-tests
+TMPDIR=/path/on/native-root /usr/bin/time -v /path/to/frozen-promotion-tests \
+  ontology_promotion_preserves_mixed_routes_and_reencoding_scope \
+  --exact --nocapture --test-threads=1
+cargo test -p graphforge-api --test ontology_adoption_retry
+cargo test -p graphforge-storage --lib reader_preparation_failure
+```

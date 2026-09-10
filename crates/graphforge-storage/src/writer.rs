@@ -6018,6 +6018,117 @@ pub fn remove_edge_properties(
     Ok(touched)
 }
 
+/// Move one bounded set of exploratory snapshots into its promoted owner.
+pub(crate) fn stage_promoted_properties(
+    staged: &mut RewriteBatch,
+    dir: &Path,
+    stem: &str,
+    kind: crate::PropertyRouteKind,
+    source_schema: &Schema,
+    source: &BTreeMap<[u8; 16], crate::PropertySnapshotRow>,
+) -> Result<(), GfError> {
+    let inventory =
+        crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)?;
+    let targets = source.keys().copied().collect();
+    let (before, _) = crate::property_overlay::read_authenticated_property_snapshots_for_inventory(
+        &inventory, kind, stem, &targets,
+    )?;
+    if kind == crate::PropertyRouteKind::Edge {
+        let (present, _) =
+            crate::property_overlay::read_authenticated_property_presence_for_inventory(
+                &inventory, kind, stem, &targets,
+            )?;
+        if !present.is_empty() {
+            return Err(GfError::Validation(
+                "ontology promotion has overlapping edge property owners".into(),
+            ));
+        }
+    }
+    let destination = inventory.route_schema(kind, stem);
+    let mut source_metadata = source_schema.metadata().clone();
+    source_metadata.insert(
+        match kind {
+            crate::PropertyRouteKind::Node => "graphforge.entity_type",
+            crate::PropertyRouteKind::Edge => "graphforge.rel_type",
+        }
+        .into(),
+        stem.into(),
+    );
+    let source_schema = source_schema.clone().with_metadata(source_metadata);
+    let mut schemas = vec![&source_schema];
+    if let Some(schema) = &destination {
+        schemas.push(schema.as_ref());
+    }
+    let authority = crate::property_overlay::merge_property_route_schemas(kind, stem, schemas)?;
+    let mut metadata = authority.metadata().clone();
+    if let Some(summary) = destination.as_ref().and_then(|schema| {
+        schema
+            .metadata()
+            .get(crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY)
+    }) {
+        metadata.insert(
+            crate::property_overlay::PROPERTY_LIVE_SCHEMA_KEY.into(),
+            summary.clone(),
+        );
+    }
+    let authority = Arc::new(authority.as_ref().clone().with_metadata(metadata));
+    let rows = source
+        .iter()
+        .filter(|(_, row)| !row.tombstone)
+        .map(|(uuid, row)| {
+            let mut values = before
+                .get(uuid)
+                .map_or_else(BTreeMap::new, |row| row.values.clone());
+            values.extend(row.values.clone());
+            PropRow {
+                node_uuid: *uuid,
+                props: values.into_iter().collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    match kind {
+        crate::PropertyRouteKind::Node => stage_node_property_file(
+            staged,
+            dir,
+            stem,
+            &rows,
+            Some(authority),
+            inventory.generation_authority(),
+            Some(&before),
+        ),
+        crate::PropertyRouteKind::Edge => {
+            let rows = rows
+                .into_iter()
+                .map(|row| EdgePropRow {
+                    edge_uuid: row.node_uuid,
+                    props: row.props,
+                })
+                .collect::<Vec<_>>();
+            stage_edge_property_file(
+                staged,
+                dir,
+                stem,
+                &rows,
+                Some(authority),
+                inventory.generation_authority(),
+                Some(&before),
+            )?;
+            let tombstones = source
+                .iter()
+                .filter_map(|(uuid, row)| row.tombstone.then_some(*uuid))
+                .collect::<HashSet<_>>();
+            stage_property_tombstones_authenticated(
+                staged,
+                dir,
+                &inventory,
+                kind,
+                stem,
+                &tombstones,
+            )
+        }
+    }
+}
+
 fn stage_node_property_file(
     staged: &mut RewriteBatch,
     dir: &Path,
@@ -10103,6 +10214,114 @@ mod tests {
             "empty_compressor_bytes":empty_compressor_bytes,
             "empty_decompressor_bytes":decompressor.sizeof(),
             "measurements":measurements})
+        );
+    }
+}
+
+#[cfg(test)]
+mod promotion_full_width_tests {
+    use super::*;
+    use arrow::array::UInt64Array;
+    use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+
+    #[test]
+    fn same_name_promotion_preserves_full_width_authorities_and_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = graphforge_ir::RuntimeCatalog::new();
+        let runtime_id = catalog.intern_label("Person").unwrap();
+        catalog.intern_relation_type("KNOWS").unwrap();
+        let label = graphforge_value::EntityTypeId::runtime(runtime_id);
+        let left = Uuid::from_u128(1229801);
+        let right = Uuid::from_u128(1229802);
+        let edge = Uuid::from_u128(1229803);
+        let node_base = u64::MAX - 8;
+        let edge_base = u64::from(u32::MAX) + 7;
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1).unwrap();
+        writer.next_node_id = node_base;
+        writer.next_edge_id = edge_base;
+        assert_eq!(writer.create_node(left, label).unwrap(), node_base);
+        assert_eq!(writer.create_node(right, label).unwrap(), node_base + 1);
+        assert_eq!(
+            writer.create_edge(edge, "KNOWS", &left, &right).unwrap(),
+            edge_base
+        );
+        writer.flush().unwrap();
+        drop(writer);
+        crate::runtime_entity_labels::persist_runtime_catalog(dir.path(), &catalog).unwrap();
+        let document = OntologyLoader::load_yaml("ontology_id: wide\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n".as_bytes()).unwrap();
+        let ontology = OntologyHandle::new(OntologyCompiler::compile(&document).unwrap());
+        crate::promote_runtime_graph_for_ontology(dir.path(), &ontology, &catalog).unwrap();
+        let mut membership = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            membership.lookup_node_surrogates(&[left, right]).unwrap().0,
+            [Some(node_base), Some(node_base + 1)]
+        );
+        drop(membership);
+        let inventory =
+            crate::property_overlay::authenticated_property_inventory(dir.path()).unwrap();
+        let batches =
+            crate::read_edges_from_inventory(&inventory, "KNOWS", OntologyMode::Strict).unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+        for (name, expected) in [("edge_uuid", edge), ("src_uuid", left), ("dst_uuid", right)] {
+            assert_eq!(
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                    .unwrap()
+                    .value(0),
+                expected.as_bytes()
+            );
+        }
+        for (name, expected) in [
+            ("edge_id", edge_base),
+            ("src_id", node_base),
+            ("dst_id", node_base + 1),
+        ] {
+            assert_eq!(
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+        let created = Uuid::from_u128(1229804);
+        let next_edge = Uuid::from_u128(1229805);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 2).unwrap();
+        writer.register_existing_endpoints(&[left]).unwrap();
+        assert_eq!(
+            writer
+                .create_node(
+                    created,
+                    graphforge_value::EntityTypeId::ontology(
+                        ontology.entity_type_id("Person").unwrap()
+                    )
+                    .unwrap()
+                )
+                .unwrap(),
+            node_base + 2
+        );
+        assert_eq!(
+            writer
+                .create_edge(next_edge, "KNOWS", &left, &created)
+                .unwrap(),
+            edge_base + 1
+        );
+        writer.flush().unwrap();
+        drop(writer);
+        let mut membership = crate::UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            membership
+                .lookup_node_surrogates(&[left, right, created])
+                .unwrap()
+                .0,
+            [Some(node_base), Some(node_base + 1), Some(node_base + 2)]
         );
     }
 }
