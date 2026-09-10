@@ -6,11 +6,27 @@ schema or digest.
 
 ## UUID membership facet
 
-`manifest.json` is the existing v3 authority for both node and edge UUID
+`manifest.json` is the current v5 authority for both node and edge UUID
 membership and node `UUID -> node_id` resolution. Existing endpoint-resolution,
-construction, and mutation consumers continue to authenticate this facet
-unchanged. Its immutable runs and `topology-receipt.json` remain reachable
-until the v3 manifest no longer selects them.
+construction, and mutation consumers authenticate this facet. Its immutable runs and `topology-receipt.json` remain reachable
+until the v5 manifest no longer selects them.
+
+
+Membership format 5 encodes UUID16 + kind1, followed by the full big-endian
+surrogate8 for nodes and tombstones (25 bytes). Live edges use 17 bytes because
+their membership surrogate is defined as zero; their canonical edge ID remains
+in topology. Nonzero live-edge membership surrogates are rejected. This removes
+seven reserved zero bytes per record and eight additional bytes per live edge.
+No UUID bits or meaningful surrogate bits are truncated.
+
+Authenticated blocks are at most 1 MiB and end on complete record boundaries.
+Readers validate kinds, record counts, UUID ordering, first/last fences and SHA;
+probes select blocks by their fences and merge-scan sorted requests. Byte counts
+come from authenticated block lengths, and write-call counters count actual
+whole-record flushes. Private construction input remains a separate 32-byte
+format, hashed before bounded in-place packing. The published manifest and
+receipt select format 5; unsupported prior membership formats are refused.
+There is no compatibility reader or migration requirement before v1.
 
 ## Node ordinal facet
 
@@ -25,18 +41,18 @@ mapping independently. Ordinal payloads are packed by contiguous node-ID range
 and carry fixed-size authenticated block fences.
 
 Discovery and authenticated open are separate operations. When the ordinal
-manifest is absent, discovery validates that current v3 authority is canonical
+manifest is absent, discovery validates that current v5 authority is canonical
 before returning `RebuildRequired`. When the ordinal path exists, discovery
 reports it as present without trusting its contents. Authenticated open then
 requires the ordinal digest selected by the project receipt. A malformed,
 substituted, or generation-mismatched ordinal facet fails closed and never
-falls back to v3.
+falls back to v5.
 
 The explicit rebuild API constructs v4 only from canonical topology and returns
 an aggregate `CanonicalTopology` disposition with generation, identity/range,
 artifact-byte, fixed-block, buffer, temporary-run, and fsync evidence. It never
-opens a v3 reverse run as migration input. Durable-rewrite recovery either
-retains the prior v3-only authority or completes the receipt-bound v4 facet;
+opens a v5 reverse run as migration input. Durable-rewrite recovery either
+retains the prior v5-only authority or completes the receipt-bound v4 facet;
 there is no mixed-version read state.
 
 `peak_temporary_bytes` is the total maximum coexisting rebuild scratch, not
@@ -70,17 +86,17 @@ requested/unique/found counts, selected ranges, logical bytes, coalesced calls,
 tombstones, and bounded-buffer charges. A typed failure can be reduced to
 sanitized failure evidence, including an authentication-failure count, without
 emitting UUIDs, paths, or record contents. Consumers must not reopen the index
-per chunk or substitute the v3 membership LSM.
+per chunk or substitute the v5 membership LSM.
 
-Orphan collection starts from the current authenticated v3 manifest and, when
+Orphan collection starts from the current authenticated v5 manifest and, when
 the ordinal facet exists, requires the opaque authority resolved from a pinned
 project generation before authenticating the v4 manifest and artifacts. It
 retains the union. Hashing an untrusted manifest or receipt is never treated as
 provenance for deciding reachability.
 
 Both facets are persistent graph authority, not `.graphforge-cache/` content.
-Construction and canonical v3-to-v4 publication are specified separately by
-#969.
+Construction and canonical ordinal-facet publication are specified separately by
+#969. The facet version numbers identify separate schemas, not an upgrade order.
 
 ### Incremental ordinal publication
 
@@ -96,7 +112,7 @@ Their descriptors are strictly generation-ordered; they are not required to be
 globally concatenation-sorted. The reader authenticates every run and compares
 the aggregate forward mapping commitment with the aggregate ordinal mapping
 commitment. Historical UUID and surrogate uniqueness is also proved by the
-coupled authenticated v3 participant in the same topology transaction.
+coupled authenticated v5 participant in the same topology transaction.
 
 The construction artifact remains an immutable base. Later forward artifacts
 close implicit contiguous generation intervals. Two adjacent equal-width delta
@@ -122,7 +138,42 @@ expected manifest, so retry never replays a graph mutation. A retained old read
 handle fails stale named-manifest revalidation after the switch; callers advance
 by opening the exact newly receipt-authorized generation.
 
-Orphan maintenance runs only from the union of selected authenticated v3 and v4
+Orphan maintenance runs only from the union of selected authenticated v5 and v4
 authority. It removes an unreferenced single-link artifact by retained identity,
 defers linked or over-budget candidates, and never treats an untrusted sibling
 manifest as reachability evidence.
+
+## Packed membership evidence (#1203)
+
+[Raw integrated measurements](../../development/evidence/packed-membership-1203.json)
+use source `d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60`, including the merged
+construction Zstd repair. Four permanent fixtures pass exact
+query/reopen/export/full-verify/clean-import checks. The additional boundary test
+verifies full-width encoding; separate production tests cover rebuild, reopen,
+probes and deletion at the ID boundary.
+
+For 4,097 nodes and 65,537 edges, membership payload falls from 2,228,288 to
+1,216,554 bytes: 487,438 bytes of reserved padding and 524,296 bytes of defined-zero
+live-edge fields. For 8,193 nodes it falls from 2,359,360 to 1,318,954 bytes.
+Node reverse-surrogate records remain 24 bytes and the ordinal facet keeps its
+independent current schema.
+
+| Fixture | After Parquet repair: permanent allocation | With packed membership |
+| --- | ---: | ---: |
+| Sequential | 4,112,384 | 3,096,576 |
+| Random | 7,585,792 | 6,541,312 |
+| Eight property routes, CSR built | 18,644,992 | 17,633,280 |
+| Heterogeneous properties | 13,086,720 | 12,075,008 |
+
+The serial integrated assessment took 391.33 seconds and peaked at 247,332 KiB
+RSS on the same ext4 host, versus 393.65 seconds and 270,208 KiB after the Parquet
+repair. These are whole-test measurements, including reads and portable copies;
+they do not establish an isolated codec CPU improvement. Raw process I/O is
+recorded separately from logical storage counters.
+
+Production-path regressions cover full-width rebuild/reopen/probes and a
+`u64::MAX` tombstone, current-format crash recovery, retained snapshots, framing
+corruption and bounded merge/probe work. The write-counter boundary test uses
+123,361 live edges: exactly 2,097,137 payload bytes and three whole-record writes,
+verified through both append paths. Dividing total bytes by 1 MiB would incorrectly
+report two writes.

@@ -1,0 +1,865 @@
+{
+  "source_commit": "d103c3cb0360e5a76a4b3cbbf60ce3c3cec14d60",
+  "command": "/usr/bin/time -v /home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2 --nocapture --test-threads=1",
+  "result": "5 passed; 0 failed; 391.31 seconds",
+  "process_resource_output": "\tCommand being timed: \"/home/ubuntu/code/graphforge-target-1195/debug/deps/permanent_storage_budgets-c514423ca6fb68a2 --nocapture --test-threads=1\"\n\tUser time (seconds): 352.21\n\tSystem time (seconds): 27.48\n\tPercent of CPU this job got: 97%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 6:31.33\n\tAverage shared text size (kbytes): 0\n\tAverage unshared data size (kbytes): 0\n\tAverage stack size (kbytes): 0\n\tAverage total size (kbytes): 0\n\tMaximum resident set size (kbytes): 247332\n\tAverage resident set size (kbytes): 0\n\tMajor (requiring I/O) page faults: 0\n\tMinor (reclaiming a frame) page faults: 199150\n\tVoluntary context switches: 173345\n\tInvoluntary context switches: 3243\n\tSwaps: 0\n\tFile system inputs: 4612640\n\tFile system outputs: 3231536\n\tSocket messages sent: 0\n\tSocket messages received: 0\n\tSignals delivered: 0\n\tPage size (bytes): 4096\n\tExit status: 0\n",
+  "fixtures": [
+    {
+      "adjacency_built": false,
+      "adjacency_codec_experiment": null,
+      "construction_elapsed_ns": 26972459598,
+      "edges": 65537,
+      "fixture": "heterogeneous_property_schemas",
+      "heterogeneous_schemas": true,
+      "identity_padding_experiment": {
+        "current_record_bytes": 1216554,
+        "defined_zero_edge_saved_bytes": 524296,
+        "identity_runs": 2,
+        "live_edge_records": 65537,
+        "previous_32_byte_baseline": 2228288,
+        "production_format_changed": true,
+        "records": 69634,
+        "reserved_padding_saved_bytes": 487438
+      },
+      "manifest_bucket_experiment": {
+        "authenticated_lookups_checked": 544,
+        "candidate_bucket_capacity": 8,
+        "candidate_estimated_allocated_bytes_at_4096": 974848,
+        "candidate_logical_bytes": 194598,
+        "candidate_objects": 238,
+        "production_format_changed": false,
+        "source_manifest_allocated_bytes": 3072000,
+        "source_manifest_objects": 750
+      },
+      "nodes": 4097,
+      "parquet_experiment": {
+        "decode_elapsed_ns": [
+          170901470,
+          203487009,
+          203372907
+        ],
+        "encode_elapsed_ns": [
+          657191800,
+          824312086,
+          848801142
+        ],
+        "normalized_allocated_bytes_at_4096": [
+          9310208,
+          7467008,
+          7483392
+        ],
+        "normalized_bytes_uncompressed_zstd1_zstd3": [
+          8357272,
+          6398839,
+          6420637
+        ],
+        "production_parquet_allocated_bytes": 7467008,
+        "production_parquet_bytes": 6398839
+      },
+      "permanent": {
+        "allocated_bytes": 12075008,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 3104768,
+            "logical_bytes": 371612,
+            "logical_references": 758,
+            "physical_logical_bytes": 371612,
+            "physical_objects": 758
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 2265088,
+            "logical_bytes": 1877949,
+            "logical_references": 266,
+            "physical_logical_bytes": 1877949,
+            "physical_objects": 266
+          },
+          "topology_edges": {
+            "allocated_bytes": 5091328,
+            "logical_bytes": 4428564,
+            "logical_references": 257,
+            "physical_logical_bytes": 4428564,
+            "physical_objects": 257
+          },
+          "topology_nodes": {
+            "allocated_bytes": 102400,
+            "logical_bytes": 88869,
+            "logical_references": 5,
+            "physical_logical_bytes": 88869,
+            "physical_objects": 5
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1511424,
+            "logical_bytes": 1482397,
+            "logical_references": 12,
+            "physical_logical_bytes": 1482397,
+            "physical_objects": 9
+          }
+        },
+        "logical_bytes": 8249391,
+        "physical_logical_bytes": 8249391,
+        "physical_objects": 1295
+      },
+      "properties": true,
+      "random_ids": true,
+      "routes": 4,
+      "semantic_fingerprint": "5c704d8bf7e1851e1631e6f36bc37495f9d9d9e1e9b94950e84310b545824ec2",
+      "unindexed_allocated_bytes": 12075008,
+      "unindexed_categories": {
+        "adjacency": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 3104768,
+          "logical_bytes": 371612,
+          "logical_references": 758,
+          "physical_logical_bytes": 371612,
+          "physical_objects": 758
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 2265088,
+          "logical_bytes": 1877949,
+          "logical_references": 266,
+          "physical_logical_bytes": 1877949,
+          "physical_objects": 266
+        },
+        "topology_edges": {
+          "allocated_bytes": 5091328,
+          "logical_bytes": 4428564,
+          "logical_references": 257,
+          "physical_logical_bytes": 4428564,
+          "physical_objects": 257
+        },
+        "topology_nodes": {
+          "allocated_bytes": 102400,
+          "logical_bytes": 88869,
+          "logical_references": 5,
+          "physical_logical_bytes": 88869,
+          "physical_objects": 5
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1511424,
+          "logical_bytes": 1482397,
+          "logical_references": 12,
+          "physical_logical_bytes": 1482397,
+          "physical_objects": 9
+        }
+      }
+    },
+    {
+      "adjacency_built": true,
+      "adjacency_codec_experiment": {
+        "decode_elapsed_ns": [
+          5246088,
+          109966333,
+          36960820
+        ],
+        "encode_elapsed_ns": [
+          3039176,
+          193323233,
+          109137928
+        ],
+        "estimated_allocated_bytes_at_4096": [
+          4972544,
+          2351104,
+          1363968
+        ],
+        "largest_decoded_batch_array_bytes": 3322008,
+        "normalized_bytes_none_lz4_zstd": [
+          4920564,
+          2320564,
+          1324020
+        ],
+        "production_format_changed": false,
+        "shards": 18,
+        "source_bytes": 4920564
+      },
+      "construction_elapsed_ns": 34641114448,
+      "edges": 65537,
+      "fixture": "random_properties_eight_routes",
+      "heterogeneous_schemas": false,
+      "identity_padding_experiment": {
+        "current_record_bytes": 1216554,
+        "defined_zero_edge_saved_bytes": 524296,
+        "identity_runs": 2,
+        "live_edge_records": 65537,
+        "previous_32_byte_baseline": 2228288,
+        "production_format_changed": true,
+        "records": 69634,
+        "reserved_padding_saved_bytes": 487438
+      },
+      "manifest_bucket_experiment": {
+        "authenticated_lookups_checked": 1080,
+        "candidate_bucket_capacity": 8,
+        "candidate_estimated_allocated_bytes_at_4096": 1372160,
+        "candidate_logical_bytes": 359411,
+        "candidate_objects": 335,
+        "production_format_changed": false,
+        "source_manifest_allocated_bytes": 5967872,
+        "source_manifest_objects": 1457
+      },
+      "nodes": 4097,
+      "parquet_experiment": {
+        "decode_elapsed_ns": [
+          326066616,
+          372188535,
+          374729110
+        ],
+        "encode_elapsed_ns": [
+          1089693084,
+          1323997663,
+          1350358584
+        ],
+        "normalized_allocated_bytes_at_4096": [
+          12939264,
+          10743808,
+          10747904
+        ],
+        "normalized_bytes_uncompressed_zstd1_zstd3": [
+          10231116,
+          7845372,
+          7861925
+        ],
+        "production_parquet_allocated_bytes": 10743808,
+        "production_parquet_bytes": 7845372
+      },
+      "permanent": {
+        "allocated_bytes": 17633280,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 5050368,
+            "logical_bytes": 4930822,
+            "logical_references": 37,
+            "physical_logical_bytes": 4930822,
+            "physical_objects": 37
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 335872,
+            "logical_bytes": 309543,
+            "logical_references": 8,
+            "physical_logical_bytes": 309543,
+            "physical_objects": 8
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 4337664,
+            "logical_bytes": 2576971,
+            "logical_references": 546,
+            "physical_logical_bytes": 2576971,
+            "physical_objects": 546
+          },
+          "topology_edges": {
+            "allocated_bytes": 6295552,
+            "logical_bytes": 5174833,
+            "logical_references": 513,
+            "physical_logical_bytes": 5174833,
+            "physical_objects": 513
+          },
+          "topology_nodes": {
+            "allocated_bytes": 102400,
+            "logical_bytes": 90021,
+            "logical_references": 5,
+            "physical_logical_bytes": 90021,
+            "physical_objects": 5
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1511424,
+            "logical_bytes": 1482397,
+            "logical_references": 12,
+            "physical_logical_bytes": 1482397,
+            "physical_objects": 12
+          }
+        },
+        "logical_bytes": 14564587,
+        "physical_logical_bytes": 14564587,
+        "physical_objects": 1121
+      },
+      "properties": true,
+      "random_ids": true,
+      "routes": 8,
+      "semantic_fingerprint": "1a4578d5b5d6c474b1fd9de5478fd2afe0f69e1456f3964d410bc6e0fd3e8b51",
+      "unindexed_allocated_bytes": 18247680,
+      "unindexed_categories": {
+        "adjacency": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 6000640,
+          "logical_bytes": 728070,
+          "logical_references": 1465,
+          "physical_logical_bytes": 728070,
+          "physical_objects": 1465
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 4337664,
+          "logical_bytes": 2576971,
+          "logical_references": 546,
+          "physical_logical_bytes": 2576971,
+          "physical_objects": 546
+        },
+        "topology_edges": {
+          "allocated_bytes": 6295552,
+          "logical_bytes": 5174833,
+          "logical_references": 513,
+          "physical_logical_bytes": 5174833,
+          "physical_objects": 513
+        },
+        "topology_nodes": {
+          "allocated_bytes": 102400,
+          "logical_bytes": 90021,
+          "logical_references": 5,
+          "physical_logical_bytes": 90021,
+          "physical_objects": 5
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1511424,
+          "logical_bytes": 1482397,
+          "logical_references": 12,
+          "physical_logical_bytes": 1482397,
+          "physical_objects": 9
+        }
+      }
+    },
+    {
+      "adjacency_built": false,
+      "adjacency_codec_experiment": null,
+      "construction_elapsed_ns": 20284094999,
+      "edges": 65537,
+      "fixture": "random_single_route",
+      "heterogeneous_schemas": false,
+      "identity_padding_experiment": {
+        "current_record_bytes": 1318954,
+        "defined_zero_edge_saved_bytes": 524296,
+        "identity_runs": 2,
+        "live_edge_records": 65537,
+        "previous_32_byte_baseline": 2359360,
+        "production_format_changed": true,
+        "records": 73730,
+        "reserved_padding_saved_bytes": 516110
+      },
+      "manifest_bucket_experiment": {
+        "authenticated_lookups_checked": 90,
+        "candidate_bucket_capacity": 8,
+        "candidate_estimated_allocated_bytes_at_4096": 122880,
+        "candidate_logical_bytes": 28602,
+        "candidate_objects": 30,
+        "production_format_changed": false,
+        "source_manifest_allocated_bytes": 495616,
+        "source_manifest_objects": 121
+      },
+      "nodes": 8193,
+      "parquet_experiment": {
+        "decode_elapsed_ns": [
+          50697163,
+          65744078,
+          66458133
+        ],
+        "encode_elapsed_ns": [
+          329807417,
+          413504532,
+          437969379
+        ],
+        "normalized_allocated_bytes_at_4096": [
+          5488640,
+          4145152,
+          4145152
+        ],
+        "normalized_bytes_uncompressed_zstd1_zstd3": [
+          5318519,
+          4015814,
+          4047391
+        ],
+        "production_parquet_allocated_bytes": 4145152,
+        "production_parquet_bytes": 4015814
+      },
+      "permanent": {
+        "allocated_bytes": 6541312,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 528384,
+            "logical_bytes": 62909,
+            "logical_references": 129,
+            "physical_logical_bytes": 62909,
+            "physical_objects": 129
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "topology_edges": {
+            "allocated_bytes": 3936256,
+            "logical_bytes": 3841869,
+            "logical_references": 65,
+            "physical_logical_bytes": 3841869,
+            "physical_objects": 65
+          },
+          "topology_nodes": {
+            "allocated_bytes": 200704,
+            "logical_bytes": 170753,
+            "logical_references": 9,
+            "physical_logical_bytes": 170753,
+            "physical_objects": 9
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1875968,
+            "logical_bytes": 1847051,
+            "logical_references": 12,
+            "physical_logical_bytes": 1847051,
+            "physical_objects": 9
+          }
+        },
+        "logical_bytes": 5922582,
+        "physical_logical_bytes": 5922582,
+        "physical_objects": 212
+      },
+      "properties": false,
+      "random_ids": true,
+      "routes": 1,
+      "semantic_fingerprint": "6ce665fa15e02a8781492c112961d22d14fa79e33d0fd22bbedfc29958308030",
+      "unindexed_allocated_bytes": 6541312,
+      "unindexed_categories": {
+        "adjacency": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 528384,
+          "logical_bytes": 62909,
+          "logical_references": 129,
+          "physical_logical_bytes": 62909,
+          "physical_objects": 129
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "topology_edges": {
+          "allocated_bytes": 3936256,
+          "logical_bytes": 3841869,
+          "logical_references": 65,
+          "physical_logical_bytes": 3841869,
+          "physical_objects": 65
+        },
+        "topology_nodes": {
+          "allocated_bytes": 200704,
+          "logical_bytes": 170753,
+          "logical_references": 9,
+          "physical_logical_bytes": 170753,
+          "physical_objects": 9
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1875968,
+          "logical_bytes": 1847051,
+          "logical_references": 12,
+          "physical_logical_bytes": 1847051,
+          "physical_objects": 9
+        }
+      }
+    },
+    {
+      "adjacency_built": false,
+      "adjacency_codec_experiment": null,
+      "construction_elapsed_ns": 18326227381,
+      "edges": 65537,
+      "fixture": "sequential_single_route",
+      "heterogeneous_schemas": false,
+      "identity_padding_experiment": {
+        "current_record_bytes": 1216554,
+        "defined_zero_edge_saved_bytes": 524296,
+        "identity_runs": 2,
+        "live_edge_records": 65537,
+        "previous_32_byte_baseline": 2228288,
+        "production_format_changed": true,
+        "records": 69634,
+        "reserved_padding_saved_bytes": 487438
+      },
+      "manifest_bucket_experiment": {
+        "authenticated_lookups_checked": 86,
+        "candidate_bucket_capacity": 8,
+        "candidate_estimated_allocated_bytes_at_4096": 131072,
+        "candidate_logical_bytes": 28378,
+        "candidate_objects": 32,
+        "production_format_changed": false,
+        "source_manifest_allocated_bytes": 462848,
+        "source_manifest_objects": 113
+      },
+      "nodes": 4097,
+      "parquet_experiment": {
+        "decode_elapsed_ns": [
+          44854979,
+          68777589,
+          67110477
+        ],
+        "encode_elapsed_ns": [
+          293439370,
+          373887029,
+          379350516
+        ],
+        "normalized_allocated_bytes_at_4096": [
+          5373952,
+          1097728,
+          1097728
+        ],
+        "normalized_bytes_uncompressed_zstd1_zstd3": [
+          5262627,
+          973925,
+          960425
+        ],
+        "production_parquet_allocated_bytes": 1097728,
+        "production_parquet_bytes": 973925
+      },
+      "permanent": {
+        "allocated_bytes": 3096576,
+        "categories": {
+          "adjacency": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "catalog_and_manifests": {
+            "allocated_bytes": 495616,
+            "logical_bytes": 59995,
+            "logical_references": 121,
+            "physical_logical_bytes": 59995,
+            "physical_objects": 121
+          },
+          "clean_imported_project": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "construction_staging": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "other": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "portable_package": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "properties": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          },
+          "topology_edges": {
+            "allocated_bytes": 1052672,
+            "logical_bytes": 944705,
+            "logical_references": 65,
+            "physical_logical_bytes": 944705,
+            "physical_objects": 65
+          },
+          "topology_nodes": {
+            "allocated_bytes": 36864,
+            "logical_bytes": 26028,
+            "logical_references": 5,
+            "physical_logical_bytes": 26028,
+            "physical_objects": 5
+          },
+          "uuid_and_surrogates": {
+            "allocated_bytes": 1511424,
+            "logical_bytes": 1482397,
+            "logical_references": 12,
+            "physical_logical_bytes": 1482397,
+            "physical_objects": 9
+          }
+        },
+        "logical_bytes": 2513125,
+        "physical_logical_bytes": 2513125,
+        "physical_objects": 200
+      },
+      "properties": false,
+      "random_ids": false,
+      "routes": 1,
+      "semantic_fingerprint": "57f3deaf6829d02e203e90a4c5c69f9e7b2949a647aa0a0ac82684550722b805",
+      "unindexed_allocated_bytes": 3096576,
+      "unindexed_categories": {
+        "adjacency": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "catalog_and_manifests": {
+          "allocated_bytes": 495616,
+          "logical_bytes": 59995,
+          "logical_references": 121,
+          "physical_logical_bytes": 59995,
+          "physical_objects": 121
+        },
+        "clean_imported_project": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "construction_staging": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "other": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "portable_package": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "properties": {
+          "allocated_bytes": 0,
+          "logical_bytes": 0,
+          "logical_references": 0,
+          "physical_logical_bytes": 0,
+          "physical_objects": 0
+        },
+        "topology_edges": {
+          "allocated_bytes": 1052672,
+          "logical_bytes": 944705,
+          "logical_references": 65,
+          "physical_logical_bytes": 944705,
+          "physical_objects": 65
+        },
+        "topology_nodes": {
+          "allocated_bytes": 36864,
+          "logical_bytes": 26028,
+          "logical_references": 5,
+          "physical_logical_bytes": 26028,
+          "physical_objects": 5
+        },
+        "uuid_and_surrogates": {
+          "allocated_bytes": 1511424,
+          "logical_bytes": 1482397,
+          "logical_references": 12,
+          "physical_logical_bytes": 1482397,
+          "physical_objects": 9
+        }
+      }
+    }
+  ]
+}
