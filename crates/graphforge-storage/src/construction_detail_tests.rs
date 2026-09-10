@@ -130,7 +130,7 @@ mod compact_details {
             assert_eq!(evidence.authority_read_bytes, expected);
             assert!(evidence.decoded_bytes > 0);
         }
-        assert!(DetailCodec::from_version(9).is_err());
+        assert!(DetailCodec::from_version(10).is_err());
         assert_eq!(
             DetailCodec::from_version(7).unwrap(),
             DetailCodec::from_version(8).unwrap()
@@ -172,7 +172,7 @@ mod compact_details {
         for generation in [2, 3] {
             let (_source, mut session, shape) =
                 ordinal_append_session(&root, generation, u128::from(generation + 2), 1);
-            assert_eq!(session.checkpoint.format_version, 8);
+            assert_eq!(session.checkpoint.format_version, 9);
             let encoding = session.encode_canonical(&shape, generation).unwrap();
             let path = session
                 .root
