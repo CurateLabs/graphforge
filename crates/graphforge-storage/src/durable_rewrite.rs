@@ -1305,8 +1305,8 @@ fn valid_uuid_receipt(receipt: &AuxiliaryReceipt) -> bool {
             receipt.path.as_str()
         ),
         (
-            "uuid-membership/v3",
-            3,
+            "uuid-membership/v5",
+            5,
             "topology/uuid-membership/topology-receipt.json"
         ) | (
             "uuid-membership/v4",
@@ -1469,8 +1469,8 @@ mod tests {
     fn auxiliary_receipt_must_name_and_digest_an_exact_staged_entry() {
         let mut valid = intent();
         valid.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v3".to_owned(),
-            schema_version: 3,
+            kind: "uuid-membership/v5".to_owned(),
+            schema_version: 5,
             path: valid.entries[0].destination.clone(),
             digest: valid.entries[0].sha256.clone(),
             bytes: valid.entries[0].bytes,
@@ -1502,8 +1502,8 @@ mod tests {
 
         let mut legacy = intent();
         legacy.auxiliary = Some(AuxiliaryReceipt {
-            kind: "uuid-membership/v3".to_owned(),
-            schema_version: 3,
+            kind: "uuid-membership/v5".to_owned(),
+            schema_version: 5,
             path: legacy.entries[0].destination.clone(),
             digest: legacy.entries[0].sha256.clone(),
             bytes: legacy.entries[0].bytes,

@@ -521,7 +521,9 @@ fn identity_padding_experiment(source: &Path) -> Value {
     let selected = graphforge_storage::resolve_project_generation(source).unwrap();
     let inventory = selected.graph_files_inventory().unwrap().unwrap();
     let mut records = 0_u64;
+    let mut edges = 0_u64;
     let mut runs = 0_u64;
+    let mut current_bytes = 0_u64;
     for entry in &inventory.files {
         let name = Path::new(&entry.relative_path)
             .file_name()
@@ -533,45 +535,50 @@ fn identity_padding_experiment(source: &Path) -> Value {
         {
             continue;
         }
-        let original = std::fs::read(
+        let bytes = std::fs::read(
             graphforge_storage::graph_object_path(source, &entry.content_sha256).unwrap(),
         )
         .unwrap();
-        let packed = pack_identity_records(&original);
-        let mut restored = Vec::with_capacity(original.len());
-        for record in packed.chunks_exact(25) {
-            restored.extend_from_slice(&record[..17]);
-            restored.extend_from_slice(&[0; 7]);
-            restored.extend_from_slice(&record[17..25]);
-        }
-        assert_eq!(restored, original);
-        // Fixed-width binary search retains exact UUID/kind ordering. Exercise
-        // beginning, midpoint and last identifiers rather than surrogate-only keys.
-        let packed_rows = packed.chunks_exact(25).collect::<Vec<_>>();
-        for row in [
-            0,
-            packed_rows.len() / 2,
-            packed_rows.len().saturating_sub(1),
-        ] {
-            if packed_rows.is_empty() {
-                continue;
+        let mut cursor = bytes.as_slice();
+        let mut prior: Option<[u8; 16]> = None;
+        while !cursor.is_empty() {
+            assert!(cursor.len() >= 17);
+            let uuid: [u8; 16] = cursor[..16].try_into().unwrap();
+            assert!(prior.is_none_or(|prior| prior < uuid));
+            prior = Some(uuid);
+            let kind = cursor[16];
+            assert!(kind <= 3);
+            let width = if kind == 1 { 17 } else { 25 };
+            assert!(cursor.len() >= width);
+            let surrogate = if kind == 1 {
+                0
+            } else {
+                u64::from_be_bytes(cursor[17..25].try_into().unwrap())
+            };
+            // Expand only in the test to quantify the previous physical representation.
+            // This is not a legacy reader or production migration path.
+            let mut expanded = [0_u8; 32];
+            expanded[..17].copy_from_slice(&cursor[..17]);
+            expanded[24..].copy_from_slice(&surrogate.to_be_bytes());
+            let packed = pack_identity_records(&expanded);
+            assert_eq!(&packed[..width], &cursor[..width]);
+            if kind == 1 {
+                assert_eq!(&packed[17..], &[0; 8]);
+                edges += 1;
             }
-            let key = &original[row * 32..row * 32 + 17];
-            let found = packed_rows
-                .binary_search_by(|record| record[..17].cmp(key))
-                .unwrap();
-            assert_eq!(
-                &packed_rows[found][17..25],
-                &original[row * 32 + 24..row * 32 + 32]
-            );
+            records += 1;
+            cursor = &cursor[width..];
         }
-        records += (original.len() / 32) as u64;
+        current_bytes += bytes.len() as u64;
         runs += 1;
     }
     assert!(records > 0);
-    json!({"identity_runs":runs,"records":records,"current_record_bytes":records * 32,
-        "packed_record_bytes":records * 25,"removable_reserved_padding_bytes":records * 7,
-        "production_format_changed":false})
+    assert_eq!(current_bytes, records * 25 - edges * 8);
+    assert!(current_bytes <= records * 25);
+    json!({"identity_runs":runs,"records":records,"live_edge_records":edges,
+        "current_record_bytes":current_bytes,"previous_32_byte_baseline":records * 32,
+        "reserved_padding_saved_bytes":records * 7,"defined_zero_edge_saved_bytes":edges * 8,
+        "production_format_changed":true})
 }
 
 #[test]
