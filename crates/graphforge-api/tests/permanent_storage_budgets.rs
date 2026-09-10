@@ -2547,10 +2547,25 @@ fn publishing_parquet_inventory(source: &Path) -> Value {
         } else {
             Value::Null
         };
+        let codec_pairs = if std::env::var_os("GF_PARQUET_CODEC_PAIRS").is_some() {
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+            let schema = reader.schema().clone();
+            let batches = reader
+                .build()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            Some(paired_codec_profiles(
+                &arrow::compute::concat_batches(&schema, &batches).unwrap(),
+            ))
+        } else {
+            None
+        };
         payload += entry.byte_length;
         allocated += physical;
         files.push(json!({"path":entry.relative_path,"bytes":entry.byte_length,
-            "allocated_bytes":physical,"row_groups":groups, "edge_id_order":edge_order}));
+            "allocated_bytes":physical,"row_groups":groups, "edge_id_order":edge_order,"codec_pairs":codec_pairs}));
     }
     json!({"ownership":if generation_owned { "generation_graph_tree" } else { "cas" }, "parquet_bytes":payload,"parquet_allocated_bytes":allocated,"files":files})
 }
@@ -2649,4 +2664,227 @@ fn permanent_publishing_policy_construction_mutation_and_compaction() {
         "mutation":mutation,"compaction":compaction,"mutation_ns":mutation_ns,
         "compaction_ns":compaction_ns,"compaction_report":format!("{report:?}")})
     );
+}
+
+// Codec-only comparisons keep schema, dictionary policy, row groups and write
+// batches identical within each pair. Whole publishing costs are measured by
+// the public fixture separately; ArrowWriter::memory_size excludes native Zstd.
+fn paired_codec_profiles(batch: &RecordBatch) -> Value {
+    let mut profiles = Vec::new();
+    for (name, dictionary, row_group_rows, current) in [
+        (
+            "construction",
+            true,
+            1_048_576,
+            Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
+        ),
+        ("canonical_staging", true, 65_536, Compression::UNCOMPRESSED),
+        ("replay", false, 8_192, Compression::UNCOMPRESSED),
+        (
+            "other_permanent",
+            true,
+            1_048_576,
+            Compression::UNCOMPRESSED,
+        ),
+    ] {
+        let mut outputs = Vec::new();
+        let mut retained = Vec::new();
+        let mut allocated_peak = 0_u64;
+        for codec in [current, Compression::ZSTD(ZstdLevel::try_new(1).unwrap())] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let properties = WriterProperties::builder()
+                .set_compression(codec)
+                .set_dictionary_enabled(dictionary)
+                .set_max_row_group_row_count(Some(row_group_rows))
+                .build();
+            let start = Instant::now();
+            let mut writer =
+                ArrowWriter::try_new(file.reopen().unwrap(), batch.schema(), Some(properties))
+                    .unwrap();
+            let mut arrow_writer_peak = 0;
+            for offset in (0..batch.num_rows()).step_by(127) {
+                writer
+                    .write(&batch.slice(offset, 127.min(batch.num_rows() - offset)))
+                    .unwrap();
+                arrow_writer_peak = arrow_writer_peak.max(writer.memory_size());
+            }
+            writer.close().unwrap();
+            let encode_ns = start.elapsed().as_nanos();
+            let bytes = file.as_file().metadata().unwrap().len();
+            let allocated = graphforge_filesystem::file_space_usage(file.as_file())
+                .unwrap()
+                .allocated_bytes;
+            allocated_peak += allocated;
+            let start = Instant::now();
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file.reopen().unwrap()).unwrap();
+            assert_eq!(reader.schema().as_ref(), batch.schema().as_ref());
+            let metadata = reader.metadata();
+            assert_eq!(
+                metadata.num_row_groups(),
+                batch.num_rows().div_ceil(row_group_rows)
+            );
+            for group in metadata.row_groups() {
+                assert!(group.num_rows() <= row_group_rows as i64);
+                for column in group.columns() {
+                    assert_eq!(column.compression(), codec);
+                    if !dictionary {
+                        assert!(
+                            !column.encodings().any(
+                                |encoding| encoding == parquet::basic::Encoding::RLE_DICTIONARY
+                            )
+                        );
+                    }
+                }
+            }
+            let decoded = reader
+                .with_batch_size(127)
+                .build()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let decoded = arrow::compute::concat_batches(&batch.schema(), &decoded).unwrap();
+            let decode_ns = start.elapsed().as_nanos();
+            assert_eq!(decoded, *batch);
+            outputs.push(json!({"codec":format!("{codec:?}"),"bytes":bytes,"allocated_bytes":allocated,
+                "encode_ns":encode_ns,"decode_ns":decode_ns,"arrow_writer_peak_bytes":arrow_writer_peak}));
+            retained.push(file);
+        }
+        profiles.push(json!({"profile":name,"dictionary":dictionary,"row_group_rows":row_group_rows,
+            "write_batch_rows":127,"outputs_current_candidate":outputs,"pair_temporary_allocated_peak_bytes":allocated_peak}));
+    }
+    json!({"rows":batch.num_rows(),"arrow_input_bytes":batch.get_array_memory_size(),"profiles":profiles})
+}
+
+#[test]
+fn permanent_codec_pairs_cover_wide_nullable_and_full_width_values() {
+    use arrow::array::{BooleanArray, Float64Array, StructArray, UInt8Array, UInt64Array};
+    let rows = 257;
+    let mut fields = vec![
+        Field::new("uuid", DataType::FixedSizeBinary(16), false),
+        Field::new("ordinal", DataType::UInt64, false),
+    ];
+    let mut arrays = vec![
+        uuids((0..rows).map(|row| id(17, row, true))),
+        Arc::new(UInt64Array::from(
+            (0..rows)
+                .map(|row| u64::MAX - row as u64)
+                .collect::<Vec<_>>(),
+        )) as ArrayRef,
+    ];
+    for column in 0..32 {
+        fields.push(Field::new(
+            format!("nullable_{column}"),
+            DataType::Int64,
+            true,
+        ));
+        arrays.push(Arc::new(Int64Array::from(
+            (0..rows)
+                .map(|row| (!row.is_multiple_of(3)).then_some((row * 37 + column) as i64))
+                .collect::<Vec<_>>(),
+        )));
+    }
+    let strings = (0..rows)
+        .map(|row| {
+            if row.is_multiple_of(3) {
+                None
+            } else {
+                let length = if row == 1 { 256 * 1024 } else { 1024 };
+                Some(
+                    (0..length)
+                        .map(|index| char::from(b'!' + ((index * 31 + row * 17) % 90) as u8))
+                        .collect::<String>(),
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    fields.push(Field::new("large_nullable_text", DataType::Utf8, true));
+    arrays.push(Arc::new(StringArray::from(strings)));
+    let tagged_fields: arrow::datatypes::Fields = vec![
+        Field::new("tag", DataType::UInt8, false),
+        Field::new("int", DataType::Int64, true),
+        Field::new("float", DataType::Float64, true),
+        Field::new("str", DataType::Utf8, true),
+        Field::new("bool", DataType::Boolean, true),
+    ]
+    .into();
+    let tagged = StructArray::new(
+        tagged_fields.clone(),
+        vec![
+            Arc::new(UInt8Array::from(
+                (0..rows).map(|row| (row % 4) as u8).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 0).then_some(row as i64))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 1).then_some(row as f64 / 3.0))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 2).then_some("tagged"))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                (0..rows)
+                    .map(|row| (row % 4 == 3).then_some(true))
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+        None,
+    );
+    fields.push(Field::new("tagged", DataType::Struct(tagged_fields), false));
+    arrays.push(Arc::new(tagged));
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap();
+    let small = RecordBatch::try_new(
+        batch.schema(),
+        batch
+            .columns()
+            .iter()
+            .map(|column| {
+                arrow::compute::take(
+                    column.as_ref(),
+                    &arrow::array::UInt32Array::from(vec![0]),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let narrow_rows = 65_537;
+    let narrow = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("ordinal", DataType::UInt64, false),
+        ])),
+        vec![
+            uuids((0..narrow_rows).map(|row| id(19, row, true))),
+            Arc::new(UInt64Array::from(
+                (0..narrow_rows)
+                    .map(|row| u64::MAX - row as u64)
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+    for selected in [small, batch, narrow] {
+        let result = paired_codec_profiles(&selected);
+        for profile in result["profiles"].as_array().unwrap() {
+            assert!(
+                profile["pair_temporary_allocated_peak_bytes"]
+                    .as_u64()
+                    .unwrap()
+                    <= 8 * 1024 * 1024
+            );
+            for output in profile["outputs_current_candidate"].as_array().unwrap() {
+                assert!(output["arrow_writer_peak_bytes"].as_u64().unwrap() <= 8 * 1024 * 1024);
+                assert!(output["bytes"].as_u64().unwrap() <= 2 * 1024 * 1024);
+            }
+        }
+        println!("PERMANENT_CODEC_PAIRS {result}");
+    }
 }
