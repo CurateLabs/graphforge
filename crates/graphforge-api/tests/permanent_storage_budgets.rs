@@ -325,6 +325,8 @@ fn parquet_experiment(source: &Path) -> Value {
     let mut encode_ns = [0_u128; 3];
     let mut decode_ns = [0_u128; 3];
     let mut original_bytes = 0_u64;
+    let mut original_allocated = 0_u64;
+    let mut normalized_allocated = [0_u64; 3];
     for entry in &inventory.files {
         if !entry.relative_path.ends_with(".parquet") || !seen.insert(entry.content_sha256.clone())
         {
@@ -334,6 +336,17 @@ fn parquet_experiment(source: &Path) -> Value {
         let reader = ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap())
             .unwrap()
             .with_batch_size(4096);
+        for group in reader.metadata().row_groups() {
+            for column in group.columns() {
+                assert!(
+                    matches!(column.compression(), Compression::ZSTD(_)),
+                    "permanent construction Parquet must use the selected Zstd codec"
+                );
+            }
+        }
+        original_allocated += graphforge_filesystem::file_space_usage(&File::open(&path).unwrap())
+            .unwrap()
+            .allocated_bytes;
         let schema = reader.schema().clone();
         let original = reader
             .build()
@@ -367,6 +380,7 @@ fn parquet_experiment(source: &Path) -> Value {
             writer.close().unwrap();
             encode_ns[slot] += start.elapsed().as_nanos();
             sizes[slot] += bytes.len() as u64;
+            normalized_allocated[slot] += (bytes.len() as u64).div_ceil(4096) * 4096;
             let start = Instant::now();
             let decoded = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
                 .unwrap()
@@ -383,7 +397,7 @@ fn parquet_experiment(source: &Path) -> Value {
         }
     }
     assert!(original_bytes > 0);
-    json!({"production_parquet_bytes": original_bytes, "normalized_bytes_uncompressed_zstd1_zstd3":sizes,
+    json!({"production_parquet_bytes": original_bytes, "production_parquet_allocated_bytes":original_allocated, "normalized_allocated_bytes_at_4096":normalized_allocated, "normalized_bytes_uncompressed_zstd1_zstd3":sizes,
         "encode_elapsed_ns":encode_ns, "decode_elapsed_ns":decode_ns})
 }
 
@@ -868,6 +882,16 @@ fn assess(f: Fixture) {
     // Candidate codecs inspect construction's published payload generation.
     // Adjacency publication may switch to a generation-owned graph tree.
     let experiment = parquet_experiment(&source);
+    if matches!(f.identifiers, Identifiers::Random) {
+        let actual = experiment["production_parquet_bytes"].as_u64().unwrap();
+        let uncompressed = experiment["normalized_bytes_uncompressed_zstd1_zstd3"][0]
+            .as_u64()
+            .unwrap();
+        assert!(
+            actual * 5 <= uncompressed * 4,
+            "random-identity fixtures must retain the measured at-least-20% Parquet reduction"
+        );
+    }
     let identity_experiment = identity_padding_experiment(&source);
     let manifest_experiment = bucket_manifest_experiment(&source);
     if f.adjacency {

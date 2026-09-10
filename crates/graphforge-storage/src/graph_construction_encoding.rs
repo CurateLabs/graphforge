@@ -31,6 +31,8 @@ use graphforge_ontology::{QualifiedSymbol, SymbolKind};
 use graphforge_value::{EntityTypeId, RelationTypeId, TaggedTypeId};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -2150,7 +2152,11 @@ fn write_parquet(
             digest: Sha256::new(),
         },
         batch.schema(),
-        None,
+        Some(
+            WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(1).map_err(storage)?))
+                .build(),
+        ),
     )
     .map_err(storage)?;
     writer.write(batch).map_err(storage)?;
