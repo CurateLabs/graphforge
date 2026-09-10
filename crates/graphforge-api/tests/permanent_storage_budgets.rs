@@ -474,6 +474,10 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
     let mut encode_ns = [0_u128; 3];
     let mut decode_ns = [0_u128; 3];
     let mut source_bytes = 0_u64;
+    #[cfg(unix)]
+    let mut source_allocated_bytes = 0_u64;
+    #[cfg(not(unix))]
+    let source_allocated_bytes = 0_u64;
     let mut shards = 0_u64;
     let mut largest_decoded_batch = 0_usize;
     while let Some(directory) = pending.pop() {
@@ -493,7 +497,13 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
             let reader = FileReader::try_new(File::open(entry.path()).unwrap(), None).unwrap();
             let schema = reader.schema();
             let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
-            source_bytes += entry.metadata().unwrap().len();
+            let metadata = entry.metadata().unwrap();
+            source_bytes += metadata.len();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                source_allocated_bytes += metadata.blocks() * 512;
+            }
             shards += 1;
             for batch in &batches {
                 largest_decoded_batch = largest_decoded_batch.max(batch.get_array_memory_size());
@@ -534,10 +544,19 @@ fn adjacency_codec_experiment(source: &Path) -> Value {
             }
         }
     }
-    assert!(shards > 0);
-    json!({"shards":shards,"source_bytes":source_bytes,"normalized_bytes_none_lz4_zstd":sizes,
+    assert_eq!(shards, 18, "fixed eight-route fixture shard boundaries");
+    assert!(
+        source_bytes * 10 <= 4_920_564 * 3,
+        "CSR payload exceeds the #1205 30% budget: {source_bytes}"
+    );
+    #[cfg(unix)]
+    assert!(
+        source_allocated_bytes * 10 <= 4_972_544 * 3,
+        "actual native CSR allocation exceeds the #1205 30% budget: {source_allocated_bytes}"
+    );
+    json!({"shards":shards,"source_bytes":source_bytes,"source_allocated_bytes_unix":source_allocated_bytes,"normalized_bytes_none_lz4_zstd":sizes,
         "estimated_allocated_bytes_at_4096":allocations,"encode_elapsed_ns":encode_ns,"decode_elapsed_ns":decode_ns,
-        "largest_decoded_batch_array_bytes":largest_decoded_batch,"production_format_changed":false})
+        "largest_decoded_batch_array_bytes":largest_decoded_batch,"production_format_changed":true})
 }
 
 fn identity_padding_experiment(source: &Path) -> Value {
@@ -5608,4 +5627,104 @@ fn publishing_edge_surrogates(source: &Path) -> BTreeMap<Uuid, u64> {
         }
     }
     ids
+}
+
+fn csr_two_hop_rows(batches: &[RecordBatch]) -> Vec<[Uuid; 5]> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            rows.push(std::array::from_fn(|column| uuid_at(batch, column, row)));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn verify_csr_two_hop_queries(graph: &GraphForge, edges: &[Edge], routes: usize) {
+    for inbound in [false, true] {
+        for route in std::iter::once(None).chain((0..routes).map(Some)) {
+            let relation = route.map_or_else(String::new, |r| format!(":REL{r}"));
+            let pattern = if inbound {
+                format!("(a)<-[r{relation}]-(b)<-[s]-(c)")
+            } else {
+                format!("(a)-[r{relation}]->(b)-[s]->(c)")
+            };
+            let query = format!(
+                "MATCH {pattern} RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid"
+            );
+            let actual = csr_two_hop_rows(&graph.execute(&query).unwrap().batches);
+            let mut expected = Vec::new();
+            for first in edges {
+                if route.is_some_and(|r| first.3 != format!("REL{r}")) {
+                    continue;
+                }
+                for second in edges {
+                    if first.0 == second.0 {
+                        continue;
+                    }
+                    if inbound && first.1 == second.2 {
+                        expected.push([first.2, first.0, first.1, second.0, second.1]);
+                    } else if !inbound && first.2 == second.1 {
+                        expected.push([first.1, first.0, first.2, second.0, second.2]);
+                    }
+                }
+            }
+            expected.sort();
+            assert_eq!(actual, expected, "exact current CSR query: {query}");
+        }
+    }
+}
+
+#[test]
+fn compressed_csr_public_mutation_snapshot_and_portable_queries() {
+    use futures::TryStreamExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "compressed_csr_lifecycle",
+        nodes: 33,
+        edges: 129,
+        routes: 4,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph.rebuild_adjacency(None).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    verify_csr_two_hop_queries(&graph, &edges, fixture.routes);
+    let query = "MATCH (a)-[r]->(b)-[s]->(c) RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    let before = csr_two_hop_rows(&graph.execute(query).unwrap().batches);
+    let snapshot = graph.execute_stream(query).unwrap();
+    graph.execute("MATCH ()-[r:REL0]->() DELETE r").unwrap();
+    edges.retain(|edge| edge.3 != "REL0");
+    verify_graph(&graph, fixture, &nodes, &edges);
+    verify_csr_two_hop_queries(&graph, &edges, fixture.routes);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let old: Vec<RecordBatch> = runtime.block_on(snapshot.try_collect()).unwrap();
+    assert_eq!(csr_two_hop_rows(&old), before);
+    graph.rebuild_adjacency(None).unwrap();
+    verify_csr_two_hop_queries(&graph, &edges, fixture.routes);
+    drop(graph);
+    round_trip_checked(root.path(), &source, |graph| {
+        verify_csr_two_hop_queries(graph, &edges, fixture.routes);
+        verify_graph(graph, fixture, &nodes, &edges)
+    });
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    imported.execute("MATCH ()-[r:REL1]->() DELETE r").unwrap();
+    edges.retain(|edge| edge.3 != "REL1");
+    verify_csr_two_hop_queries(&imported, &edges, fixture.routes);
+    imported.rebuild_adjacency(None).unwrap();
+    verify_graph(&imported, fixture, &nodes, &edges);
+    drop(imported);
+    let reopened = GraphForge::new(imported_path.to_str()).unwrap();
+    verify_graph(&reopened, fixture, &nodes, &edges);
+    verify_csr_two_hop_queries(&reopened, &edges, fixture.routes);
 }

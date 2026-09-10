@@ -203,7 +203,7 @@ fn hostile_and_reserved_stems_are_skipped_but_counted_in_union() {
 fn build_failure_leaves_no_manifest() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
-    // Pre-create indexes/adjacency as a READ-ONLY dir so write_csr fails.
+    // Pre-create indexes/adjacency as a READ-ONLY dir so shard publication fails.
     let adj = adjacency_dir(dir.path());
     std::fs::create_dir_all(&adj).unwrap();
     let mut perms = std::fs::metadata(&adj).unwrap().permissions();
