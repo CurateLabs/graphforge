@@ -364,17 +364,23 @@
           {
             "user_seconds": 1.08,
             "system_seconds": 1.05,
-            "maximum_rss_kib": 101544
+            "maximum_rss_kib": 101544,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           },
           {
             "user_seconds": 1.07,
             "system_seconds": 1.02,
-            "maximum_rss_kib": 100236
+            "maximum_rss_kib": 100236,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           },
           {
             "user_seconds": 1.11,
             "system_seconds": 1.01,
-            "maximum_rss_kib": 101504
+            "maximum_rss_kib": 101504,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           }
         ]
       },
@@ -404,17 +410,23 @@
           {
             "user_seconds": 1.12,
             "system_seconds": 1.02,
-            "maximum_rss_kib": 100652
+            "maximum_rss_kib": 100652,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           },
           {
             "user_seconds": 1.1,
             "system_seconds": 1.01,
-            "maximum_rss_kib": 100560
+            "maximum_rss_kib": 100560,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           },
           {
             "user_seconds": 1.1,
             "system_seconds": 1.01,
-            "maximum_rss_kib": 100956
+            "maximum_rss_kib": 100956,
+            "filesystem_inputs_counter": 22680,
+            "filesystem_outputs_counter": 87384
           }
         ]
       }
@@ -717,7 +729,8 @@
     "latency": "Three fresh processes per case, five queries per facade, alternating case order. fsync+POSIX_FADV_DONTNEED on private fixture before each process; advisory, not proof of physically cold media.",
     "traces": "Separate complete strace -f -qq -yy -s 0 with read/pread/vector/write/copy_file_range/sendfile/fsync/fdatasync. Parse completed and resumed syscall returns, count copy once read and once write. Zero unresolved calls and errors. Not physical I/O.",
     "workspace": "Separate 5-ms requested scans of fixture plus private TMPDIR. Deduplicate globally by device/inode, shared files attributed first to fixture. Regular files only, directories and unlinked-open files excluded. Maximum observed gaps 77.8 ms baseline, 78.5 ms candidate. Non-atomic sampled observations, not hard bounds.",
-    "freeze": "Copy successful release executable and verify SHA256 before/after every measurement; no builds overlapped measured runs. Later changes add tests/documentation, a static rule-name lifetime and relocation of the identical optimizer-rule factory; the recorded executable/source remain the measured artifact, not an unmeasured final-head timing claim."
+    "freeze": "Copy successful release executable and verify SHA256 before/after every measurement; no builds overlapped measured runs. Later changes add tests/documentation, a static rule-name lifetime and relocation of the identical optimizer-rule factory; the recorded executable/source remain the measured artifact, not an unmeasured final-head timing claim.",
+    "os_io": "GNU time -v filesystem input/output resource counters are retained alongside syscall bytes; input counter22680 is unchanged across baseline and candidate. Do not infer a physical disk-read reduction from the much lower syscall-read totals."
   },
   "reproduction": [
     "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
