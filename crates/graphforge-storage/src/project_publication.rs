@@ -1177,7 +1177,7 @@ fn verify_compact_graph_root(
             crate::read_graph_object_by_digest(
                 container_root,
                 digest,
-                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {
@@ -1202,7 +1202,7 @@ fn verify_compact_graph_root_with_lease(
             crate::graph_object_store::read_graph_object_by_digest_with_lease(
                 lease,
                 digest,
-                MAX_GRAPH_MANIFEST_SEGMENT_BYTES,
+                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
             )
         })?;
     crate::route_component::authenticate_manifest_routes(root.format_version, &files, |entry| {

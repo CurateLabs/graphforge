@@ -99,6 +99,7 @@ pub(crate) use graph_manifest::{
 #[cfg(any(test, feature = "test-support"))]
 pub use graph_manifest::{
     GRAPH_MANIFEST_BRANCH_MAX_BYTES, GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES,
+    GRAPH_MANIFEST_NODE_MAX_BYTES,
 };
 
 #[allow(

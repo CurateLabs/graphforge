@@ -377,14 +377,39 @@ materialization, lease cleanup, and GC use the distinct mutable open-or-create
 capability; materialization remains there because installing hard links mutates
 the source inode's link state.
 
-The node-v2 canonical shape has no unary branches: maximal lowercase-hex digest
-prefixes are compressed into nodes, branches have at least two distinct nibble
-children, and leaves contain the full-digest collision bucket in logical-path
-order. Empty inventory is the sole one-node empty-branch exception. Therefore
-`F > 0` distinct path digests require at most `2F - 1` manifest objects instead
-of one object per hash nibble. Resolver admission derives its structural bound
-from the authenticated root totals and rejects v1/mixed/future nodes, malformed
-or nonmaximal shapes, wrong routes, duplicate references, and corrupt objects.
+The node-v3 canonical shape uses bounded buckets of one to eight exact-path
+entries. Maximal lowercase-hex SHA-256 prefixes are compressed into nodes;
+branches have at least two distinct nibble children. Empty inventory is the
+sole one-node empty-branch exception. Each entry authenticates its logical
+path, byte length, role and payload SHA-256. Bucket order, unique paths and the
+entire ancestral hash route are checked, including when a targeted lookup is
+absent. For `F > 0` entries, the structural bound remains `2F - 1` nodes.
+Node v1/v2 and mixed/future formats are refused; this node-format change does
+not change the separate graph-files root version and adds no compatibility
+reader or migration machinery.
+
+Every production manifest-object read admits at most 256 KiB before allocating
+the encoded buffer. Decoding admits at most eight entries, 4096 UTF-8 bytes per
+path, 64 bytes per digest, and sixteen branch children. The explicit field
+visitor avoids an unbounded flattened JSON intermediate and rejects the ninth
+entry. A 64-KiB decoded representation charge covers the node, bounded entry or
+child slots and their string contents. This is a logical charge, **not a hard
+native-memory bound**: parser scratch, canonical re-encoding, allocator overhead,
+read caches, and retained copy-on-write ancestors can overlap. Process RSS and
+filesystem peaks must be measured separately; route-table payload limits are
+independent of these manifest-node limits.
+
+Insertion into a bucket is local; a ninth entry partitions at its first
+SHA-256 divergence into at most seventeen nodes. An unsplittable ninth
+full-digest collision is refused. Replacement copies only the selected path.
+Deletion removes empty nodes, collapses unary branches, and coalesces a small
+subtree using a probe limited to sixteen nodes and eight entries. A lower bound
+from pending nonempty children stops oversized probes without scanning the
+subtree. Published roots and payloads remain immutable, so retained generations
+and active snapshots keep their exact authenticated inventory. The 128/256/512
+entry regression ladder bounds representative successful and absent lookups and
+replacements to four reads, and checks deletion work separately. These are
+application I/O counters, not OS I/O or native memory measurements.
 
 Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
@@ -790,11 +815,11 @@ under `.graphforge-cache/` and are rejected as graph authority. Parquet write
 sites share `RewriteBatch` plus `commit_topology_aware`; the three control-file
 writers record their descriptor before making replacement bytes visible.
 
-Terminal leaves retain a sorted exact-path bucket for the theoretical case in
-which distinct path bytes have the same SHA-256 digest. Producing a real
-SHA-256 collision is cryptographically infeasible and is not a test fixture.
-Tests instead cover exact-path replacement/deletion and reject malformed leaf
-digests, ordering, duplicate references, wrong depth, and corrupt objects.
+Terminal buckets retain sorted exact paths even when distinct path bytes share
+a SHA-256 digest, up to the eight-entry bound. A real SHA-256 collision is not a
+test fixture. Tests cover exact-path replacement/deletion, bucket split/collapse,
+maximum escaped path fields, oversized encodings, duplicate paths, malformed
+routes, unsupported versions and authenticated old-root reads.
 
 ### Properties layer (warm path)
 

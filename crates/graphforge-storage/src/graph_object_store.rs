@@ -802,7 +802,7 @@ impl GraphManifestState {
             let (bytes, io) = read_graph_object_by_digest_file_counted(
                 lease.cas.open_digest(digest)?,
                 digest,
-                64 * 1024 * 1024,
+                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                 &lease.cas.diagnostic_root,
             )?;
             read_calls = read_calls
@@ -1081,7 +1081,11 @@ pub(crate) fn gc_graph_objects_guarded(
         let mut segment_digests = Vec::new();
         let (files, _) = crate::resolve_graph_manifest(graph_root, limits, |digest| {
             segment_digests.push(digest.to_owned());
-            read_graph_object_by_digest_from_cas(&guard.cas, digest, 64 * 1024 * 1024)
+            read_graph_object_by_digest_from_cas(
+                &guard.cas,
+                digest,
+                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+            )
         })?;
         marked.extend(segment_digests);
         marked.extend(files.into_iter().map(|entry| entry.content_sha256));
@@ -1794,7 +1798,7 @@ fn load_manifest_node(
     let (bytes, io) = read_graph_object_by_digest_file_counted(
         lease.cas.open_digest(digest)?,
         digest,
-        64 * 1024 * 1024,
+        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
         &lease.cas.diagnostic_root,
     )?;
     publication_io.manifest_reads.add_read(io)?;
@@ -1839,21 +1843,45 @@ fn update_manifest_digest(
 ) -> Result<Option<String>, GfError> {
     let Some(current_digest) = current_digest else {
         return replacement
-            .map(|entry| {
-                install_manifest_node(
-                    lease,
-                    &leaf_node(
-                        depth,
-                        &path_digest[usize::from(depth)..],
-                        path_digest,
-                        vec![entry],
-                    ),
-                    publication_io,
-                )
-            })
+            .map(|entry| install_bucket_entries(lease, depth, vec![entry], publication_io))
             .transpose();
     };
     let mut node = load_manifest_node(lease, current_digest, depth, publication_io)?;
+    // A small bucket absorbs a divergent path before any prefix split. Both
+    // replacement and deletion recompute its maximal compressed prefix.
+    if let GraphManifestNodeKind::Bucket { mut entries } = node.kind {
+        for entry in &entries {
+            if !hex_digest(crate::graph_manifest::logical_path_digest(
+                &entry.relative_path,
+            ))
+            .starts_with(&path_digest[..usize::from(depth)])
+            {
+                return Err(validation(
+                    "manifest bucket ancestral route mismatch during update",
+                ));
+            }
+        }
+        match entries.binary_search_by(|entry| entry.relative_path.as_str().cmp(path)) {
+            Ok(index) => match replacement {
+                Some(entry) => entries[index] = entry,
+                None => {
+                    entries.remove(index);
+                }
+            },
+            Err(index) => {
+                if let Some(entry) = replacement {
+                    entries.insert(index, entry);
+                } else {
+                    return Ok(Some(current_digest.to_owned()));
+                }
+            }
+        }
+        return if entries.is_empty() {
+            Ok(None)
+        } else {
+            install_bucket_entries(lease, depth, entries, publication_io).map(Some)
+        };
+    }
     let start = usize::from(depth);
     let common = node
         .prefix
@@ -1878,12 +1906,7 @@ fn update_manifest_digest(
         }
         let new_digest = install_manifest_node(
             lease,
-            &leaf_node(
-                split_depth + 1,
-                &path_digest[usize::from(split_depth) + 1..],
-                path_digest,
-                vec![entry],
-            ),
+            &bucket_node(split_depth + 1, vec![entry])?,
             publication_io,
         )?;
         let children = BTreeMap::from([(old_edge, old_digest), (new_edge, new_digest)]);
@@ -1900,38 +1923,8 @@ fn update_manifest_digest(
         )
         .ok_or_else(|| validation("Patricia depth overflow"))?;
     match node.kind {
-        GraphManifestNodeKind::Leaf {
-            path_sha256,
-            mut entries,
-        } => {
-            if path_sha256 != path_digest {
-                return Err(validation("Patricia leaf route mismatch"));
-            }
-            match entries.binary_search_by(|entry| entry.relative_path.as_str().cmp(path)) {
-                Ok(index) => match replacement {
-                    Some(entry) => entries[index] = entry,
-                    None => {
-                        entries.remove(index);
-                    }
-                },
-                Err(index) => {
-                    if let Some(entry) = replacement {
-                        entries.insert(index, entry);
-                    } else {
-                        return Ok(Some(current_digest.to_owned()));
-                    }
-                }
-            }
-            if entries.is_empty() {
-                Ok(None)
-            } else {
-                install_manifest_node(
-                    lease,
-                    &leaf_node(depth, &node.prefix, path_digest, entries),
-                    publication_io,
-                )
-                .map(Some)
-            }
+        GraphManifestNodeKind::Bucket { .. } => {
+            unreachable!("buckets handled before prefix splitting")
         }
         GraphManifestNodeKind::Branch { mut children } => {
             if payload_depth >= GRAPH_RADIX_DEPTH {
@@ -1939,6 +1932,7 @@ fn update_manifest_digest(
             }
             let edge =
                 path_digest[usize::from(payload_depth)..=usize::from(payload_depth)].to_owned();
+            let deleting = replacement.is_none();
             let child = update_manifest_digest(
                 lease,
                 children.get(&edge).map(String::as_str),
@@ -1970,12 +1964,26 @@ fn update_manifest_digest(
                     child.prefix = format!("{}{}{}", node.prefix, edge, child.prefix);
                     install_manifest_node(lease, &child, publication_io).map(Some)
                 }
-                _ => install_manifest_node(
-                    lease,
-                    &branch_node(depth, &node.prefix, children),
-                    publication_io,
-                )
-                .map(Some),
+                _ => {
+                    if deleting
+                        && let Some(entries) = collect_small_subtree(
+                            lease,
+                            &children,
+                            payload_depth + 1,
+                            &path_digest[..usize::from(payload_depth)],
+                            publication_io,
+                        )?
+                    {
+                        return install_bucket_entries(lease, depth, entries, publication_io)
+                            .map(Some);
+                    }
+                    install_manifest_node(
+                        lease,
+                        &branch_node(depth, &node.prefix, children),
+                        publication_io,
+                    )
+                    .map(Some)
+                }
             }
         }
     }
@@ -1991,22 +1999,128 @@ fn branch_node(depth: u8, prefix: &str, children: BTreeMap<String, String>) -> G
     }
 }
 
-fn leaf_node(
+fn bucket_node(
     depth: u8,
-    prefix: &str,
-    path_sha256: &str,
     entries: Vec<crate::GraphFileEntry>,
-) -> GraphManifestNode {
-    GraphManifestNode {
+) -> Result<GraphManifestNode, GfError> {
+    Ok(GraphManifestNode {
         format: GRAPH_MANIFEST_NODE_FORMAT.into(),
         format_version: GRAPH_MANIFEST_NODE_VERSION,
         depth,
-        prefix: prefix.to_owned(),
-        kind: GraphManifestNodeKind::Leaf {
-            path_sha256: path_sha256.to_owned(),
-            entries,
-        },
+        prefix: crate::graph_manifest::bucket_prefix(depth, &entries)?,
+        kind: GraphManifestNodeKind::Bucket { entries },
+    })
+}
+
+// Only a formerly bounded bucket (at most nine entries after insertion) reaches
+// this builder. It never reconstructs the surrounding manifest.
+fn install_bucket_entries(
+    lease: &GraphObjectPublicationLease,
+    depth: u8,
+    entries: Vec<crate::GraphFileEntry>,
+    publication_io: &mut GraphPublicationIo,
+) -> Result<String, GfError> {
+    let capacity = crate::graph_manifest::GRAPH_MANIFEST_BUCKET_CAPACITY;
+    if entries.is_empty() || entries.len() > capacity + 1 {
+        return Err(validation("manifest bucket split input exceeds bound"));
     }
+    if entries.len() <= capacity {
+        return install_manifest_node(lease, &bucket_node(depth, entries)?, publication_io);
+    }
+    let prefix = crate::graph_manifest::bucket_prefix(depth, &entries)?;
+    let split_depth = usize::from(depth) + prefix.len();
+    if split_depth >= usize::from(GRAPH_RADIX_DEPTH) {
+        return Err(validation(
+            "manifest hash collision exceeds bucket capacity",
+        ));
+    }
+    let mut groups = BTreeMap::<String, Vec<crate::GraphFileEntry>>::new();
+    for entry in entries {
+        let digest = hex_digest(crate::graph_manifest::logical_path_digest(
+            &entry.relative_path,
+        ));
+        groups
+            .entry(digest[split_depth..=split_depth].to_owned())
+            .or_default()
+            .push(entry);
+    }
+    let mut children = BTreeMap::new();
+    for (edge, entries) in groups {
+        children.insert(
+            edge,
+            install_bucket_entries(lease, (split_depth + 1) as u8, entries, publication_io)?,
+        );
+    }
+    install_manifest_node(
+        lease,
+        &branch_node(depth, &prefix, children),
+        publication_io,
+    )
+}
+
+// Collect a small child forest without assuming that an authenticated branch
+// necessarily has more than eight descendants. Each pending nonempty node
+// contributes at least one entry. Stop as soon as that lower bound exceeds
+// eight; non-unary branches therefore permit at most sixteen node visits.
+fn collect_small_subtree(
+    lease: &GraphObjectPublicationLease,
+    children: &BTreeMap<String, String>,
+    depth: u8,
+    parent_route: &str,
+    publication_io: &mut GraphPublicationIo,
+) -> Result<Option<Vec<crate::GraphFileEntry>>, GfError> {
+    let capacity = crate::graph_manifest::GRAPH_MANIFEST_BUCKET_CAPACITY;
+    if children.len() > capacity {
+        return Ok(None);
+    }
+    let mut pending = children
+        .iter()
+        .map(|(edge, digest)| (digest.clone(), depth, format!("{parent_route}{edge}")))
+        .collect::<Vec<_>>();
+    let mut entries = Vec::with_capacity(capacity);
+    let mut visited = BTreeSet::new();
+    while let Some((digest, expected_depth, route)) = pending.pop() {
+        if visited.len() >= 2 * capacity || !visited.insert(digest.clone()) {
+            return Err(validation(
+                "manifest collapse node bound or uniqueness violated",
+            ));
+        }
+        let node = load_manifest_node(lease, &digest, expected_depth, publication_io)?;
+        let node_route = format!("{route}{}", node.prefix);
+        match node.kind {
+            GraphManifestNodeKind::Bucket { entries: bucket } => {
+                if entries.len() + pending.len() + bucket.len() > capacity {
+                    return Ok(None);
+                }
+                for entry in bucket {
+                    if !hex_digest(crate::graph_manifest::logical_path_digest(
+                        &entry.relative_path,
+                    ))
+                    .starts_with(&node_route)
+                    {
+                        return Err(validation(
+                            "manifest collapse bucket ancestral route mismatch",
+                        ));
+                    }
+                    entries.push(entry);
+                }
+            }
+            GraphManifestNodeKind::Branch { children } => {
+                if entries.len() + pending.len() + children.len() > capacity {
+                    return Ok(None);
+                }
+                let child_depth = u8::try_from(node_route.len() + 1)
+                    .map_err(|_| validation("manifest collapse depth overflow"))?;
+                pending.extend(
+                    children
+                        .into_iter()
+                        .map(|(edge, digest)| (digest, child_depth, format!("{node_route}{edge}"))),
+                );
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(Some(entries))
 }
 
 /// Resolve a digest to its admitted project-level object path.
@@ -5568,6 +5682,167 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.len(), 7);
         assert!(!resolved.iter().any(|entry| entry.relative_path == deleted));
+    }
+
+    #[test]
+    fn bounded_bucket_update_and_lookup_budgets_do_not_scale_with_inventory() {
+        for count in [128_usize, 256, 512] {
+            let container = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let lease = begin_graph_object_publication(container.path()).unwrap();
+            let paths = (0..count)
+                .map(|index| PathBuf::from(format!("payload-{index:06}.parquet")))
+                .collect::<Vec<_>>();
+            for path in &paths {
+                fs::write(workspace.path().join(path), b"initial").unwrap();
+            }
+            let mut state = GraphManifestState::empty();
+            let (original, _) =
+                append_graph_files_v2(&lease, workspace.path(), &mut state, &paths, &[]).unwrap();
+            fs::write(workspace.path().join(&paths[count / 2]), b"replacement").unwrap();
+            let (replaced, update) = append_graph_files_v2(
+                &lease,
+                workspace.path(),
+                &mut state,
+                &paths[count / 2..count / 2 + 1],
+                &[],
+            )
+            .unwrap();
+            assert_eq!(update.prior_entries_examined, 0);
+            assert_eq!(update.changed_entries_examined, 1);
+            // This deterministic representative ladder requires at most four radix
+            // reads/writes per replacement, independent of inventory doubling.
+            assert!(update.publication_io.manifest_reads.read_calls <= 4);
+            assert!(update.publication_io.manifest.installed_objects <= 4);
+            for root in [&original, &replaced] {
+                for path in [paths[count / 2].to_str().unwrap(), "absent-payload.parquet"] {
+                    let mut reads = 0;
+                    let found = crate::graph_manifest::resolve_manifest_entry(
+                        root,
+                        path,
+                        crate::GraphManifestLimits::default(),
+                        |digest| {
+                            reads += 1;
+                            read_graph_object_by_digest(
+                                container.path(),
+                                digest,
+                                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                            )
+                        },
+                    )
+                    .unwrap();
+                    assert!(reads <= 4);
+                    assert_eq!(found.is_some(), path != "absent-payload.parquet");
+                    if let Some(entry) = found {
+                        assert_eq!(entry.byte_length, if root == &original { 7 } else { 11 });
+                    }
+                }
+            }
+            let removed = paths[count / 2].to_str().unwrap().to_owned();
+            let (_, deletion) =
+                append_graph_files_v2(&lease, workspace.path(), &mut state, &[], &[removed])
+                    .unwrap();
+            assert_eq!(deletion.prior_entries_examined, 0);
+            // Four ancestors plus at most sixteen bounded collapse probes each;
+            // this is logical application I/O, not process memory or OS I/O.
+            assert!(deletion.publication_io.manifest_reads.read_calls <= 68);
+            assert!(deletion.publication_io.manifest.installed_objects <= 4);
+            println!(
+                "BUCKET_UPDATE_BUDGET entries={count} replacement_reads={} replacement_installs={} deletion_reads={}",
+                update.publication_io.manifest_reads.read_calls,
+                update.publication_io.manifest.installed_objects,
+                deletion.publication_io.manifest_reads.read_calls
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_bucket_split_collapse_and_replacement_preserve_old_roots() {
+        let container = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let lease = begin_graph_object_publication(container.path()).unwrap();
+        let paths = (0..9)
+            .map(|index| PathBuf::from(format!("payload-{index}.parquet")))
+            .collect::<Vec<_>>();
+        for (index, path) in paths.iter().enumerate() {
+            fs::write(workspace.path().join(path), [index as u8]).unwrap();
+        }
+        let mut state = GraphManifestState::empty();
+        let (eight, _) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths[..8], &[]).unwrap();
+        let read = |root: &GraphFilesRootV2| {
+            let bytes = read_graph_object_by_digest(
+                container.path(),
+                &root.root_node_sha256,
+                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+            )
+            .unwrap();
+            crate::decode_graph_manifest_node(&bytes).unwrap()
+        };
+        assert!(
+            matches!(read(&eight).kind, GraphManifestNodeKind::Bucket { entries } if entries.len() == 8)
+        );
+        let (nine, split) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths[8..], &[]).unwrap();
+        assert!(matches!(
+            read(&nine).kind,
+            GraphManifestNodeKind::Branch { .. }
+        ));
+        assert_eq!(split.prior_entries_examined, 0);
+        assert_eq!(split.changed_entries_examined, 1);
+        assert!(split.publication_io.manifest.installed_objects <= 17);
+        assert_eq!(split.publication_io.manifest_reads.read_calls, 1);
+
+        let removed = paths[8].to_str().unwrap().to_owned();
+        let (collapsed, deletion) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &[], &[removed]).unwrap();
+        assert_eq!(collapsed, eight);
+        assert_eq!(deletion.prior_entries_examined, 0);
+        assert!(deletion.publication_io.manifest_reads.read_calls <= 18);
+        fs::write(workspace.path().join(&paths[0]), b"replacement").unwrap();
+        let (replaced, _) =
+            append_graph_files_v2(&lease, workspace.path(), &mut state, &paths[..1], &[]).unwrap();
+        assert_ne!(replaced.root_node_sha256, eight.root_node_sha256);
+        for (root, expected_count, first_length) in
+            [(&eight, 8, 1), (&nine, 9, 1), (&replaced, 8, 11)]
+        {
+            let (files, work) = crate::resolve_graph_manifest(
+                root,
+                crate::GraphManifestLimits::default(),
+                |digest| {
+                    read_graph_object_by_digest(
+                        container.path(),
+                        digest,
+                        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(files.len(), expected_count);
+            assert_eq!(files[0].byte_length, first_length);
+            assert!(work.segments_examined <= 17);
+            for entry in &files {
+                verify_graph_object(container.path(), &entry.content_sha256, entry.byte_length)
+                    .unwrap();
+                assert_eq!(
+                    crate::graph_manifest::resolve_manifest_entry(
+                        root,
+                        &entry.relative_path,
+                        crate::GraphManifestLimits::default(),
+                        |digest| {
+                            read_graph_object_by_digest(
+                                container.path(),
+                                digest,
+                                crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
+                            )
+                        }
+                    )
+                    .unwrap()
+                    .as_ref(),
+                    Some(entry)
+                );
+            }
+        }
     }
 
     #[test]

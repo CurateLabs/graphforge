@@ -5773,10 +5773,11 @@ fn validate_fresh_cas_control_bound(
         return Err("CAS growth proof requires one fresh publication with every changed path in the canonical inventory".into());
     }
     // A radix update consumes at least one of 64 nibbles per recursive branch.
-    // A split installs at most three nodes; a collapse can load one extra child.
+    // A nine-entry bucket split installs at most 17 nodes (2 * 9 - 1).
+    // This fresh-publication bound has no deletions or collapse probes.
     // The fresh empty root adds one install before the P updates.
     let installs = paths
-        .checked_mul(67)
+        .checked_mul(81)
         .and_then(|value| value.checked_add(1))
         .ok_or("CAS manifest install bound overflows")?;
     let reads = paths
@@ -5791,7 +5792,8 @@ fn validate_fresh_cas_control_bound(
         .checked_mul(graphforge_storage::GRAPH_MANIFEST_ENTRY_ENCODING_OVERHEAD_BYTES)
         .and_then(|value| value.checked_add(inventory_bytes))
         .and_then(|value| value.checked_add(graphforge_storage::GRAPH_MANIFEST_BRANCH_MAX_BYTES))
-        .ok_or("CAS manifest encoded-node bound overflows")?;
+        .ok_or("CAS manifest encoded-node bound overflows")?
+        .min(graphforge_storage::GRAPH_MANIFEST_NODE_MAX_BYTES);
     let requests = io
         .manifest
         .installed_objects

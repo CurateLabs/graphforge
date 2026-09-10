@@ -970,7 +970,7 @@ pub fn capture_storage_attribution(
                     let bytes = crate::read_graph_object_by_digest(
                         generation.container_root(),
                         digest,
-                        64 * 1024 * 1024,
+                        crate::graph_manifest::GRAPH_MANIFEST_NODE_MAX_BYTES,
                     )?;
                     manifest_objects.insert((
                         digest.to_owned(),

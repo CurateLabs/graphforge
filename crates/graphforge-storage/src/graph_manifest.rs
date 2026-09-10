@@ -13,7 +13,16 @@ pub const GRAPH_FILES_V2_VERSION: u32 = 2;
 /// Canonical radix-node format identifier.
 pub const GRAPH_MANIFEST_NODE_FORMAT: &str = "graphforge-graph-manifest-radix-node";
 /// Supported radix-node format version.
-pub const GRAPH_MANIFEST_NODE_VERSION: u32 = 2;
+pub const GRAPH_MANIFEST_NODE_VERSION: u32 = 3;
+/// Maximum exact entries in one current-format bucket.
+pub const GRAPH_MANIFEST_BUCKET_CAPACITY: usize = 8;
+/// Maximum canonical relative-path bytes in a manifest entry.
+pub const GRAPH_MANIFEST_PATH_MAX_BYTES: usize = 4096;
+/// Per-node encoded admission, checked before storage reads and JSON parsing.
+pub const GRAPH_MANIFEST_NODE_MAX_BYTES: u64 = 256 * 1024;
+/// Conservative decoded field/collection-slot charge, excluding allocator
+/// overhead and parser/canonical-encoding buffers (not a native RSS limit).
+pub const GRAPH_MANIFEST_NODE_MAX_DECODED_BYTES: u64 = 64 * 1024;
 /// Number of SHA-256 nibbles consumed by the Patricia trie.
 pub const GRAPH_RADIX_DEPTH: u8 = 64;
 /// Largest canonical branch: 16 references, a 63-nibble prefix, JSON header and newline.
@@ -39,7 +48,7 @@ pub struct GraphFilesRootV2 {
 }
 
 /// One immutable, canonically encoded radix node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphManifestNode {
     /// Node contract identifier.
     pub format: String,
@@ -50,12 +59,12 @@ pub struct GraphManifestNode {
     /// Lowercase hex path compressed between `depth` and this node's payload.
     pub prefix: String,
     #[serde(flatten)]
-    /// Branch or collision-leaf payload.
+    /// Branch or bounded-bucket payload.
     pub kind: GraphManifestNodeKind,
 }
 
 /// Canonical radix-node payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GraphManifestNodeKind {
     /// Hex-nibble child references.
@@ -63,13 +72,142 @@ pub enum GraphManifestNodeKind {
         /// Canonically ordered nibble to child-object digest map.
         children: BTreeMap<String, String>,
     },
-    /// Terminal exact-path collision bucket.
-    Leaf {
-        /// Full SHA-256 digest shared by every colliding exact path.
-        path_sha256: String,
+    /// At most eight exact paths sharing the node's compressed route.
+    Bucket {
         /// Exact logical entries ordered by relative path.
         entries: Vec<GraphFileEntry>,
     },
+}
+
+// Do not deserialize the flattened public representation through Serde's
+// intermediate Content tree: that buffers arbitrary entries before an entry
+// visitor can enforce its limit. This wire type parses bounded fields directly.
+struct BoundedText<const MAX: usize>(String);
+impl<'de, const MAX: usize> Deserialize<'de> for BoundedText<MAX> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TextVisitor<const MAX: usize>;
+        impl<const MAX: usize> serde::de::Visitor<'_> for TextVisitor<MAX> {
+            type Value = BoundedText<MAX>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("bounded manifest text")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                if value.len() > MAX {
+                    return Err(E::custom("manifest text exceeds byte limit"));
+                }
+                Ok(BoundedText(value.to_owned()))
+            }
+        }
+        deserializer.deserialize_str(TextVisitor::<MAX>)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundedEntry {
+    relative_path: BoundedText<GRAPH_MANIFEST_PATH_MAX_BYTES>,
+    byte_length: u64,
+    content_sha256: BoundedText<64>,
+    role: GraphFileRole,
+}
+struct BoundedEntries(Vec<GraphFileEntry>);
+impl<'de> Deserialize<'de> for BoundedEntries {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EntriesVisitor;
+        impl<'de> serde::de::Visitor<'de> for EntriesVisitor {
+            type Value = BoundedEntries;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("at most eight manifest entries")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::with_capacity(GRAPH_MANIFEST_BUCKET_CAPACITY);
+                for _ in 0..GRAPH_MANIFEST_BUCKET_CAPACITY {
+                    let Some(entry) = input.next_element::<BoundedEntry>()? else {
+                        return Ok(BoundedEntries(entries));
+                    };
+                    entries.push(GraphFileEntry {
+                        relative_path: entry.relative_path.0,
+                        byte_length: entry.byte_length,
+                        content_sha256: entry.content_sha256.0,
+                        role: entry.role,
+                    });
+                }
+                if input.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "manifest bucket entry limit exceeded",
+                    ));
+                }
+                Ok(BoundedEntries(entries))
+            }
+        }
+        deserializer.deserialize_seq(EntriesVisitor)
+    }
+}
+struct BoundedChildren(BTreeMap<String, String>);
+impl<'de> Deserialize<'de> for BoundedChildren {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ChildrenVisitor;
+        impl<'de> serde::de::Visitor<'de> for ChildrenVisitor {
+            type Value = BoundedChildren;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("at most sixteen manifest children")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut input: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut children = BTreeMap::new();
+                for _ in 0..16 {
+                    let Some((key, value)) =
+                        input.next_entry::<BoundedText<1>, BoundedText<64>>()?
+                    else {
+                        return Ok(BoundedChildren(children));
+                    };
+                    if children.insert(key.0, value.0).is_some() {
+                        return Err(serde::de::Error::custom("duplicate manifest child"));
+                    }
+                }
+                if input.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom("manifest child limit exceeded"));
+                }
+                Ok(BoundedChildren(children))
+            }
+        }
+        deserializer.deserialize_map(ChildrenVisitor)
+    }
+}
+impl<'de> Deserialize<'de> for GraphManifestNode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            format: BoundedText<64>,
+            format_version: u32,
+            depth: u8,
+            prefix: BoundedText<64>,
+            kind: BoundedText<8>,
+            children: Option<BoundedChildren>,
+            entries: Option<BoundedEntries>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let kind = match (wire.kind.0.as_str(), wire.children, wire.entries) {
+            ("branch", Some(children), None) => GraphManifestNodeKind::Branch {
+                children: children.0,
+            },
+            ("bucket", None, Some(entries)) => GraphManifestNodeKind::Bucket { entries: entries.0 },
+            _ => return Err(serde::de::Error::custom("unsupported manifest node shape")),
+        };
+        Ok(Self {
+            format: wire.format.0,
+            format_version: wire.format_version,
+            depth: wire.depth,
+            prefix: wire.prefix.0,
+            kind,
+        })
+    }
 }
 
 /// Admission bounds for resolving an untrusted radix manifest.
@@ -129,10 +267,21 @@ pub(crate) struct GraphManifestTargetedState {
 /// Encode one validated node as canonical JSON-line bytes.
 pub fn encode_node(node: &GraphManifestNode) -> Result<Vec<u8>, GfError> {
     validate_node(node)?;
-    canonical_line(node, "graph manifest radix node")
+    let bytes = canonical_line(node, "graph manifest radix node")?;
+    if bytes.len() as u64 > GRAPH_MANIFEST_NODE_MAX_BYTES {
+        return Err(validation(
+            "graph manifest encoded node byte limit exceeded",
+        ));
+    }
+    Ok(bytes)
 }
 /// Decode and validate canonical JSON-line node bytes.
 pub fn decode_node(bytes: &[u8]) -> Result<GraphManifestNode, GfError> {
+    if bytes.len() as u64 > GRAPH_MANIFEST_NODE_MAX_BYTES {
+        return Err(validation(
+            "graph manifest encoded node byte limit exceeded",
+        ));
+    }
     decode_canonical_line(bytes, "graph manifest radix node", validate_node)
 }
 /// Encode one validated compact root as canonical JSON-line bytes.
@@ -265,21 +414,17 @@ where
                     stack.push((child, payload_depth + 1, child_route));
                 }
             }
-            GraphManifestNodeKind::Leaf {
-                path_sha256,
-                entries,
-            } => {
-                if payload_depth != GRAPH_RADIX_DEPTH || node_route != path_sha256 {
-                    return Err(validation("graph manifest leaf is not terminal"));
-                }
+            GraphManifestNodeKind::Bucket { entries } => {
                 admit_work(
                     &mut evidence,
                     limits,
                     u64::try_from(entries.len()).unwrap_or(u64::MAX),
                 )?;
                 for entry in entries {
-                    if hex_digest(logical_path_digest(&entry.relative_path)) != path_sha256 {
-                        return Err(validation("graph manifest leaf path digest mismatch"));
+                    if !hex_digest(logical_path_digest(&entry.relative_path))
+                        .starts_with(&node_route)
+                    {
+                        return Err(validation("graph manifest bucket ancestral route mismatch"));
                     }
                     evidence.entries_examined = evidence.entries_examined.saturating_add(1);
                     if files.insert(entry.relative_path.clone(), entry).is_some() {
@@ -375,6 +520,30 @@ where
         if node.depth != depth {
             return Err(validation("graph manifest radix depth mismatch"));
         }
+        if let GraphManifestNodeKind::Bucket { entries } = &node.kind {
+            state.entries_examined = state
+                .entries_examined
+                .checked_add(entries.len())
+                .ok_or_else(|| validation("graph manifest targeted entry total overflow"))?;
+            if state.entries_examined > limits.max_entries {
+                return Err(validation("graph manifest targeted entry limit exceeded"));
+            }
+            state.work_units = state
+                .work_units
+                .checked_add(u64::try_from(entries.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| validation("graph manifest targeted work overflow"))?;
+            if state.work_units > limits.max_work_units {
+                return Err(validation("graph manifest targeted work limit exceeded"));
+            }
+            let ancestral_route = &route[..usize::from(depth)];
+            for entry in entries {
+                if !hex_digest(logical_path_digest(&entry.relative_path))
+                    .starts_with(ancestral_route)
+                {
+                    return Err(validation("graph manifest bucket ancestral route mismatch"));
+                }
+            }
+        }
         let prefix_end = usize::from(depth)
             .checked_add(node.prefix.len())
             .ok_or_else(|| validation("graph manifest prefix overflow"))?;
@@ -407,36 +576,10 @@ where
                 digest.clone_from(child);
                 depth = depth.saturating_add(1);
             }
-            GraphManifestNodeKind::Leaf {
-                path_sha256,
-                entries,
-            } => {
-                state.entries_examined = state
-                    .entries_examined
-                    .checked_add(entries.len())
-                    .ok_or_else(|| validation("graph manifest targeted entry total overflow"))?;
-                if state.entries_examined > limits.max_entries {
-                    return Err(validation("graph manifest targeted entry limit exceeded"));
-                }
-                state.work_units = state
-                    .work_units
-                    .checked_add(u64::try_from(entries.len()).unwrap_or(u64::MAX))
-                    .ok_or_else(|| validation("graph manifest targeted work overflow"))?;
-                if state.work_units > limits.max_work_units {
-                    return Err(validation("graph manifest targeted work limit exceeded"));
-                }
-                if depth != GRAPH_RADIX_DEPTH || path_sha256 != route {
-                    return Err(validation("graph manifest leaf is not terminal"));
-                }
-                for entry in entries {
-                    if hex_digest(logical_path_digest(&entry.relative_path)) != path_sha256 {
-                        return Err(validation("graph manifest leaf path digest mismatch"));
-                    }
-                    if entry.relative_path == relative_path {
-                        return Ok(Some(entry));
-                    }
-                }
-                return Ok(None);
+            GraphManifestNodeKind::Bucket { entries } => {
+                return Ok(entries
+                    .into_iter()
+                    .find(|entry| entry.relative_path == relative_path));
             }
         }
     }
@@ -475,6 +618,9 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
     {
         return Err(validation("unsupported graph manifest radix node contract"));
     }
+    if node.prefix.len() > usize::from(GRAPH_RADIX_DEPTH) {
+        return Err(validation("graph manifest prefix byte limit exceeded"));
+    }
     validate_prefix(&node.prefix)?;
     let payload_depth = node
         .depth
@@ -487,8 +633,11 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
     }
     match &node.kind {
         GraphManifestNodeKind::Branch { children } => {
+            if children.len() > 16 {
+                return Err(validation("graph manifest child limit exceeded"));
+            }
             if payload_depth >= GRAPH_RADIX_DEPTH {
-                return Err(validation("terminal graph manifest node must be a leaf"));
+                return Err(validation("terminal graph manifest node must be a bucket"));
             }
             if children.len() == 1 {
                 return Err(validation("graph manifest unary branch is not canonical"));
@@ -507,32 +656,80 @@ fn validate_node(node: &GraphManifestNode) -> Result<(), GfError> {
                 }
             }
         }
-        GraphManifestNodeKind::Leaf {
-            path_sha256,
-            entries,
-        } => {
-            if payload_depth != GRAPH_RADIX_DEPTH || entries.is_empty() {
-                return Err(validation("graph manifest leaf shape is invalid"));
-            }
-            validate_digest(path_sha256)?;
-            if node.prefix != path_sha256[usize::from(node.depth)..] {
-                return Err(validation("graph manifest leaf compressed route mismatch"));
+        GraphManifestNodeKind::Bucket { entries } => {
+            if entries.is_empty() || entries.len() > GRAPH_MANIFEST_BUCKET_CAPACITY {
+                return Err(validation("graph manifest bucket shape is invalid"));
             }
             let mut previous: Option<&str> = None;
             for entry in entries {
                 validate_entry(entry)?;
                 if previous.is_some_and(|p| p >= entry.relative_path.as_str()) {
-                    return Err(validation("graph manifest collision leaf is not canonical"));
-                }
-                if hex_digest(logical_path_digest(&entry.relative_path)) != *path_sha256 {
-                    return Err(validation("graph manifest leaf path digest mismatch"));
+                    return Err(validation(
+                        "graph manifest bucket entry order is not canonical",
+                    ));
                 }
                 previous = Some(&entry.relative_path);
             }
+            if node.prefix != bucket_prefix(node.depth, entries)? {
+                return Err(validation(
+                    "graph manifest bucket compressed route mismatch",
+                ));
+            }
         }
+    }
+    let decoded_charge = std::mem::size_of::<GraphManifestNode>() as u64
+        + node.format.len() as u64
+        + node.prefix.len() as u64
+        + match &node.kind {
+            GraphManifestNodeKind::Bucket { entries } => {
+                (GRAPH_MANIFEST_BUCKET_CAPACITY * std::mem::size_of::<GraphFileEntry>()) as u64
+                    + entries
+                        .iter()
+                        .map(|entry| {
+                            (entry.relative_path.len() + entry.content_sha256.len()) as u64
+                        })
+                        .sum::<u64>()
+            }
+            GraphManifestNodeKind::Branch { children } => {
+                (16 * std::mem::size_of::<(String, String)>()) as u64
+                    + children
+                        .iter()
+                        .map(|(key, value)| (key.len() + value.len()) as u64)
+                        .sum::<u64>()
+            }
+        };
+    if decoded_charge > GRAPH_MANIFEST_NODE_MAX_DECODED_BYTES {
+        return Err(validation(
+            "graph manifest decoded node byte limit exceeded",
+        ));
     }
     Ok(())
 }
+/// Maximal common digest suffix for a bounded entry set at the given depth.
+pub(crate) fn bucket_prefix(depth: u8, entries: &[GraphFileEntry]) -> Result<String, GfError> {
+    if depth > GRAPH_RADIX_DEPTH || entries.is_empty() {
+        return Err(validation("invalid manifest bucket prefix input"));
+    }
+    let first = hex_digest(logical_path_digest(&entries[0].relative_path));
+    let mut end = usize::from(GRAPH_RADIX_DEPTH);
+    for entry in &entries[1..] {
+        let digest = hex_digest(logical_path_digest(&entry.relative_path));
+        end = end.min(
+            first
+                .bytes()
+                .zip(digest.bytes())
+                .take_while(|(a, b)| a == b)
+                .count(),
+        );
+    }
+    if end < usize::from(depth) {
+        return Err(validation(
+            "graph manifest bucket entries cross ancestral routes",
+        ));
+    }
+    Ok(first[usize::from(depth)..end].to_owned())
+}
+
 fn validate_entry(entry: &GraphFileEntry) -> Result<(), GfError> {
     validate_path(&entry.relative_path)?;
     validate_digest(&entry.content_sha256)?;
@@ -548,7 +745,8 @@ fn validate_entry(entry: &GraphFileEntry) -> Result<(), GfError> {
 }
 fn validate_path(value: &str) -> Result<(), GfError> {
     let path = std::path::Path::new(value);
-    if path.as_os_str().is_empty()
+    if value.len() > GRAPH_MANIFEST_PATH_MAX_BYTES
+        || path.as_os_str().is_empty()
         || path.is_absolute()
         || path
             .components()
@@ -690,8 +888,7 @@ mod tests {
                         format_version: GRAPH_MANIFEST_NODE_VERSION,
                         depth: 0,
                         prefix: digest.clone(),
-                        kind: GraphManifestNodeKind::Leaf {
-                            path_sha256: digest,
+                        kind: GraphManifestNodeKind::Bucket {
                             entries: vec![entry],
                         },
                     };
@@ -736,8 +933,7 @@ mod tests {
                 format_version: GRAPH_MANIFEST_NODE_VERSION,
                 depth: GRAPH_RADIX_DEPTH,
                 prefix: String::new(),
-                kind: GraphManifestNodeKind::Leaf {
-                    path_sha256: digest.clone(),
+                kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
                         relative_path: path.into(),
                         byte_length: 0,
@@ -874,8 +1070,7 @@ mod tests {
             format_version: GRAPH_MANIFEST_NODE_VERSION,
             depth: 0,
             prefix: path_sha256.clone(),
-            kind: GraphManifestNodeKind::Leaf {
-                path_sha256,
+            kind: GraphManifestNodeKind::Bucket {
                 entries: vec![entry],
             },
         };
@@ -952,8 +1147,7 @@ mod tests {
                 format_version: GRAPH_MANIFEST_NODE_VERSION,
                 depth: 1,
                 prefix: route[1..].into(),
-                kind: GraphManifestNodeKind::Leaf {
-                    path_sha256: route,
+                kind: GraphManifestNodeKind::Bucket {
                     entries: vec![GraphFileEntry {
                         relative_path: path.clone(),
                         byte_length: 1,
@@ -1008,5 +1202,158 @@ mod tests {
         assert!(results.next().unwrap().unwrap().is_some());
         let error = results.next().unwrap().unwrap_err();
         assert!(error.to_string().contains("segment limit"), "{error}");
+    }
+    fn test_bucket(depth: u8, paths: &[String]) -> GraphManifestNode {
+        let mut entries = paths
+            .iter()
+            .map(|path| GraphFileEntry {
+                relative_path: path.clone(),
+                byte_length: u64::MAX,
+                content_sha256: "a".repeat(64),
+                role: GraphFileRole::Properties,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+        GraphManifestNode {
+            format: GRAPH_MANIFEST_NODE_FORMAT.into(),
+            format_version: GRAPH_MANIFEST_NODE_VERSION,
+            depth,
+            prefix: bucket_prefix(depth, &entries).unwrap(),
+            kind: GraphManifestNodeKind::Bucket { entries },
+        }
+    }
+
+    #[test]
+    fn bounded_bucket_decoder_admits_maximum_fields_and_refuses_before_ninth_entry() {
+        let paths = (0..GRAPH_MANIFEST_BUCKET_CAPACITY)
+            .map(|index| {
+                let prefix = format!("p/{index}/");
+                format!(
+                    "{prefix}{}",
+                    "\u{0001}".repeat(GRAPH_MANIFEST_PATH_MAX_BYTES - prefix.len())
+                )
+            })
+            .collect::<Vec<_>>();
+        let node = test_bucket(0, &paths);
+        let encoded = encode_node(&node).unwrap();
+        assert!(encoded.len() as u64 <= GRAPH_MANIFEST_NODE_MAX_BYTES);
+        assert!(
+            encoded.len() > 192 * 1024,
+            "escaped maximum paths must exercise the encoded bound"
+        );
+        assert_eq!(decode_node(&encoded).unwrap(), node);
+
+        let mut too_long = paths.clone();
+        too_long[0].push('x');
+        assert!(encode_node(&test_bucket(0, &too_long)).is_err());
+        let mut wire = serde_json::to_value(&node).unwrap();
+        wire["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "relative_path": "x".repeat(GRAPH_MANIFEST_PATH_MAX_BYTES + 1)
+            }));
+        let mut bytes = serde_json::to_vec(&wire).unwrap();
+        bytes.push(b'\n');
+        let error = decode_node(&bytes).unwrap_err();
+        assert!(
+            error.to_string().contains("entry limit"),
+            "ninth entry must not be decoded: {error}"
+        );
+
+        let bytes = vec![b'x'; GRAPH_MANIFEST_NODE_MAX_BYTES as usize + 1];
+        assert!(
+            decode_node(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("encoded node byte limit")
+        );
+        let mut old = node;
+        old.format_version = 2;
+        let bytes = canonical_line(&old, "test").unwrap();
+        assert!(
+            decode_node(&bytes)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn bucket_duplicate_order_and_nonmaximal_prefix_are_rejected() {
+        let paths = vec!["a.parquet".into(), "b.parquet".into()];
+        let mut node = test_bucket(0, &paths);
+        let GraphManifestNodeKind::Bucket { entries } = &mut node.kind else {
+            unreachable!()
+        };
+        entries.reverse();
+        assert!(encode_node(&node).is_err());
+        let mut node = test_bucket(0, &paths);
+        let GraphManifestNodeKind::Bucket { entries } = &mut node.kind else {
+            unreachable!()
+        };
+        entries[1] = entries[0].clone();
+        assert!(encode_node(&node).is_err());
+        let mut node = test_bucket(0, &paths[..1]);
+        node.prefix.pop();
+        assert!(encode_node(&node).is_err());
+    }
+
+    #[test]
+    fn targeted_absence_rejects_bucket_under_wrong_ancestor() {
+        let actual = "topology/actual.parquet".to_owned();
+        let actual_route = hex_digest(logical_path_digest(&actual));
+        let wrong_edge = if actual_route.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
+        let absent = (0..10_000)
+            .map(|index| format!("topology/absent-{index}.parquet"))
+            .find(|path| hex_digest(logical_path_digest(path)).starts_with(wrong_edge))
+            .unwrap();
+        let misplaced = test_bucket(1, std::slice::from_ref(&actual));
+        let bytes = encode_node(&misplaced).unwrap();
+        let digest = object_digest(&bytes);
+        // A distinct well-formed sibling avoids relying on unary-branch refusal.
+        let sibling = test_bucket(1, &[actual.clone() + ".sibling"]);
+        let sibling_route = hex_digest(logical_path_digest(&(actual.clone() + ".sibling")));
+        let sibling_edge = &sibling_route[..1];
+        assert_ne!(sibling_edge, wrong_edge);
+        let sibling_bytes = encode_node(&sibling).unwrap();
+        let sibling_digest = object_digest(&sibling_bytes);
+        let root_node = branch(
+            0,
+            BTreeMap::from([
+                (wrong_edge.into(), digest.clone()),
+                (sibling_edge.into(), sibling_digest.clone()),
+            ]),
+        );
+        let root_bytes = encode_node(&root_node).unwrap();
+        let root_digest = object_digest(&root_bytes);
+        let objects = BTreeMap::from([
+            (digest, bytes),
+            (sibling_digest, sibling_bytes),
+            (root_digest.clone(), root_bytes),
+        ]);
+        let root = GraphFilesRootV2 {
+            format: GRAPH_FILES_V2_FORMAT.into(),
+            format_version: GRAPH_FILES_V2_VERSION,
+            root_node_sha256: root_digest,
+            logical_file_count: 2,
+            logical_byte_length: 0,
+        };
+        let error =
+            resolve_manifest_entry(&root, &absent, GraphManifestLimits::default(), |digest| {
+                Ok(objects[digest].clone())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("ancestral route"), "{error}");
+        assert!(
+            resolve_manifest(&root, GraphManifestLimits::default(), |digest| Ok(objects
+                [digest]
+                .clone()))
+            .is_err()
+        );
     }
 }
