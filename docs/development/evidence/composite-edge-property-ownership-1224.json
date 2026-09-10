@@ -1,0 +1,252 @@
+{
+  "issue": 1224,
+  "source_commit": "d30ac7553a6825246333d7f815d6b8fa680b5914",
+  "baseline_source_commit": "1aea7a8b823f5e79ba890c80f822cc50ba06f85f",
+  "workload": "Public construction N33/N4097 E129/two routes; ordinary CREATE adds four nodes and two edges (one without properties); composite edge SET/removal; exact fixed/variable Arrow queries; large-case compaction and retained stream; reopen/export/full verify/clean import; subsequent imported edge SET/removal, exact retry and second reopen.",
+  "command": [
+    "permanent_storage_budgets",
+    "composite_constructed_edge_properties_preserve_authenticated_owner",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "runtime": {
+    "elapsed_seconds": 14.46,
+    "user_seconds": 14.36,
+    "system_seconds": 1.62,
+    "peak_rss_kib": 156492,
+    "filesystem_input_512_byte_blocks": 32608,
+    "filesystem_output_512_byte_blocks": 99408,
+    "exit_status": 0
+  },
+  "syscall_io": {
+    "syscalls": {
+      "read": {
+        "calls": 59223,
+        "bytes": 193990320
+      },
+      "pread64": {
+        "calls": 75286,
+        "bytes": 24612567
+      },
+      "write": {
+        "calls": 5773,
+        "bytes": 28201103
+      },
+      "fsync": {
+        "calls": 5942,
+        "bytes": 0
+      },
+      "copy_file_range": {
+        "calls": 2516,
+        "bytes": 14216471
+      }
+    },
+    "read_bytes": 232819358,
+    "write_bytes": 42417574,
+    "errors": [],
+    "elapsed_seconds": 37.98
+  },
+  "workspace_observation": {
+    "command": [
+      "/tmp/gf1224-measure-bin",
+      "composite_constructed_edge_properties_preserve_authenticated_owner",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "sampled_unique_inode_allocated_peak_bytes": 10649600,
+    "sampled_path_logical_peak_bytes": 9048977,
+    "sampled_file_count_peak": 680,
+    "samples": 1324,
+    "requested_poll_interval_seconds": 0.005,
+    "maximum_observed_sample_interval_seconds": 0.019791411992628127,
+    "vanished_files_during_scan": 28,
+    "exit_status": 0,
+    "limitations": [
+      "Sampling can miss shorter-lived allocation peaks and unlinked open files.",
+      "Includes retained project generations, private hydration/staging and portable artifacts, not only temporary files.",
+      "Hardlinks are deduplicated for allocated bytes, not path logical bytes.",
+      "Separate run from CPU/RSS and syscall traces; scanner adds filesystem activity."
+    ]
+  },
+  "targeted_owner_probe_observations": [
+    {
+      "unrelated": 33,
+      "targets": 1,
+      "candidate_routes": 2,
+      "target_memberships": 2,
+      "resolved_targets": 1,
+      "route_name_bytes": 16,
+      "physical_bytes": 16231,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 194,
+      "physical_blocks": 401,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 1,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 33,
+      "targets": 16,
+      "candidate_routes": 2,
+      "target_memberships": 32,
+      "resolved_targets": 16,
+      "route_name_bytes": 16,
+      "physical_bytes": 18153,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 258,
+      "physical_blocks": 481,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 33,
+      "targets": 129,
+      "candidate_routes": 2,
+      "target_memberships": 258,
+      "resolved_targets": 129,
+      "route_name_bytes": 16,
+      "physical_bytes": 18153,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 258,
+      "physical_blocks": 481,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 33,
+      "fragments": 8,
+      "candidate_routes": 2,
+      "target_memberships": 258,
+      "resolved_targets": 129,
+      "route_name_bytes": 16,
+      "physical_bytes": 58796,
+      "authentication_bytes": 15747,
+      "authenticated_snapshot_bytes": 15747,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 645,
+      "physical_blocks": 1378,
+      "fragments_considered": 8,
+      "row_groups_considered": 8,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 4097,
+      "targets": 1,
+      "candidate_routes": 2,
+      "target_memberships": 2,
+      "resolved_targets": 1,
+      "route_name_bytes": 16,
+      "physical_bytes": 16231,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 194,
+      "physical_blocks": 401,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 1,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 4097,
+      "targets": 16,
+      "candidate_routes": 2,
+      "target_memberships": 32,
+      "resolved_targets": 16,
+      "route_name_bytes": 16,
+      "physical_bytes": 18153,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 258,
+      "physical_blocks": 481,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 4097,
+      "targets": 129,
+      "candidate_routes": 2,
+      "target_memberships": 258,
+      "resolved_targets": 129,
+      "route_name_bytes": 16,
+      "physical_bytes": 18153,
+      "authentication_bytes": 4164,
+      "authenticated_snapshot_bytes": 4164,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 258,
+      "physical_blocks": 481,
+      "fragments_considered": 2,
+      "row_groups_considered": 2,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    },
+    {
+      "unrelated": 4097,
+      "fragments": 8,
+      "candidate_routes": 2,
+      "target_memberships": 258,
+      "resolved_targets": 129,
+      "route_name_bytes": 16,
+      "physical_bytes": 58796,
+      "authentication_bytes": 15747,
+      "authenticated_snapshot_bytes": 15747,
+      "authenticated_snapshot_peak_bytes": 2104,
+      "physical_rows": 645,
+      "physical_blocks": 1378,
+      "fragments_considered": 8,
+      "row_groups_considered": 8,
+      "row_groups_selected": 2,
+      "decoder_peak_bytes": 408,
+      "decoder_page_reservation_bytes": 2257
+    }
+  ],
+  "deterministic_budgets": {
+    "candidate_memberships_per_target": 2,
+    "resolved_entries_per_target": 1,
+    "existing_composite_request_entries": 100000,
+    "two_fragment_read_bytes": 65536,
+    "two_fragment_authentication_and_snapshot_write_bytes": 16384,
+    "eight_fragment_read_bytes": 262144,
+    "eight_fragment_authentication_and_snapshot_write_bytes": 65536,
+    "eight_fragment_snapshot_peak_bytes": 16384,
+    "decoded_row_state_peak_bytes": 32768,
+    "published_parquet_logical_bytes": 1048576,
+    "published_parquet_allocated_bytes": 2097152,
+    "compaction_output_bytes": 1048576,
+    "reported_compaction_logical_state_bytes": 16384,
+    "reported_compaction_spill_bytes": 0,
+    "existing_per_route_decoder_admission_bytes": 67108864
+  },
+  "limitations": [
+    "Baseline fails exact values before compaction. There is no valid whole-fixture baseline CPU/RSS comparison and no claimed performance improvement.",
+    "Probe counters exclude the existing composite topology scan, baseline per-field rereads, publication and query work. Unrelated property-route growth adds no probe I/O; selected-fragment growth explicitly does.",
+    "Identity container counts are not allocator or RSS byte estimates. Decoder row-state counters and compaction logical-state estimates exclude whole-process memory; per-route decoder admission does not include all transaction maps.",
+    "The targeted reader still authenticates selected fragments and validates all row values before selected target decode to enforce tombstone/UUID correctness.",
+    "Runtime, syscall and sampled filesystem evidence use separate serial runs of a frozen executable. Whole-fixture observations include setup, all mutations, authentication, queries, persistence and portable work.",
+    "Filesystem sampling includes overlapping retained/project/private/portable files, deduplicates allocated inodes, and may miss unlinked files, directory allocation and shorter-lived peaks. It is not an exact temporary-only admission limit.",
+    "No compression, dictionary, row-group, streaming or lifecycle default changes. Inspected permanent Parquet must use the shared Zstd policy.",
+    "Earlier successful measurements before adding subsequent imported mutation were superseded and are not used here."
+  ]
+}

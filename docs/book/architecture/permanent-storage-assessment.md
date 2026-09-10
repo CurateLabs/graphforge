@@ -753,3 +753,92 @@ speed improvement. Earlier diagnostic runs were excluded after adding immediate
 post-error retry coverage and fixing the measurement harness to retain a stable
 executable for its child processes. Required CI additionally runs the native
 Windows/macOS lifetime regression; #1221 retains the wider publication close gate.
+
+### Composite edge property ownership (#1224)
+
+The current production writers intentionally have different exploratory property
+owners: construction uses `_exploratory`, while ordinary CREATE uses the logical
+relationship name. Qualified topology carries its authenticated semantic route.
+The composite publisher resolves each requested existing edge against its logical
+or qualified route and `_exploratory`, intersected with admitted property schemas.
+It groups target UUIDs by candidate and reads each selected route once. It retains
+row presence even when the newest row is tombstoned or has no live properties;
+multiple candidate owners refuse before publication. Edges with no property-row
+authority and same-request creations retain ordinary writer ownership. Public
+unnamed CREATE is rejected by binding and is outside this publishing inventory.
+Both canonical staging and GFDR use the resolved owner map. This changes no
+compression, dictionary, row-group, streaming or durability defaults.
+
+The targeted reader's existing full authentication, UUID ordering, schema and
+tombstone-value checks remain in place. Presence is derived from its unresolved
+UUID set; existing live snapshot and replay readers retain their result semantics
+and do not allocate an additional presence set. Probe routes execute serially and
+drop decoded values between routes. Candidate names are retained once, and the
+resolved map borrows those names until installing the existing owner map. There
+are at most two candidate memberships and one resolved entry per requested edge;
+the existing 100,000-entry transaction cap still applies. These container counts
+are not allocator-byte or RSS estimates. The existing per-route 64 MiB decoder
+admission does not include all transaction identity containers.
+
+The added read cost is proportional to authenticated fragments in selected routes,
+not all property routes. Validation currently decodes values to check malformed
+tombstones, followed by selected target decoding; this repair does not claim a
+UUID-only scan. Optimistic baseline capture retains its existing per-field reads.
+The existing composite validation topology scan and identity sets also remain;
+the complete transaction is not request-sized. Probe counters report cumulative
+read/authentication/snapshot work and serial decoder peaks separately from route
+and identity counts. Full-fixture CPU, I/O, RSS and overlapping disk observations
+must include those other costs.
+
+Removing the last string value in one route also exposed a query union error:
+the first route's Null type could mask another route's Utf8 type. Fixed and
+variable traversal now retain the first concrete union type and treat Null-only
+route contributions as nulls. All-Null values remain null; incompatible concrete
+types still fail. Returned relationship structs omit a property once no live
+owner advertises it; explicit property selection yields Arrow logical nulls.
+
+Regression fixtures combine public construction, ordinary CREATE with and without
+properties, composite SET/removal, exact fixed/variable Arrow query results,
+compaction, retained streams, reopen, export/full verification, clean import,
+subsequent mutation, exact retry and a second reopen.
+The fixtures use 33/4,097 original nodes, 129 constructed edges and two newly
+created edges. Published Parquet is capped at 1 MiB logical and 2 MiB allocated;
+compaction output is capped at 1 MiB, reported logical state at 16 KiB and reported
+spill at zero. The logical-state report is not total memory. All inspected
+permanent columns must retain the shared Zstd policy.
+
+A separate deterministic ownership probe checks 1/16/129 targets, two selected
+routes and 33/4,097 unrelated property rows. Its two-fragment ceilings are 64 KiB
+reads, 16 KiB authentication/snapshot writes and 32 KiB decoded row state. The
+same selected payloads must have identical counters despite unrelated growth.
+An eight-fragment case caps total reads at 256 KiB, authentication/snapshot writes
+at 64 KiB, peak snapshot size at 16 KiB and decoded row state at 32 KiB. This
+explicitly admits increasing work when fragments are added within a selected
+route. Authenticated tombstone corruption and ambiguous ownership fail closed.
+
+Source `d30ac7553a6825246333d7f815d6b8fa680b5914` and observations are in
+[`composite-edge-property-ownership-1224.json`](../../development/evidence/composite-edge-property-ownership-1224.json).
+The two-fragment probes read 16,231/18,153 bytes for 1/16–129 targets, with
+4,164 authentication/snapshot bytes, 401/481 read calls and a 2,104-byte peak
+snapshot. Eight fragments required 58,796 read bytes, 15,747 authentication/
+snapshot bytes and 1,378 read calls; peak snapshot size stayed 2,104 bytes.
+Both unrelated-route cardinalities have identical counters. The decoder reports
+408 peak row-state bytes and 2,257 page-reservation bytes in these small fixtures;
+these are deliberately not described as complete process memory.
+
+The frozen public lifecycle test ran separately for runtime, syscall tracing and
+filesystem sampling. Untraced elapsed/user/system times were 14.46/14.36/1.62
+seconds, with 156,492 KiB peak RSS. The traced run recorded 232,819,358 read bytes,
+42,417,574 write bytes and 5,942 fsync calls, with no failed traced calls.
+Successful `copy_file_range` transfers are included in both read and write totals.
+OS filesystem input/output counters were 32,608/99,408 512-byte blocks.
+These whole-fixture costs include construction, authentication, queries, retained
+generations, mutation, compaction and portable work, rather than just the probe.
+
+The 1,324-sample filesystem observation found a 10,649,600-byte unique-inode
+allocation peak and 9,048,977 path-logical bytes, with a maximum 19.8 ms sample
+interval and 28 vanished-file races. This scan cannot prove peaks of unlinked
+or shorter-lived files or directory allocations. The baseline fails the required
+value assertion, so no complete baseline runtime comparison or speed improvement
+is claimed. An earlier successful measurement preceding the subsequent-import
+mutation assertion was superseded by this final workload.
