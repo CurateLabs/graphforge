@@ -42,6 +42,12 @@ use value_semantics::{
 };
 pub(crate) use value_semantics::{CYPHER_ORDER_KEY, needs_cypher_order_key_type};
 
+pub(crate) fn is_comparison_predicate(
+    function: &datafusion::logical_expr::expr::ScalarFunction,
+) -> bool {
+    value_semantics::is_comparison_predicate(function)
+}
+
 pub(crate) use aggregates::{
     CYPHER_COLLECT, CYPHER_COLLECT_DISTINCT, CYPHER_MAX, CYPHER_MIN, CYPHER_PERCENTILE_CONT,
     CYPHER_PERCENTILE_DISC,

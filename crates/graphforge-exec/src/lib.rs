@@ -5417,14 +5417,21 @@ impl ExecutionSession {
                 .expect("DataFusion RuntimeEnv construction"),
         );
 
+        let mut optimizer_rules = datafusion::optimizer::Optimizer::new().rules;
+        let predicate_position = optimizer_rules
+            .iter()
+            .position(|rule| rule.name() == "push_down_filter")
+            .expect("pinned DataFusion optimizer includes filter pushdown");
+        optimizer_rules.insert(
+            predicate_position + 1,
+            Arc::new(graphforge_rel::input_predicates::FixedExpandInputPredicates),
+        );
         let state = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_query_planner(Arc::new(GraphForgeQueryPlanner))
-            .with_optimizer_rule(Arc::new(
-                graphforge_rel::input_predicates::FixedExpandInputPredicates,
-            ))
+            .with_optimizer_rules(optimizer_rules)
             // Runs after DataFusion's default rules, when terminal fetches and
             // eager round-robin exchanges are visible (#1269).
             .with_physical_optimizer_rule(Arc::new(demand::FixedHopDemandRule))

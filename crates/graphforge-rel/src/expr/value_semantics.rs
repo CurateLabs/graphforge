@@ -112,6 +112,16 @@ fn scalar_as_bool(s: &ScalarValue) -> datafusion::error::Result<Option<bool>> {
 pub(super) static CYPHER_CMP_PRED: LazyLock<ScalarUDF> =
     LazyLock::new(|| ScalarUDF::new_from_impl(CypherCmpPred::new()));
 
+pub(super) fn is_comparison_predicate(
+    function: &datafusion::logical_expr::expr::ScalarFunction,
+) -> bool {
+    function
+        .func
+        .inner()
+        .downcast_ref::<CypherCmpPred>()
+        .is_some()
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CypherCmpPred {
     signature: Signature,

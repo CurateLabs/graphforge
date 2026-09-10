@@ -66,6 +66,21 @@ fn total_predicate(expr: &Expr, schema: &DFSchema) -> bool {
         Expr::BinaryExpr(binary) if binary.op == Operator::And => {
             total_predicate(&binary.left, schema) && total_predicate(&binary.right, schema)
         }
+        Expr::ScalarFunction(function) if crate::expr::is_comparison_predicate(function) => {
+            function.args.len() == 3
+                && matches!(
+                    &function.args[2],
+                    Expr::Literal(
+                        datafusion::common::ScalarValue::Int8(Some(0..=3))
+                            | datafusion::common::ScalarValue::Int64(Some(0..=3)),
+                        _
+                    )
+                )
+                && atom_type(&function.args[0], schema)
+                    .as_ref()
+                    .is_some_and(primitive)
+                && atom_type(&function.args[0], schema) == atom_type(&function.args[1], schema)
+        }
         _ => crate::expr::is_fixed_relationship_disjoint(expr, schema),
     }
 }
@@ -127,5 +142,134 @@ impl OptimizerRule for FixedExpandInputPredicates {
             None => replacement,
         };
         Ok(Transformed::yes(replacement))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::Field;
+    use datafusion::common::{Column, TableReference};
+    use datafusion::logical_expr::{EmptyRelation, Extension, col, lit};
+    use datafusion::optimizer::OptimizerContext;
+    use graphforge_ir::Direction;
+
+    fn expanded() -> LogicalPlan {
+        let schema = DFSchema::new_with_metadata(
+            vec![(
+                Some(TableReference::bare("var_0")),
+                Arc::new(Field::new("score", DataType::Int64, true)),
+            )],
+            Default::default(),
+        )
+        .unwrap();
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(schema),
+        });
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(ExpandNode::new(
+                Arc::new(input),
+                "*",
+                0,
+                1,
+                2,
+                Direction::Out,
+                None,
+                vec![Arc::new(Field::new("edge_id", DataType::UInt64, false))],
+                vec![],
+                vec![Arc::new(Field::new("score", DataType::Int64, true))],
+            )),
+        })
+    }
+
+    fn column(var: &str) -> Expr {
+        Expr::Column(Column::new(Some(TableReference::bare(var)), "score"))
+    }
+
+    fn rewrite(predicate: Expr) -> Transformed<LogicalPlan> {
+        FixedExpandInputPredicates
+            .rewrite(
+                LogicalPlan::Filter(Filter::try_new(predicate, Arc::new(expanded())).unwrap()),
+                &OptimizerContext::new(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn same_named_destination_stays_residual() {
+        let result = rewrite(
+            column("var_0")
+                .eq(lit(7_i64))
+                .and(column("var_1").gt(lit(2_i64))),
+        );
+        assert!(result.transformed);
+        let LogicalPlan::Filter(residual) = result.data else {
+            panic!("destination predicate must remain");
+        };
+        assert_eq!(residual.predicate, column("var_1").gt(lit(2_i64)));
+        let LogicalPlan::Extension(extension) = residual.input.as_ref() else {
+            panic!();
+        };
+        let expand = extension
+            .node
+            .as_any()
+            .downcast_ref::<ExpandNode>()
+            .unwrap();
+        let LogicalPlan::Filter(input) = expand.input.as_ref() else {
+            panic!("input predicate must precede expansion");
+        };
+        assert_eq!(input.predicate, column("var_0").eq(lit(7_i64)));
+    }
+
+    #[test]
+    fn potentially_failing_residual_blocks_entire_filter() {
+        let predicate = column("var_0")
+            .eq(lit(7_i64))
+            .and((column("var_1") / lit(0_i64)).gt(lit(0_i64)));
+        assert!(!rewrite(predicate).transformed);
+    }
+
+    #[test]
+    fn unqualified_or_mixed_disjunction_is_not_moved() {
+        assert!(!total_predicate(
+            &col("score").eq(lit(7_i64)),
+            expanded().schema()
+        ));
+        assert!(
+            !rewrite(
+                column("var_0")
+                    .eq(lit(7_i64))
+                    .or(column("var_1").eq(lit(7_i64)))
+            )
+            .transformed
+        );
+        assert!(!rewrite(column("var_1").eq(lit(7_i64))).transformed);
+    }
+
+    #[test]
+    fn volatile_residual_blocks_entire_filter() {
+        let random = datafusion::functions::math::random().call(vec![]);
+        assert!(!rewrite(column("var_0").eq(lit(7_i64)).and(random.gt(lit(0.5)))).transformed);
+    }
+
+    #[test]
+    fn input_column_comparison_preserves_qualified_membership() {
+        assert!(rewrite(column("var_0").eq(column("var_0"))).transformed);
+        assert!(!rewrite(column("var_0").eq(column("var_1"))).transformed);
+    }
+
+    #[test]
+    fn nullable_input_checks_can_precede_expansion() {
+        assert!(rewrite(column("var_0").is_null()).transformed);
+        assert!(rewrite(column("var_0").is_not_null()).transformed);
+        assert!(
+            rewrite(
+                column("var_0")
+                    .gt_eq(lit(-7_i64))
+                    .and(column("var_0").lt_eq(lit(7_i64)))
+            )
+            .transformed
+        );
     }
 }
