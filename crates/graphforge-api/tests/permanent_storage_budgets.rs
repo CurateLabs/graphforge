@@ -6695,6 +6695,10 @@ fn fragmentation_statistics_public_probe() {
             nodes[1024 + round].2 = None;
             mutation_ns.push(started.elapsed().as_nanos());
         }
+        let status = graph
+            .graph_delta_compaction_status(Default::default(), Default::default())
+            .unwrap();
+        assert_eq!(status.run_count, rounds as u64);
         std::fs::write(
             root.join("oracle.json"),
             serde_json::to_vec(&nodes).unwrap(),
@@ -6719,6 +6723,8 @@ fn fragmentation_statistics_public_probe() {
             cleanup_limits: ProjectRetentionLimits::default(),
         };
         let report = graph.compact_graph_delta(&request, None).unwrap();
+        assert_eq!(report.input_runs, rounds as u64);
+        assert_eq!(report.input_rows, 2 * rounds as u64);
         println!(
             "FRAGMENT_COMPACTION {}",
             json!({"input_runs":report.input_runs,"input_rows":report.input_rows,"output_rows":report.output_rows,"input_bytes":report.input_bytes,"output_bytes":report.output_bytes,"logical_peak_memory_bytes":report.peak_memory_bytes,"spill_bytes":report.spill_bytes,"elapsed_ms":report.elapsed_ms})
