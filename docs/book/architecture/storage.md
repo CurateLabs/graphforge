@@ -1306,3 +1306,132 @@ verification/import followed by mutation.
 See [property projection evidence](../../development/evidence/property-projection-1247.json)
 for source/executable hashes, all observations, selection budgets, instrumentation
 limits, reproduction commands and validation results.
+
+### Integrated query and maintenance assessment (#1207)
+
+The comparison starts after the permanent-storage prerequisites and uses main
+`a3a620c9b2e81108e4a21830c404920c2f948dd4`. Rust 1.96.0, Arrow/Parquet
+58.4.0 and DataFusion 54.1.0 are pinned by the repository. Measurements used
+an admitted ext4 process root on a Ryzen 7 3800X (16 logical CPUs), approximately
+128 GiB RAM and 4 KiB allocation units. Scalar warm medians are the median of three per-process medians, each using
+executions 2–5; they are not pooled medians. Each executable was built once, copied,
+made read-only and SHA-256 checked before and after its subprocess campaign.
+No native build overlapped resource measurements. The accompanying evidence
+records source/executable hashes, exact commands, budgets and observations.
+
+Two selected query repairs are already merged: #1241 moves an eligible
+input predicate ahead of fixed-path expansion, and #1247 projects property
+values before overlay materialization. Their existing evidence files contain
+public mutation, reopen and portable-lifecycle proof as well as exact result
+oracles. On their respective workloads, warm query medians fell from 3.850 s
+to 0.254 s and from 290.6 ms to 27.8 ms. These are separate workloads; their
+speedups must not be multiplied. Neither query repair reduced the measured
+physical filesystem input blocks. Full-width property queries became slightly
+slower within their preselected envelope; that is not a full-scan speedup.
+
+| Candidate | Bounded comparison and decision |
+| --- | --- |
+| Predicate/projection placement | #1241 and #1247 are validated, merged improvements. The fixed-path probe reduces generated candidates from 1,113,889 to 272 and key rows from 8,932,490 to 80,898. The wide narrow query avoids 87,399,628 syscall write bytes across five executions. Remaining key validation is not credited as avoidable payload work. |
+| Optimizer statistics | Conservative cardinality forwarding changes actual join/aggregate execution, but none of seven scalar workloads meets its preselected process-CPU saving. Empty-label warm execution improves from 14.6 to 3.3 ms and saves 472,867 read / 331,707 write bytes over five queries; retain this result without claiming a general improvement. Exact forwarding is invalid because the child statistics ignore per-fragment limits and footer metadata does not prove completed decoding. The experimental patch is reverted. A separate identity-row-marker experiment meets its empty-count CPU budget and selects #1249; it does not forward statistics. |
+| Parquet layout | On five CURRENT wide shards, 128-row groups reduce a one-target-per-shard second pass from 8,094,549 to 1,012,462 compressed column bytes. This excludes the mandatory full validation pass. Repeated-text allocation doubles (143,360 to 286,720 bytes), while dense second-pass bytes increase from 109,509 to 160,364. Reject the global row-group change. The 16 KiB page target produces byte-identical files with the existing 1,024-row write batch. Plain strings save 45,056 allocated bytes for random text but breach the observed RSS selection cap and add 12,288 bytes for repeated text. Reject that global encoding change. Conditional policies remain unvalidated possibilities, not selected repairs. |
+| Property Bloom filters | Random-text filters occupy 8,303 bytes and produce 14 false positives in 20,480 verified-absent checks, with no false negatives for present values. Repeated-text filters occupy 235 bytes. Current readers must validate requested values before negative pruning, so these experiments demonstrate filter effectiveness but zero validated public read savings. Do not publish filters without an admitted consumer or credit skipping mandatory validation. |
+| Fragmentation and maintenance | Public construction, eight fixed CREATE/DELETE events and 1/8/32 repeated property transactions preserve exact UUID/value/null results. Existing compaction folds all runs, and existing cleanup reclaims retained generations. Query-only warm latency remains approximately 14 ms. Full process CPU falls from 0.46–0.50 s to 0.39–0.40 s; this includes open/validation and is not a query-latency gain. Compaction fails the preselected read-I/O ceiling in all three cases. The failed budget stays visible; whole-tree authentication cannot be removed merely by retaining a lease or parsed runs. No additional compactor is selected. |
+
+The additional selected repair, #1249, anchors the existing null-preserving
+`COUNT(*)` row marker to an available qualified identity instead of an unused
+property. All seven scalar oracles match. Count-all warm time falls from
+14.319 to 10.853 ms; its process-CPU saving misses the preselected 0.02 s
+threshold, while empty-label count meets that threshold (0.17 to 0.15 s).
+Count-all, label count and empty count each avoid 923,923 syscall read bytes
+and approximately 308.8 KB writes per five executions. Explicit nullable count,
+SUM and selective-property count remain controls. All measured RSS ceilings
+pass. The prototype is reverted from this assessment; #1249 owns production
+implementation and its direct correctness/CI close gate.
+
+The fragmentation test fixes topology cardinality at 4,101 live nodes across
+chain lengths; it repeatedly overwrites the same score and removes/restores an
+actually present nullable property. It asserts the verified run count rather
+than assuming API calls leave a delta chain. Compaction input is 2/16/64 records
+and 526/4,376/17,504 bytes. Retained allocation grows from
+17,821,696/28,487,680/66,658,304 bytes to
+19,333,120/29,999,104/68,169,728 bytes while old generations coexist.
+Explicit cleanup with zero retained ancestors, after private fixture leases
+are released, reduces this to 2,330,624/2,359,296/2,457,600 bytes. CURRENT is
+unchanged by cleanup, and all public query oracles pass afterward. This is an
+operator-policy experiment, not a change to default retention.
+
+Compaction reads 62,176,116/62,292,189/62,685,028 syscall bytes against ceilings
+49,654,012/49,774,517/50,180,680. The comparison includes compaction, facade
+refresh and three validation queries; its read baseline includes open plus
+15 queries. It does not isolate query cost. A repeated run load can reread the
+17,504-byte chain and a full graph authentication pass; the latter has a
+conservative 1,148,656-byte lower bound from the cleaned CURRENT inventory.
+A lease prevents cleanup, not in-place modification. No unchecked “already
+verified” flag or weakened corruption check is justified by these observations.
+
+Resource meanings are deliberately separate. Syscall return bytes include
+cached I/O and copy operations; GNU time filesystem blocks reflect a different
+boundary. Logical decoder/join/replay counters are not process RSS. Directory
+and descendant-FD samples deduplicate device/inode owners and include unlinked
+open files, but exclude unlinked mappings without descriptors and directory
+blocks. Their observed peaks, including their recorded scheduling gaps, are
+samples rather than hard bounds. Failed and superseded collectors/builds stay
+identified in the evidence; no incomplete baseline supports an improvement.
+
+These decisions cover the tested settings and workloads, not every possible
+layout, conditional encoding policy or planner feature. The final epic ledger
+must also include the existing admitted S20/S22 ladder on the merged executable.
+No S24/S26 run or additional certification workflow is authorized here.
+
+Reproduction uses `crates/graphforge-api/tests/permanent_storage_budgets.rs`:
+`fragmentation_statistics_public_probe`, `statistics_public_query_probe` and
+`property_layout_bloom_assessment`. The default tests construct their own
+public fixtures and assert results; environment variables select retained
+fixtures for separate subprocess measurements. The layout fixture verifies
+actual decoded schemas/values, all present Bloom values, 4,096 verified-absent
+probes per shard and selected-row second-pass results. It never changes the
+published source project.
+
+Build the selected source with
+`cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json`,
+using an isolated `CARGO_TARGET_DIR` and admitted `TMPDIR`. Extract the reported
+test executable, copy it outside the build tree, make it read-only and record
+`sha256sum` before starting any measurement. Run each case in three fresh
+processes under `/usr/bin/time -v`, without concurrent native builds:
+
+```bash
+GF_FRAGMENT_ROOT="$EVIDENCE_ROOT/chain-32" GF_FRAGMENT_ROUNDS=32 \
+  GF_FRAGMENT_MODE=prepare "$FROZEN_TEST" --exact \
+  fragmentation_statistics_public_probe --nocapture --test-threads=1
+# Repeat read before compaction, after compaction, and after explicit cleanup.
+GF_FRAGMENT_ROOT="$EVIDENCE_ROOT/chain-32" GF_FRAGMENT_ROUNDS=32 \
+  GF_FRAGMENT_MODE=read /usr/bin/time -v "$FROZEN_TEST" --exact \
+  fragmentation_statistics_public_probe --nocapture --test-threads=1
+GF_STATS_ROOT="$EVIDENCE_ROOT/chain-32" GF_STATS_CASE=count_all \
+  /usr/bin/time -v "$FROZEN_TEST" --exact \
+  statistics_public_query_probe --nocapture --test-threads=1
+GF_LAYOUT_SOURCE="$EVIDENCE_ROOT/wide/source" \
+  GF_LAYOUT_OUTPUT="$EVIDENCE_ROOT/layout-fresh" GF_LAYOUT_DATA=random \
+  GF_LAYOUT_VARIANT=baseline /usr/bin/time -v "$FROZEN_TEST" --exact \
+  property_layout_bloom_assessment --nocapture --test-threads=1
+```
+
+Prepare the wide source with `wide_property_public_query_probe`,
+`GF_WIDE_PROBE_ROOT` and `GF_WIDE_PROBE_MODE=prepare`. Fragment modes are
+`prepare/read/compact`; use chain lengths 1, 8 and 32. Scalar cases are
+`count_all/count_identity/count_label/count_property/sum_property/selective/empty`.
+Layout cases are `baseline/row_group_128/page_16k/string_plain/bloom`, with
+`GF_LAYOUT_DATA=random/repeated` and a fresh output directory each time.
+Compaction executes once per prepared fixture. A separately frozen CLI runs
+`maintenance cleanup-preview` and `maintenance cleanup-execute --yes`, both
+with `--retained-ancestors 0 --cleanup-batch 0`, only after the private fixture's
+leases are released. This preserves CURRENT and does not change default policy.
+
+[The aggregate evidence](../../development/evidence/query-maintenance-assessment-1207.json)
+contains all process observations, syscall totals, page/row-group counts,
+selection ceilings, FD samples and failed/superseded evidence limitations.
+Tracing uses `strace -f -qq -yy -s 0` with read/pread/readv, write/pwrite/writev,
+copy/sendfile and fsync/fdatasync families. Traced and sampled runs are separate
+from latency observations. Source-only conditional policies, Bloom consumers
+and stronger immutable authentication handles are not silently counted as
+implemented improvements.
