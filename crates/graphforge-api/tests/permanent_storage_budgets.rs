@@ -6604,3 +6604,171 @@ fn wide_property_public_query_probe() {
         );
     }
 }
+
+/// Canonical #1207 observation fixture. Separate prepare/read/compact processes
+/// distinguish mutation cost, query work and existing maintenance cost.
+#[test]
+fn fragmentation_statistics_public_probe() {
+    use graphforge_api::{CompositeGraphMutation as Mutation, PropValue};
+    use graphforge_storage::{
+        GraphDeltaCompactionRequest, ProjectRetentionLimits, ProjectRetentionPolicy,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("GF_FRAGMENT_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("probe"));
+    let mode = std::env::var("GF_FRAGMENT_MODE").unwrap_or_else(|_| "all".into());
+    assert!(matches!(
+        mode.as_str(),
+        "all" | "prepare" | "read" | "compact"
+    ));
+    let rounds: usize = std::env::var("GF_FRAGMENT_ROUNDS")
+        .unwrap_or_else(|_| "8".into())
+        .parse()
+        .unwrap();
+    assert!(matches!(rounds, 1 | 8 | 32));
+    let source = root.join("source");
+    let fixture = Fixture {
+        name: "fragmentation_statistics",
+        nodes: 4097,
+        edges: 0,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    if matches!(mode.as_str(), "all" | "prepare") {
+        assert!(!source.exists());
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let mut topology_ns = Vec::new();
+        for round in 0..rounds {
+            let started = Instant::now();
+            let created_score = -100_000 - round as i64;
+            let created = graph
+                .execute(&format!(
+                    "CREATE (n:Node0 {{score: {created_score}}}) RETURN n.node_uuid"
+                ))
+                .unwrap();
+            let uuid = uuid_at(&created.batches[0], 0, 0);
+            nodes.push((uuid, "Node0".into(), Some(created_score)));
+            if round % 2 == 1 {
+                graph
+                    .execute(&format!(
+                        "MATCH (n) WHERE n.score = {created_score} DELETE n"
+                    ))
+                    .unwrap();
+                nodes.retain(|node| node.0 != uuid);
+            }
+            topology_ns.push(started.elapsed().as_nanos());
+        }
+        let mut mutation_ns = Vec::new();
+        // Topology publications can fold earlier deltas. Accumulate the measured
+        // property chain afterwards and report its actual verified length.
+        for round in 0..rounds {
+            let started = Instant::now();
+            graph
+                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                    context: graphforge_api::WriteContext {
+                        operation_uuid: OperationId(Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    graph_mutations: vec![
+                        Mutation::SetNodeProperty {
+                            node_uuid: nodes[round].0,
+                            property: "score".into(),
+                            value: PropValue::Int(10_000 + round as i64),
+                        },
+                        Mutation::RemoveNodeProperty {
+                            node_uuid: nodes[1024 + round].0,
+                            property: "score".into(),
+                        },
+                    ],
+                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+                })
+                .unwrap();
+            nodes[round].2 = Some(10_000 + round as i64);
+            nodes[1024 + round].2 = None;
+            mutation_ns.push(started.elapsed().as_nanos());
+        }
+        std::fs::write(
+            root.join("oracle.json"),
+            serde_json::to_vec(&nodes).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "FRAGMENT_PREPARE {}",
+            json!({"rounds":rounds,"topology_elapsed_ns":topology_ns,"property_elapsed_ns":mutation_ns,"expected_rows":nodes.len()})
+        );
+    }
+    let nodes: Vec<Node> =
+        serde_json::from_slice(&std::fs::read(root.join("oracle.json")).unwrap()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    if mode == "compact" || mode == "all" {
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: Default::default(),
+            cleanup_after_commit: false,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+        let report = graph.compact_graph_delta(&request, None).unwrap();
+        println!(
+            "FRAGMENT_COMPACTION {}",
+            json!({"input_runs":report.input_runs,"input_rows":report.input_rows,"output_rows":report.output_rows,"input_bytes":report.input_bytes,"output_bytes":report.output_bytes,"logical_peak_memory_bytes":report.peak_memory_bytes,"spill_bytes":report.spill_bytes,"elapsed_ms":report.elapsed_ms})
+        );
+    }
+    for (name, query) in [
+        ("all", "MATCH (n) RETURN n.node_uuid, n.score"),
+        (
+            "selective",
+            "MATCH (n) WHERE n.score >= 10000 RETURN n.node_uuid, n.score",
+        ),
+        (
+            "null",
+            "MATCH (n) WHERE n.score IS NULL RETURN n.node_uuid, n.score",
+        ),
+    ] {
+        let mut expected: Vec<_> = nodes
+            .iter()
+            .filter(|node| match name {
+                "selective" => node.2.is_some_and(|score| score >= 10000),
+                "null" => node.2.is_none(),
+                _ => true,
+            })
+            .map(|node| (node.0, node.2))
+            .collect();
+        expected.sort();
+        let mut query_ns = Vec::new();
+        for _ in 0..if mode == "read" { 5 } else { 1 } {
+            let start = Instant::now();
+            let result = graph.execute(query).unwrap();
+            query_ns.push(start.elapsed().as_nanos());
+            let mut actual = Vec::new();
+            for batch in result.batches {
+                for row in 0..batch.num_rows() {
+                    actual.push((uuid_at(&batch, 0, row), int_at(&batch, 1, row)));
+                }
+            }
+            actual.sort();
+            assert_eq!(actual, expected, "{name}");
+        }
+        println!(
+            "FRAGMENT_QUERY {}",
+            json!({"case":name,"rows":expected.len(),"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap()),"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
+        );
+    }
+    let status = graph
+        .graph_delta_compaction_status(Default::default(), Default::default())
+        .unwrap();
+    println!(
+        "FRAGMENT_STATUS {}",
+        json!({"run_count":status.run_count,"run_bytes":status.run_bytes,"estimated_replay_memory_bytes":status.estimated_replay_memory_bytes,"inventory":publishing_parquet_inventory(&source)})
+    );
+}
