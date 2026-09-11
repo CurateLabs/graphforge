@@ -216,3 +216,125 @@ fn nested_with_aggregation_rewrites_predicates_and_rejects_nested_aggregates() {
     )
     .expect_err("aggregation in a pattern-comprehension body must remain invalid");
 }
+
+#[test]
+fn count_preserves_nullable_variables_and_row_cardinality() {
+    use arrow::array::Array;
+    let graph = GraphForge::new(None).unwrap();
+    graph.execute("CREATE (a:CountProbe {score:1,z:1}), (b:CountProbe {z:'text'}), (c:CountProbe {score:3,z:true}), (a)-[:R]->(b)").unwrap();
+    for (query, expected) in [
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) RETURN count(*) AS total, count(r) AS present",
+            vec![3, 1],
+        ),
+        ("MATCH (n) WITH n AS x RETURN count(*) AS total", vec![3]),
+        (
+            "MATCH (n) RETURN count(n.z) AS present, count(n.score) AS scored",
+            vec![3, 2],
+        ),
+        (
+            "UNWIND [null,1,2] AS x WITH x AS y RETURN count(*) AS total, count(y) AS present",
+            vec![3, 2],
+        ),
+        ("UNWIND [] AS x RETURN count(*) AS total", vec![0]),
+        (
+            "UNWIND [null,null] AS x RETURN count(*) AS total, count(x) AS present, count(DISTINCT x) AS unique",
+            vec![2, 0, 0],
+        ),
+        (
+            "UNWIND [] AS x RETURN count(*) AS total, count(x) AS present",
+            vec![0, 0],
+        ),
+        (
+            "UNWIND [null,1,1] AS x RETURN count(*) AS total, count(x) AS present, count(DISTINCT x) AS unique",
+            vec![3, 2, 1],
+        ),
+        (
+            "MATCH (n) OPTIONAL MATCH (n)-[r:R]->(m) RETURN count(m) AS present, count(DISTINCT r) AS unique",
+            vec![1, 1],
+        ),
+        ("MATCH ()-[r:R]->() RETURN count(*) AS total", vec![1]),
+        ("MATCH ()-[r:R*1..2]->() RETURN count(*) AS total", vec![1]),
+        ("MATCH ()-[r:R*1..2]->() RETURN count(r) AS total", vec![1]),
+        ("MATCH ()-[r:R*0..2]->() RETURN count(r) AS total", vec![4]),
+        (
+            "MATCH (a)-[:R]->() WHERE a.score = 999 RETURN count(*) AS total",
+            vec![0],
+        ),
+    ] {
+        if query.contains("R*") {
+            assert!(!graph.explain(query).unwrap().contains("EdgeCountExec"));
+        }
+        let result = graph.execute(query).unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .sum::<usize>(),
+            1,
+            "{query}"
+        );
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        assert_eq!(batch.num_columns(), expected.len(), "{query}");
+        for (column, expected) in expected.iter().enumerate() {
+            let array = batch
+                .column(column)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert!(!array.is_null(0), "{query}");
+            assert_eq!(array.value(0), *expected, "{query}");
+        }
+    }
+    let empty = graph
+        .execute("UNWIND [] AS x RETURN null AS k, count(*) AS total")
+        .unwrap();
+    assert_eq!(
+        empty
+            .batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>(),
+        0
+    );
+    let grouped = graph
+        .execute("UNWIND [null,1,2] AS x RETURN null AS k, count(*) AS total, count(x) AS present")
+        .unwrap();
+    assert_eq!(
+        grouped
+            .batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>(),
+        1
+    );
+    let batch = grouped
+        .batches
+        .iter()
+        .find(|batch| batch.num_rows() == 1)
+        .unwrap();
+    assert_eq!(batch.column(0).logical_null_count(), 1);
+    assert_eq!(
+        batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
+    assert_eq!(
+        batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        3
+    );
+}

@@ -428,6 +428,14 @@ fn regression1094_property_free_shortcuts() {
         let mut failures = Vec::new();
         for (query, expected) in [
             ("MATCH ()-[r]->() RETURN count(r) AS n", 4),
+            ("MATCH ()-[r]->() RETURN count(DISTINCT r) AS n", 4),
+            ("MATCH ()-[r]->() RETURN count(r.missing) AS n", 0),
+            ("MATCH ()-[r]->() WITH r AS link RETURN count(link) AS n", 4),
+            (
+                "MATCH (a) OPTIONAL MATCH (a)-[r]->() RETURN count(r) AS n",
+                4,
+            ),
+            ("MATCH ()-[r:Missing]->() RETURN count(r) AS n", 0),
             ("MATCH ()-[r]->() RETURN count(NULL) AS n", 0),
             ("MATCH ()-[r]->() RETURN count(1) AS n", 4),
             ("MATCH (a:Missing)-[r]->() RETURN count(r) AS n", 0),
@@ -443,9 +451,24 @@ fn regression1094_property_free_shortcuts() {
         ] {
             let plan = forge.explain(query).unwrap();
             let should_optimize = query == "MATCH ()-[r]->() RETURN count(r) AS n"
-                || query == "MATCH ()-[r]->() RETURN count(1) AS n";
-            assert_eq!(plan.contains("EdgeCountExec"), should_optimize, "{plan}");
-            let result = forge.execute(query).unwrap();
+                || query == "MATCH ()-[r]->() RETURN count(1) AS n"
+                || query == "MATCH ()-[r:Missing]->() RETURN count(r) AS n"
+                || query == "MATCH ()-[r]->() WITH r AS link RETURN count(link) AS n";
+            assert_eq!(
+                plan.contains("EdgeCountExec"),
+                should_optimize,
+                "{query}: {plan}"
+            );
+            let (result, evidence) = demand::capture(|| forge.execute(query));
+            let result = result.unwrap();
+            assert_eq!(
+                evidence
+                    .operator_rss
+                    .iter()
+                    .any(|operator| operator.operator == "edge_count"),
+                should_optimize,
+                "{query}: actual execution must match shortcut eligibility"
+            );
             let actual = int64_values(&result, "n");
             if actual != vec![expected] {
                 failures.push(format!("{query}: {actual:?} != {expected}; {plan}"));

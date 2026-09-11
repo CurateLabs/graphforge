@@ -3159,14 +3159,11 @@ impl Binder {
         bindings
     }
 
-    /// Build one [`AggExpr`] from an aggregate call. `count(*)` has no argument;
-    /// `count(n)` over a bare variable counts bound rows (equivalent to `count(*)`
-    /// — a MATCH variable is always bound — and avoids referencing the bare
-    /// `var_N`, which is not a real column). Distinct aggregates keep the
-    /// argument so optional/unbound values can be filtered correctly. Distinct
-    /// aggregate calls are preserved in the IR so lowering can pick the matching
-    /// DataFusion/Cypher implementation. `out_var`, when set, binds the result
-    /// column for a following `Project` (#599 nested aggregates).
+    /// Build one [`AggExpr`] from an aggregate call. Only `count(*)` has no
+    /// argument: explicit variables may be null after OPTIONAL MATCH or scalar
+    /// projection and must retain their null-sensitive count semantics.
+    /// Distinct aggregate calls are preserved for lowering. `out_var`, when set,
+    /// binds the result column for a following `Project` (#599 nested aggregates).
     fn build_agg(
         &self,
         call: &graphforge_ast::FunctionCall,
@@ -3175,7 +3172,6 @@ impl Binder {
         out_var: Option<VarId>,
         s: &mut BinderState,
     ) -> AggExpr {
-        let bare_var_arg = matches!(call.args.first(), Some(Expr::Var(_)));
         let is_percentile = matches!(func, AggFunc::PercentileDisc | AggFunc::PercentileCont);
         if is_percentile {
             if call.star || call.args.len() != 2 {
@@ -3193,9 +3189,7 @@ impl Binder {
                 ));
             }
         }
-        let arg = if !is_percentile
-            && (call.star || (func == AggFunc::Count && bare_var_arg && !call.distinct))
-        {
+        let arg = if !is_percentile && call.star {
             None
         } else {
             call.args.first().map(|a| {

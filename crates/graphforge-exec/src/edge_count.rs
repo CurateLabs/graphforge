@@ -3,7 +3,8 @@
 //! `MATCH ()-[r]->() RETURN count(r)` otherwise expands every adjacency entry
 //! into Arrow batches before aggregating. That retains process RSS ~linear in
 //! edge count and fails the progressive S18→S19 plateau gate. When the physical
-//! plan is a global nonnull literal / compiler row-marker count over a single
+//! plan is a global nonnull literal, compiler row-marker, or matched edge-identity
+//! count over a single
 //! unconstrained outward Expand (including a validated Partial/Final pair),
 //! replace it with the adjacency view's edge-entry count.
 
@@ -121,6 +122,33 @@ pub(crate) fn has_complete_frontier(expand: &ExpandExec) -> bool {
     expand.fetch.is_none() && trace(&expand.input, expand.src_col_idx)
 }
 
+/// An emitted fixed-hop edge has an identity even when its properties are null.
+/// Follow exact column lineage; names and schema nullability alone are not proof.
+fn is_matched_edge_identity(plan: &Arc<dyn ExecutionPlan>, index: usize) -> bool {
+    if let Some(projection) = plan.downcast_ref::<ProjectionExec>() {
+        return projection
+            .expr()
+            .get(index)
+            .and_then(|expr| expr.expr.downcast_ref::<Column>())
+            .is_some_and(|column| is_matched_edge_identity(projection.input(), column.index()));
+    }
+    if let Some(coalesce) = plan.downcast_ref::<CoalescePartitionsExec>() {
+        return is_matched_edge_identity(coalesce.input(), index);
+    }
+    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>() {
+        return is_matched_edge_identity(repartition.input(), index);
+    }
+    let Some(expand) = plan.downcast_ref::<ExpandExec>() else {
+        return false;
+    };
+    index == expand.input_width
+        && expand.schema.fields().get(index).is_some_and(|field| {
+            field.name() == "edge_uuid"
+                && field.data_type() == &arrow::datatypes::DataType::FixedSizeBinary(16)
+                && !field.is_nullable()
+        })
+}
+
 fn is_row_count(aggregate: &AggregateExec) -> bool {
     aggregate.group_expr().is_empty()
         && !aggregate.aggr_expr().is_empty()
@@ -140,6 +168,9 @@ fn is_row_count(aggregate: &AggregateExec) -> bool {
                 if let Some(literal) = arg.downcast_ref::<Literal>() {
                     return !literal.value().is_null();
                 }
+                if let Some(column) = arg.downcast_ref::<Column>() {
+                    return is_matched_edge_identity(aggregate.input(), column.index());
+                }
                 arg.downcast_ref::<ScalarFunctionExpr>()
                     .is_some_and(|function| {
                         graphforge_rel::expr::is_cypher_row_marker(function.fun())
@@ -153,15 +184,18 @@ fn is_row_count(aggregate: &AggregateExec) -> bool {
 fn detect_edge_count(plan: &Arc<dyn ExecutionPlan>) -> Option<EdgeCountSpec> {
     let plan = peel_transport(plan);
     let aggregate = plan.downcast_ref::<AggregateExec>()?;
-    if !is_row_count(aggregate) {
-        return None;
-    }
     let input = match aggregate.mode() {
-        AggregateMode::Single => Arc::clone(aggregate.input()),
+        AggregateMode::Single if is_row_count(aggregate) => Arc::clone(aggregate.input()),
         AggregateMode::Final => {
             let input = peel_expand_input_without_projection(aggregate.input());
             let partial = input.downcast_ref::<AggregateExec>()?;
             if *partial.mode() != AggregateMode::Partial
+                || !aggregate.group_expr().is_empty()
+                || aggregate.filter_expr().iter().any(Option::is_some)
+                // DataFusion aggregate equality does not compare these flags.
+                || aggregate.aggr_expr().iter().any(|expr| {
+                    expr.is_distinct() || !expr.order_bys().is_empty()
+                })
                 || !is_row_count(partial)
                 || aggregate.aggr_expr() != partial.aggr_expr()
             {
