@@ -6645,7 +6645,7 @@ fn fragmentation_statistics_public_probe() {
         construct(&source, fixture, &nodes, &edges);
         let graph = GraphForge::new(source.to_str()).unwrap();
         let mut topology_ns = Vec::new();
-        for round in 0..rounds {
+        for round in 0..8 {
             let started = Instant::now();
             let created_score = -100_000 - round as i64;
             let created = graph
@@ -6665,6 +6665,7 @@ fn fragmentation_statistics_public_probe() {
             }
             topology_ns.push(started.elapsed().as_nanos());
         }
+        assert!(nodes[64].2.is_some());
         let mut mutation_ns = Vec::new();
         // Topology publications can fold earlier deltas. Accumulate the measured
         // property chain afterwards and report its actual verified length.
@@ -6679,20 +6680,29 @@ fn fragmentation_statistics_public_probe() {
                     },
                     graph_mutations: vec![
                         Mutation::SetNodeProperty {
-                            node_uuid: nodes[round].0,
+                            node_uuid: nodes[1].0,
                             property: "score".into(),
                             value: PropValue::Int(10_000 + round as i64),
                         },
-                        Mutation::RemoveNodeProperty {
-                            node_uuid: nodes[1024 + round].0,
-                            property: "score".into(),
+                        if round % 2 == 0 {
+                            assert!(nodes[64].2.is_some());
+                            Mutation::RemoveNodeProperty {
+                                node_uuid: nodes[64].0,
+                                property: "score".into(),
+                            }
+                        } else {
+                            Mutation::SetNodeProperty {
+                                node_uuid: nodes[64].0,
+                                property: "score".into(),
+                                value: PropValue::Int(20_000 + round as i64),
+                            }
                         },
                     ],
                     knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
                 })
                 .unwrap();
-            nodes[round].2 = Some(10_000 + round as i64);
-            nodes[1024 + round].2 = None;
+            nodes[1].2 = Some(10_000 + round as i64);
+            nodes[64].2 = (round % 2 == 1).then_some(20_000 + round as i64);
             mutation_ns.push(started.elapsed().as_nanos());
         }
         let status = graph
@@ -6752,9 +6762,28 @@ fn fragmentation_statistics_public_probe() {
             .collect();
         expected.sort();
         let mut query_ns = Vec::new();
+        let mut join_work = Vec::new();
         for _ in 0..if mode == "read" { 5 } else { 1 } {
             let start = Instant::now();
-            let result = graph.execute(query).unwrap();
+            let result = if mode != "read" || std::env::var_os("GF_FRAGMENT_DIAGNOSTICS").is_some()
+            {
+                let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
+                assert_eq!(captured.joins.len(), 1);
+                for join in captured.joins {
+                    assert!(join.build_input_rows > 0);
+                    assert!(join.probe_input_rows > 0);
+                    assert!(join.build_memory_bytes > 0);
+                    assert!(
+                        join.input_row_statistics
+                            .iter()
+                            .all(|value| !value.contains("error"))
+                    );
+                    join_work.push(json!({"ordinal":join.ordinal,"input_row_statistics":join.input_row_statistics,"build_input_rows":join.build_input_rows,"probe_input_rows":join.probe_input_rows,"build_memory_bytes":join.build_memory_bytes}));
+                }
+                result.unwrap()
+            } else {
+                graph.execute(query).unwrap()
+            };
             query_ns.push(start.elapsed().as_nanos());
             let mut actual = Vec::new();
             for batch in result.batches {
@@ -6767,7 +6796,7 @@ fn fragmentation_statistics_public_probe() {
         }
         println!(
             "FRAGMENT_QUERY {}",
-            json!({"case":name,"rows":expected.len(),"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap()),"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
+            json!({"case":name,"rows":expected.len(),"join_work":join_work,"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap()),"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
         );
     }
     let status = graph
