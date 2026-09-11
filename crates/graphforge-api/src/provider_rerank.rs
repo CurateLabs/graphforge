@@ -227,7 +227,7 @@ impl GraphForge {
     where
         F: FnMut(&ProviderModelContract, &str) -> ProviderResult<u64>,
     {
-        let generation = read_search_generation(&self.dir)?;
+        let generation = read_search_generation(&self.dir())?;
         let prepared =
             self.prepare_rerank_plan(canonical, request, &mut count_tokens, &mut || Ok(()))?;
         let runtime = graphforge_search::StandardProviderExecutionRuntime::new();
@@ -267,7 +267,7 @@ impl GraphForge {
             ProviderExecutionController::new(&request.contract, request.execution_limits, runtime)?;
 
         for attempt in 1_u8..=2 {
-            let generation = read_search_generation(&self.dir)?;
+            let generation = read_search_generation(&self.dir())?;
             let prepared =
                 self.prepare_rerank_plan(canonical, request, count_tokens, checkpoint)?;
             let candidates = prepared
@@ -305,14 +305,14 @@ impl GraphForge {
                         provider_checkpoint,
                     )
                 })?;
-            if generation != read_search_generation(&self.dir)? {
+            if generation != read_search_generation(&self.dir())? {
                 if attempt == 2 {
                     return Err(SearchArtifactError::ConcurrentMutation.into());
                 }
                 continue;
             }
             let result = self.shape_rerank_application(request, application)?;
-            if generation == read_search_generation(&self.dir)? {
+            if generation == read_search_generation(&self.dir())? {
                 return Ok(result);
             }
             if attempt == 2 {
@@ -341,7 +341,7 @@ impl GraphForge {
         hits.truncate(request.candidate_depth);
         let label_id = self.search_label_id(&request.label)?;
         let projection = project_text_source(
-            &self.dir,
+            &self.dir(),
             label_id,
             Some(&request.properties),
             TextSearchLimits::default(),
@@ -419,7 +419,7 @@ impl GraphForge {
         hits.truncate(request.limit);
         let label_id = self.search_label_id(&request.label)?;
         let batch = shape_search_output(
-            &self.dir,
+            &self.dir(),
             &self.property_inventory_for_session(),
             label_id,
             &hits,

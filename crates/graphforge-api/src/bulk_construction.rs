@@ -599,7 +599,7 @@ impl GraphForge {
         let mut next_catalog = prior_catalog.clone();
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
         let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir, self.ontology_mode, now)?;
+            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
         for row in &normalized.rows {
             let type_id = match self
                 .ontology
@@ -629,7 +629,7 @@ impl GraphForge {
         let publication = (|| -> Result<(), super::GfError> {
             writer.flush()?;
             if self.path.is_some() {
-                super::persist_runtime_catalog(&self.dir, &next_catalog)?;
+                super::persist_runtime_catalog(&self.dir(), &next_catalog)?;
             }
             let receipt = graphforge_exec::MutationReceipt {
                 effects: vec![graphforge_exec::MutationEffect {
@@ -660,7 +660,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned")
                 == expected_parent;
             if still_prior {
-                crate::rematerialize_graph_workspace(&prior_generation, &self.dir)?;
+                crate::rematerialize_graph_workspace(&prior_generation, &self.dir())?;
             } else {
                 *self
                     .runtime_catalog
@@ -955,13 +955,13 @@ impl GraphForge {
         let mut next_catalog = prior_catalog.clone();
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
         let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir, self.ontology_mode, now)?;
+            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
         let endpoints = normalized
             .rows
             .iter()
             .flat_map(|row| [row.source_uuid, row.target_uuid])
             .collect::<BTreeSet<_>>();
-        register_existing_endpoints(&mut writer, &self.dir, &endpoints)?;
+        register_existing_endpoints(&mut writer, &self.dir(), &endpoints)?;
         for row in &normalized.rows {
             next_catalog.intern_relation_type(&row.rel_type)?;
             writer.create_edge(
@@ -986,7 +986,7 @@ impl GraphForge {
         let publication = (|| -> Result<(), super::GfError> {
             writer.flush()?;
             if self.path.is_some() {
-                super::persist_runtime_catalog(&self.dir, &next_catalog)?;
+                super::persist_runtime_catalog(&self.dir(), &next_catalog)?;
             }
             let receipt = graphforge_exec::MutationReceipt {
                 effects: vec![graphforge_exec::MutationEffect {
@@ -1025,7 +1025,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned")
                 == expected_parent;
             if still_prior {
-                crate::rematerialize_graph_workspace(&prior_generation, &self.dir)?;
+                crate::rematerialize_graph_workspace(&prior_generation, &self.dir())?;
             } else {
                 *self
                     .runtime_catalog
@@ -2007,7 +2007,7 @@ fn open_membership_index(
     BulkValidationError,
 > {
     let current_generation =
-        graphforge_storage::read_topology_generation(&graph.dir).map_err(|error| {
+        graphforge_storage::read_topology_generation(&graph.dir()).map_err(|error| {
             contract_error(
                 input_kind,
                 BulkValidationReason::ProjectState,
@@ -2027,15 +2027,16 @@ fn open_membership_index(
     {
         *cached = None;
     }
-    if !graphforge_storage::uuid_membership_index_present(&graph.dir) {
-        let has_nodes = graphforge_storage::node_topology_present(&graph.dir).map_err(|error| {
-            contract_error(
-                input_kind,
-                BulkValidationReason::ProjectState,
-                &error.to_string(),
-            )
-        })?;
-        let has_edges = std::fs::read_dir(graph.dir.join("topology/edges"))
+    if !graphforge_storage::uuid_membership_index_present(&graph.dir()) {
+        let has_nodes =
+            graphforge_storage::node_topology_present(&graph.dir()).map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })?;
+        let has_edges = std::fs::read_dir(graph.dir().join("topology/edges"))
             .ok()
             .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));
         if has_nodes || has_edges {
@@ -2049,7 +2050,7 @@ fn open_membership_index(
     }
     if cached.is_none() {
         *cached = Some(
-            graphforge_storage::UuidMembershipIndex::open(&graph.dir).map_err(|error| {
+            graphforge_storage::UuidMembershipIndex::open(&graph.dir()).map_err(|error| {
                 contract_error(
                     input_kind,
                     BulkValidationReason::ProjectState,
@@ -2152,7 +2153,7 @@ fn candidate_endpoint_uuids(
 
 #[cfg(test)]
 fn indexed_uuid_count(graph: &GraphForge, kind: graphforge_storage::UuidIndexKind) -> u64 {
-    graphforge_storage::UuidMembershipIndex::open(&graph.dir)
+    graphforge_storage::UuidMembershipIndex::open(&graph.dir())
         .expect("published graph has an authenticated UUID membership index")
         .count(kind)
 }
@@ -2675,14 +2676,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
         let mut writer = graphforge_storage::GraphWriter::open_at(
-            &graph.dir,
+            &graph.dir(),
             graph.ontology_mode,
             (graph.clock.lock().unwrap())().unwrap(),
         )
         .unwrap();
         let missing = uuid(70_001);
         let failure =
-            register_existing_endpoints(&mut writer, &graph.dir, &BTreeSet::from([missing]))
+            register_existing_endpoints(&mut writer, &graph.dir(), &BTreeSet::from([missing]))
                 .unwrap_err();
         assert_eq!(
             failure.to_string(),
@@ -3894,7 +3895,7 @@ mod tests {
     #[test]
     fn validation_is_zero_write_for_catalog_generation_and_graph_bytes() {
         let graph = GraphForge::new(None).unwrap();
-        let before = crate::graph_snapshot::capture(&graph.dir).unwrap();
+        let before = crate::graph_snapshot::capture(&graph.dir()).unwrap();
         let catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
         let generation = *graph.current_generation_uuid.lock().unwrap();
         let invalid = node_batch(&[uuid(30), uuid(30)], &["Person", "Person"], &[None, None]);
@@ -3904,7 +3905,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            crate::graph_snapshot::capture(&graph.dir).unwrap().bytes,
+            crate::graph_snapshot::capture(&graph.dir()).unwrap().bytes,
             before.bytes
         );
         assert_eq!(
@@ -3923,7 +3924,7 @@ mod tests {
             1
         );
         assert_eq!(
-            crate::graph_snapshot::capture(&graph.dir).unwrap().bytes,
+            crate::graph_snapshot::capture(&graph.dir()).unwrap().bytes,
             before.bytes
         );
         assert_eq!(
@@ -4024,7 +4025,7 @@ mod tests {
             1
         );
 
-        let before_graph = crate::graph_snapshot::capture(&graph.dir).unwrap();
+        let before_graph = crate::graph_snapshot::capture(&graph.dir()).unwrap();
         let before_catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
         let before_generation = *graph.current_generation_uuid.lock().unwrap();
         let before_ontology = graph
@@ -4057,7 +4058,7 @@ mod tests {
         assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
         assert_eq!(error.field.as_deref(), Some("score"));
         assert_eq!(
-            crate::graph_snapshot::capture(&graph.dir).unwrap().bytes,
+            crate::graph_snapshot::capture(&graph.dir()).unwrap().bytes,
             before_graph.bytes
         );
         assert_eq!(

@@ -50,15 +50,17 @@ impl GraphForge {
                 "algorithm result {value_name:?} must be non-null {expected:?}"
             )));
         }
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path().to_path_buf();
         reject_property_collision(
-            &self.dir,
+            &dir,
             &self.property_inventory_for_session(),
             stem,
             property,
             &expected,
         )?;
 
-        let known = persisted_node_uuids(&self.dir)?;
+        let known = persisted_node_uuids(&dir)?;
         let updates = algorithm_property_updates(
             algorithm,
             property,
@@ -77,7 +79,7 @@ impl GraphForge {
         transaction.intern_property(property, Some(label))?;
         let working = transaction.catalog();
         let catalog = graphforge_storage::GraphCatalog::open_authenticated_with_semantic_bindings(
-            &self.dir,
+            &dir,
             self.ontology.as_ref(),
             &working.lock().expect("mutation catalog poisoned"),
             self.semantic_storage_bindings
@@ -91,7 +93,7 @@ impl GraphForge {
             graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
                 catalog,
                 self.ontology.clone(),
-                self.dir.clone(),
+                dir,
                 self.ontology_mode,
                 self.adjacency_provider_for_session(),
                 Some(std::sync::Arc::clone(&self.ordinal_identities)),
@@ -270,7 +272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(Some(dir.path().to_str().unwrap())).unwrap();
         graph.execute("CREATE (:Person)").unwrap();
-        let nodes = graphforge_storage::read_nodes(&graph.dir).unwrap();
+        let nodes = graphforge_storage::read_nodes(&graph.dir()).unwrap();
         let uuids = fixed_uuid_column(&nodes[0], "node_uuid").unwrap();
         let uuid = uuid_at(uuids, 0).unwrap();
         (dir, graph, uuid)
@@ -294,7 +296,7 @@ mod tests {
         uuid: [u8; 16],
     ) -> graphforge_storage::PropertySnapshotRow {
         let (mut rows, _) = graphforge_storage::read_authenticated_property_snapshots_for(
-            &graph.dir,
+            &graph.dir(),
             graphforge_storage::PropertyRouteKind::Node,
             "_untyped",
             &BTreeSet::from([uuid]),
@@ -333,7 +335,7 @@ mod tests {
     #[test]
     fn rank_and_cluster_writes_persist_without_topology_changes() {
         let (dir, graph, uuid) = graph();
-        let generation = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+        let generation = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
         let rank = result(&[uuid], "score", Arc::new(Float64Array::from(vec![0.75])));
         let cluster = result(&[uuid], "community_id", Arc::new(Int64Array::from(vec![7])));
         let rank_algorithm = Algorithm::Rank(RankAlgorithm::Degree);
@@ -346,7 +348,7 @@ mod tests {
         );
         assert!(
             graphforge_storage::enumerate_property_fragments(
-                &graph.dir,
+                &graph.dir(),
                 graphforge_storage::PropertyRouteKind::Node,
                 "_untyped",
             )
@@ -356,14 +358,14 @@ mod tests {
         write(&graph, rank_algorithm, Some("ranked"), &rank).unwrap();
         write(&graph, cluster_algorithm, Some("group"), &cluster).unwrap();
         assert_eq!(
-            graphforge_storage::read_topology_generation(&graph.dir).unwrap(),
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
             generation
         );
         drop(graph);
 
         let reopened = GraphForge::new(Some(dir.path().to_str().unwrap())).unwrap();
         let props =
-            graphforge_storage::read_entity_properties(&reopened.dir, "_untyped", &uuid, false)
+            graphforge_storage::read_entity_properties(&reopened.dir(), "_untyped", &uuid, false)
                 .unwrap();
         assert_eq!(props["ranked"], IrLiteral::Float(0.75));
         assert_eq!(props["group"], IrLiteral::Int(7));
@@ -381,7 +383,7 @@ mod tests {
         let before = authenticated_properties(&graph, uuid);
         assert_eq!(before.values["metric"], IrLiteral::Str("old".into()));
         let fragments_before = graphforge_storage::enumerate_property_fragments(
-            &graph.dir,
+            &graph.dir(),
             graphforge_storage::PropertyRouteKind::Node,
             "_untyped",
         )
@@ -401,7 +403,7 @@ mod tests {
         assert_eq!(authenticated_properties(&graph, uuid), before);
         assert_eq!(
             graphforge_storage::enumerate_property_fragments(
-                &graph.dir,
+                &graph.dir(),
                 graphforge_storage::PropertyRouteKind::Node,
                 "_untyped",
             )

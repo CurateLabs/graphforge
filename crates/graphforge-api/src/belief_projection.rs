@@ -422,8 +422,8 @@ impl GraphForge {
             ..Default::default()
         };
         let materialized = graphforge_storage::materialize_graph_projection(
-            &self.dir,
-            &projected.dir,
+            &self.dir(),
+            &projected.dir(),
             &storage_selection,
         )?;
         projected.ontology.clone_from(&self.ontology);
@@ -439,7 +439,7 @@ impl GraphForge {
             .write()
             .expect("adjacency provider lock poisoned") =
             Arc::new(crate::adjacency_provider_for_graph(
-                &projected.dir,
+                &projected.dir(),
                 projected.ontology_mode,
                 projected.property_inventory_for_session(),
             )?);
@@ -1709,7 +1709,7 @@ mod tests {
             })
             .unwrap();
         crate::permanent_parquet_test_support::assert_file(
-            &projection.graph.dir.join("topology/nodes.parquet"),
+            &projection.graph.dir().join("topology/nodes.parquet"),
         );
         assert_ne!(projection.source_generation_uuid(), Uuid::nil());
         assert!(!projection.policy_bytes().is_empty());
@@ -1721,7 +1721,7 @@ mod tests {
         assert_ne!(projection.graph_content_fingerprint(), [0; 32]);
         assert_eq!(projection.source_record_uuids(), &[uuid7(5)]);
         assert_eq!(
-            graphforge_storage::read_nodes(&projection.graph.dir)
+            graphforge_storage::read_nodes(&projection.graph.dir())
                 .unwrap()
                 .iter()
                 .map(RecordBatch::num_rows)
@@ -1903,7 +1903,7 @@ mod tests {
         assert!(current_selection.node_uuids.is_empty());
         let empty_target = tempfile::tempdir().unwrap();
         let empty_summary = graphforge_storage::materialize_graph_projection(
-            &graph.dir,
+            &graph.dir(),
             empty_target.path(),
             &graphforge_storage::GraphProjectionSelection::default(),
         )
@@ -1925,7 +1925,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            graphforge_storage::read_nodes(&before_retraction.graph.dir)
+            graphforge_storage::read_nodes(&before_retraction.graph.dir())
                 .unwrap()
                 .iter()
                 .map(RecordBatch::num_rows)
@@ -1940,7 +1940,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            graphforge_storage::read_nodes(&after_retraction.graph.dir)
+            graphforge_storage::read_nodes(&after_retraction.graph.dir())
                 .unwrap()
                 .iter()
                 .map(RecordBatch::num_rows)
@@ -1971,7 +1971,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            graphforge_storage::read_nodes(&inside_validity.graph.dir)
+            graphforge_storage::read_nodes(&inside_validity.graph.dir())
                 .unwrap()
                 .iter()
                 .map(RecordBatch::num_rows)
@@ -1986,7 +1986,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            graphforge_storage::read_nodes(&exclusive_upper.graph.dir)
+            graphforge_storage::read_nodes(&exclusive_upper.graph.dir())
                 .unwrap()
                 .iter()
                 .map(RecordBatch::num_rows)

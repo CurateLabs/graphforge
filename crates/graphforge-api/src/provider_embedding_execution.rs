@@ -241,7 +241,7 @@ impl GraphForge {
         let mut first_attempt = Some(prepared);
 
         let result = publish_provider_embedding_generation(
-            &self.dir,
+            &self.dir(),
             &publication,
             EmbeddingRefreshLimits::default(),
             |artifact_checkpoint| {
@@ -333,7 +333,7 @@ fn record_refresh_outcome(
     status: EmbeddingRefreshOutcomeStatus,
 ) -> Result<(), ProviderEmbeddingExecutionError> {
     record_embedding_refresh_outcome(
-        &graph.dir,
+        &graph.dir(),
         lineage,
         EmbeddingRefreshOutcomeAttempt {
             status,
@@ -1169,7 +1169,7 @@ mod tests {
         assert_eq!(outcome.status, EmbeddingRefreshOutcomeStatus::Succeeded);
         assert_eq!(
             outcome.graph_generation,
-            graphforge_storage::generation::read_search_generation(&graph.dir).unwrap()
+            graphforge_storage::generation::read_search_generation(&graph.dir()).unwrap()
         );
         assert_eq!(
             refreshed.freshness.as_ref().unwrap().compatibility_id,

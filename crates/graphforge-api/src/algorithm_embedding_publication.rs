@@ -104,7 +104,7 @@ impl GraphForge {
         let eligible_count = u64::try_from(prepared.rows.len()).map_err(|_| {
             GfError::Execution("algorithm embedding row count cannot be represented".to_owned())
         })?;
-        let project_dir = self.dir.clone();
+        let project_dir = self.dir();
         let projection_bytes = prepared.projection_bytes.clone();
         self.publish_prepared_algorithm_embeddings(
             &prepared,
@@ -218,10 +218,13 @@ impl GraphForge {
         if replace_alias {
             return Ok(());
         }
-        if self.embedding_spaces()?.iter().any(|space| {
-            space.aliases.iter().any(|alias| alias == display_name)
-                && space.compatibility_id != compatibility_id.to_hex()
-        }) {
+        if Self::embedding_spaces_at(self.workspace_for_session().path())?
+            .iter()
+            .any(|space| {
+                space.aliases.iter().any(|alias| alias == display_name)
+                    && space.compatibility_id != compatibility_id.to_hex()
+            })
+        {
             return Err(validation(
                 "embedding alias already targets another compatibility identity; explicit replacement is required",
             ));
@@ -241,7 +244,7 @@ impl GraphForge {
     {
         let now = transaction_time_micros();
         refresh_embedding_generation(
-            &self.dir,
+            &self.dir(),
             EmbeddingRefreshRequest {
                 descriptor: &prepared.descriptor,
                 generated_at_micros: now,
@@ -632,7 +635,7 @@ mod tests {
         let reopened = GraphForge::new(Some(path)).unwrap();
         assert_eq!(reopened.embedding_space(Some("structural")).unwrap(), first);
         let discovered = discover_embedding_spaces(
-            &reopened.dir,
+            &reopened.dir(),
             EmbeddingSpaceDiscoveryLimits::default(),
             || Ok(()),
         )

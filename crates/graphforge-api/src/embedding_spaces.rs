@@ -143,15 +143,18 @@ impl GraphForge {
     /// Returns structured storage, corruption, incompatibility, cancellation,
     /// or resource errors. A dangling durable alias fails closed.
     pub fn embedding_spaces(&self) -> Result<Vec<EmbeddingSpaceInfo>, GfError> {
-        let catalog = read_embedding_space_catalog(
-            &self.dir,
-            EmbeddingSpaceCatalogLimits::default(),
-            || Ok(()),
-        )?;
+        let _visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
+        Self::embedding_spaces_at(workspace.path())
+    }
+
+    pub(crate) fn embedding_spaces_at(
+        dir: &std::path::Path,
+    ) -> Result<Vec<EmbeddingSpaceInfo>, GfError> {
+        let catalog =
+            read_embedding_space_catalog(dir, EmbeddingSpaceCatalogLimits::default(), || Ok(()))?;
         let discovered =
-            discover_embedding_spaces(&self.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })?;
+            discover_embedding_spaces(dir, EmbeddingSpaceDiscoveryLimits::default(), || Ok(()))?;
         join_spaces(&catalog, &discovered)
     }
 
@@ -166,11 +169,21 @@ impl GraphForge {
         compatibility_id: &str,
         replace: bool,
     ) -> Result<EmbeddingSpaceInfo, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        self.bind_embedding_space_alias_guarded(display_name, compatibility_id, replace)
+    }
+
+    pub(crate) fn bind_embedding_space_alias_guarded(
+        &self,
+        display_name: &str,
+        compatibility_id: &str,
+        replace: bool,
+    ) -> Result<EmbeddingSpaceInfo, GfError> {
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
         let compatibility_id = EmbeddingCompatibilityId::from_hex(compatibility_id)?;
         let discovered =
-            discover_embedding_spaces(&self.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })?;
+            discover_embedding_spaces(dir, EmbeddingSpaceDiscoveryLimits::default(), || Ok(()))?;
         let exists = discovered
             .iter()
             .any(|space| space.compatibility_id() == compatibility_id);
@@ -180,7 +193,7 @@ impl GraphForge {
             ));
         }
         let catalog = bind_existing_embedding_space_catalog_entry(
-            &self.dir,
+            dir,
             display_name,
             compatibility_id,
             replace,
@@ -197,8 +210,10 @@ impl GraphForge {
     /// # Errors
     /// Rejects malformed names and preserves structured storage failures.
     pub fn remove_embedding_space_alias(&self, display_name: &str) -> Result<bool, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let removed = remove_embedding_space_catalog_entry(
-            &self.dir,
+            workspace.path(),
             display_name,
             EmbeddingSpaceCatalogLimits::default(),
             || Ok(()),
@@ -218,8 +233,10 @@ impl GraphForge {
     /// Rejects malformed names and preserves structured storage, cancellation,
     /// and lock failures. No partial vector generation is exposed.
     pub fn delete_embedding_space(&self, display_name: Option<&str>) -> Result<bool, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let catalog = read_embedding_space_catalog(
-            &self.dir,
+            workspace.path(),
             EmbeddingSpaceCatalogLimits::default(),
             || Ok(()),
         )?;
@@ -236,7 +253,7 @@ impl GraphForge {
             return Ok(false);
         };
         let deleted = delete_embedding_space_lineage(
-            &self.dir,
+            workspace.path(),
             compatibility_id,
             EmbeddingSpaceCatalogLimits::default(),
             SearchCoordinationLimits::default(),
@@ -256,8 +273,10 @@ impl GraphForge {
         &self,
         display_name: Option<&str>,
     ) -> Result<Option<EmbeddingSpaceInfo>, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let catalog = update_embedding_space_catalog(
-            &self.dir,
+            workspace.path(),
             EmbeddingSpaceCatalogUpdate::SetDefault { display_name },
             EmbeddingSpaceCatalogLimits::default(),
             || Ok(()),
@@ -266,10 +285,11 @@ impl GraphForge {
         let Some(display_name) = display_name else {
             return Ok(None);
         };
-        let discovered =
-            discover_embedding_spaces(&self.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })?;
+        let discovered = discover_embedding_spaces(
+            workspace.path(),
+            EmbeddingSpaceDiscoveryLimits::default(),
+            || Ok(()),
+        )?;
         resolve_named_space(join_spaces(&catalog, &discovered)?, display_name).map(Some)
     }
 
@@ -282,6 +302,7 @@ impl GraphForge {
         &self,
         display_name: Option<&str>,
     ) -> Result<EmbeddingSpaceInfo, GfError> {
+        let _visibility = self.graph_visibility.read()?;
         self.resolve_embedding_space_lineage(display_name)
             .map(|(info, _)| info)
     }
@@ -296,15 +317,24 @@ impl GraphForge {
         ),
         GfError,
     > {
-        let catalog = read_embedding_space_catalog(
-            &self.dir,
-            EmbeddingSpaceCatalogLimits::default(),
-            || Ok(()),
-        )?;
+        let workspace = self.workspace_for_session();
+        Self::resolve_embedding_space_lineage_at(workspace.path(), display_name)
+    }
+
+    pub(crate) fn resolve_embedding_space_lineage_at(
+        dir: &std::path::Path,
+        display_name: Option<&str>,
+    ) -> Result<
+        (
+            EmbeddingSpaceInfo,
+            graphforge_storage::DiscoveredEmbeddingSpace,
+        ),
+        GfError,
+    > {
+        let catalog =
+            read_embedding_space_catalog(dir, EmbeddingSpaceCatalogLimits::default(), || Ok(()))?;
         let discovered =
-            discover_embedding_spaces(&self.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })?;
+            discover_embedding_spaces(dir, EmbeddingSpaceDiscoveryLimits::default(), || Ok(()))?;
         let spaces = join_spaces(&catalog, &discovered)?;
         let selected = match display_name {
             Some(display_name) => resolve_named_space(spaces, display_name)?,
@@ -318,8 +348,7 @@ impl GraphForge {
             .into_iter()
             .find(|space| space.compatibility_id() == compatibility_id)
             .ok_or_else(|| graphforge_storage::SearchArtifactError::Missing {
-                path: self
-                    .dir
+                path: dir
                     .join("embeddings/spaces")
                     .join(compatibility_id.to_hex())
                     .join("space.json"),
@@ -525,7 +554,7 @@ mod tests {
 
     fn publish(graph: &GraphForge, descriptor: &EmbeddingCompatibilityDescriptor, marker: u8) {
         publish_embedding_generation(
-            &graph.dir,
+            &graph.dir(),
             EmbeddingPublicationRequest {
                 descriptor,
                 source: EmbeddingSourceState::new(7, [marker; 32], [marker + 1; 32], 1),
@@ -671,7 +700,7 @@ mod tests {
             .unwrap();
 
         let interrupted_marker = graph
-            .dir
+            .dir()
             .join("embeddings")
             .join(format!(".deleting-{deleted_id}"));
         std::fs::write(&interrupted_marker, deleted_id.as_bytes()).unwrap();
@@ -697,14 +726,14 @@ mod tests {
         assert_eq!(spaces[0].compatibility_id, retained_id);
         assert!(
             !graph
-                .dir
+                .dir()
                 .join("embeddings/spaces")
                 .join(&deleted_id)
                 .exists()
         );
         assert!(
             graph
-                .dir
+                .dir()
                 .join("embeddings/spaces")
                 .join(&retained_id)
                 .exists()
@@ -790,7 +819,7 @@ mod tests {
         });
         let compatibility_id = descriptor.compatibility_id().unwrap().to_hex();
         let root = graph
-            .dir
+            .dir()
             .join("embeddings")
             .join("spaces")
             .join(&compatibility_id);
@@ -817,7 +846,7 @@ mod tests {
     fn dangling_catalog_identity_fails_closed() {
         let graph = GraphForge::new(None).unwrap();
         update_embedding_space_catalog(
-            &graph.dir,
+            &graph.dir(),
             EmbeddingSpaceCatalogUpdate::Bind {
                 display_name: "dangling",
                 compatibility_id: EmbeddingCompatibilityId::from_hex(&"9".repeat(64)).unwrap(),

@@ -1031,7 +1031,7 @@ mod tests {
             .to_owned();
         let read_edge_properties = || {
             graphforge_storage::read_authenticated_property_snapshots_for(
-                &graph.dir,
+                &graph.dir(),
                 graphforge_storage::PropertyRouteKind::Edge,
                 &edge_route,
                 &std::collections::BTreeSet::from([edge_uuid.into_bytes()]),
@@ -1048,7 +1048,7 @@ mod tests {
         assert_eq!(
             graphforge_storage::stage_set_edge_properties_authenticated(
                 &mut staged,
-                &graph.dir,
+                &graph.dir(),
                 &inventory,
                 &edge_route,
                 &std::collections::HashMap::from([(
@@ -1062,7 +1062,7 @@ mod tests {
             .unwrap(),
             1
         );
-        graphforge_storage::commit_topology_aware(staged, &graph.dir).unwrap();
+        graphforge_storage::commit_topology_aware(staged, &graph.dir()).unwrap();
         let set_properties = read_edge_properties();
         assert_eq!(
             set_properties.get("weight"),
@@ -1093,7 +1093,7 @@ mod tests {
         assert_eq!(
             graphforge_storage::stage_remove_edge_properties_authenticated(
                 &mut staged,
-                &graph.dir,
+                &graph.dir(),
                 &inventory,
                 &edge_route,
                 &std::collections::HashMap::from([(
@@ -1104,7 +1104,7 @@ mod tests {
             .unwrap(),
             1
         );
-        graphforge_storage::commit_topology_aware(staged, &graph.dir).unwrap();
+        graphforge_storage::commit_topology_aware(staged, &graph.dir()).unwrap();
         let removed_properties = read_edge_properties();
         assert_eq!(
             removed_properties.get("weight"),
@@ -1212,7 +1212,8 @@ mod tests {
         let before_fingerprint = logical_fingerprint(&before.batches);
         let limits = graphforge_core::portable::PortableV2Limits::default();
         let graph_fingerprint =
-            graphforge_storage::portable_v2_graph_data_fingerprint(&reopened.dir, limits).unwrap();
+            graphforge_storage::portable_v2_graph_data_fingerprint(&reopened.dir(), limits)
+                .unwrap();
         let package = root.path().join("lifecycle.gfpb");
         let exported = reopened
             .export_portable_v2(
@@ -1274,7 +1275,8 @@ mod tests {
         );
         assert_eq!(logical_fingerprint(&after.batches), before_fingerprint);
         assert_eq!(
-            graphforge_storage::portable_v2_graph_data_fingerprint(&imported.dir, limits).unwrap(),
+            graphforge_storage::portable_v2_graph_data_fingerprint(&imported.dir(), limits)
+                .unwrap(),
             graph_fingerprint
         );
         let imported_inventory =

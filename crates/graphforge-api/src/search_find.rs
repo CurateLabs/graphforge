@@ -33,6 +33,9 @@ impl GraphForge {
         if options.semantic_query.is_some() {
             return self.find_with_configured_provider(options);
         }
+        let _visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
         let FindOptions {
             query,
             label,
@@ -69,8 +72,9 @@ impl GraphForge {
             return Err(validation("find requires text or vector retrieval"));
         }
         for attempt in 1_u8..=2 {
-            let before = read_search_generation(&self.dir)?;
+            let before = read_search_generation(dir)?;
             let hits = self.retrieve_find_hits(
+                dir,
                 &label,
                 label_id,
                 query.as_deref(),
@@ -79,13 +83,9 @@ impl GraphForge {
                 force_stale,
                 limit,
             )?;
-            let batch = shape_search_output(
-                &self.dir,
-                &self.property_inventory_for_session(),
-                label_id,
-                &hits,
-            )?;
-            if before == read_search_generation(&self.dir)? {
+            let batch =
+                shape_search_output(dir, &self.property_inventory_for_session(), label_id, &hits)?;
+            if before == read_search_generation(dir)? {
                 return Ok(batch);
             }
             if attempt == 2 {
@@ -98,6 +98,7 @@ impl GraphForge {
     #[allow(clippy::too_many_arguments)]
     fn retrieve_find_hits(
         &self,
+        dir: &std::path::Path,
         label: &str,
         label_id: graphforge_value::EntityTypeSelection,
         query: Option<&str>,
@@ -109,7 +110,7 @@ impl GraphForge {
         let text = query
             .map(|query| {
                 search_graph_native(
-                    &self.dir,
+                    dir,
                     FindSearchRequest {
                         label,
                         label_id,
@@ -170,13 +171,16 @@ impl GraphForge {
         force_stale: bool,
         limit: usize,
     ) -> Result<Vec<VectorSearchHit>, GfError> {
+        // The caller retains graph read visibility for the entire find attempt.
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
         let space = space.expect("vector query form requires space");
         match vector_query {
             VectorQuery::Raw(vector) => {
                 let key = SearchArtifactKey::vector(label, space)?;
-                if current_search_artifact(&self.dir, &key)?.is_some() {
+                if current_search_artifact(dir, &key)?.is_some() {
                     return soft_dimension_miss(search_graph_vectors(
-                        &self.dir,
+                        dir,
                         VectorIndexRequest {
                             label,
                             label_id,
@@ -190,7 +194,7 @@ impl GraphForge {
                 }
                 let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
                 soft_dimension_miss(search_embedding_generation(
-                    &self.dir,
+                    dir,
                     EmbeddingGenerationQuery {
                         prepared: &prepared,
                         label_id,
@@ -204,7 +208,7 @@ impl GraphForge {
             VectorQuery::Node(node_uuid) => {
                 let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
                 soft_dimension_miss(search_embedding_generation(
-                    &self.dir,
+                    dir,
                     EmbeddingGenerationQuery {
                         prepared: &prepared,
                         label_id,

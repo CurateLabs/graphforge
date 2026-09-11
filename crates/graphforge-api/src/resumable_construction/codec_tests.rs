@@ -91,7 +91,7 @@ fn graph_rows(graph: &GraphForge) -> (Vec<NodeRow>, Vec<EdgeRow>) {
 }
 
 fn ordinals(graph: &GraphForge, ids: &[Uuid]) -> Vec<Option<u64>> {
-    UuidMembershipIndex::open(&graph.dir)
+    UuidMembershipIndex::open(&graph.dir())
         .unwrap()
         .lookup_node_surrogates(ids)
         .unwrap()

@@ -30,7 +30,7 @@ pub use graphforge_observability as telemetry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef;
@@ -416,6 +416,33 @@ pub use search_index::SearchIndexOptions;
 // GraphForge
 // ---------------------------------------------------------------------------
 
+/// A selected graph path and the owner keeping its private resources alive.
+/// Pinned generations can read a path different from the temporary guard root.
+#[derive(Clone, Debug)]
+struct GraphWorkspace {
+    dir: PathBuf,
+    _owner: Arc<tempfile::TempDir>,
+}
+
+impl GraphWorkspace {
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl std::ops::Deref for GraphWorkspace {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl AsRef<Path> for GraphWorkspace {
+    fn as_ref(&self) -> &Path {
+        self.path()
+    }
+}
+
 struct PreparedGenerationReadAuthority {
     properties: Arc<graphforge_storage::AuthenticatedPropertyInventory>,
     ordinal: Option<graphforge_storage::ordinal_identity_v4::V4OrdinalIdentityHandle>,
@@ -461,9 +488,8 @@ pub struct GraphForge {
     /// Project directory backing topology/properties Parquet files. For an
     /// instance this is a private mutable workspace materialized from the pinned
     /// graph generation (file-backed tree or legacy snapshot).
-    dir: PathBuf,
-    /// Keeps the private mutable graph workspace alive for the engine's life.
-    workspace_guard: Arc<tempfile::TempDir>,
+    /// Readers capture one owner under graph visibility before publication may rotate it.
+    workspace_guard: Arc<RwLock<GraphWorkspace>>,
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
     /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
@@ -552,7 +578,7 @@ impl std::fmt::Debug for GraphForge {
                 "generation_uuid",
                 &self.resolved_generation.generation_uuid(),
             )
-            .field("dir", &self.dir)
+            .field("dir", &self.dir())
             .field("ontology_mode", &self.ontology_mode)
             .field("write_options", &self.write_options)
             .field("has_ontology", &self.ontology.is_some())
@@ -710,8 +736,10 @@ impl GraphForge {
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
-            dir,
-            workspace_guard: workspace,
+            workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
+                dir,
+                _owner: workspace,
+            })),
             graph_open_evidence,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
@@ -917,8 +945,10 @@ impl GraphForge {
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
-            dir,
-            workspace_guard: workspace,
+            workspace_guard: Arc::new(RwLock::new(GraphWorkspace {
+                dir,
+                _owner: workspace,
+            })),
             graph_open_evidence,
             project_open_recovery,
             tempdir: None,
@@ -994,6 +1024,27 @@ impl GraphForge {
         }
     }
 
+    fn workspace_for_session(&self) -> GraphWorkspace {
+        self.workspace_guard
+            .read()
+            .expect("workspace lock poisoned")
+            .clone()
+    }
+
+    fn dir(&self) -> GraphWorkspace {
+        self.workspace_for_session()
+    }
+
+    fn replace_workspace_owner(&self, workspace: GraphWorkspace) -> GraphWorkspace {
+        std::mem::replace(
+            &mut *self
+                .workspace_guard
+                .write()
+                .expect("workspace lock poisoned"),
+            workspace,
+        )
+    }
+
     fn adjacency_provider_for_session(&self) -> Arc<graphforge_exec::PersistentAdjacencyProvider> {
         Arc::clone(
             &self
@@ -1063,7 +1114,7 @@ impl GraphForge {
         &self,
         generation: &ResolvedProjectGeneration,
     ) -> Result<(), GfError> {
-        let prepared = self.prepare_generation_read_authority(generation, &self.dir)?;
+        let prepared = self.prepare_generation_read_authority(generation, &self.dir())?;
         self.install_prepared_generation_read_authority(generation.generation_uuid(), prepared);
         Ok(())
     }
@@ -1246,7 +1297,7 @@ impl GraphForge {
             .lock()
             .expect("semantic storage binding lock poisoned");
         GraphCatalog::open_authenticated_with_semantic_bindings(
-            &self.dir,
+            &self.dir(),
             self.ontology.as_ref(),
             &runtime,
             candidate.or(installed.as_ref()),
@@ -1402,12 +1453,12 @@ impl GraphForge {
                 let projection =
                     graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
                         context.composition(),
-                        &self.dir,
+                        &self.dir(),
                     )?;
                 (projection.bindings, projection.route_moves)
             } else {
                 if current.is_none() {
-                    graphforge_storage::require_atomic_legacy_migration(&self.dir)?;
+                    graphforge_storage::require_atomic_legacy_migration(&self.dir())?;
                 }
                 (
                     graphforge_storage::SemanticStorageBindings::project(
@@ -1495,6 +1546,8 @@ impl GraphForge {
         let _read_visibility = (!is_write)
             .then(|| self.graph_visibility.read())
             .transpose()?;
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path().to_path_buf();
         let prior_catalog = self
             .runtime_catalog
             .lock()
@@ -1529,7 +1582,7 @@ impl GraphForge {
                 ));
             }
             legacy_migration = Some(graphforge_storage::apply_legacy_route_moves(
-                &self.dir,
+                &dir,
                 legacy_route_moves.expect("checked"),
                 candidate_bindings.expect("legacy migration has candidate bindings"),
             )?);
@@ -1546,7 +1599,7 @@ impl GraphForge {
             self.adjacency_provider_for_session()
         } else {
             Arc::new(adjacency_provider_for_graph(
-                &self.dir,
+                &dir,
                 execution_mode,
                 self.property_inventory_for_session(),
             )?)
@@ -1554,7 +1607,7 @@ impl GraphForge {
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
             self.ontology.clone(),
-            self.dir.clone(),
+            dir,
             execution_mode,
             adjacency_provider,
             Some(Arc::clone(&self.ordinal_identities)),
@@ -1689,13 +1742,13 @@ impl GraphForge {
             ));
         }
 
-        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir)? {
+        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
             graphforge_storage::rebuild_uuid_membership_indexes(
-                &self.dir,
+                &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
+        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let installed_bindings = self
             .semantic_storage_bindings
@@ -1730,7 +1783,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir.as_path()),
+            Some(self.dir().path()),
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -1789,13 +1842,13 @@ impl GraphForge {
                 "project generation changed before graph publication".into(),
             ));
         }
-        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir)? {
+        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir())? {
             graphforge_storage::rebuild_uuid_membership_indexes(
-                &self.dir,
+                &self.dir(),
                 graphforge_storage::UuidIndexBuildLimits::default(),
             )?;
         }
-        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
+        let graph = graphforge_storage::capture_graph_files(&self.dir())?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -1827,7 +1880,7 @@ impl GraphForge {
         let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
-            Some(self.dir.as_path()),
+            Some(self.dir().path()),
             self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
@@ -1898,10 +1951,20 @@ impl GraphForge {
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
     ) -> Result<graphforge_exec::SendableRecordBatchStream, GfError> {
+        self.execute_stream_with_workspace(cypher, params)
+            .map(|(stream, _)| stream)
+    }
+
+    fn execute_stream_with_workspace(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> Result<(graphforge_exec::SendableRecordBatchStream, GraphWorkspace), GfError> {
         use graphforge_exec::ExecutionSession;
 
         let admission = self.admit_heavy_query_owned()?;
         let _read_visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
         let composition = self
             .default_composition_snapshot()
             .map(|context| self.bind_generation_storage(&context))
@@ -1980,7 +2043,7 @@ impl GraphForge {
             self.adjacency_provider_for_session()
         } else {
             Arc::new(adjacency_provider_for_graph(
-                &self.dir,
+                workspace.path(),
                 execution_mode,
                 self.property_inventory_for_session(),
             )?)
@@ -1988,7 +2051,7 @@ impl GraphForge {
         let session = ExecutionSession::new_with_target_provider_resources_and_identity(
             catalog,
             self.ontology.clone(),
-            self.dir.clone(),
+            workspace.path().to_path_buf(),
             execution_mode,
             adjacency_provider,
             Some(Arc::clone(&self.ordinal_identities)),
@@ -2009,17 +2072,24 @@ impl GraphForge {
         // stream is demand-driven and may outlive this call; holding the slot
         // for the full consumer lifetime would serialize all streaming clients.
         drop(admission);
-        Ok(self.finish_public_stream(stream))
+        Ok((
+            self.finish_public_stream(stream, workspace.clone()),
+            workspace,
+        ))
     }
 
-    fn finish_public_stream(&self, stream: SendableRecordBatchStream) -> SendableRecordBatchStream {
+    fn finish_public_stream(
+        &self,
+        stream: SendableRecordBatchStream,
+        workspace: GraphWorkspace,
+    ) -> SendableRecordBatchStream {
         Box::pin(WorkspacePinnedStream {
             stream: self.graph_visibility.health.guard_stream(shape_stream(
                 stream,
                 self.ontology_mode,
                 self.ontology.as_ref(),
             )),
-            _workspace: Arc::clone(&self.workspace_guard),
+            _workspace: workspace,
         })
     }
 
@@ -2051,14 +2121,14 @@ impl GraphForge {
         ),
         GfError,
     > {
-        let stream = self.execute_stream_with_params(cypher, params)?;
+        let (stream, workspace) = self.execute_stream_with_workspace(cypher, params)?;
         let schema = stream.schema();
         Ok((
             stream,
             schema,
             RuntimeGuard {
                 runtime: Arc::clone(&self.runtime),
-                workspace: Arc::clone(&self.workspace_guard),
+                workspace,
                 tempdir: self.tempdir.clone(),
             },
         ))
@@ -2107,7 +2177,7 @@ impl GraphForge {
         let cleanup_result =
             self.adjacency_provider_for_session()
                 .reset_graph(|| -> Result<(), GfError> {
-                    let entries = std::fs::read_dir(&self.dir).map_err(|e| {
+                    let entries = std::fs::read_dir(self.dir()).map_err(|e| {
                         GfError::Storage(format!("failed to read in-memory project: {e}"))
                     })?;
                     let mut first_error = None;
@@ -2298,7 +2368,7 @@ impl GraphForge {
                 .write()
                 .expect("adjacency provider lock poisoned") =
                 Arc::new(adjacency_provider_for_graph(
-                    &self.dir,
+                    &self.dir(),
                     self.ontology_mode,
                     self.property_inventory_for_session(),
                 )?);
@@ -2742,7 +2812,7 @@ pub struct RuntimeGuard {
     /// Private mutable graph workspace hydrated for this facade (`dir`).
     /// Held solely so `TempDir` cleanup waits until stream consumers finish.
     #[allow(dead_code)]
-    workspace: Arc<tempfile::TempDir>,
+    workspace: GraphWorkspace,
     /// In-memory project root, when the facade is not path-backed.
     #[allow(dead_code)]
     tempdir: Option<Arc<tempfile::TempDir>>,
@@ -3553,7 +3623,7 @@ impl Shaper {
 // workspace owner. Compaction may rotate the facade while this stream lives.
 struct WorkspacePinnedStream {
     stream: SendableRecordBatchStream,
-    _workspace: Arc<tempfile::TempDir>,
+    _workspace: GraphWorkspace,
 }
 
 impl futures::Stream for WorkspacePinnedStream {
@@ -3841,7 +3911,7 @@ mod tests {
         .unwrap();
         let before_catalog = view.runtime_catalog.lock().unwrap().to_record_batch();
         let before_generation = view.generation_for_read().unwrap().generation_uuid();
-        let before_files = files(&view.dir);
+        let before_files = files(&view.dir());
         assert!(
             view.explain("CREATE (:NewLabel {fresh:1})")
                 .unwrap()
@@ -3887,7 +3957,7 @@ mod tests {
             view.generation_for_read().unwrap().generation_uuid(),
             before_generation
         );
-        assert_eq!(files(&view.dir), before_files);
+        assert_eq!(files(&view.dir()), before_files);
         // Execution binding observes runtime names, unlike snapshot-only EXPLAIN.
         // Rejection must nevertheless preserve canonical data and authority.
         for query in [
@@ -3898,7 +3968,7 @@ mod tests {
         ] {
             assert!(view.execute(query).is_err());
         }
-        assert_eq!(files(&view.dir), before_files);
+        assert_eq!(files(&view.dir()), before_files);
         assert_eq!(
             view.generation_for_read().unwrap().generation_uuid(),
             before_generation
@@ -3956,7 +4026,7 @@ mod tests {
         graph
             .execute("CREATE (:Person {name: 'Ada'})")
             .expect("create compact-root fixture");
-        publish_compact_graph_workspace(project.path(), &graph.dir);
+        publish_compact_graph_workspace(project.path(), &graph.dir());
         drop(graph);
 
         let reopened = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
@@ -3973,14 +4043,14 @@ mod tests {
         assert_eq!(reopened.graph_open_evidence().files_copied, 3);
         let mut control_bytes = 0;
         for relative in controls {
-            let file = std::fs::File::open(reopened.dir.join(relative)).unwrap();
+            let file = std::fs::File::open(reopened.dir().join(relative)).unwrap();
             assert_eq!(graphforge_filesystem::file_link_count(&file).unwrap(), 1);
             control_bytes += file.metadata().unwrap().len();
         }
         assert_eq!(reopened.graph_open_evidence().bytes_copied, control_bytes);
         assert!(reopened.graph_open_evidence().files_reused > 0);
-        assert!(!reopened.dir.join("files").exists());
-        assert!(reopened.dir.join("topology").is_dir());
+        assert!(!reopened.dir().join("files").exists());
+        assert!(reopened.dir().join("topology").is_dir());
 
         let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
         let (read_only_dir, read_only_guard, read_only_evidence) =
@@ -3993,7 +4063,7 @@ mod tests {
         let rematerialized = rematerialized_owner.path().join("workspace");
         std::fs::create_dir(&rematerialized).unwrap();
         rematerialize_graph_workspace(&resolved, &rematerialized).unwrap();
-        let (expected, _) = graphforge_storage::capture_graph_files(&reopened.dir).unwrap();
+        let (expected, _) = graphforge_storage::capture_graph_files(&reopened.dir()).unwrap();
         let (actual, _) = graphforge_storage::capture_graph_files(&rematerialized).unwrap();
         assert_eq!(actual, expected);
 
@@ -4097,7 +4167,7 @@ mod tests {
                 .value(0),
             7
         );
-        assert!(!reopened.dir.join("deltas").exists());
+        assert!(!reopened.dir().join("deltas").exists());
         assert!(reopened.graph_open_evidence().files_reused > 0);
         assert!(reopened.graph_open_evidence().files_copied > 0);
     }
@@ -4130,8 +4200,8 @@ mod tests {
         let gf = GraphForge::new(None).expect("in-memory instance");
         assert!(gf.path().is_none());
         assert_eq!(gf.ontology_mode(), OntologyMode::Exploratory);
-        assert!(gf.dir.is_dir());
-        assert!(gf.dir.file_name().is_some_and(|name| {
+        assert!(gf.dir().is_dir());
+        assert!(gf.dir().file_name().is_some_and(|name| {
             name.to_string_lossy()
                 .starts_with("graphforge-graph-workspace-")
         }));
@@ -4427,13 +4497,13 @@ mod tests {
             .adjacency("KNOWS", graphforge_ir::Direction::Out)
             .unwrap();
         let generation =
-            graphforge_storage::generation::read_topology_generation(&graph.dir).unwrap();
+            graphforge_storage::generation::read_topology_generation(&graph.dir()).unwrap();
         graph.clear().unwrap();
         graph
             .execute("CREATE (:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person)")
             .unwrap();
         assert_eq!(
-            graphforge_storage::generation::read_topology_generation(&graph.dir).unwrap(),
+            graphforge_storage::generation::read_topology_generation(&graph.dir()).unwrap(),
             generation
         );
         let count = graph
@@ -4497,15 +4567,15 @@ mod tests {
         })
         .expect("register fixture procedure");
 
-        let original = std::fs::metadata(&gf.dir)
+        let original = std::fs::metadata(&gf.dir())
             .expect("fixture directory metadata")
             .permissions();
         let mut restricted = original.clone();
         restricted.set_mode(0o500);
-        std::fs::set_permissions(&gf.dir, restricted)
+        std::fs::set_permissions(&gf.dir(), restricted)
             .expect("restrict fixture directory permissions");
         let mut guard = PermissionGuard {
-            path: gf.dir.clone(),
+            path: gf.dir().to_path_buf(),
             original: Some(original),
         };
 
@@ -5532,7 +5602,7 @@ mod tests {
     fn persistent_open_does_not_cleanup_generation_files() {
         let dir = tempfile::TempDir::new().unwrap();
         let first = GraphForge::new(dir.path().to_str()).unwrap();
-        let topology = first.dir.join("topology");
+        let topology = first.dir().join("topology");
         std::fs::create_dir_all(&topology).unwrap();
         let stale = topology.join("nodes.parquet.Abc123.tmp");
         let unrelated = topology.join("notes.tmp");
@@ -5544,8 +5614,13 @@ mod tests {
         let path = dir.path().to_str().unwrap();
         let graph = GraphForge::new(Some(path)).unwrap();
 
-        assert!(graph.dir.join("topology/nodes.parquet.Abc123.tmp").exists());
-        assert!(graph.dir.join("topology/notes.tmp").exists());
+        assert!(
+            graph
+                .dir()
+                .join("topology/nodes.parquet.Abc123.tmp")
+                .exists()
+        );
+        assert!(graph.dir().join("topology/notes.tmp").exists());
         assert_eq!(graph.path(), Some(dir.path()));
     }
 

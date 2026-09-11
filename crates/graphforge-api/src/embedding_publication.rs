@@ -102,11 +102,13 @@ impl GraphForge {
         &self,
         request: CallerEmbeddingBatchRequest,
     ) -> Result<EmbeddingSpaceInfo, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let prepared = self.prepare_caller_publication(request)?;
         let eligible_count = u64::try_from(prepared.rows.len()).map_err(|_| {
             GfError::Execution("caller embedding row count cannot be represented".to_owned())
         })?;
-        let project_dir = self.dir.clone();
+        let project_dir = workspace.path().to_path_buf();
         self.publish_prepared_caller_embeddings(
             &prepared,
             move |projection_bytes| {
@@ -245,10 +247,13 @@ impl GraphForge {
         if replace_alias {
             return Ok(());
         }
-        if self.embedding_spaces()?.iter().any(|space| {
-            space.aliases.iter().any(|alias| alias == display_name)
-                && space.compatibility_id != compatibility_id.to_hex()
-        }) {
+        if Self::embedding_spaces_at(self.workspace_for_session().path())?
+            .iter()
+            .any(|space| {
+                space.aliases.iter().any(|alias| alias == display_name)
+                    && space.compatibility_id != compatibility_id.to_hex()
+            })
+        {
             return Err(validation(
                 "embedding alias already targets another compatibility identity; explicit replacement is required",
             ));
@@ -269,7 +274,7 @@ impl GraphForge {
         let now = transaction_time_micros();
         let projection_bytes = RefCell::new(prepared.projection_bytes.clone());
         refresh_embedding_generation(
-            &self.dir,
+            &self.dir(),
             EmbeddingRefreshRequest {
                 descriptor: &prepared.descriptor,
                 generated_at_micros: now,
@@ -291,7 +296,7 @@ impl GraphForge {
             },
             checkpoint,
         )?;
-        self.bind_embedding_space_alias(
+        self.bind_embedding_space_alias_guarded(
             &prepared.display_name,
             &prepared.descriptor.compatibility_id()?.to_hex(),
             prepared.replace_alias,
@@ -468,7 +473,7 @@ mod tests {
             replacement
         );
         let discovered = discover_embedding_spaces(
-            &reopened.dir,
+            &reopened.dir(),
             EmbeddingSpaceDiscoveryLimits::default(),
             || Ok(()),
         )
@@ -556,11 +561,12 @@ mod tests {
             .unwrap();
         assert_eq!(info.dimensions, 7);
         assert_eq!(info.active.unwrap().vector_count, 0);
-        let discovered =
-            discover_embedding_spaces(&graph.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })
-            .unwrap();
+        let discovered = discover_embedding_spaces(
+            &graph.dir(),
+            EmbeddingSpaceDiscoveryLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
         let active = discovered[0].active().unwrap();
         let rows =
             read_vector_snapshot(&active.path, 7, VectorStoreLimits::default(), || Ok(())).unwrap();
@@ -668,11 +674,12 @@ mod tests {
             )
             .unwrap();
 
-        let discovered =
-            discover_embedding_spaces(&graph.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })
-            .unwrap();
+        let discovered = discover_embedding_spaces(
+            &graph.dir(),
+            EmbeddingSpaceDiscoveryLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
         let active = discovered[0].active().unwrap();
         let rows =
             read_vector_snapshot(&active.path, 2, VectorStoreLimits::default(), || Ok(())).unwrap();
@@ -702,11 +709,12 @@ mod tests {
             info.producer,
             EmbeddingSpaceProducer::CallerSupplied { .. }
         ));
-        let discovered =
-            discover_embedding_spaces(&graph.dir, EmbeddingSpaceDiscoveryLimits::default(), || {
-                Ok(())
-            })
-            .unwrap();
+        let discovered = discover_embedding_spaces(
+            &graph.dir(),
+            EmbeddingSpaceDiscoveryLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
         assert!(matches!(
             discovered[0].descriptor().producer(),
             EmbeddingProducerIdentity::CallerSupplied { .. }

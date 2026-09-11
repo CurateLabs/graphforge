@@ -746,7 +746,7 @@ mod tests {
         let graph = GraphForge::new(directory.path().to_str()).unwrap();
         graph.execute("CREATE (:Person {name:'retained'})").unwrap();
         let catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
-        let files = graphforge_storage::capture_graph_files(&graph.dir)
+        let files = graphforge_storage::capture_graph_files(&graph.dir())
             .unwrap()
             .0;
         let generation = *graph.current_generation_uuid.lock().unwrap();
@@ -764,7 +764,7 @@ mod tests {
             catalog
         );
         assert_eq!(
-            graphforge_storage::capture_graph_files(&graph.dir)
+            graphforge_storage::capture_graph_files(&graph.dir())
                 .unwrap()
                 .0,
             files

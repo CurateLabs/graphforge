@@ -173,8 +173,10 @@ impl GraphForge {
             let prepared = self.prepare_generation_read_authority(&current, &dir)?;
             let catalog = crate::load_runtime_catalog(&dir)?;
             let bindings = graphforge_storage::semantic_storage_bindings(&current)?;
-            let old_workspace = std::mem::replace(&mut self.workspace_guard, workspace);
-            self.dir = dir;
+            let old_workspace = self.replace_workspace_owner(crate::GraphWorkspace {
+                dir,
+                _owner: workspace,
+            });
             self.graph_open_evidence = evidence;
             self.install_prepared_generation_read_authority(current.generation_uuid(), prepared);
             self.resolved_generation = current;
@@ -459,8 +461,9 @@ mod tests {
             })
             .unwrap();
         *graph.uuid_membership_index.lock().unwrap() =
-            Some(graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap());
-        let old_dir = graph.dir.clone();
+            Some(graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap());
+        // Observe reclamation without adding another workspace owner.
+        let old_dir = graph.dir().to_path_buf();
         let snapshot = graph
             .execute_stream("MATCH (n) RETURN n.node_uuid, n.score")
             .unwrap();
@@ -477,7 +480,7 @@ mod tests {
         let report = graph.compact_graph_delta(&request, None).unwrap();
 
         assert!(report.cleanup.is_some());
-        assert_ne!(graph.dir, old_dir);
+        assert_ne!(graph.dir().path(), old_dir.as_path());
         assert!(graph.uuid_membership_index.lock().unwrap().is_none());
         assert!(old_dir.exists(), "active stream retains old workspace");
         drop(snapshot);

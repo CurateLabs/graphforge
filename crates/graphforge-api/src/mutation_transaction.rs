@@ -36,7 +36,7 @@ impl<'a> FacadeMutationLifecycle<'a> {
             None
         } else {
             Some(graphforge_storage::GraphWorkspaceCheckpoint::capture(
-                &graph.dir,
+                &graph.dir(),
             )?)
         };
         Ok(Self {
@@ -50,16 +50,16 @@ impl<'a> FacadeMutationLifecycle<'a> {
     }
 
     fn refresh_unpublished(&self) -> Result<(), GfError> {
-        let (inventory, _) = graphforge_storage::capture_graph_files(&self.graph.dir)?;
+        let (inventory, _) = graphforge_storage::capture_graph_files(&self.graph.dir())?;
         let inventory = Arc::new(
             graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &self.parent,
-                &self.graph.dir,
+                &self.graph.dir(),
                 inventory,
             )?,
         );
         let adjacency = Arc::new(crate::adjacency_provider_for_graph(
-            &self.graph.dir,
+            &self.graph.dir(),
             self.graph.ontology_mode,
             Arc::clone(&inventory),
         )?);
@@ -129,10 +129,10 @@ impl FacadeMutationLifecycle<'_> {
         )?;
         if current.generation_uuid() == self.parent.generation_uuid() {
             if let Some(checkpoint) = &mut self.unpublished {
-                checkpoint.restore(&self.graph.dir)?;
+                checkpoint.restore(&self.graph.dir())?;
                 self.refresh_unpublished()?;
             } else {
-                crate::rematerialize_graph_workspace(&self.parent, &self.graph.dir)?;
+                crate::rematerialize_graph_workspace(&self.parent, &self.graph.dir())?;
                 self.graph.install_property_generation(&self.parent)?;
             }
             *self
@@ -143,8 +143,8 @@ impl FacadeMutationLifecycle<'_> {
         } else {
             // Publication may have succeeded before a later operation failed.
             // Reconcile from the selected generation; never reinstall old files.
-            crate::rematerialize_graph_workspace(&current, &self.graph.dir)?;
-            let catalog = crate::load_runtime_catalog(&self.graph.dir)?;
+            crate::rematerialize_graph_workspace(&current, &self.graph.dir())?;
+            let catalog = crate::load_runtime_catalog(&self.graph.dir())?;
             self.graph.install_property_generation(&current)?;
             *self
                 .graph
@@ -231,7 +231,7 @@ mod tests {
             let inventory = graph.property_inventory_for_session();
             let catalog =
                 graphforge_storage::GraphCatalog::open_authenticated_with_semantic_bindings(
-                    &graph.dir,
+                    &graph.dir(),
                     None,
                     &working.lock().unwrap(),
                     None,
@@ -241,7 +241,7 @@ mod tests {
             let session = graphforge_exec::ExecutionSession::new_with_target(
                 catalog,
                 None,
-                graph.dir.clone(),
+                graph.dir().to_path_buf(),
                 graph.ontology_mode,
             )
             .unwrap();
@@ -305,7 +305,7 @@ mod tests {
                 graph.execute("CREATE (:Person {name:'retained'})").unwrap();
             }
             let prior_catalog = graph.runtime_catalog.lock().unwrap().to_record_batch();
-            let prior_files = graphforge_storage::capture_graph_files(&graph.dir)
+            let prior_files = graphforge_storage::capture_graph_files(&graph.dir())
                 .unwrap()
                 .0;
             let prior_generation = *graph.current_generation_uuid.lock().unwrap();
@@ -320,7 +320,7 @@ mod tests {
                 prior_catalog
             );
             assert_eq!(
-                graphforge_storage::capture_graph_files(&graph.dir)
+                graphforge_storage::capture_graph_files(&graph.dir())
                     .unwrap()
                     .0,
                 prior_files
@@ -415,7 +415,7 @@ mod tests {
                     "MATCH (n:Person) SET n.metric = CASE n.name {} END",
                     cases.join(" ")
                 );
-                let topology = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+                let topology = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
                 let before = *graph.current_generation_uuid.lock().unwrap();
                 let mut outcomes = Vec::new();
                 for analyst in [analyst_first, !analyst_first] {
@@ -426,7 +426,7 @@ mod tests {
                     }
                     outcomes.push(graph.last_mutation_outcome.lock().unwrap().clone().unwrap());
                     assert_eq!(
-                        graphforge_storage::read_topology_generation(&graph.dir).unwrap(),
+                        graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
                         topology
                     );
                     assert_ne!(*graph.current_generation_uuid.lock().unwrap(), before);
@@ -625,12 +625,12 @@ mod recovery_tests {
         let read = bind("MATCH (n:Person) RETURN n.name");
         let write = bind("MATCH (n:Person) DELETE n SET n.metric = 1");
         let physical_catalog =
-            graphforge_storage::GraphCatalog::open(&graph.dir, None, &catalog.lock().unwrap())
+            graphforge_storage::GraphCatalog::open(&graph.dir(), None, &catalog.lock().unwrap())
                 .unwrap();
         let session = graphforge_exec::ExecutionSession::new_with_target(
             physical_catalog,
             None,
-            graph.dir.clone(),
+            graph.dir().to_path_buf(),
             graphforge_core::OntologyMode::Exploratory,
         )
         .unwrap();

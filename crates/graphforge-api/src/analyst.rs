@@ -26,11 +26,12 @@ impl GraphForge {
             )
             .into());
         }
-        let (label_id, _) = self.algorithm_label(label, "rank")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, _) = self.algorithm_label(label, "rank")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let projection = graphforge_exec::rank_projection_fingerprint(
@@ -38,7 +39,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             options,
@@ -109,11 +110,12 @@ impl GraphForge {
             )
             .into());
         }
-        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let projection = graphforge_exec::cluster_projection_fingerprint(
@@ -121,7 +123,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
@@ -200,11 +202,12 @@ impl GraphForge {
         label: &str,
         options: &SimilarOptions,
     ) -> Result<InvocationDescriptor, InvocationError> {
-        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let projection = graphforge_exec::similar_projection_fingerprint(
@@ -212,7 +215,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
@@ -300,14 +303,15 @@ impl GraphForge {
         label: Option<&str>,
         options: &EmbeddingAnalyzeOptions,
     ) -> Result<InvocationDescriptor, InvocationError> {
-        let label_id = label
-            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?
-            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let label_id = label
+            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let prepared = graphforge_exec::prepare_embedding_invocation_descriptor_with_compute(
@@ -315,7 +319,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             label,
@@ -618,14 +622,15 @@ impl GraphForge {
         label: Option<&str>,
         options: &AnalyzeOptions,
     ) -> Result<InvocationDescriptor, InvocationError> {
-        let label_id = label
-            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?
-            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let label_id = label
+            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let projection = graphforge_exec::analyze_projection_fingerprint(
@@ -633,7 +638,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             options,
@@ -740,6 +745,11 @@ impl GraphForge {
             ))
             .into());
         }
+        let _adjacency_visibility = self
+            .adjacency_visibility
+            .read()
+            .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
         let source = source
             .map(|selector| self.resolve_node_selector(selector))
             .transpose()?
@@ -755,10 +765,6 @@ impl GraphForge {
             normalized.walk_length = Some(normalized.walk_length.unwrap_or(10));
             normalized.seed = Some(normalized.seed.unwrap_or(0));
         }
-        let _adjacency_visibility = self
-            .adjacency_visibility
-            .read()
-            .expect("adjacency visibility lock poisoned");
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let projection = graphforge_exec::paths_projection_fingerprint(
@@ -766,7 +772,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             source,
             target,
@@ -958,11 +964,12 @@ impl GraphForge {
             .as_ref()
             .map(|_| self.graph_visibility.lock())
             .transpose()?;
-        let (label_id, stem) = self.algorithm_label(label, "rank")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "rank")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let batch = graphforge_exec::rank_algorithm_with_compute(
@@ -970,7 +977,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
@@ -1020,11 +1027,12 @@ impl GraphForge {
             .as_ref()
             .map(|_| self.graph_visibility.lock())
             .transpose()?;
-        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         let batch = graphforge_exec::cluster_algorithm_with_compute(
@@ -1032,7 +1040,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
@@ -1087,6 +1095,7 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         graphforge_exec::paths_algorithm_with_compute(
@@ -1094,7 +1103,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             source.map(|uuid| *uuid.as_bytes()),
             target.map(|uuid| *uuid.as_bytes()),
@@ -1119,14 +1128,15 @@ impl GraphForge {
         options: AnalyzeOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
         let dispatch_options = options;
-        let label_id = label
-            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?
-            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let label_id = label
+            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         graphforge_exec::analyze_algorithm_with_compute(
@@ -1134,7 +1144,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             &dispatch_options,
@@ -1158,14 +1168,15 @@ impl GraphForge {
         options: &EmbeddingAnalyzeOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
         let _admission = self.admit_heavy_query()?;
-        let label_id = label
-            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
-            .transpose()?
-            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let label_id = label
+            .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
+            .transpose()?
+            .unwrap_or(graphforge_value::EntityTypeSelection::All);
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         graphforge_exec::embedding_algorithm_execution_with_compute(
@@ -1173,7 +1184,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             label,
@@ -1198,11 +1209,12 @@ impl GraphForge {
         options: SimilarOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
         let _admission = self.admit_heavy_query()?;
-        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
         graphforge_exec::similar_algorithm_with_compute(
@@ -1210,7 +1222,7 @@ impl GraphForge {
                 adjacency_provider.as_ref(),
                 self.property_inventory_for_session(),
             ),
-            &self.dir,
+            workspace.path(),
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),

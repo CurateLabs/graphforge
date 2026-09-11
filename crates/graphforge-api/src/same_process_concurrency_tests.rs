@@ -117,13 +117,13 @@ fn lazy_rank_keeps_graph_workspace_inventory_unchanged() {
     let project = tempfile::tempdir().unwrap();
     seed(project.path());
     let graph = GraphForge::new(project.path().to_str()).unwrap();
-    let before = graphforge_storage::capture_graph_files(&graph.dir)
+    let before = graphforge_storage::capture_graph_files(&graph.dir())
         .unwrap()
         .0;
-    assert!(!graphforge_storage::adjacency::adjacency_dir(&graph.dir).exists());
+    assert!(!graphforge_storage::adjacency::adjacency_dir(&graph.dir()).exists());
     graph.rank("Person", RankOptions::default()).unwrap();
     assert_eq!(
-        graphforge_storage::capture_graph_files(&graph.dir)
+        graphforge_storage::capture_graph_files(&graph.dir())
             .unwrap()
             .0,
         before,

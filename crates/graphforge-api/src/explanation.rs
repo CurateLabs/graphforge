@@ -54,6 +54,7 @@ impl GraphForge {
         // Pin the composition projection and all generation-coupled planning
         // authorities together. Projection does not publish its candidate.
         let _read_visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
         let composition = self
             .default_composition_snapshot()
             .map(|context| self.bind_generation_storage(&context))
@@ -103,13 +104,13 @@ impl GraphForge {
             composition.as_ref().map(|(_, candidate, _)| candidate),
         )?;
         if stage == Some(ExplainStage::LogicalPlan) {
-            return self.explain_logical_stage(&plan, &catalog, execution_mode);
+            return self.explain_logical_stage(&plan, &catalog, execution_mode, workspace.path());
         }
         // Preserve the all-stage presentation: some operators only lower in
         // the directory-backed physical stage, so that section remains useful
         // when the directory-less logical renderer cannot represent them.
         let logical = if stage.is_none() {
-            self.explain_logical_stage(&plan, &catalog, execution_mode)
+            self.explain_logical_stage(&plan, &catalog, execution_mode, workspace.path())
                 .unwrap_or_else(|error| format!("(logical plan unavailable: {error})"))
         } else {
             String::new()
@@ -118,7 +119,7 @@ impl GraphForge {
             self.adjacency_provider_for_session()
         } else {
             Arc::new(crate::adjacency_provider_for_graph(
-                &self.dir,
+                workspace.path(),
                 execution_mode,
                 self.property_inventory_for_session(),
             )?)
@@ -127,7 +128,7 @@ impl GraphForge {
             graphforge_exec::ExecutionSession::new_with_target_provider_resources_and_identity(
                 catalog,
                 self.ontology.clone(),
-                self.dir.clone(),
+                workspace.path().to_path_buf(),
                 execution_mode,
                 adjacency_provider,
                 Some(Arc::clone(&self.ordinal_identities)),
@@ -151,6 +152,7 @@ impl GraphForge {
         plan: &GraphPlan,
         catalog: &GraphCatalog,
         execution_mode: OntologyMode,
+        dir: &std::path::Path,
     ) -> Result<String, GfError> {
         let needs_writes = plan.ops.iter().any(|op| {
             matches!(
@@ -165,7 +167,7 @@ impl GraphForge {
         if needs_writes {
             graphforge_rel::explain_logical_for_writes(
                 plan,
-                &catalog.lowering_snapshot(Some(&self.dir))?,
+                &catalog.lowering_snapshot(Some(dir))?,
                 self.ontology.as_ref(),
                 execution_mode,
             )
