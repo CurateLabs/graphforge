@@ -331,7 +331,7 @@
         },
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
-          "symbol": "refresh_boundaries_preserve_the_prior_workspace_on_failure"
+          "symbol": "post_publication_refresh_failure_reports_committed_authority"
         },
         {
           "path": "crates/graphforge-api/tests/resumable_construction_surface.rs",

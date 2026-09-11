@@ -30,10 +30,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, _) = self.algorithm_label(label, "rank")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, _) = self.algorithm_label(label, "rank")?;
         let projection = graphforge_exec::rank_projection_fingerprint(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -114,10 +114,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let projection = graphforge_exec::cluster_projection_fingerprint(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -206,10 +206,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let projection = graphforge_exec::similar_projection_fingerprint(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -307,13 +307,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
             .transpose()?
             .unwrap_or(graphforge_value::EntityTypeSelection::All);
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         let prepared = graphforge_exec::prepare_embedding_invocation_descriptor_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -626,13 +626,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
             .transpose()?
             .unwrap_or(graphforge_value::EntityTypeSelection::All);
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         let projection = graphforge_exec::analyze_projection_fingerprint(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -749,6 +749,8 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
         let source = source
             .map(|selector| self.resolve_node_selector(selector))
@@ -765,8 +767,6 @@ impl GraphForge {
             normalized.walk_length = Some(normalized.walk_length.unwrap_or(10));
             normalized.seed = Some(normalized.seed.unwrap_or(0));
         }
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         let projection = graphforge_exec::paths_projection_fingerprint(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -968,10 +968,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, stem) = self.algorithm_label(label, "rank")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "rank")?;
         let batch = graphforge_exec::rank_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -1031,10 +1031,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let batch = graphforge_exec::cluster_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -1085,19 +1085,19 @@ impl GraphForge {
                 options.by
             )));
         }
+        let _adjacency_visibility = self
+            .adjacency_visibility
+            .read()
+            .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
         let source = source
             .map(|selector| self.resolve_node_selector(selector))
             .transpose()?;
         let target = target
             .map(|selector| self.resolve_node_selector(selector))
             .transpose()?;
-        let _adjacency_visibility = self
-            .adjacency_visibility
-            .read()
-            .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         graphforge_exec::paths_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -1132,13 +1132,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
             .transpose()?
             .unwrap_or(graphforge_value::EntityTypeSelection::All);
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         graphforge_exec::analyze_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -1172,13 +1172,13 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
+        let adjacency_provider = self.adjacency_provider_for_session();
+        adjacency_provider.revalidate();
         let workspace = self.workspace_for_session();
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
             .transpose()?
             .unwrap_or(graphforge_value::EntityTypeSelection::All);
-        let adjacency_provider = self.adjacency_provider_for_session();
-        adjacency_provider.revalidate();
         graphforge_exec::embedding_algorithm_execution_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
@@ -1213,10 +1213,10 @@ impl GraphForge {
             .adjacency_visibility
             .read()
             .expect("adjacency visibility lock poisoned");
-        let workspace = self.workspace_for_session();
-        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let adjacency_provider = self.adjacency_provider_for_session();
         adjacency_provider.revalidate();
+        let workspace = self.workspace_for_session();
+        let (label_id, stem) = self.algorithm_label(label, "similar")?;
         graphforge_exec::similar_algorithm_with_compute(
             &graphforge_exec::AdmittedAdjacencyProvider::new(
                 adjacency_provider.as_ref(),
