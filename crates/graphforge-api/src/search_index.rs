@@ -141,7 +141,7 @@ impl GraphForge {
                 rebuild,
             } => {
                 prepare_search_index(
-                    &self.dir,
+                    &self.dir(),
                     SearchIndexRequest::Text {
                         label,
                         label_id,
@@ -160,7 +160,7 @@ impl GraphForge {
             } => {
                 let node_uuid = self.resolve_node_selector(&node)?;
                 prepare_search_index(
-                    &self.dir,
+                    &self.dir(),
                     SearchIndexRequest::Vector {
                         label,
                         label_id,
@@ -196,7 +196,7 @@ impl GraphForge {
     ) -> Result<TextIndexInspection, GfError> {
         let label_id = self.search_label_id(label)?;
         let inspection = inspect_text_index_freshness(
-            &self.dir,
+            &self.dir(),
             LazyTextRequest { label, label_id },
             properties,
             graphforge_search::TextLifecycleLimits::default(),
@@ -241,8 +241,9 @@ impl GraphForge {
             .expect("adjacency visibility lock poisoned");
         let token = cancellation.unwrap_or_default();
         token.checkpoint()?;
-        let adjacency = graphforge_storage::adjacency::adjacency_dir(&self.dir);
-        let workspace_parent = self.dir.parent().ok_or_else(|| {
+        let adjacency = graphforge_storage::adjacency::adjacency_dir(&self.dir());
+        let workspace = self.workspace_for_session();
+        let workspace_parent = workspace.path().parent().ok_or_else(|| {
             GfError::Storage("graph workspace has no same-filesystem parent".into())
         })?;
         let staged = tempfile::Builder::new()
@@ -255,7 +256,7 @@ impl GraphForge {
         // scoped to the unpublished artifact (#336).
         let build_options = self.adjacency_build_options(staged.path());
         graphforge_storage::adjacency::build_adjacency_index_from_inventory(
-            &self.dir,
+            &self.dir(),
             staged.path(),
             Some(&self.property_inventory_for_session()),
             transaction_time_micros(),
@@ -263,7 +264,7 @@ impl GraphForge {
             &mut || token.checkpoint(),
         )?;
         let issues = graphforge_storage::adjacency::validate_adjacency_index_from_inventory(
-            &self.dir,
+            &self.dir(),
             staged.path(),
             Some(&self.property_inventory_for_session()),
         )?;
@@ -279,7 +280,7 @@ impl GraphForge {
         // Keep rollback bytes beside (not inside) the private workspace. The
         // operation-wide visibility lock makes the two directory renames an
         // atomic observation boundary for every reader of this workspace.
-        let backup = self.dir.with_file_name(format!(
+        let backup = self.dir().with_file_name(format!(
             ".graphforge-adjacency-backup.{}",
             uuid::Uuid::new_v4().simple()
         ));
@@ -401,7 +402,7 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         let inspection = graphforge_storage::adjacency::inspect_adjacency_index_from_inventory(
-            &self.dir,
+            &self.dir(),
             Some(&self.property_inventory_for_session()),
         )?;
         Ok(AdjacencyInspection {
@@ -606,18 +607,24 @@ mod tests {
 
         graph.index_search("Person", text(None, false)).unwrap();
         let key = SearchArtifactKey::text("Person", ["name", "summary"]).unwrap();
-        let first = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let first = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             first.manifest.properties.as_deref().unwrap(),
             ["name", "summary"]
         );
 
         graph.index_search("Person", text(None, false)).unwrap();
-        let reused = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let reused = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         assert_eq!(reused.path, first.path);
 
         graph.index_search("Person", text(None, true)).unwrap();
-        let replaced = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let replaced = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         assert_ne!(replaced.path, first.path);
 
         assert_validation(graph.index_search("Person", text(Some(vec![]), false)));
@@ -629,7 +636,7 @@ mod tests {
 
         graph.index_search("NoText", text(None, false)).unwrap();
         let no_text_probe = SearchArtifactKey::text("NoText", ["_"]).unwrap();
-        let no_text_label_root = no_text_probe.artifact_root(&graph.dir);
+        let no_text_label_root = no_text_probe.artifact_root(&graph.dir());
         let no_text_label_root = no_text_label_root
             .parent()
             .expect("text key has a property component");
@@ -640,7 +647,7 @@ mod tests {
         reopened
             .index_search("Person", text(Some(vec!["summary", "name"]), false))
             .unwrap();
-        let after_reopen = current_search_artifact(&reopened.dir, &key)
+        let after_reopen = current_search_artifact(&reopened.dir(), &key)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -714,7 +721,9 @@ mod tests {
         );
 
         let key = SearchArtifactKey::text("Person", ["name"]).unwrap();
-        let artifact = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let artifact = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         let manifest_path = artifact.path.join("manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
@@ -763,7 +772,9 @@ mod tests {
             )
             .unwrap();
         let key = SearchArtifactKey::vector("Person", "semantic").unwrap();
-        let first = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let first = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
 
         graph
             .index_search(
@@ -771,7 +782,9 @@ mod tests {
                 vector(NodeSelector::Uuid(person.uuid), &[1.0, 0.0]),
             )
             .unwrap();
-        let repeated = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let repeated = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         assert_eq!(repeated.path, first.path);
 
         graph
@@ -780,7 +793,9 @@ mod tests {
                 vector(NodeSelector::Uuid(person.uuid), &[0.0, 1.0]),
             )
             .unwrap();
-        let replaced = current_search_artifact(&graph.dir, &key).unwrap().unwrap();
+        let replaced = current_search_artifact(&graph.dir(), &key)
+            .unwrap()
+            .unwrap();
         assert_ne!(replaced.path, first.path);
         crate::permanent_parquet_test_support::assert_file(
             &replaced.path.join(graphforge_storage::VECTOR_DATA_FILE),
@@ -816,7 +831,7 @@ mod tests {
                 vector(NodeSelector::Uuid(person.uuid), &[0.0, 1.0]),
             )
             .unwrap();
-        let after_reopen = current_search_artifact(&reopened.dir, &key)
+        let after_reopen = current_search_artifact(&reopened.dir(), &key)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -843,7 +858,7 @@ mod tests {
             Some(receipt.source_topology_fingerprint.as_str())
         );
         assert!(
-            graphforge_storage::adjacency::validate_adjacency_index(&graph.dir)
+            graphforge_storage::adjacency::validate_adjacency_index(&graph.dir())
                 .unwrap()
                 .is_empty()
         );
@@ -855,7 +870,11 @@ mod tests {
         ));
         graph.index_search("adjacency", text(None, false)).unwrap();
         let key = SearchArtifactKey::text("adjacency", ["name"]).unwrap();
-        assert!(current_search_artifact(&graph.dir, &key).unwrap().is_some());
+        assert!(
+            current_search_artifact(&graph.dir(), &key)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -866,14 +885,14 @@ mod tests {
             .unwrap();
         let prior = graph.index_adjacency().unwrap();
         let prior_manifest =
-            std::fs::read(graphforge_storage::adjacency::manifest_path(&graph.dir)).unwrap();
+            std::fs::read(graphforge_storage::adjacency::manifest_path(&graph.dir())).unwrap();
         let token = CancellationToken::new();
         token.cancel();
 
         let error = graph.rebuild_adjacency(Some(token)).unwrap_err();
         assert_eq!(error.code(), "GF_CANCELLED");
         assert_eq!(
-            std::fs::read(graphforge_storage::adjacency::manifest_path(&graph.dir)).unwrap(),
+            std::fs::read(graphforge_storage::adjacency::manifest_path(&graph.dir())).unwrap(),
             prior_manifest
         );
         assert_eq!(graph.inspect_adjacency().unwrap(), prior);
@@ -893,7 +912,7 @@ mod tests {
             .execute("CREATE (a:Person)-[:KNOWS]->(b:Person)")
             .unwrap();
         graph.index_adjacency().unwrap();
-        let manifest = graphforge_storage::adjacency::manifest_path(&graph.dir);
+        let manifest = graphforge_storage::adjacency::manifest_path(&graph.dir());
         let prior_manifest = std::fs::read(&manifest).unwrap();
         graph
             .execute("CREATE (c:Person)-[:KNOWS]->(d:Person)")
@@ -932,7 +951,10 @@ mod tests {
         let reopened = Arc::new(GraphForge::new(Some(path)).unwrap());
         assert_eq!(reopened.inspect_adjacency().unwrap(), before_cancel);
         assert_eq!(
-            std::fs::read(graphforge_storage::adjacency::manifest_path(&reopened.dir)).unwrap(),
+            std::fs::read(graphforge_storage::adjacency::manifest_path(
+                &reopened.dir()
+            ))
+            .unwrap(),
             prior_manifest
         );
         let (rebuilt, rebuilt_stage) = rebuild_through_barrier(Arc::clone(&reopened));
@@ -1099,6 +1121,6 @@ mod tests {
         assert_validation(
             other.index_search("Person", vector(NodeSelector::Handle(foreign), &[1.0])),
         );
-        assert!(!other.dir.join("embeddings").exists());
+        assert!(!other.dir().join("embeddings").exists());
     }
 }

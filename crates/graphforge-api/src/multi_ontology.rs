@@ -495,7 +495,7 @@ impl GraphForge {
             cancellation,
         )
         .map_err(MultiOntologyError::from)?;
-        crate::rematerialize_graph_workspace(&self.resolved_generation, &self.dir)
+        crate::rematerialize_graph_workspace(&self.resolved_generation, &self.dir())
             .map_err(MultiOntologyError::from)?;
         *self
             .semantic_storage_bindings
@@ -524,7 +524,7 @@ impl GraphForge {
             .runtime_catalog
             .lock()
             .expect("runtime catalog poisoned") =
-            crate::load_runtime_catalog(&self.dir).map_err(MultiOntologyError::from)?;
+            crate::load_runtime_catalog(&self.dir()).map_err(MultiOntologyError::from)?;
         self.adjacency_provider_for_session().invalidate();
         Ok(ModuleMigrationReceipt {
             project_generation_uuid: expected_generation,
@@ -2852,7 +2852,7 @@ mod tests {
             serde_json::json!({
                 "first_serialized": deterministic_first,
                 "second_serialized": deterministic_second,
-                "forbidden_path": graph.dir.to_string_lossy()
+                "forbidden_path": graph.dir().to_string_lossy()
             }),
         );
         let packaged = GraphForge::new(None).unwrap();

@@ -330,7 +330,7 @@ fn facade_migrates_legacy_routes_with_atomic_participants_and_plain_reopen() {
     let path = dir.path().join("project");
     let forge = GraphForge::new(Some(path.to_str().unwrap())).unwrap();
     let mut writer =
-        graphforge_storage::GraphWriter::open_at(&forge.dir, OntologyMode::Strict, 1).unwrap();
+        graphforge_storage::GraphWriter::open_at(&forge.dir(), OntologyMode::Strict, 1).unwrap();
     let left = graphforge_core::uuid::new_v7();
     let right = graphforge_core::uuid::new_v7();
     writer
@@ -763,7 +763,7 @@ fn facade_reopens_relation_edge_property_through_default_context() {
         .unwrap()
         .value(0);
     let node_batch = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
-        std::fs::File::open(forge.dir.join("topology/nodes.parquet")).unwrap(),
+        std::fs::File::open(forge.dir().join("topology/nodes.parquet")).unwrap(),
     )
     .unwrap()
     .build()
@@ -786,7 +786,7 @@ fn facade_reopens_relation_edge_property_through_default_context() {
         .install_generation_composition_context(&context)
         .unwrap();
     let reopened_edge = reopened
-        .dir
+        .dir()
         .join("topology/edges")
         .join(edge_path.file_name().unwrap());
     assert!(

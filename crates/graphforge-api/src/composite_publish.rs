@@ -489,6 +489,8 @@ impl GraphForge {
         optimistic: bool,
         routes: &CompositePropertyRoutes,
     ) -> Result<RecordBatch, GfError> {
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path().to_path_buf();
         let root = self.resolved_generation.container_root();
         let expected_parent = parent.generation_uuid();
         let transaction_uuid = request.context.operation_uuid.0;
@@ -510,7 +512,7 @@ impl GraphForge {
                 eligible_delta_operations(request, routes)?
             };
             let property_inventory =
-                crate::property_inventory_for_hydrated_generation(parent, &self.dir)?;
+                crate::property_inventory_for_hydrated_generation(parent, &dir)?;
             #[cfg(test)]
             after_property_inventory_capture_for_test();
             apply_graph_mutations(
@@ -522,7 +524,7 @@ impl GraphForge {
                 routes,
             )?;
             if self.path.is_some() {
-                crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
+                crate::persist_runtime_catalog(&dir, &next_catalog)?;
             }
             let prepared_delta = if let Some(operations) = delta_operations {
                 let delta_request = graphforge_storage::GraphDeltaPublishRequest {
@@ -546,10 +548,10 @@ impl GraphForge {
             let graph = if let Some(prepared) = prepared_delta.as_ref() {
                 prepared.files_participant.clone()
             } else {
-                let (inventory, participant) = graphforge_storage::capture_graph_files(&self.dir)?;
+                let (inventory, participant) = graphforge_storage::capture_graph_files(&dir)?;
                 if routes.requires_canonical {
                     let (participant, lease) = graphforge_storage::prepare_graph_files_replacement(
-                        parent, &self.dir, &inventory,
+                        parent, &dir, &inventory,
                     )?;
                     canonical_lease = lease;
                     participant
@@ -578,7 +580,7 @@ impl GraphForge {
                     &publication,
                     content_fingerprint,
                     prepared_delta.as_ref().map_or_else(
-                        || canonical_lease.is_none().then_some(self.dir.as_path()),
+                        || canonical_lease.is_none().then_some(dir.as_path()),
                         |prepared| prepared.graph_tree_source(),
                     ),
                     self.lifecycle_mode,
@@ -588,7 +590,7 @@ impl GraphForge {
                     root,
                     &publication,
                     prepared_delta.as_ref().map_or_else(
-                        || canonical_lease.is_none().then_some(self.dir.as_path()),
+                        || canonical_lease.is_none().then_some(dir.as_path()),
                         |prepared| prepared.graph_tree_source(),
                     ),
                     self.lifecycle_mode,
@@ -652,9 +654,7 @@ impl GraphForge {
                 // the validation or conflict that caused publication to abort.
                 if let Ok(durable) = graphforge_storage::resolve_project_generation(root) {
                     if durable.generation_uuid() == expected_parent {
-                        if crate::rematerialize_graph_workspace(&prior_generation, &self.dir)
-                            .is_ok()
-                        {
+                        if crate::rematerialize_graph_workspace(&prior_generation, &dir).is_ok() {
                             *self
                                 .runtime_catalog
                                 .lock()
@@ -941,11 +941,11 @@ fn reconcile_workspace_to(
     graph: &GraphForge,
     generation: &ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
-    crate::rematerialize_graph_workspace(generation, &graph.dir)?;
+    crate::rematerialize_graph_workspace(generation, &graph.dir())?;
     *graph
         .runtime_catalog
         .lock()
-        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir)?;
+        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir())?;
     graph.install_property_generation(generation)?;
     graph.adjacency_provider_for_session().invalidate();
     Ok(())
@@ -1065,7 +1065,7 @@ fn build_validation_snapshot(
             .map(str::to_owned)
             .collect();
     }
-    for batch in graphforge_storage::read_nodes(&graph.dir)
+    for batch in graphforge_storage::read_nodes(&graph.dir())
         .map_err(|error| GfError::Storage(format!("failed to read node topology: {error}")))?
     {
         let Some(column) = batch.column_by_name("node_uuid") else {
@@ -1346,7 +1346,7 @@ fn apply_graph_mutations(
         return Ok(());
     }
     let mut writer =
-        graphforge_storage::GraphWriter::open_at(&graph.dir, graph.ontology_mode, recorded_at)?
+        graphforge_storage::GraphWriter::open_at(&graph.dir(), graph.ontology_mode, recorded_at)?
             .with_semantic_composition_fingerprint(
                 graph
                     .default_composition_snapshot()
@@ -1373,7 +1373,7 @@ fn apply_graph_mutations(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    register_existing_endpoints(&mut writer, &graph.dir, &endpoints, &same_request_nodes)?;
+    register_existing_endpoints(&mut writer, &graph.dir(), &endpoints, &same_request_nodes)?;
     let mut node_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
         HashMap::new();
     let mut edge_sets: HashMap<String, HashMap<[u8; 16], HashMap<String, IrLiteral>>> =
@@ -1512,7 +1512,7 @@ fn apply_graph_mutations(
     for (stem, updates) in &node_sets {
         graphforge_storage::stage_set_node_properties_authenticated(
             &mut staged,
-            &graph.dir,
+            &graph.dir(),
             inventory,
             stem,
             updates,
@@ -1521,7 +1521,7 @@ fn apply_graph_mutations(
     for (stem, updates) in &edge_sets {
         graphforge_storage::stage_set_edge_properties_authenticated(
             &mut staged,
-            &graph.dir,
+            &graph.dir(),
             inventory,
             stem,
             updates,
@@ -1530,7 +1530,7 @@ fn apply_graph_mutations(
     for (stem, removals) in &node_removes {
         graphforge_storage::stage_remove_node_properties_authenticated(
             &mut staged,
-            &graph.dir,
+            &graph.dir(),
             inventory,
             stem,
             removals,
@@ -1539,7 +1539,7 @@ fn apply_graph_mutations(
     for (stem, removals) in &edge_removes {
         graphforge_storage::stage_remove_edge_properties_authenticated(
             &mut staged,
-            &graph.dir,
+            &graph.dir(),
             inventory,
             stem,
             removals,
@@ -1547,13 +1547,13 @@ fn apply_graph_mutations(
     }
     graphforge_storage::stage_delete_edges_authenticated(
         &mut staged,
-        &graph.dir,
+        &graph.dir(),
         inventory,
         &delete_edges,
     )?;
     graphforge_storage::stage_delete_nodes_authenticated(
         &mut staged,
-        &graph.dir,
+        &graph.dir(),
         inventory,
         &delete_nodes,
     )?;
@@ -2375,7 +2375,7 @@ mod tests {
         columns[3] = Arc::new(arrow::array::UInt64Array::from(vec![u64::MAX]));
         let batch = arrow::array::RecordBatch::try_new(batch.schema(), columns).unwrap();
         let mut catalog = RuntimeCatalog::from_record_batch(&batch).unwrap();
-        let before = graphforge_storage::capture_graph_files(&graph.dir)
+        let before = graphforge_storage::capture_graph_files(&graph.dir())
             .unwrap()
             .1
             .bytes;
@@ -2400,7 +2400,7 @@ mod tests {
         assert!(error.to_string().contains("observation count overflow"));
         assert_eq!(catalog.to_record_batch(), batch);
         assert_eq!(
-            graphforge_storage::capture_graph_files(&graph.dir)
+            graphforge_storage::capture_graph_files(&graph.dir())
                 .unwrap()
                 .1
                 .bytes,

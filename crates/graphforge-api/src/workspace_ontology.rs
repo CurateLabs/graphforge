@@ -316,8 +316,10 @@ impl GraphForge {
                     prepared,
                 );
             }
-            self.dir = dir;
-            self.workspace_guard = workspace;
+            self.replace_workspace_owner(crate::GraphWorkspace {
+                dir,
+                _owner: workspace,
+            });
             self.graph_open_evidence = evidence;
             *self
                 .uuid_membership_index
@@ -367,7 +369,7 @@ impl GraphForge {
             .write()
             .expect("adjacency provider lock poisoned") =
             std::sync::Arc::new(crate::adjacency_provider_for_graph(
-                &self.dir,
+                &self.dir(),
                 self.ontology_mode,
                 self.property_inventory_for_session(),
             )?);
@@ -1176,7 +1178,7 @@ mod tests {
             "unknown Ghost must stay queryable as tagged runtime label"
         );
 
-        let batches = graphforge_storage::read_nodes(&graph.dir).unwrap();
+        let batches = graphforge_storage::read_nodes(&graph.dir()).unwrap();
         let type_ids = batches[0]
             .column_by_name("type_ids")
             .unwrap()

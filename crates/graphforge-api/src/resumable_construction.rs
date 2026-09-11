@@ -6,7 +6,6 @@ mod codec_tests;
 use arrow::record_batch::RecordBatch;
 use graphforge_core::uuid::Uuid;
 use sha2::{Digest, Sha256};
-use std::path::Path;
 
 use crate::{
     ConstructionChunkReceipt, GfError, GraphConstructionBudgets, GraphConstructionEvidence,
@@ -44,6 +43,8 @@ pub struct GraphConstructionSession<'a> {
     graph: &'a GraphForge,
     session_uuid: Uuid,
     inner: graphforge_storage::GraphConstructionSession,
+    /// Keep the admitted source workspace stable while storage retains its capabilities.
+    _parent_workspace: super::GraphWorkspace,
 }
 
 impl GraphForge {
@@ -73,7 +74,10 @@ impl GraphForge {
         if self.read_only {
             return Err(validation("historical graph views cannot construct"));
         }
-        let parent_topology_generation = graphforge_storage::read_topology_generation(&self.dir)?;
+        let _visibility = self.graph_visibility.read()?;
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
+        let parent_topology_generation = graphforge_storage::read_topology_generation(dir)?;
         let project = self.resolved_generation.container_root();
         let inner = if let Some(allocation) = &self.allocation_operation {
             let authority = if self.ontology_mode == OntologyMode::Exploratory {
@@ -93,7 +97,7 @@ impl GraphForge {
             };
             graphforge_storage::GraphConstructionSession::open_with_allocation(
                 project,
-                &self.dir,
+                dir,
                 session_uuid,
                 parent_topology_generation,
                 self.ontology_mode,
@@ -107,7 +111,7 @@ impl GraphForge {
             if resume {
                 graphforge_storage::GraphConstructionSession::resume_with_mode_and_lifecycle_from_graph(
                     project,
-                    &self.dir,
+                    dir,
                     session_uuid,
                     self.ontology_mode,
                     budgets,
@@ -116,7 +120,7 @@ impl GraphForge {
             } else {
                 graphforge_storage::GraphConstructionSession::open_with_mode_and_lifecycle_from_graph(
                     project,
-                    &self.dir,
+                    dir,
                     session_uuid,
                     parent_topology_generation,
                     self.ontology_mode,
@@ -141,7 +145,7 @@ impl GraphForge {
             if resume {
                 graphforge_storage::GraphConstructionSession::resume_with_semantic_authority_and_lifecycle_from_graph(
                     project,
-                    &self.dir,
+                    dir,
                     session_uuid,
                     self.ontology_mode,
                     budgets,
@@ -151,7 +155,7 @@ impl GraphForge {
             } else {
                 graphforge_storage::GraphConstructionSession::open_with_semantic_authority_and_lifecycle_from_graph(
                     project,
-                    &self.dir,
+                    dir,
                     session_uuid,
                     parent_topology_generation,
                     self.ontology_mode,
@@ -165,6 +169,7 @@ impl GraphForge {
             graph: self,
             session_uuid,
             inner,
+            _parent_workspace: workspace,
         })
     }
 }
@@ -275,6 +280,11 @@ impl GraphConstructionSession<'_> {
             token.checkpoint()?;
         }
         let _visibility = self.graph.graph_visibility.lock()?;
+        let _adjacency_visibility = self
+            .graph
+            .adjacency_visibility
+            .write()
+            .expect("adjacency visibility lock poisoned");
         let target = derived_uuid(self.session_uuid, b"generation");
         let transaction = derived_uuid(self.session_uuid, b"transaction");
         let published = if let Some(replay) =
@@ -306,6 +316,7 @@ impl GraphConstructionSession<'_> {
         };
 
         let refresh = (|| {
+            refresh_boundary(RefreshBoundary::BeforeHydrate)?;
             let root = self.graph.resolved_generation.container_root();
             let resolved = graphforge_storage::resolve_project_generation(root)?;
             if resolved.generation_uuid() != published.generation_uuid {
@@ -316,52 +327,47 @@ impl GraphConstructionSession<'_> {
             let (prepared_dir, prepared_guard, hydration_evidence) =
                 super::hydrate_graph_workspace(&resolved, false)?;
             self.inner.record_hydration_evidence(&hydration_evidence)?;
+            refresh_boundary(RefreshBoundary::AfterHydrate)?;
             let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
-            let property_inventory = std::sync::Arc::new(
-                graphforge_storage::AuthenticatedPropertyInventory::from_resolved_generation(
-                    &resolved,
-                )?,
-            );
-            replace_workspace(&prepared_dir, &self.graph.dir)?;
+            let prepared = self
+                .graph
+                .prepare_generation_read_authority(&resolved, &prepared_dir)?;
+            refresh_boundary(RefreshBoundary::BeforeInstall)?;
             Ok((
                 resolved,
-                prepared_guard,
+                super::GraphWorkspace {
+                    dir: prepared_dir,
+                    _owner: prepared_guard,
+                },
                 runtime_catalog,
-                property_inventory,
+                prepared,
             ))
         })();
-        let (resolved, prepared_guard, runtime_catalog, property_inventory) =
+        let (resolved, prepared_guard, runtime_catalog, prepared) =
             refresh.map_err(|error: GfError| {
                 GfError::Storage(format!(
                     "phase=POST_PUBLICATION_REFRESH committed=true generation_uuid={} recovery=reopen_or_resume cause={error}",
                     published.generation_uuid
                 ))
             })?;
-        drop(prepared_guard);
+        // Readers retain stable paths and capabilities. Never rename a workspace
+        // pinned by an ordinal handle or an unconsumed stream (including Windows).
+        // All fallible preparation precedes this transition under write visibility.
+        let old_workspace = self.graph.replace_workspace_owner(prepared_guard);
         *self
             .graph
             .runtime_catalog
             .lock()
             .expect("runtime catalog poisoned") = runtime_catalog;
-        *self
-            .graph
-            .property_authority
-            .lock()
-            .expect("property authority lock poisoned") = super::GenerationPropertyAuthority {
-            generation_uuid: resolved.generation_uuid(),
-            inventory: property_inventory,
-        };
-        *self
-            .graph
-            .current_generation_uuid
-            .lock()
-            .expect("generation UUID lock poisoned") = resolved.generation_uuid();
+        self.graph
+            .install_prepared_generation_read_authority(resolved.generation_uuid(), prepared);
         *self
             .graph
             .uuid_membership_index
             .lock()
             .expect("UUID membership lock poisoned") = None;
-        self.graph.adjacency_provider_for_session().invalidate();
+        // Release old reader handles before their workspace; streams own their pins.
+        drop(old_workspace);
         Ok(GraphConstructionPublicationReceipt {
             generation_uuid: published.generation_uuid,
             idempotent_replay: published.idempotent_replay,
@@ -397,53 +403,11 @@ impl GraphConstructionSession<'_> {
     }
 }
 
-fn replace_workspace(prepared: &Path, target: &Path) -> Result<(), GfError> {
-    refresh_boundary(RefreshBoundary::BeforeMove)?;
-    let parent = target.parent().ok_or_else(|| {
-        GfError::Storage("graph workspace has no parent for atomic replacement".into())
-    })?;
-    let backup = parent.join(format!(".graphforge-workspace-backup-{}", Uuid::now_v7()));
-    std::fs::rename(target, &backup).map_err(|error| {
-        GfError::Storage(format!("failed to preserve graph workspace: {error}"))
-    })?;
-    if let Err(error) = refresh_boundary(RefreshBoundary::AfterOldMoved) {
-        restore_workspace(&backup, target, None)?;
-        return Err(error);
-    }
-    if let Err(error) = std::fs::rename(prepared, target) {
-        restore_workspace(&backup, target, None)?;
-        return Err(GfError::Storage(format!(
-            "failed to install prepared graph workspace: {error}"
-        )));
-    }
-    if let Err(error) = refresh_boundary(RefreshBoundary::AfterNewInstalled) {
-        restore_workspace(&backup, target, Some(prepared))?;
-        return Err(error);
-    }
-    // The backup is no longer authoritative. Failure to reclaim it cannot make
-    // the already-installed workspace or in-memory replacement state invalid.
-    let _ = std::fs::remove_dir_all(backup);
-    Ok(())
-}
-
-fn restore_workspace(backup: &Path, target: &Path, prepared: Option<&Path>) -> Result<(), GfError> {
-    if let Some(prepared) = prepared {
-        std::fs::rename(target, prepared).map_err(|error| {
-            GfError::Storage(format!(
-                "failed to withdraw prepared graph workspace during rollback: {error}"
-            ))
-        })?;
-    }
-    std::fs::rename(backup, target).map_err(|error| {
-        GfError::Storage(format!("failed to restore prior graph workspace: {error}"))
-    })
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RefreshBoundary {
-    BeforeMove,
-    AfterOldMoved,
-    AfterNewInstalled,
+    BeforeHydrate,
+    AfterHydrate,
+    BeforeInstall,
 }
 
 #[cfg(not(test))]
@@ -487,39 +451,10 @@ fn validation(message: impl Into<String>) -> GfError {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
+    use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, StringArray};
     use arrow::record_batch::RecordBatch;
 
     use super::*;
-
-    #[test]
-    fn refresh_boundaries_preserve_the_prior_workspace_on_failure() {
-        for boundary in [
-            RefreshBoundary::BeforeMove,
-            RefreshBoundary::AfterOldMoved,
-            RefreshBoundary::AfterNewInstalled,
-        ] {
-            let parent = tempfile::tempdir().unwrap();
-            let target = parent.path().join("live");
-            let prepared = parent.path().join("prepared");
-            std::fs::create_dir(&target).unwrap();
-            std::fs::create_dir(&prepared).unwrap();
-            std::fs::write(target.join("generation"), b"old").unwrap();
-            std::fs::write(prepared.join("generation"), b"new").unwrap();
-
-            REFRESH_FAILURE.with(|failure| failure.set(Some(boundary)));
-            let error = replace_workspace(&prepared, &target).unwrap_err();
-            REFRESH_FAILURE.with(|failure| failure.set(None));
-
-            assert!(
-                error
-                    .to_string()
-                    .contains("injected construction refresh failure")
-            );
-            assert_eq!(std::fs::read(target.join("generation")).unwrap(), b"old");
-            assert_eq!(std::fs::read(prepared.join("generation")).unwrap(), b"new");
-        }
-    }
 
     fn nodes(ids: &[Uuid]) -> RecordBatch {
         let uuids =
@@ -599,27 +534,110 @@ mod tests {
 
     #[test]
     fn post_publication_refresh_failure_reports_committed_authority() {
-        let graph = GraphForge::new(None).unwrap();
-        let root = graph.resolved_generation.container_root().to_path_buf();
-        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
-        session
-            .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
-            .unwrap();
+        for boundary in [
+            RefreshBoundary::BeforeHydrate,
+            RefreshBoundary::AfterHydrate,
+            RefreshBoundary::BeforeInstall,
+        ] {
+            let graph = GraphForge::new(None).unwrap();
+            let root = graph.resolved_generation.container_root().to_path_buf();
+            let old_workspace = graph.workspace_for_session();
+            let old_generation = *graph.current_generation_uuid.lock().unwrap();
+            let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+            session
+                .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
+                .unwrap();
+            REFRESH_FAILURE.with(|failure| failure.set(Some(boundary)));
+            let error = session.seal_and_publish().unwrap_err();
+            REFRESH_FAILURE.with(|failure| failure.set(None));
+            assert!(session.progress().publication_committed);
+            let committed = graphforge_storage::resolve_project_generation(&root)
+                .unwrap()
+                .generation_uuid();
+            let message = error.to_string();
+            assert!(message.contains("phase=POST_PUBLICATION_REFRESH"));
+            assert!(message.contains("committed=true"));
+            assert!(message.contains(&format!("generation_uuid={committed}")));
+            assert!(message.contains("recovery=reopen_or_resume"));
+            assert_eq!(old_workspace.path(), graph.workspace_for_session().path());
+            assert_eq!(
+                *graph.current_generation_uuid.lock().unwrap(),
+                old_generation
+            );
+            assert_eq!(graph.node_count("Person").unwrap(), 0);
+            let retry = session.seal_and_publish().unwrap();
+            assert!(retry.idempotent_replay);
+            assert_eq!(retry.generation_uuid, committed);
+            assert_eq!(graph.node_count("Person").unwrap(), 1);
+            assert_ne!(old_workspace.path(), graph.workspace_for_session().path());
+        }
+    }
 
-        REFRESH_FAILURE.with(|failure| failure.set(Some(RefreshBoundary::BeforeMove)));
-        let error = session.seal_and_publish().unwrap_err();
-        REFRESH_FAILURE.with(|failure| failure.set(None));
+    fn relationship_identities(batches: &[RecordBatch]) -> std::collections::BTreeSet<[Uuid; 3]> {
+        let identities: std::collections::BTreeSet<_> = batches
+            .iter()
+            .flat_map(|batch| {
+                let columns: Vec<_> = (0..3)
+                    .map(|column| {
+                        batch
+                            .column(column)
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap()
+                    })
+                    .collect();
+                for column in &columns {
+                    assert_eq!(column.null_count(), 0);
+                }
+                (0..batch.num_rows())
+                    .map(|row| {
+                        std::array::from_fn(|column| {
+                            Uuid::from_slice(columns[column].value(row)).unwrap()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            identities.len(),
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            "relationship rows must not be duplicated"
+        );
+        identities
+    }
 
-        let progress = session.progress();
-        assert!(progress.publication_committed);
-        let committed = graphforge_storage::resolve_project_generation(&root)
-            .unwrap()
-            .generation_uuid();
-        let message = error.to_string();
-        assert!(message.contains("phase=POST_PUBLICATION_REFRESH"));
-        assert!(message.contains("committed=true"));
-        assert!(message.contains(&format!("generation_uuid={committed}")));
-        assert!(message.contains("recovery=reopen_or_resume"));
+    const RELATIONSHIP_IDENTITIES: &str = "MATCH (a)-[r:KNOWS]->(b) RETURN a.node_uuid AS source, r.edge_uuid AS edge, b.node_uuid AS target";
+
+    fn assert_construction_relationships(graph: &GraphForge, expected: &[[Uuid; 3]]) {
+        let result = graph.execute(RELATIONSHIP_IDENTITIES).unwrap();
+        assert_eq!(
+            relationship_identities(&result.batches),
+            expected.iter().copied().collect()
+        );
+        for query in [
+            "MATCH ()-[r:KNOWS]->() RETURN count(r) AS n",
+            "MATCH ()-[r:KNOWS]->() RETURN count(*) AS n",
+        ] {
+            let result = graph.execute(query).unwrap();
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                1
+            );
+            assert_eq!(result.batches[0].column(0).null_count(), 0);
+            assert_eq!(
+                result.batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected.len() as i64
+            );
+        }
     }
 
     #[test]
@@ -679,6 +697,11 @@ mod tests {
             first.generation_uuid
         );
         drop(session);
+        let original_relationships = [
+            [node_ids[0], edge_ids[0], node_ids[1]],
+            [node_ids[1], edge_ids[1], node_ids[2]],
+        ];
+        assert_construction_relationships(&graph, &original_relationships);
 
         let mut resumed = graph
             .resume_graph_construction(session_uuid, budgets)
@@ -693,8 +716,9 @@ mod tests {
             first.generation_uuid
         );
         drop(resumed);
+        assert_construction_relationships(&graph, &original_relationships);
 
-        let index = graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap();
+        let index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
         assert_eq!(index.count(graphforge_storage::UuidIndexKind::Node), 3);
         assert_eq!(index.count(graphforge_storage::UuidIndexKind::Edge), 2);
         let catalog = graph.runtime_catalog.lock().unwrap();
@@ -725,6 +749,14 @@ mod tests {
         let old_stream = graph
             .execute_stream("MATCH (n:Person) RETURN n.node_uuid")
             .unwrap();
+        let original_workspace = graph.workspace_for_session();
+        let (old_relationship_stream, _, old_runtime_guard) = graph
+            .execute_stream_owned(RELATIONSHIP_IDENTITIES, &std::collections::HashMap::new())
+            .unwrap();
+        assert_eq!(
+            original_workspace.path(),
+            old_runtime_guard.workspace.path()
+        );
         let added_node = Uuid::now_v7();
         let added_edge = Uuid::now_v7();
         let mut child = graph.begin_graph_construction(budgets).unwrap();
@@ -771,6 +803,28 @@ mod tests {
             })
             .collect();
         assert_eq!(old_ids, node_ids.into_iter().collect());
+        assert_ne!(original_workspace.path(), graph.dir().path());
+        assert!(original_workspace.path().is_dir());
+        let old_relationship_batches: Vec<RecordBatch> = old_runtime_guard
+            .block_on(async {
+                old_relationship_stream
+                    .try_collect()
+                    .await
+                    .map_err(|error| GfError::Storage(format!("{error}")))
+            })
+            .unwrap();
+        assert_eq!(
+            relationship_identities(&old_relationship_batches),
+            original_relationships.into_iter().collect()
+        );
+        let current_relationships = [
+            original_relationships[0],
+            original_relationships[1],
+            [node_ids[2], added_edge, added_node],
+        ];
+        assert_construction_relationships(&graph, &current_relationships);
+        let reopened = GraphForge::new(root.to_str()).unwrap();
+        assert_construction_relationships(&reopened, &current_relationships);
 
         let resolved_child = graphforge_storage::resolve_project_generation(&root).unwrap();
         assert_eq!(
@@ -798,7 +852,7 @@ mod tests {
             })
         }));
 
-        let child_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap();
+        let child_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
         assert_eq!(
             child_index.count(graphforge_storage::UuidIndexKind::Node),
             4
@@ -841,7 +895,8 @@ mod tests {
             child_receipt.generation_uuid
         );
         drop(historical_replay);
-        let current_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir).unwrap();
+        assert_construction_relationships(&graph, &current_relationships);
+        let current_index = graphforge_storage::UuidMembershipIndex::open(&graph.dir()).unwrap();
         assert_eq!(
             current_index.count(graphforge_storage::UuidIndexKind::Node),
             4
@@ -849,6 +904,39 @@ mod tests {
         assert_eq!(
             current_index.count(graphforge_storage::UuidIndexKind::Edge),
             3
+        );
+        drop(current_index);
+        let reopened = GraphForge::new(root.to_str()).unwrap();
+        let final_node = Uuid::now_v7();
+        let final_edge = Uuid::now_v7();
+        let mut next = reopened.begin_graph_construction(budgets).unwrap();
+        next.append_nodes("reopened-node", &nodes(&[final_node]))
+            .unwrap();
+        next.append_edges(
+            "reopened-edge",
+            &edges(&[final_edge], &[(added_node, final_node)]),
+        )
+        .unwrap();
+        let cancelled = crate::CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            next.seal_and_publish_with_cancellation(&cancelled)
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
+        assert_construction_relationships(&reopened, &current_relationships);
+        next.seal_and_publish().unwrap();
+        let final_relationships = [
+            current_relationships[0],
+            current_relationships[1],
+            current_relationships[2],
+            [added_node, final_edge, final_node],
+        ];
+        assert_construction_relationships(&reopened, &final_relationships);
+        assert_construction_relationships(
+            &GraphForge::new(root.to_str()).unwrap(),
+            &final_relationships,
         );
     }
 

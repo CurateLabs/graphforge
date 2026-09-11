@@ -307,13 +307,13 @@ impl GraphForge {
         validate_provider_request(request)?;
         let label_id = self.search_label_id(&request.label)?;
         let projection = project_text_source(
-            &self.dir,
+            &self.dir(),
             label_id,
             Some(&request.properties),
             TextSearchLimits::default(),
             &mut *checkpoint,
         )?;
-        let source = capture_projected_source(&self.dir, &projection, checkpoint)?;
+        let source = capture_projected_source(&self.dir(), &projection, checkpoint)?;
         Ok((projection, source))
     }
 
@@ -324,10 +324,12 @@ impl GraphForge {
         replace_alias: bool,
     ) -> Result<(), ProviderEmbeddingPlanError> {
         if !replace_alias
-            && self.embedding_spaces()?.iter().any(|space| {
-                space.aliases.iter().any(|alias| alias == display_name)
-                    && space.compatibility_id != compatibility_id
-            })
+            && Self::embedding_spaces_at(self.workspace_for_session().path())?
+                .iter()
+                .any(|space| {
+                    space.aliases.iter().any(|alias| alias == display_name)
+                        && space.compatibility_id != compatibility_id
+                })
         {
             return Err(validation(
                 "embedding alias already targets another compatibility identity; explicit replacement is required",

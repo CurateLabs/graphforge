@@ -240,3 +240,20 @@ python3 scripts/ci/bulk-construction-conformance.py validate
 - [Quick Start](quickstart.md) — five-minute walkthrough
 - [Tutorial](tutorial.md) — guided citation-network example
 - [API Reference](../reference/api.md) — complete method signatures
+
+### Publication and existing readers
+
+Successful resumable construction updates the same facade's workspace, property
+inventory, adjacency provider and ordinal identity authority together. Immediate
+queries therefore observe the published relationships and endpoints without
+requiring reopen. Publication prepares one new workspace and adopts its owner;
+it does not rename directories pinned by existing readers. A lazy stream and its
+runtime guard retain the workspace selected when the stream was created, so
+subsequent construction cannot change that stream's identities or remove its
+files. Those overlapping live workspaces remain real resource owners until the
+last reader releases them.
+
+If reader preparation fails after durable publication, the error still reports
+`committed=true` and recovery by reopen or resume. The facade retains its prior
+workspace until all replacement readers are ready; exact retry adopts the
+already committed generation.

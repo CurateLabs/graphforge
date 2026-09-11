@@ -62,7 +62,9 @@ impl GraphForge {
         let inventory = self.property_inventory_for_session();
         for stem in inventory.routes(graphforge_storage::PropertyRouteKind::Node) {
             for (bytes, properties) in graphforge_storage::read_node_property_rows_from_inventory(
-                &self.dir, &inventory, stem,
+                &self.dir(),
+                &inventory,
+                stem,
             )? {
                 scanned += 1;
                 if scanned > MAX_SELECTOR_ROWS {
@@ -112,7 +114,7 @@ impl GraphForge {
     fn node_uuids(&self, label_id: Option<EntityTypeId>) -> Result<HashSet<Uuid>, GfError> {
         let mut uuids = HashSet::new();
         let mut scanned = 0usize;
-        for batch in graphforge_storage::read_nodes(&self.dir)
+        for batch in graphforge_storage::read_nodes(&self.dir())
             .map_err(|error| GfError::Storage(error.to_string()))?
         {
             let uuid_column = batch
@@ -195,7 +197,7 @@ mod tests {
     use graphforge_core::PathsOptions;
 
     fn first_uuid(graph: &GraphForge) -> Uuid {
-        let batches = graphforge_storage::read_nodes(&graph.dir).unwrap();
+        let batches = graphforge_storage::read_nodes(&graph.dir()).unwrap();
         let column = batches[0]
             .column_by_name("node_uuid")
             .unwrap()
@@ -293,7 +295,7 @@ mod tests {
             *uuid.as_bytes(),
             HashMap::from([("name".into(), IrLiteral::Str("unique".into()))]),
         )]);
-        graphforge_storage::set_node_properties(&other.dir, "Person", &updates).unwrap();
+        graphforge_storage::set_node_properties(&other.dir(), "Person", &updates).unwrap();
         let duplicate = NodeSelector::Match {
             label: "Person".into(),
             property: "name".into(),
@@ -303,11 +305,11 @@ mod tests {
         assert_eq!(other.resolve_node_selector(&duplicate).unwrap(), uuid);
         // Explicitly admit the malformed workspace to test cross-route duplicate rejection.
         let generation = other.generation_for_read().unwrap();
-        let (captured, _) = graphforge_storage::capture_graph_files(&other.dir).unwrap();
+        let (captured, _) = graphforge_storage::capture_graph_files(&other.dir()).unwrap();
         let inventory =
             graphforge_storage::AuthenticatedPropertyInventory::from_materialized_inventory(
                 &generation,
-                &other.dir,
+                &other.dir(),
                 captured,
             )
             .unwrap();

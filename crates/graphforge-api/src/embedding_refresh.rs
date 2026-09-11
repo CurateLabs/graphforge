@@ -116,7 +116,7 @@ impl GraphForge {
                 continue;
             }
             if merge_embedding_mutation_batch(
-                &self.dir,
+                &self.dir(),
                 &active.manifest,
                 EmbeddingMutationBatch {
                     current_source,
@@ -132,7 +132,7 @@ impl GraphForge {
             {
                 continue;
             }
-            let Ok(config) = read_refresh_config(&self.dir) else {
+            let Ok(config) = read_refresh_config(&self.dir()) else {
                 continue;
             };
             let policy = config.resolved_policy(runtime.compatibility_id());
@@ -265,7 +265,6 @@ impl GraphForge {
             clock: std::sync::Mutex::new(Arc::clone(
                 &self.clock.lock().expect("clock lock poisoned"),
             )),
-            dir: self.dir.clone(),
             workspace_guard: Arc::clone(&self.workspace_guard),
             graph_open_evidence: self.graph_open_evidence.clone(),
             project_open_recovery: self.project_open_recovery.clone(),
@@ -302,7 +301,7 @@ impl GraphForge {
     pub fn embedding_refresh_project_policy(
         &self,
     ) -> Result<EmbeddingRefreshProjectPolicy, GfError> {
-        Ok(read_refresh_config(&self.dir)?.project_policy())
+        Ok(read_refresh_config(&self.dir())?.project_policy())
     }
 
     /// Replace durable project-wide refresh defaults and the idle local worker.
@@ -318,6 +317,8 @@ impl GraphForge {
         &self,
         policy: EmbeddingRefreshProjectPolicy,
     ) -> Result<EmbeddingRefreshProjectPolicy, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let replacement = scheduler_for_policy(policy)?;
         let mut scheduler = self
             .embedding_refresh_scheduler
@@ -325,7 +326,7 @@ impl GraphForge {
             .map_err(|_| validation("embedding refresh scheduler lock is poisoned"))?;
         ensure_idle(&scheduler.snapshot()?)?;
         let config = update_embedding_refresh_config(
-            &self.dir,
+            workspace.path(),
             EmbeddingRefreshConfigUpdate::SetProjectPolicy(policy),
             EmbeddingRefreshConfigLimits::default(),
             || Ok(()),
@@ -348,9 +349,11 @@ impl GraphForge {
         display_name: Option<&str>,
         policy: Option<EmbeddingRefreshSpacePolicy>,
     ) -> Result<EmbeddingRefreshInspection, GfError> {
+        let _visibility = self.graph_visibility.lock()?;
+        let workspace = self.workspace_for_session();
         let (_, lineage) = self.resolve_embedding_space_lineage(display_name)?;
         update_embedding_refresh_config(
-            &self.dir,
+            workspace.path(),
             EmbeddingRefreshConfigUpdate::SetSpacePolicy {
                 compatibility_id: lineage.compatibility_id(),
                 policy,
@@ -359,7 +362,7 @@ impl GraphForge {
             || Ok(()),
         )?;
         self.publish_workspace_update()?;
-        self.inspect_embedding_refresh(display_name)
+        self.inspect_embedding_refresh_guarded(display_name)
     }
 
     /// Inspect durable policy/outcome and this process's worker state.
@@ -374,9 +377,19 @@ impl GraphForge {
         &self,
         display_name: Option<&str>,
     ) -> Result<EmbeddingRefreshInspection, GfError> {
-        let (space, lineage) = self.resolve_embedding_space_lineage(display_name)?;
+        let _visibility = self.graph_visibility.read()?;
+        self.inspect_embedding_refresh_guarded(display_name)
+    }
+
+    fn inspect_embedding_refresh_guarded(
+        &self,
+        display_name: Option<&str>,
+    ) -> Result<EmbeddingRefreshInspection, GfError> {
+        let workspace = self.workspace_for_session();
+        let (space, lineage) =
+            Self::resolve_embedding_space_lineage_at(workspace.path(), display_name)?;
         let compatibility_id = lineage.compatibility_id();
-        let config = read_refresh_config(&self.dir)?;
+        let config = read_refresh_config(workspace.path())?;
         let state = config
             .spaces()
             .into_iter()
@@ -387,7 +400,7 @@ impl GraphForge {
             .map_err(|_| validation("embedding refresh scheduler lock is poisoned"))?
             .snapshot()?;
         let freshness = if space.active.is_some() {
-            Some(self.inspect_embedding_space_freshness(display_name, false)?)
+            Some(self.inspect_embedding_space_freshness_guarded(display_name, false)?)
         } else {
             None
         };
@@ -561,7 +574,7 @@ mod tests {
             completed_at_micros: 10,
         };
         update_embedding_refresh_config(
-            &graph.dir,
+            &graph.dir(),
             EmbeddingRefreshConfigUpdate::RecordOutcome {
                 compatibility_id: EmbeddingCompatibilityId::from_hex(&compatibility_id).unwrap(),
                 outcome,

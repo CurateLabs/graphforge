@@ -129,14 +129,14 @@ impl GraphForge {
         // selection, endpoint registration against live topology, surrogate
         // allocation, flush, and publication (see #704).
         let _visibility = self.graph_visibility.lock()?;
-        let prior = crate::graph_snapshot::capture(&self.dir)?;
+        let prior = crate::graph_snapshot::capture(&self.dir())?;
         let expected_generation = *self
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
         let now = (self.clock.lock().expect("clock lock poisoned"))()?;
         let mut writer =
-            graphforge_storage::GraphWriter::open_at(&self.dir, self.ontology_mode, now)?;
+            graphforge_storage::GraphWriter::open_at(&self.dir(), self.ontology_mode, now)?;
         writer
             .register_existing_endpoints(&[src_uuid, dst_uuid])
             .map_err(|error| match error {
@@ -179,7 +179,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned")
                 == expected_generation;
             if still_prior {
-                crate::graph_snapshot::restore(&prior.bytes, &self.dir)?;
+                crate::graph_snapshot::restore(&prior.bytes, &self.dir())?;
                 self.adjacency_provider_for_session().invalidate();
             }
             return Err(error);
@@ -538,7 +538,8 @@ mod tests {
             1
         );
 
-        let rows = graphforge_storage::read_node_property_rows(&reopened.dir, "_untyped").unwrap();
+        let rows =
+            graphforge_storage::read_node_property_rows(&reopened.dir(), "_untyped").unwrap();
         assert_eq!(rows.len(), 1);
         let stored = rows.values().next().unwrap();
         for (name, value) in temporal {
@@ -653,7 +654,7 @@ mod tests {
             .unwrap()
             .to_record_batch()
             .num_rows();
-        let generation = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+        let generation = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
 
         for (label, props) in [
             ("", properties()),
@@ -680,11 +681,11 @@ mod tests {
             catalog_rows
         );
         assert_eq!(
-            graphforge_storage::read_topology_generation(&graph.dir).unwrap(),
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
             generation
         );
         assert_eq!(
-            graphforge_storage::read_nodes(&graph.dir)
+            graphforge_storage::read_nodes(&graph.dir())
                 .unwrap()
                 .iter()
                 .map(arrow::record_batch::RecordBatch::num_rows)
@@ -717,11 +718,11 @@ mod tests {
 
         let graph = GraphForge::new(dir.path().to_str()).unwrap();
         let handle = graph.add_node("Person", &properties()).unwrap();
-        let generation = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+        let generation = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
         let error = graph.add_node("Unknown", &HashMap::new()).unwrap_err();
         assert!(matches!(error, GfError::Bind { .. }));
         assert_eq!(
-            graphforge_storage::read_topology_generation(&graph.dir).unwrap(),
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
             generation
         );
         assert_eq!(
@@ -765,7 +766,8 @@ mod tests {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
-        let topology_generation = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+        let topology_generation =
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
 
         let error = graph
             .add_node(
@@ -783,10 +785,10 @@ mod tests {
             generation_uuid
         );
         assert_eq!(
-            graphforge_storage::read_topology_generation(&graph.dir).unwrap(),
+            graphforge_storage::read_topology_generation(&graph.dir()).unwrap(),
             topology_generation
         );
-        let rows = graphforge_storage::read_node_property_rows(&graph.dir, "Host").unwrap();
+        let rows = graphforge_storage::read_node_property_rows(&graph.dir(), "Host").unwrap();
         assert_eq!(rows.len(), 1);
         let properties = rows.get(valid.uuid.as_bytes()).unwrap();
         assert_eq!(

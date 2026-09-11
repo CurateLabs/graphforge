@@ -73,6 +73,15 @@ impl GraphForge {
         display_name: Option<&str>,
         force_stale: bool,
     ) -> Result<EmbeddingSpaceFreshnessInspection, GfError> {
+        let _visibility = self.graph_visibility.read()?;
+        self.inspect_embedding_space_freshness_guarded(display_name, force_stale)
+    }
+
+    pub(crate) fn inspect_embedding_space_freshness_guarded(
+        &self,
+        display_name: Option<&str>,
+        force_stale: bool,
+    ) -> Result<EmbeddingSpaceFreshnessInspection, GfError> {
         let prepared = self.prepare_embedding_space_read(display_name, force_stale)?;
         let compatibility_id = prepared.publication().manifest.compatibility_id();
         let freshness = prepared.freshness();
@@ -93,20 +102,21 @@ impl GraphForge {
         let _visibility = self.embedding_refresh_visibility.lock().map_err(|_| {
             GfError::Execution("embedding refresh visibility lock is poisoned".into())
         })?;
-        let (_, lineage) = self.resolve_embedding_space_lineage(display_name)?;
+        let workspace = self.workspace_for_session();
+        let dir = workspace.path();
+        let (_, lineage) = Self::resolve_embedding_space_lineage_at(dir, display_name)?;
         let compatibility_id = lineage.compatibility_id();
         let publication = lineage
             .active()
             .ok_or_else(|| SearchArtifactError::Missing {
-                path: self
-                    .dir
+                path: dir
                     .join("embeddings/spaces")
                     .join(compatibility_id.to_hex())
                     .join("active.json"),
             })?;
-        let current_source = current_source(&self.dir, publication)?;
+        let current_source = current_source(dir, publication)?;
         prepare_embedding_read(
-            &self.dir,
+            dir,
             lineage.descriptor(),
             current_source,
             force_stale,
@@ -114,8 +124,7 @@ impl GraphForge {
             || Ok(()),
         )?
         .ok_or_else(|| SearchArtifactError::Missing {
-            path: self
-                .dir
+            path: dir
                 .join("embeddings/spaces")
                 .join(compatibility_id.to_hex())
                 .join("active.json"),
@@ -256,13 +265,13 @@ mod tests {
         )
         .unwrap();
         let source = EmbeddingSourceState::new(
-            read_search_generation(&graph.dir).unwrap(),
+            read_search_generation(&graph.dir()).unwrap(),
             [1; 32],
             [2; 32],
             u64::from(count),
         );
         let publication = publish_embedding_generation(
-            &graph.dir,
+            &graph.dir(),
             EmbeddingPublicationRequest {
                 descriptor: &descriptor,
                 source,
@@ -278,7 +287,7 @@ mod tests {
         .publication()
         .clone();
         reset_embedding_mutation_journal(
-            &graph.dir,
+            &graph.dir(),
             &publication.manifest,
             EmbeddingMutationJournalLimits::default(),
             SearchCoordinationLimits::default(),
@@ -327,7 +336,7 @@ mod tests {
     fn unproven_generation_advance_blocks_unless_explicitly_forced() {
         let graph = GraphForge::new(None).unwrap();
         publish(&graph, 2);
-        bump_search_generation(&graph.dir).unwrap();
+        bump_search_generation(&graph.dir()).unwrap();
 
         let blocked = graph
             .inspect_embedding_space_freshness(Some("semantic"), false)
@@ -358,10 +367,10 @@ mod tests {
     fn proven_small_mutation_is_mildly_stale_and_serveable() {
         let graph = GraphForge::new(None).unwrap();
         let publication = publish(&graph, 100);
-        let generation = bump_search_generation(&graph.dir).unwrap();
+        let generation = bump_search_generation(&graph.dir()).unwrap();
         let current_source = EmbeddingSourceState::new(generation, [3; 32], [2; 32], 100);
         merge_embedding_mutation_batch(
-            &graph.dir,
+            &graph.dir(),
             &publication.manifest,
             EmbeddingMutationBatch {
                 current_source,
@@ -393,7 +402,7 @@ mod tests {
         let graph = GraphForge::new(None).unwrap();
         let descriptor = descriptor();
         let root = graph
-            .dir
+            .dir()
             .join("embeddings/spaces")
             .join(descriptor.compatibility_id().unwrap().to_hex());
         std::fs::create_dir_all(&root).unwrap();

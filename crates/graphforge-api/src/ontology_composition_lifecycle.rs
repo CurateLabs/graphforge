@@ -212,7 +212,7 @@ impl GraphForge {
             if let Err(error) = graphforge_storage::SemanticStorageBindings::project_with_graph_scan_identity_equivalent(
                 compiled,
                 current_bindings.as_ref(),
-                &self.dir,
+                &self.dir(),
                 &identity_equivalent,
             ) {
                 let retained = compiled
@@ -227,7 +227,7 @@ impl GraphForge {
                     .filter(|binding| !retained.contains(&binding.symbol))
                     .map(|binding| {
                         graphforge_storage::SemanticStorageBindings::binding_has_retained_data(
-                            binding, &self.dir,
+                            binding, &self.dir(),
                         )
                         .map(|has_data| has_data.then_some(binding))
                     })
@@ -450,7 +450,7 @@ impl GraphForge {
             graphforge_storage::SemanticStorageBindings::project_with_graph_scan_identity_equivalent(
                 &compiled_candidate,
                 previous_bindings.as_ref(),
-                &self.dir,
+                &self.dir(),
                 &identity_equivalent,
             )?;
         let published_binding = graphforge_ir::CompositionBindingContext::new(
@@ -490,7 +490,7 @@ impl GraphForge {
             .write()
             .expect("adjacency provider lock poisoned") =
             std::sync::Arc::new(crate::adjacency_provider_for_graph(
-                &self.dir,
+                &self.dir(),
                 self.ontology_mode,
                 self.property_inventory_for_session(),
             )?);

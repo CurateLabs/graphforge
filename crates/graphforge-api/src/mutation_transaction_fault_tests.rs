@@ -48,7 +48,7 @@ fn mutation_authority_fault_helper() {
     let before = graphforge_storage::resolve_project_generation(std::path::Path::new(&root))
         .unwrap()
         .generation_uuid();
-    let topology = graphforge_storage::read_topology_generation(&graph.dir).unwrap();
+    let topology = graphforge_storage::read_topology_generation(&graph.dir()).unwrap();
     let edges = graph
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name")
         .unwrap()
@@ -109,7 +109,7 @@ fn mutation_authority_fault_helper() {
         drop(catalog);
         values(owner, published, score);
         assert_eq!(
-            graphforge_storage::read_topology_generation(&owner.dir).unwrap(),
+            graphforge_storage::read_topology_generation(&owner.dir()).unwrap(),
             topology
         );
         let actual = owner
