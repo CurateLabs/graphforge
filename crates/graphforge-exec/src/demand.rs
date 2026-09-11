@@ -190,6 +190,24 @@ pub struct JoinSnapshot {
     pub build_memory_bytes: u64,
 }
 
+/// Completed property-overlay work for one physical tree occurrence.
+/// Counters are logical work/admission observations, not process RSS or
+/// filesystem allocation; repeated shared-plan occurrences are not additive.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PropertyOverlaySnapshot {
+    /// Physical tree encounter order among property overlays.
+    pub ordinal: usize,
+    /// Logical bytes written by the overlay spool and merge.
+    pub spill_bytes: u64,
+    /// Bytes authenticated by completed property reads.
+    pub authentication_bytes: u64,
+    /// Physical fragment rows validated by completed reads.
+    pub physical_rows: u64,
+    /// Maximum logical decoder admission estimate, not process/native RSS.
+    pub decoder_peak_bytes: u64,
+}
+
 /// Aggregate-only diagnostic snapshot for the most recently reset capture.
 #[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,6 +220,8 @@ pub struct DemandSnapshot {
     pub sorts: Vec<SortSnapshot>,
     /// Executed hash-join estimates and aggregate work.
     pub joins: Vec<JoinSnapshot>,
+    /// Completed native property-overlay counters.
+    pub property_overlays: Vec<PropertyOverlaySnapshot>,
     /// Per-operator observational RSS lifetimes.
     pub operator_rss: Vec<OperatorRssSnapshot>,
     /// Number of query cancellation signals.
@@ -413,6 +433,7 @@ pub(crate) fn record_plan_completion(
         plan: &Arc<dyn ExecutionPlan>,
         sorts: &mut Vec<SortSnapshot>,
         joins: &mut Vec<JoinSnapshot>,
+        property_overlays: &mut Vec<PropertyOverlaySnapshot>,
     ) {
         if plan.downcast_ref::<SortExec>().is_some() {
             let metrics = plan.metrics().unwrap_or_default();
@@ -446,8 +467,18 @@ pub(crate) fn record_plan_completion(
                 build_memory_bytes: metric(&metrics, "build_mem_used"),
             });
         }
+        if plan.name() == "PropertyOverlayExec" {
+            let metrics = plan.metrics().unwrap_or_default();
+            property_overlays.push(PropertyOverlaySnapshot {
+                ordinal: property_overlays.len(),
+                spill_bytes: metric(&metrics, "property_spill_bytes"),
+                authentication_bytes: metric(&metrics, "property_authentication_bytes"),
+                physical_rows: metric(&metrics, "property_physical_rows"),
+                decoder_peak_bytes: metric(&metrics, "property_decoder_peak_bytes"),
+            });
+        }
         for child in plan.children() {
-            visit(child, sorts, joins);
+            visit(child, sorts, joins, property_overlays);
         }
     }
 
@@ -463,7 +494,8 @@ pub(crate) fn record_plan_completion(
 
     let mut sorts = Vec::new();
     let mut joins = Vec::new();
-    visit(plan, &mut sorts, &mut joins);
+    let mut property_overlays = Vec::new();
+    visit(plan, &mut sorts, &mut joins, &mut property_overlays);
     let completion_rss = current_rss_bytes();
     let mut state = CAPTURE
         .lock()
@@ -485,6 +517,7 @@ pub(crate) fn record_plan_completion(
     state.snapshot.hydration = hydration;
     state.snapshot.sorts = sorts;
     state.snapshot.joins = joins;
+    state.snapshot.property_overlays = property_overlays;
     state.snapshot.memory_reserved_before = memory_reserved_before as u64;
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;

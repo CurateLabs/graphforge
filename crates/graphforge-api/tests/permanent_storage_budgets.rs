@@ -7398,3 +7398,164 @@ fn count_row_marker_rejects_property_corruption_after_facade_open() {
         );
     }
 }
+
+fn count_marker_rows(batches: &[RecordBatch]) -> Vec<(Uuid, Option<i64>, Option<String>)> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        assert_eq!(batch.num_columns(), 3);
+        let payload = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                uuid_at(batch, 0, row),
+                int_at(batch, 1, row),
+                (!payload.is_null(row)).then(|| payload.value(row).to_owned()),
+            ));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn verify_count_marker_graph(
+    graph: &GraphForge,
+    nodes: &[Node],
+    payloads: &[Option<String>],
+) -> String {
+    let result = graph
+        .execute("MATCH (n) RETURN n.node_uuid, n.score, n.z_payload")
+        .unwrap();
+    let actual = count_marker_rows(&result.batches);
+    let mut expected = nodes
+        .iter()
+        .zip(payloads)
+        .map(|(node, payload)| (node.0, node.2, payload.clone()))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
+    for (query, expected) in [
+        ("MATCH (n) RETURN count(*) AS value", nodes.len() as i64),
+        (
+            "MATCH (n) RETURN count(n.score) AS value",
+            nodes.iter().filter(|node| node.2.is_some()).count() as i64,
+        ),
+        (
+            "MATCH (n) RETURN sum(n.score) AS value",
+            nodes.iter().filter_map(|node| node.2).sum(),
+        ),
+        (
+            "MATCH (n) RETURN count(n.z_payload) AS value",
+            payloads.iter().filter(|payload| payload.is_some()).count() as i64,
+        ),
+    ] {
+        let result = graph.execute(query).unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(int_at(batch, 0, 0), Some(expected), "{query}");
+    }
+    digest_hex(&serde_json::to_vec(&actual).unwrap())
+}
+
+#[test]
+fn count_row_marker_avoids_property_values_through_public_lifecycle() {
+    use futures::TryStreamExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let (nodes, mut payloads) = construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let initial = verify_count_marker_graph(&graph, &nodes, &payloads);
+    let capture = |query: &str, expected: i64| {
+        let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
+        let result = result.unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let batch = result
+            .batches
+            .iter()
+            .find(|batch| batch.num_rows() == 1)
+            .unwrap();
+        assert_eq!(int_at(batch, 0, 0), Some(expected));
+        assert_eq!(captured.property_overlays.len(), 1, "{query}");
+        captured.property_overlays[0].clone()
+    };
+    let counted = capture("MATCH (n) RETURN count(*) AS value", nodes.len() as i64);
+    let values = capture(
+        "MATCH (n) RETURN count(n.z_payload) AS value",
+        payloads.iter().filter(|payload| payload.is_some()).count() as i64,
+    );
+    assert!(counted.authentication_bytes > 0);
+    assert_eq!(counted.authentication_bytes, values.authentication_bytes);
+    assert!(counted.physical_rows > 0);
+    assert_eq!(counted.physical_rows, values.physical_rows);
+    let unrequested_bytes = payloads.iter().flatten().map(String::len).sum::<usize>() as u64;
+    assert!(counted.spill_bytes + unrequested_bytes <= values.spill_bytes);
+    assert!(counted.spill_bytes <= nodes.len() as u64 * 256);
+    assert!(counted.decoder_peak_bytes <= nodes.len() as u64 * 256);
+    assert!(counted.decoder_peak_bytes < values.decoder_peak_bytes);
+    println!(
+        "COUNT_MARKER_WORK {}",
+        json!({"rows":nodes.len(),"unrequested_value_bytes":unrequested_bytes,"count_spill_bytes":counted.spill_bytes,"value_spill_bytes":values.spill_bytes,"authentication_bytes_each":counted.authentication_bytes,"physical_rows_each":counted.physical_rows,"count_logical_decoder_peak_bytes":counted.decoder_peak_bytes,"value_logical_decoder_peak_bytes":values.decoder_peak_bytes})
+    );
+
+    let snapshot = graph
+        .execute_stream("MATCH (n) RETURN n.node_uuid, n.score, n.z_payload")
+        .unwrap();
+    graph
+        .execute("MATCH (n) WHERE n.score = -2047 SET n.z_payload = 'after-publish'")
+        .unwrap();
+    payloads[1] = Some("after-publish".into());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let retained: Vec<RecordBatch> = runtime.block_on(snapshot.try_collect()).unwrap();
+    assert_eq!(
+        digest_hex(&serde_json::to_vec(&count_marker_rows(&retained)).unwrap()),
+        initial
+    );
+    let mutated = verify_count_marker_graph(&graph, &nodes, &payloads);
+    assert_ne!(mutated, initial);
+    drop(graph);
+    let portable = round_trip_checked(root.path(), &source, |graph| {
+        verify_count_marker_graph(graph, &nodes, &payloads)
+    });
+    assert_eq!(portable, mutated);
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    imported
+        .execute("MATCH (n) WHERE n.score = -2046 REMOVE n.z_payload")
+        .unwrap();
+    payloads[2] = None;
+    let after_import_mutation = verify_count_marker_graph(&imported, &nodes, &payloads);
+    assert_ne!(after_import_mutation, portable);
+    drop(imported);
+    assert_eq!(
+        verify_count_marker_graph(
+            &GraphForge::new(imported_path.to_str()).unwrap(),
+            &nodes,
+            &payloads
+        ),
+        after_import_mutation
+    );
+}
