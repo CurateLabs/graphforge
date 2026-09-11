@@ -3602,9 +3602,12 @@ pub(crate) fn stage_statement(
 
     // Property values/counts belong to the writable workspace; the pinned
     // generation contributes only declared semantic owners for absent routes.
-    let workspace_inventory =
-        graphforge_storage::AuthenticatedPropertyInventory::capture_workspace(dir, inventory)?;
-    let inventory = Some(&workspace_inventory);
+    let workspace_inventory = if ctx.set_acc.is_empty() && ctx.remove_acc.is_empty() {
+        None
+    } else {
+        Some(graphforge_storage::AuthenticatedPropertyInventory::capture_workspace(dir, inventory)?)
+    };
+    let inventory = workspace_inventory.as_ref();
     let mut staged = graphforge_storage::RewriteBatch::new();
     ctx.set_acc.stage_into(&mut staged, dir, inventory)?;
     ctx.remove_acc.stage_into(&mut staged, dir, inventory)?;

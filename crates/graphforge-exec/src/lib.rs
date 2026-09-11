@@ -1752,6 +1752,10 @@ pub(crate) struct SetAccumulator {
 }
 
 impl SetAccumulator {
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+
     fn record(
         &mut self,
         is_edge: bool,
@@ -1799,6 +1803,9 @@ impl SetAccumulator {
         dir: &Path,
         inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     ) -> Result<u64, GfError> {
+        if self.is_empty() {
+            return Ok(0);
+        }
         let captured;
         let inventory = if let Some(inventory) = inventory {
             inventory
@@ -1851,6 +1858,10 @@ pub(crate) struct RemoveAccumulator {
 }
 
 impl RemoveAccumulator {
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+
     fn record(&mut self, is_edge: bool, stem: String, uuid: [u8; 16], prop: String) {
         let map = if is_edge {
             &mut self.edges
@@ -1890,6 +1901,9 @@ impl RemoveAccumulator {
         dir: &Path,
         inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     ) -> Result<u64, GfError> {
+        if self.is_empty() {
+            return Ok(0);
+        }
         let captured;
         let inventory = if let Some(inventory) = inventory {
             inventory

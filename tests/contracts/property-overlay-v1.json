@@ -22,6 +22,7 @@
   },
   "exports": {
     "property_overlay": [
+      "EdgeOwnerProbeWork", "resolve_existing_edge_property_owners",
       "AuthenticatedPropertyInventory", "PROPERTY_OVERLAY_FORMAT",
       "PROPERTY_OVERLAY_FORMAT_KEY", "PROPERTY_TOMBSTONE_FIELD",
       "PropertyFragmentId", "PropertyInventoryOpenMetrics", "PropertyOverlayLimits",
@@ -33,6 +34,8 @@
       "visit_authenticated_property_snapshots"
     ],
     "property_overlay_module": [
+      "AuthenticatedPropertyInventory::capture", "AuthenticatedPropertyInventory::capture_workspace",
+      "EdgeOwnerProbeWork", "resolve_existing_edge_property_owners",
       "AuthenticatedPropertyInventory", "AuthenticatedPropertyInventory::edge_files",
       "AuthenticatedPropertyInventory::from_materialized_generation",
       "AuthenticatedPropertyInventory::from_materialized_inventory",
