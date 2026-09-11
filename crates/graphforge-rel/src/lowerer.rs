@@ -2375,8 +2375,8 @@ impl GraphPlanLowerer {
     /// A node var carries a `var_<n>.node_uuid` column; an edge var a
     /// `var_<n>.edge_uuid` column. An edge var must also carry the
     /// `var_<n>.rel_type_name` column — the per-row file stem for edge property
-    /// writes (present in Exploratory mode; a typed-only Strict-mode edge has no
-    /// such column and is rejected here, a documented #791 follow-up). Returns
+    /// writes (stored for exploratory routes and projected from the authenticated
+    /// catalog route for typed scans). Returns
     /// `is_edge` or a lowering error.
     fn resolve_write_kind(
         schema: &datafusion::common::DFSchemaRef,
@@ -3245,6 +3245,27 @@ fn lower_node_scan(
     builder.build().map_unsupported_expr()
 }
 
+/// Carry the catalog-resolved physical route into the write frontier. Typed
+/// topology omits this constant on disk; mutation ownership still needs it.
+fn project_typed_edge_route(
+    scan: LogicalPlan,
+    alias: &str,
+    route: &str,
+) -> Result<LogicalPlan, LoweringError> {
+    let mut columns: Vec<_> = scan
+        .schema()
+        .columns()
+        .into_iter()
+        .map(DfExpr::Column)
+        .collect();
+    columns
+        .push(datafusion::logical_expr::lit(route).alias_qualified(Some(alias), "rel_type_name"));
+    LogicalPlanBuilder::from(scan)
+        .project(columns)
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
+}
+
 fn lower_typed_edge_scan(
     var: VarId,
     rel_ty: RelationTypeId,
@@ -3282,8 +3303,8 @@ fn lower_typed_edge_scan(
                     rel_ty.encode()
                 ))
             })?;
-        return LogicalPlanBuilder::scan(
-            alias,
+        let scan = LogicalPlanBuilder::scan(
+            alias.clone(),
             graphforge_plan::GraphReadSource::new(
                 graphforge_plan::GraphReadTable::SemanticEdges(rel_ty),
                 &provider,
@@ -3294,7 +3315,8 @@ fn lower_typed_edge_scan(
             None,
         )
         .and_then(LogicalPlanBuilder::build)
-        .map_unsupported_expr();
+        .map_unsupported_expr()?;
+        return project_typed_edge_route(scan, &alias, rel_name);
     }
 
     // Check if the catalog has a typed edge table for this relation.
@@ -3313,9 +3335,10 @@ fn lower_typed_edge_scan(
         let src = edge_scan_source(dir, rel_name, &TYPED_EDGE_SCHEMA, mode);
         // Use alias as the scan qualifier so downstream join predicates
         // (var_map.get(edge) → "var_N") can resolve edge columns correctly.
-        LogicalPlanBuilder::scan(alias, src, None)
+        let scan = LogicalPlanBuilder::scan(alias.clone(), src, None)
             .and_then(LogicalPlanBuilder::build)
-            .map_unsupported_expr()
+            .map_unsupported_expr()?;
+        project_typed_edge_route(scan, &alias, rel_name)
     }
 }
 
@@ -4077,7 +4100,7 @@ fn try_lower_provider_expand(
 
     let node = graphforge_plan::ExpandNode::new(
         Arc::new(input.clone()),
-        rel_name,
+        rel_name.clone(),
         src.0,
         traversal_dst.0,
         edge.0,
@@ -4097,6 +4120,9 @@ fn try_lower_provider_expand(
     let mut base = LogicalPlan::Extension(datafusion::logical_expr::Extension {
         node: Arc::new(node),
     });
+    if rel_ty.is_some() && !matches!(mode, OntologyMode::Exploratory) {
+        base = project_typed_edge_route(base, &var_alias(edge), &rel_name)?;
+    }
     if let Some(bound_dst) = bound_dst {
         use datafusion::logical_expr::col;
 
@@ -6558,6 +6584,30 @@ relation_types:
         (tmp, catalog, plan)
     }
 
+    fn assert_typed_route_projection(plan: &DfLogicalPlan) -> &Extension {
+        let DfLogicalPlan::Projection(projection) = plan else {
+            panic!("expected typed route projection, got {plan:?}");
+        };
+        let mut expected = projection
+            .input
+            .schema()
+            .columns()
+            .into_iter()
+            .map(DfExpr::Column)
+            .collect::<Vec<_>>();
+        expected.push(
+            datafusion::logical_expr::lit("KNOWS").alias_qualified(Some("var_1"), "rel_type_name"),
+        );
+        assert_eq!(
+            projection.expr, expected,
+            "preserve all input columns and exact route"
+        );
+        let DfLogicalPlan::Extension(extension) = projection.input.as_ref() else {
+            panic!("expected ExpandNode directly beneath route projection, got {plan:?}");
+        };
+        extension
+    }
+
     #[test]
     fn project_backed_single_hop_emits_expand_extension_node() {
         use datafusion::logical_expr::UserDefinedLogicalNodeCore;
@@ -6571,9 +6621,7 @@ relation_types:
         .unwrap();
 
         let lp = lowerer.lower_plan(&plan).unwrap();
-        let DfLogicalPlan::Extension(ext) = &lp else {
-            panic!("expected Extension (ExpandNode), got {lp:?}");
-        };
+        let ext = assert_typed_route_projection(&lp);
         let node = ext
             .node
             .as_any()
@@ -6623,9 +6671,7 @@ relation_types:
         // No DISTINCT wrapper: the self-loop dedup happens inside ExpandExec
         // (a wrapping Distinct trips DataFusion's duplicate-field-name
         // disambiguation against the extension's multi-var schema).
-        let DfLogicalPlan::Extension(ext) = &lp else {
-            panic!("expected Extension (ExpandNode), got {lp:?}");
-        };
+        let ext = assert_typed_route_projection(&lp);
         let node = ext
             .node
             .as_any()

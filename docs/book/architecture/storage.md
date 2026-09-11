@@ -1208,3 +1208,53 @@ temporary-disk bounds. The separate point census includes retained generations.
 See [`bounded-csr-1205.json`](../../development/evidence/bounded-csr-1205.json)
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
+
+### Ordinary Cypher property ownership
+
+Committed edge SET, map updates and REMOVE resolve the authenticated property
+owner before accumulating effects. Each input batch probes only its logical
+relation routes and `_exploratory`, including newest tombstones. Multiple owners
+are refused; an entity without a property row keeps its logical route. Edges
+created in the same statement retain the pending writer's route. Replacement
+maps read existing keys in batches from the resolved owner, so omitted properties
+are removed from the same authority that receives the replacement.
+
+Typed scans and fixed expansions carry their catalog-resolved route as an
+internal constant column. This uses the generation's storage binding, without
+reinterpreting ontology IDs as runtime IDs. During staging, current property
+rows and live counts come from the writable workspace. The pinned generation
+supplies declared semantic schema metadata for a route's first property write;
+its historical counts and generation authority are not substituted for the
+workspace's. SET/REMOVE and pending appends therefore share workspace authority. Immediate query success is
+insufficient: ownership fixtures also reopen after qualified mutations and
+exercise full portable verification, clean import and later mutation.
+
+The `property_writes` demand diagnostics sum owner probes and replacement-key
+reads across every input batch and SET item. Repeated reads are counted each
+time. Decoder and authenticated-snapshot peaks describe those readers; target
+counts describe retained identities. These counters neither measure the entire
+publication nor bound process RSS. The representative multi-batch regression
+checks exact results and explicit cumulative work ceilings.
+
+Frozen-release measurements cover the entire test process, including fixture
+construction, mutations, exact queries and portable lifecycle work. The original
+baseline refuses corruption before completing that lifecycle, so these are
+corrected-path costs rather than a speedup comparison.
+
+| Fixture | CPU seconds (3 runs) | Maximum RSS (KiB) | Successful syscall read / write bytes | Sampled allocated bytes |
+|---|---:|---:|---:|---:|
+| Mixed construction and ordinary mutation, 33 / 4,097 nodes | 4.20–4.21 | 120,536 | 340,327,349 / 69,275,673 | 14,802,944 |
+| 8,193-edge multi-batch owner and replacement work | 1.57–1.60 | 166,980 | 114,304,045 / 25,674,019 | 5,394,432 |
+| Qualified mutation, reopen and portable lifecycle | 1.07–1.16 | 90,456 | 28,610,264 / 2,582,102 | 2,129,920 |
+
+Syscall bytes include non-file descriptors and count a file copy once as a read
+and once as a write; they are not physical disk I/O. The evidence records GNU
+filesystem counters separately. Disk sampling deduplicates shared device/inode
+pairs across the private workspace and all coexisting lifecycle artifacts. Its
+largest observed gap was 15.10 ms despite a requested 5 ms interval; it excludes
+directories and unlinked open files and is not a hard bound. Native process RSS
+is separate from the logical reader-buffer ceilings above.
+
+See [Cypher ownership evidence](../../development/evidence/cypher-property-ownership-1224.json)
+for executable/source hashes, all observations, deterministic budgets, reproduction
+instructions, failed prototypes and the known local #1192 fixture limitation.

@@ -22,6 +22,7 @@ use parquet::file::reader::{ChunkReader, Length};
 use parquet::thrift::TSerializable;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// On-disk property overlay format marker.
 pub const PROPERTY_OVERLAY_FORMAT: &str = "full-snapshot-v1";
@@ -372,6 +373,12 @@ struct RouteSchemaBuilder {
 }
 
 impl AuthenticatedPropertyInventory {
+    /// Authenticate the current property authority of a project or materialized
+    /// workspace. Sessions should retain and share the resulting inventory.
+    pub fn capture(project: &Path) -> Result<Self, GfError> {
+        authenticated_property_inventory(project)
+    }
+
     /// Return semantic relation names and their admitted physical payload paths.
     /// The inventory retains the generation lease and route authority.
     #[must_use]
@@ -954,6 +961,17 @@ impl AuthenticatedPropertyInventory {
             #[cfg(test)]
             mutation_barrier: Mutex::new(None),
         })
+    }
+
+    /// Admit the writable workspace's current property rows and statistics,
+    /// retaining declared semantic owners from the transaction's pinned generation.
+    /// The generation's historical live counts are not workspace statistics.
+    pub fn capture_workspace(project: &Path, pinned: Option<&Self>) -> Result<Self, GfError> {
+        let mut inventory = Self::capture(project)?;
+        if let Some(generation) = pinned.and_then(|pinned| pinned.generation_lease.as_ref()) {
+            inventory.seed_semantic_property_schemas(generation)?;
+        }
+        Ok(inventory)
     }
 
     // A declared owner may not have a property payload yet. Its authenticated
@@ -2447,6 +2465,114 @@ pub fn read_authenticated_property_snapshots_for_inventory(
 > {
     let result = read_property_targets(inventory, kind, route, targets, None)?;
     Ok((result.rows, result.metrics))
+}
+
+/// Cumulative probe I/O and serial decoder peaks. The identity containers are
+/// reported separately: decoder counters are not a bound on process memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeOwnerProbeWork {
+    /// Candidate routes.
+    pub candidate_routes: usize,
+    /// Target memberships.
+    pub target_memberships: usize,
+    /// Resolved targets.
+    pub resolved_targets: usize,
+    /// Route name bytes.
+    pub route_name_bytes: usize,
+    /// Physical bytes.
+    pub physical_bytes: u64,
+    /// Authentication bytes.
+    pub authentication_bytes: u64,
+    /// Authenticated snapshot bytes.
+    pub authenticated_snapshot_bytes: u64,
+    /// Authenticated snapshot peak bytes.
+    pub authenticated_snapshot_peak_bytes: u64,
+    /// Physical rows.
+    pub physical_rows: u64,
+    /// Physical blocks.
+    pub physical_blocks: u64,
+    /// Fragments considered.
+    pub fragments_considered: u64,
+    /// Row groups considered.
+    pub row_groups_considered: u64,
+    /// Row groups selected.
+    pub row_groups_selected: u64,
+    /// Decoder peak bytes.
+    pub decoder_peak_bytes: u64,
+    /// Decoder page reservation bytes.
+    pub decoder_page_reservation_bytes: u64,
+}
+
+/// Construction and ordinary mutation have different exploratory property
+/// owners. Probe only the candidate routes for requested identities, once per
+/// route, using authenticated row presence (including a newest tombstone).
+pub fn resolve_existing_edge_property_owners(
+    inventory: &crate::AuthenticatedPropertyInventory,
+    owners: &mut BTreeMap<Uuid, String>,
+) -> Result<EdgeOwnerProbeWork, GfError> {
+    use crate::PropertyRouteKind;
+    let mut candidates = BTreeMap::<String, BTreeSet<[u8; 16]>>::new();
+    for (uuid, route) in owners.iter() {
+        for candidate in [route.as_str(), "_exploratory"] {
+            if inventory
+                .route_schema(PropertyRouteKind::Edge, candidate)
+                .is_some()
+            {
+                if let Some(targets) = candidates.get_mut(candidate) {
+                    targets.insert(uuid.into_bytes());
+                } else {
+                    candidates.insert(candidate.to_owned(), BTreeSet::from([uuid.into_bytes()]));
+                }
+            }
+        }
+    }
+    let mut resolved = BTreeMap::new();
+    let mut total = EdgeOwnerProbeWork {
+        candidate_routes: candidates.len(),
+        target_memberships: candidates.values().map(BTreeSet::len).sum(),
+        route_name_bytes: candidates.keys().map(String::len).sum(),
+        ..EdgeOwnerProbeWork::default()
+    };
+    for (route, targets) in &candidates {
+        let (present, work) = crate::read_authenticated_property_presence_for_inventory(
+            inventory,
+            PropertyRouteKind::Edge,
+            route,
+            targets,
+        )?;
+        total.physical_bytes += work.physical_bytes;
+        total.authentication_bytes += work.authentication_bytes;
+        total.authenticated_snapshot_bytes += work.authenticated_snapshot_bytes;
+        total.authenticated_snapshot_peak_bytes = total
+            .authenticated_snapshot_peak_bytes
+            .max(work.authenticated_snapshot_peak_bytes);
+        total.physical_rows += work.physical_rows;
+        total.physical_blocks += work.physical_blocks;
+        total.fragments_considered += work.fragments_considered;
+        total.row_groups_considered += work.row_groups_considered;
+        total.row_groups_selected += work.row_groups_selected;
+        total.decoder_peak_bytes = total.decoder_peak_bytes.max(work.decoder_peak_bytes);
+        total.decoder_page_reservation_bytes = total
+            .decoder_page_reservation_bytes
+            .max(work.decoder_page_reservation_bytes);
+        for uuid in present {
+            if resolved
+                .insert(Uuid::from_bytes(uuid), route.as_str())
+                .is_some()
+            {
+                return Err(GfError::Storage(
+                    "composite edge property owner is ambiguous".into(),
+                ));
+            }
+        }
+    }
+    // No property row means ordinary writer ownership, already derived from
+    // topology. Same-request creations are added by the caller afterwards.
+    total.resolved_targets = resolved.len();
+    for (uuid, route) in resolved {
+        owners.insert(uuid, route.to_owned());
+    }
+    Ok(total)
 }
 
 /// Selected logical values and tombstone-inclusive ownership from one read.

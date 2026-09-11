@@ -5986,3 +5986,383 @@ fn selective_fixed_paths_preserve_public_mutation_and_portable_lifecycle() {
     verify_selective_fixed_paths(&reopened, &nodes, &edges);
     verify_graph(&reopened, fixture, &nodes, &edges);
 }
+
+#[test]
+fn constructed_edge_cypher_set_has_one_authenticated_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "constructed_edge_cypher_owner",
+        nodes: 33,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    graph
+        .execute("MATCH ()-[r]->() WHERE r.weight IS NOT NULL SET r.weight = r.weight + 1")
+        .unwrap();
+    for edge in &mut edges {
+        edge.4 = edge.4.map(|weight| weight + 1);
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+}
+
+#[test]
+fn constructed_edge_cypher_maps_and_removals_preserve_portable_lifecycle() {
+    use futures::TryStreamExt as _;
+    for node_count in [33, 4097] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let fixture = Fixture {
+            name: "constructed_edge_cypher_lifecycle",
+            nodes: node_count,
+            edges: 129,
+            routes: 2,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: true,
+            heterogeneous: false,
+        };
+        let (mut nodes, mut edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        verify_graph(&graph, fixture, &nodes, &edges);
+        let created = graph.execute("CREATE (a:NodeExtra)-[r:REL0 {weight: 3, text: 'ordinary'}]->(b:NodeExtra), (a)-[s:REL1]->(b) RETURN a.node_uuid, b.node_uuid, r.edge_uuid, s.edge_uuid").unwrap();
+        assert_eq!(
+            created
+                .batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+        let created = &created.batches[0];
+        let a = uuid_at(created, 0, 0);
+        let b = uuid_at(created, 1, 0);
+        nodes.extend([(a, "NodeExtra".into(), None), (b, "NodeExtra".into(), None)]);
+        edges.extend([
+            (
+                uuid_at(created, 2, 0),
+                a,
+                b,
+                "REL0".into(),
+                Some(3),
+                Some("ordinary".into()),
+            ),
+            (uuid_at(created, 3, 0), a, b, "REL1".into(), None, None),
+        ]);
+        verify_graph(&graph, fixture, &nodes, &edges);
+        let old_query = "MATCH ()-[r]->() RETURN r.edge_uuid, r.weight";
+        let snapshot = graph.execute_stream(old_query).unwrap();
+        let mut old_expected: Vec<_> = edges.iter().map(|edge| (edge.0, edge.4)).collect();
+        old_expected.sort();
+        graph
+            .execute("MATCH ()-[r]->() WHERE r.weight IS NOT NULL SET r.weight = r.weight + 1")
+            .unwrap();
+        for edge in &mut edges {
+            edge.4 = edge.4.map(|weight| weight + 1);
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph
+            .execute("MATCH ()-[r]->() WHERE r.weight IS NOT NULL SET r += {weight: r.weight + 2}")
+            .unwrap();
+        for edge in &mut edges {
+            edge.4 = edge.4.map(|weight| weight + 2);
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph
+            .execute("MATCH ()-[r:REL0]->() SET r.text = null")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL0") {
+            edge.5 = None;
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph
+            .execute("MATCH ()-[r:REL1]->() REMOVE r.weight")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL1") {
+            edge.4 = None;
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph
+            .execute("MATCH ()-[r:REL0]->() SET r = {weight: 7, text: 'replacement'}")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL0") {
+            edge.4 = Some(7);
+            edge.5 = Some("replacement".into());
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph.execute("MATCH ()-[r:REL1]->() SET r = {}").unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL1") {
+            edge.4 = None;
+            edge.5 = None;
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        graph
+            .execute("MATCH ()-[r:REL1]->() SET r.weight = 11")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL1") {
+            edge.4 = Some(11);
+        }
+        verify_graph(&graph, fixture, &nodes, &edges);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let old: Vec<RecordBatch> = runtime.block_on(snapshot.try_collect()).unwrap();
+        let mut actual = Vec::new();
+        for batch in old {
+            for row in 0..batch.num_rows() {
+                actual.push((uuid_at(&batch, 0, row), int_at(&batch, 1, row)));
+            }
+        }
+        actual.sort();
+        assert_eq!(actual, old_expected);
+        drop(graph);
+        round_trip(root.path(), &source, fixture, &nodes, &edges);
+        let imported_path = root.path().join("imported");
+        let imported = GraphForge::new(imported_path.to_str()).unwrap();
+        imported
+            .execute("MATCH ()-[r:REL0]->() REMOVE r.text")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL0") {
+            edge.5 = None;
+        }
+        imported
+            .execute("MATCH ()-[r:REL1]->() SET r += {weight: 13}")
+            .unwrap();
+        for edge in edges.iter_mut().filter(|edge| edge.3 == "REL1") {
+            edge.4 = Some(13);
+        }
+        verify_graph(&imported, fixture, &nodes, &edges);
+        drop(imported);
+        let reopened = GraphForge::new(imported_path.to_str()).unwrap();
+        verify_graph(&reopened, fixture, &nodes, &edges);
+    }
+}
+
+#[test]
+fn cypher_edge_owner_work_accounts_for_multiple_batches_and_items() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "cypher_owner_statement_work",
+        nodes: 33,
+        edges: 8193,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let (result, work) = graphforge_exec::demand::capture(|| {
+        graph.execute("MATCH ()-[r]->() SET r.weight = 1, r.text = 'changed'")
+    });
+    result.unwrap();
+    assert_eq!(
+        work.property_writes["owner_targets"],
+        2 * fixture.edges as u64
+    );
+    assert!(
+        work.property_writes["owner_batches"] >= 4,
+        "{:?}",
+        work.property_writes
+    );
+    assert!(work.property_writes["owner_target_peak"] <= 8192);
+    for edge in &mut edges {
+        edge.4 = Some(1);
+        edge.5 = Some("changed".into());
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let (result, replacement) =
+        graphforge_exec::demand::capture(|| graph.execute("MATCH ()-[r]->() SET r = {weight: 2}"));
+    result.unwrap();
+    assert_eq!(
+        replacement.property_writes["owner_targets"],
+        fixture.edges as u64
+    );
+    assert_eq!(
+        replacement.property_writes["replacement_targets"],
+        fixture.edges as u64
+    );
+    for edge in &mut edges {
+        edge.4 = Some(2);
+        edge.5 = None;
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+    // Measured fixed-fixture envelopes cover every batch and item, including
+    // repeated authenticated reads. They bound this resolver's work, not the
+    // entire mutation or process RSS. Replacement probes and key reads are
+    // both charged, even when they consume the same physical fragments.
+    let count = fixture.edges as u64;
+    assert!(work.property_writes["owner_rows"] <= 7 * count);
+    assert!(work.property_writes["owner_physical_bytes"] <= 320 * count);
+    assert!(work.property_writes["owner_authentication_bytes"] <= 128 * count);
+    for prefix in ["owner", "replacement"] {
+        assert!(replacement.property_writes[&format!("{prefix}_rows")] <= 6 * count);
+        assert!(replacement.property_writes[&format!("{prefix}_physical_bytes")] <= 256 * count);
+        assert!(
+            replacement.property_writes[&format!("{prefix}_authentication_bytes")] <= 128 * count
+        );
+        assert!(
+            replacement.property_writes[&format!("{prefix}_snapshot_peak_bytes")] <= 256 * 1024
+        );
+        assert!(replacement.property_writes[&format!("{prefix}_decoder_peak_bytes")] <= 4096);
+    }
+    println!(
+        "CYPHER_OWNER_WORK {}",
+        json!({"scalar":work.property_writes,"replacement":replacement.property_writes})
+    );
+}
+
+#[test]
+fn qualified_cypher_edge_owners_preserve_constructed_and_pending_values() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "qualified_cypher_owners",
+        nodes: 33,
+        edges: 129,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: false,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (base_nodes, base_edges) = rows(fixture);
+    construct(&source, fixture, &base_nodes, &base_edges);
+    configure_composite_ontology(root.path(), &source, true);
+    let a = id(3, 0, true);
+    let b = id(3, 1, true);
+    let edge = id(4, 0, true);
+    let nodes = vec![(a, "NewNode".into(), None), (b, "NewNode".into(), None)];
+    let edges = vec![(edge, a, b, "NEW_TYPED".into(), None, None)];
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let query = "MATCH (a:`mixed:NewNode`)-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode`) RETURN r.edge_uuid, a.node_uuid, b.node_uuid, r.weight";
+    let mut expected = vec![(edge, a, b, None)];
+    let verify = |graph: &GraphForge, expected: &[(Uuid, Uuid, Uuid, Option<i64>)]| {
+        for suffix in [
+            "RETURN type(r) AS kind, r AS relationship",
+            "WITH r AS x RETURN type(x) AS kind, x AS relationship",
+        ] {
+            let values = graph
+                .execute(&format!("MATCH ()-[r:`mixed:NEW_TYPED`]->() {suffix}"))
+                .unwrap_or_else(|error| panic!("{suffix}: {error}"));
+            assert_eq!(
+                values
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                expected.len()
+            );
+            for batch in &values.batches {
+                let kinds = batch
+                    .column_by_name("kind")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let relationships = batch
+                    .column_by_name("relationship")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::StructArray>()
+                    .unwrap();
+                let types = relationships
+                    .column_by_name("rel_type")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    assert_eq!(kinds.value(row), "mixed:NEW_TYPED", "{suffix}");
+                    assert_eq!(types.value(row), "mixed:NEW_TYPED", "{suffix}");
+                }
+            }
+        }
+        let mut actual = Vec::new();
+        for batch in graph.execute(query).unwrap().batches {
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    uuid_at(&batch, 0, row),
+                    uuid_at(&batch, 1, row),
+                    uuid_at(&batch, 2, row),
+                    int_at(&batch, 3, row),
+                ));
+            }
+        }
+        actual.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(actual, expected);
+        digest_hex(&serde_json::to_vec(&actual).unwrap())
+    };
+    verify(&graph, &expected);
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .execute("MATCH ()-[r:`mixed:NEW_TYPED`]->() SET r.weight = 7")
+        .unwrap();
+    expected[0].3 = Some(7);
+    verify(&graph, &expected);
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .execute("MATCH ()-[r:`mixed:NEW_TYPED`]->() SET r = {weight: 8}")
+        .unwrap();
+    expected[0].3 = Some(8);
+    verify(&graph, &expected);
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    graph
+        .execute("MATCH ()-[r:`mixed:NEW_TYPED`]->() REMOVE r.weight")
+        .unwrap();
+    expected[0].3 = None;
+    verify(&graph, &expected);
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let created = graph.execute("CREATE (a:`mixed:NewNode` {score: 1})-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode` {score: 2}) SET r.weight = 9 REMOVE r.weight SET r += {weight: 10} RETURN r.edge_uuid, a.node_uuid, b.node_uuid").unwrap();
+    assert_eq!(
+        created
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    let batch = &created.batches[0];
+    expected.push((
+        uuid_at(batch, 0, 0),
+        uuid_at(batch, 1, 0),
+        uuid_at(batch, 2, 0),
+        Some(10),
+    ));
+    verify(&graph, &expected);
+    drop(graph);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    drop(graph);
+    round_trip_checked(root.path(), &source, |graph| verify(graph, &expected));
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    imported
+        .execute("MATCH ()-[r:`mixed:NEW_TYPED`]->() SET r += {weight: 11}")
+        .unwrap();
+    for edge in &mut expected {
+        edge.3 = Some(11);
+    }
+    verify(&imported, &expected);
+    drop(imported);
+    verify(&GraphForge::new(imported_path.to_str()).unwrap(), &expected);
+}

@@ -305,11 +305,13 @@ impl MutationTransaction {
         &mut self,
         mut context: crate::write_driver::StatementWriteContext,
         resource: &crate::write_resource::BoundWriteResource,
+        inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     ) -> Result<(), graphforge_core::GfError> {
         self.admit(resource)?;
         self.ensure_unprepared()?;
         self.prepared = true;
-        self.staged = crate::write_driver::stage_statement(&mut context, resource.directory())?;
+        self.staged =
+            crate::write_driver::stage_statement(&mut context, resource.directory(), inventory)?;
         self.prepared = true;
         self.state = context.mutation;
         self.topology = Some(PreparedTopology {

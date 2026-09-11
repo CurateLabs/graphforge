@@ -1752,6 +1752,10 @@ pub(crate) struct SetAccumulator {
 }
 
 impl SetAccumulator {
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+
     fn record(
         &mut self,
         is_edge: bool,
@@ -1797,13 +1801,28 @@ impl SetAccumulator {
         &self,
         staged: &mut graphforge_storage::RewriteBatch,
         dir: &Path,
+        inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     ) -> Result<u64, GfError> {
+        if self.is_empty() {
+            return Ok(0);
+        }
+        let captured;
+        let inventory = if let Some(inventory) = inventory {
+            inventory
+        } else {
+            captured = graphforge_storage::AuthenticatedPropertyInventory::capture(dir)?;
+            &captured
+        };
         let mut total = 0u64;
         for (stem, updates) in &self.nodes {
-            total += graphforge_storage::stage_set_node_properties(staged, dir, stem, updates)?;
+            total += graphforge_storage::stage_set_node_properties_authenticated(
+                staged, dir, inventory, stem, updates,
+            )?;
         }
         for (stem, updates) in &self.edges {
-            total += graphforge_storage::stage_set_edge_properties(staged, dir, stem, updates)?;
+            total += graphforge_storage::stage_set_edge_properties_authenticated(
+                staged, dir, inventory, stem, updates,
+            )?;
         }
         Ok(total)
     }
@@ -1813,7 +1832,7 @@ impl SetAccumulator {
     /// returning the total number of distinct entities written.
     fn apply(&self, dir: &Path) -> Result<u64, GfError> {
         let mut staged = graphforge_storage::RewriteBatch::new();
-        let total = self.stage_into(&mut staged, dir)?;
+        let total = self.stage_into(&mut staged, dir, None)?;
         staged.commit_at(dir)?;
         Ok(total)
     }
@@ -1839,6 +1858,10 @@ pub(crate) struct RemoveAccumulator {
 }
 
 impl RemoveAccumulator {
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+
     fn record(&mut self, is_edge: bool, stem: String, uuid: [u8; 16], prop: String) {
         let map = if is_edge {
             &mut self.edges
@@ -1876,13 +1899,28 @@ impl RemoveAccumulator {
         &self,
         staged: &mut graphforge_storage::RewriteBatch,
         dir: &Path,
+        inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
     ) -> Result<u64, GfError> {
+        if self.is_empty() {
+            return Ok(0);
+        }
+        let captured;
+        let inventory = if let Some(inventory) = inventory {
+            inventory
+        } else {
+            captured = graphforge_storage::AuthenticatedPropertyInventory::capture(dir)?;
+            &captured
+        };
         let mut total = 0u64;
         for (stem, removals) in &self.nodes {
-            total += graphforge_storage::stage_remove_node_properties(staged, dir, stem, removals)?;
+            total += graphforge_storage::stage_remove_node_properties_authenticated(
+                staged, dir, inventory, stem, removals,
+            )?;
         }
         for (stem, removals) in &self.edges {
-            total += graphforge_storage::stage_remove_edge_properties(staged, dir, stem, removals)?;
+            total += graphforge_storage::stage_remove_edge_properties_authenticated(
+                staged, dir, inventory, stem, removals,
+            )?;
         }
         Ok(total)
     }
@@ -1890,7 +1928,7 @@ impl RemoveAccumulator {
     /// One staged batch across all stems, like [`SetAccumulator::apply`].
     fn apply(&self, dir: &Path) -> Result<u64, GfError> {
         let mut staged = graphforge_storage::RewriteBatch::new();
-        let total = self.stage_into(&mut staged, dir)?;
+        let total = self.stage_into(&mut staged, dir, None)?;
         staged.commit_at(dir)?;
         Ok(total)
     }
@@ -5789,6 +5827,7 @@ impl ExecutionSession {
             params,
             &wctx.writer.pending_nodes_batch()?,
         )?;
+        let property_inventory = env.inventory.clone();
         drop(env);
         drop(lowerer);
         let terminal_result = match terminal_logical {
@@ -5799,7 +5838,7 @@ impl ExecutionSession {
         };
         let c = wctx.mutation.counters;
         let mutation_receipt = Some(wctx.mutation_receipt());
-        transaction.prepare_statement(wctx, &resource)?;
+        transaction.prepare_statement(wctx, &resource, property_inventory.as_deref())?;
         let side_effects = Some(SideEffects {
             nodes_created: c.nodes_created,
             nodes_deleted: c.nodes_deleted,
