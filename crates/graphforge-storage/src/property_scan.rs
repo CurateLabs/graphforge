@@ -31,7 +31,7 @@ pub(crate) struct PropertyOverlayExec {
     route: String,
     is_edge: bool,
     schema: SchemaRef,
-    projection: Option<Vec<usize>>,
+    projection: Option<Vec<String>>,
     limit: Option<usize>,
     batch_size: usize,
     row_upper_bound: Option<usize>,
@@ -71,6 +71,13 @@ impl PropertyOverlayExec {
                     .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
             },
         )?;
+        let projection = projection.map(|_| {
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect()
+        });
         let kind = if is_edge {
             crate::PropertyRouteKind::Edge
         } else {
@@ -183,18 +190,29 @@ impl ExecutionPlan for PropertyOverlayExec {
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
         tokio::task::spawn_blocking(move || {
-            let result = crate::catalog::visit_property_overlay_batched_with_inventory(
+            let selected_properties = projection
+                .as_ref()
+                .map(|names| names.iter().cloned().collect());
+            let result = crate::catalog::visit_property_overlay_batched_projected(
                 &project,
                 inventory.as_deref(),
                 &route,
                 is_edge,
                 batch_size,
+                selected_properties.as_ref(),
                 |batch| {
                     let mut batch = projection.as_ref().map_or_else(
                         || Ok(batch.clone()),
-                        |indices| {
+                        |names| {
+                            let indices = names
+                                .iter()
+                                .map(|name| batch.schema().index_of(name))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    DataFusionError::ArrowError(Box::new(error), None)
+                                })?;
                             batch
-                                .project(indices)
+                                .project(&indices)
                                 .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
                         },
                     )?;

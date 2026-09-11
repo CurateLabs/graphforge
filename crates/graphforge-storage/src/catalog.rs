@@ -1893,7 +1893,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn visit_property_overlay_batched_projected<F>(
+pub(crate) fn visit_property_overlay_batched_projected<F>(
     dir: &Path,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
     stem: &str,
