@@ -1,0 +1,1375 @@
+{
+  "contract": "graphforge-integrated-storage-1194/1",
+  "source": "24ca688c516a86a68de9cffaab2d5a9215291256",
+  "tree": "54976786eedee511b0f6b5b0023281d3c9b3cb5b",
+  "frozen_at_utc": "2026-09-11T12:48:23.903798+00:00",
+  "executables": {
+    "gf": {
+      "sha256": "ebb01caed1b6ee197b0fd679e24957d671f50e108f4298e4b606bf9fa3947921",
+      "bytes": 184276760
+    },
+    "graphforge-benchmark-certify": {
+      "sha256": "db3440a249f51078fa0214ef1a7030d5fb03719a3fa298315ccdf1211b5ec81a",
+      "bytes": 11845616
+    },
+    "graphforge-benchmark-graph500-generator": {
+      "sha256": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551",
+      "bytes": 9675776
+    }
+  },
+  "toolchain": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "lockfiles": {
+    "Cargo.lock": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
+    "benchmarks/Cargo.lock": "1c1e58085c53aef2d50affdabcdcbc7fac7b6b77bc4d90b07af0065acbf39bb6",
+    "benchmarks/uv.lock": "f18d1f7ed87d466917bb7a94ce79f9c74ac3090ee5ca5cdc22de44ae6edea527"
+  },
+  "maximum_scale": 22,
+  "reserved_headroom_bytes": 141258578535,
+  "filesystem_total_bytes": 941723856896,
+  "available_bytes_at_freeze": 633410076672,
+  "observations": [
+    {
+      "scale": 18,
+      "live_nodes": 262144,
+      "live_edges": 4194304,
+      "metrics": {
+        "logical_read_bytes": 11360063649,
+        "logical_write_bytes": 5117151595,
+        "peak_rss_bytes": 182611968,
+        "physical_read_bytes": 54517145600,
+        "physical_write_bytes": 18559918080,
+        "publication_work_units": 63163,
+        "reader_calls": 122479,
+        "retained_storage_bytes": 1065082880,
+        "transient_peak_storage_bytes": 2974519296,
+        "wall_seconds": 97
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 80.257677,
+        "peak_rss_bytes": 819265536,
+        "pressure_cpu_seconds": 0.105651,
+        "pressure_io_seconds": 8.071899,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 54517145600,
+        "wall_seconds": 96.24521505401935,
+        "write_bytes": 18559918080
+      },
+      "phase_wall_milliseconds": {
+        "admission": 10,
+        "generate": 1633,
+        "ingest": 56944,
+        "reopen": 3479,
+        "recount": 2159,
+        "query": 9961,
+        "export": 2092,
+        "verify": 242,
+        "clean_import": 2654,
+        "reopen_proof": 14452
+      },
+      "operation_timings": [
+        {
+          "outcome": "validated",
+          "operation_timings": {
+            "append": {
+              "calls": 68,
+              "elapsed_ns": 4226577176,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "elapsed_ns": 940518,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "elapsed_ns": 44331662036,
+              "errors": 0
+            }
+          }
+        },
+        {
+          "outcome": "committed",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "elapsed_ns": 2492120075,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "elapsed_ns": 256419162,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          }
+        }
+      ],
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 205594624,
+            "logical_bytes": 205584915,
+            "logical_references": 2,
+            "physical_logical_bytes": 205584915,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 163364864,
+            "logical_bytes": 162629401,
+            "logical_references": 273,
+            "physical_logical_bytes": 162629401,
+            "physical_objects": 273
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 162566144,
+            "logical_bytes": 162560000,
+            "logical_references": 1,
+            "physical_logical_bytes": 162560000,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 164478976,
+            "logical_bytes": 162870632,
+            "logical_references": 503,
+            "physical_logical_bytes": 162870632,
+            "physical_objects": 503
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 205602816,
+            "logical_bytes": 205589045,
+            "logical_references": 3,
+            "physical_logical_bytes": 205589045,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 163368960,
+            "logical_bytes": 162629401,
+            "logical_references": 273,
+            "physical_logical_bytes": 162629401,
+            "physical_objects": 273
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "source_project_current_allocated_bytes": 163368960,
+      "artifact_sha256": {
+        "benchexec_sha256": "7b88b93271a1e2013ec0279f282d3d42be5eb8b0e53367b2e1734fa40e1e18d6",
+        "graphforge_sha256": "e86d63effe5da0659cf36077241efa1f081a6d367ff1034b84a204aec9ead65d",
+        "plan_sha256": "c7dfd2b1c3183eace121eda9cc5556dbdcb2e33366543d7b8683e99d428e0de2",
+        "rung_sha256": "52da4ffdd53137b0aa282a47da5abbdecfa6c1d4115d6f09eb6cfe674fdefd82"
+      }
+    },
+    {
+      "scale": 19,
+      "live_nodes": 524288,
+      "live_edges": 8388608,
+      "metrics": {
+        "logical_read_bytes": 22770347285,
+        "logical_write_bytes": 10248668711,
+        "peak_rss_bytes": 188862464,
+        "physical_read_bytes": 110290894848,
+        "physical_write_bytes": 37230034944,
+        "publication_work_units": 126894,
+        "reader_calls": 245352,
+        "retained_storage_bytes": 2159190016,
+        "transient_peak_storage_bytes": 5948940288,
+        "wall_seconds": 192
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 161.155301,
+        "peak_rss_bytes": 1577000960,
+        "pressure_cpu_seconds": 0.253316,
+        "pressure_io_seconds": 18.085786,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 110290894848,
+        "wall_seconds": 191.47780643799342,
+        "write_bytes": 37230034944
+      },
+      "phase_wall_milliseconds": {
+        "admission": 10,
+        "generate": 3277,
+        "ingest": 112917,
+        "reopen": 6626,
+        "recount": 4046,
+        "query": 19626,
+        "export": 4291,
+        "verify": 483,
+        "clean_import": 5605,
+        "reopen_proof": 29295
+      },
+      "operation_timings": [
+        {
+          "outcome": "validated",
+          "operation_timings": {
+            "append": {
+              "calls": 136,
+              "elapsed_ns": 8291116143,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "elapsed_ns": 974568,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "elapsed_ns": 87657475192,
+              "errors": 0
+            }
+          }
+        },
+        {
+          "outcome": "committed",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "elapsed_ns": 4929676569,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "elapsed_ns": 483101323,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          }
+        }
+      ],
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 411181056,
+            "logical_bytes": 411169177,
+            "logical_references": 2,
+            "physical_logical_bytes": 411169177,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 334139392,
+            "logical_bytes": 332462979,
+            "logical_references": 559,
+            "physical_logical_bytes": 332462979,
+            "physical_objects": 559
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 332263424,
+            "logical_bytes": 332256768,
+            "logical_references": 1,
+            "physical_logical_bytes": 332256768,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 336171008,
+            "logical_bytes": 332870981,
+            "logical_references": 975,
+            "physical_logical_bytes": 332870981,
+            "physical_objects": 975
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 411189248,
+            "logical_bytes": 411173328,
+            "logical_references": 3,
+            "physical_logical_bytes": 411173328,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 334139392,
+            "logical_bytes": 332462979,
+            "logical_references": 559,
+            "physical_logical_bytes": 332462979,
+            "physical_objects": 559
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "source_project_current_allocated_bytes": 334139392,
+      "artifact_sha256": {
+        "benchexec_sha256": "441872543db32f7d65fb2b48a2518710df462a9e415584d72a407862c8f1d9f4",
+        "graphforge_sha256": "5df01d75f9312dff89e611837aa8739a2dc78f3e7fc4213d1ce75b8c75d80d46",
+        "plan_sha256": "cdf5307917c805182209f29ce3c22f9c08b00b833601205a53680d32291b9e2f",
+        "rung_sha256": "019f21dd1fcb92228a55b57e7612336b3f96eadd66c3d8590e47704f99ea924d"
+      }
+    },
+    {
+      "scale": 20,
+      "live_nodes": 1048576,
+      "live_edges": 16777216,
+      "metrics": {
+        "logical_read_bytes": 45635825144,
+        "logical_write_bytes": 20524507070,
+        "peak_rss_bytes": 200232960,
+        "physical_read_bytes": 222907678720,
+        "physical_write_bytes": 74677432320,
+        "publication_work_units": 255934,
+        "reader_calls": 491135,
+        "retained_storage_bytes": 4372516864,
+        "transient_peak_storage_bytes": 11897737216,
+        "wall_seconds": 385
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 327.278453,
+        "peak_rss_bytes": 3118157824,
+        "pressure_cpu_seconds": 0.49856,
+        "pressure_io_seconds": 35.844997,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 222907678720,
+        "wall_seconds": 384.6858612350188,
+        "write_bytes": 74677432320
+      },
+      "phase_wall_milliseconds": {
+        "admission": 10,
+        "generate": 6626,
+        "ingest": 228672,
+        "reopen": 12622,
+        "recount": 7970,
+        "query": 40136,
+        "export": 7901,
+        "verify": 973,
+        "clean_import": 10841,
+        "reopen_proof": 58618
+      },
+      "operation_timings": [
+        {
+          "outcome": "validated",
+          "operation_timings": {
+            "append": {
+              "calls": 272,
+              "elapsed_ns": 16737040531,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "elapsed_ns": 954668,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "elapsed_ns": 177088074484,
+              "errors": 0
+            }
+          }
+        },
+        {
+          "outcome": "committed",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "elapsed_ns": 9436727862,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "elapsed_ns": 975586822,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          }
+        }
+      ],
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 822345728,
+            "logical_bytes": 822337680,
+            "logical_references": 2,
+            "physical_logical_bytes": 822337680,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 681910272,
+            "logical_bytes": 678499741,
+            "logical_references": 1127,
+            "physical_logical_bytes": 678499741,
+            "physical_objects": 1127
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 678088704,
+            "logical_bytes": 678083072,
+            "logical_references": 1,
+            "physical_logical_bytes": 678083072,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 685801472,
+            "logical_bytes": 679305946,
+            "logical_references": 1919,
+            "physical_logical_bytes": 679305946,
+            "physical_objects": 1919
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 822353920,
+            "logical_bytes": 822341855,
+            "logical_references": 3,
+            "physical_logical_bytes": 822341855,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 681910272,
+            "logical_bytes": 678499741,
+            "logical_references": 1127,
+            "physical_logical_bytes": 678499741,
+            "physical_objects": 1127
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "source_project_current_allocated_bytes": 681910272,
+      "artifact_sha256": {
+        "benchexec_sha256": "3e224e4e224f315e31414858ce02d09740ecfb17b831547bfd63a1eb84d60132",
+        "graphforge_sha256": "179160f338d7b4f9fb39a84e340bc678c73fb651956cf6b90f201ac4d5188d1c",
+        "plan_sha256": "69e334d2586557b1facdcb7c9e94b76fc3e2874d1d682b2df0656e3f17faa7a4",
+        "rung_sha256": "374699d6477e48b82d1fa22aa798b46f8c0b6ca5ab40abf7b9070e435179569e"
+      }
+    },
+    {
+      "scale": 22,
+      "live_nodes": 4194304,
+      "live_edges": 67108864,
+      "metrics": {
+        "logical_read_bytes": 193069289732,
+        "logical_write_bytes": 92215886265,
+        "peak_rss_bytes": 263090176,
+        "physical_read_bytes": 947578322944,
+        "physical_write_bytes": 414307926016,
+        "publication_work_units": 1039028,
+        "reader_calls": 2287487,
+        "retained_storage_bytes": 17813295104,
+        "transient_peak_storage_bytes": 47657119744,
+        "wall_seconds": 1776
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 1551.681826,
+        "peak_rss_bytes": 12474519552,
+        "pressure_cpu_seconds": 2.245113,
+        "pressure_io_seconds": 151.176027,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 947578322944,
+        "wall_seconds": 1775.591135450988,
+        "write_bytes": 414307926016
+      },
+      "phase_wall_milliseconds": {
+        "admission": 10,
+        "generate": 26392,
+        "ingest": 1139389,
+        "reopen": 51299,
+        "recount": 32395,
+        "query": 170095,
+        "export": 31842,
+        "verify": 4474,
+        "clean_import": 43675,
+        "reopen_proof": 237623
+      },
+      "operation_timings": [
+        {
+          "outcome": "validated",
+          "operation_timings": {
+            "append": {
+              "calls": 1088,
+              "elapsed_ns": 68519418772,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "elapsed_ns": 919977,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "elapsed_ns": 923237335509,
+              "errors": 0
+            }
+          }
+        },
+        {
+          "outcome": "committed",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "elapsed_ns": 38586566084,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "elapsed_ns": 3811642482,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          }
+        }
+      ],
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 3289362432,
+            "logical_bytes": 3289349601,
+            "logical_references": 2,
+            "physical_logical_bytes": 3289349601,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 2808377344,
+            "logical_bytes": 2796153411,
+            "logical_references": 4443,
+            "physical_logical_bytes": 2796153411,
+            "physical_objects": 4443
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 2793910272,
+            "logical_bytes": 2793903104,
+            "logical_references": 1,
+            "physical_logical_bytes": 2793903104,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 2823782400,
+            "logical_bytes": 2798775908,
+            "logical_references": 7583,
+            "physical_logical_bytes": 2798775908,
+            "physical_objects": 7583
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 3289370624,
+            "logical_bytes": 3289353824,
+            "logical_references": 3,
+            "physical_logical_bytes": 3289353824,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 2808385536,
+            "logical_bytes": 2796153411,
+            "logical_references": 4443,
+            "physical_logical_bytes": 2796153411,
+            "physical_objects": 4443
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "source_project_current_allocated_bytes": 2808385536,
+      "artifact_sha256": {
+        "benchexec_sha256": "8469a85e7dfe21d1d6de78db20f31e34592a9c045410f1191f60e1d7a7102b7b",
+        "graphforge_sha256": "69a33b9d2d8fb90dd501e95d902cdbdff3f615bd9dceb7920a6f85cb275cf332",
+        "plan_sha256": "c7cf566bb13c2f9a4982f48623cb4e25d3f88bbe399f1c315f1c4a19666ded08",
+        "rung_sha256": "44aeb767186712b8baefdeb33f8beb7a2e62d917819878591b91087023c84076"
+      }
+    }
+  ],
+  "historical_baselines": [
+    {
+      "scale": 20,
+      "commit": "3868e3c751ba0c94928033378d2ddc2b5401cd55",
+      "metrics": {
+        "logical_read_bytes": 30749598402,
+        "logical_write_bytes": 22864246562,
+        "peak_rss_bytes": 202928128,
+        "physical_read_bytes": 366526144512,
+        "physical_write_bytes": 92225392640,
+        "publication_work_units": 425058,
+        "reader_calls": 499464,
+        "retained_storage_bytes": 18242637824,
+        "transient_peak_storage_bytes": 20090777600,
+        "wall_seconds": 441
+      },
+      "source_project_current_allocated_bytes": 1852637184,
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 822345728,
+            "logical_bytes": 822337680,
+            "logical_references": 2,
+            "physical_logical_bytes": 822337680,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 1852637184,
+            "logical_bytes": 1848371632,
+            "logical_references": 1377,
+            "physical_logical_bytes": 1848371632,
+            "physical_objects": 1377
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 1847996416,
+            "logical_bytes": 1847989760,
+            "logical_references": 1,
+            "physical_logical_bytes": 1847989760,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 11044560896,
+            "logical_bytes": 11037728267,
+            "logical_references": 2999,
+            "physical_logical_bytes": 11037728267,
+            "physical_objects": 2999
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 822353920,
+            "logical_bytes": 822341858,
+            "logical_references": 3,
+            "physical_logical_bytes": 822341858,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 1852637184,
+            "logical_bytes": 1848371632,
+            "logical_references": 1377,
+            "physical_logical_bytes": 1848371632,
+            "physical_objects": 1377
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 374.798612,
+        "peak_rss_bytes": 5641248768,
+        "pressure_cpu_seconds": 0.554389,
+        "pressure_io_seconds": 42.60387,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 366526144512,
+        "wall_seconds": 440.87992319697514,
+        "write_bytes": 92225392640
+      },
+      "result_sha256": "2ea9059767240173148d2d1e601596246f2a51776dc80b4fe63bc7c232891a98",
+      "rung_sha256": "625e3ccd854c0116530148842cbf38b7a5e37201ab0d2f65a9d9efe9e634a627",
+      "profile_identities_unchanged": true
+    },
+    {
+      "scale": 22,
+      "commit": "3868e3c751ba0c94928033378d2ddc2b5401cd55",
+      "metrics": {
+        "logical_read_bytes": 133452797715,
+        "logical_write_bytes": 101744829105,
+        "peak_rss_bytes": 264278016,
+        "physical_read_bytes": 1547175919616,
+        "physical_write_bytes": 466245177344,
+        "publication_work_units": 1734104,
+        "reader_calls": 2322875,
+        "retained_storage_bytes": 73638645760,
+        "transient_peak_storage_bytes": 81197961216,
+        "wall_seconds": 1955
+      },
+      "source_project_current_allocated_bytes": 7578365952,
+      "retained_owners": {
+        "generated-inputs": {
+          "totals": {
+            "allocated_bytes": 3289358336,
+            "logical_bytes": 3289349601,
+            "logical_references": 2,
+            "physical_logical_bytes": 3289349601,
+            "physical_objects": 2
+          }
+        },
+        "imported-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "imported-project-construction": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-import": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 0,
+            "physical_logical_bytes": 0,
+            "physical_objects": 0
+          }
+        },
+        "imported-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "imported-project-published": {
+          "totals": {
+            "allocated_bytes": 7578365952,
+            "logical_bytes": 7560661703,
+            "logical_references": 5746,
+            "physical_logical_bytes": 7560661703,
+            "physical_objects": 5746
+          }
+        },
+        "imported-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        },
+        "portable-package": {
+          "totals": {
+            "allocated_bytes": 7558496256,
+            "logical_bytes": 7558490624,
+            "logical_references": 1,
+            "physical_logical_bytes": 7558490624,
+            "physical_objects": 1
+          }
+        },
+        "query-results": {
+          "totals": {
+            "allocated_bytes": 98304,
+            "logical_bytes": 71228,
+            "logical_references": 8,
+            "physical_logical_bytes": 71228,
+            "physical_objects": 8
+          }
+        },
+        "source-project-admission_lock": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 1,
+            "physical_logical_bytes": 0,
+            "physical_objects": 1
+          }
+        },
+        "source-project-construction": {
+          "totals": {
+            "allocated_bytes": 44344586240,
+            "logical_bytes": 44317415409,
+            "logical_references": 11879,
+            "physical_logical_bytes": 44317415409,
+            "physical_objects": 11879
+          }
+        },
+        "source-project-import": {
+          "totals": {
+            "allocated_bytes": 3289366528,
+            "logical_bytes": 3289353821,
+            "logical_references": 3,
+            "physical_logical_bytes": 3289353821,
+            "physical_objects": 3
+          }
+        },
+        "source-project-locks": {
+          "totals": {
+            "allocated_bytes": 0,
+            "logical_bytes": 0,
+            "logical_references": 3,
+            "physical_logical_bytes": 0,
+            "physical_objects": 3
+          }
+        },
+        "source-project-published": {
+          "totals": {
+            "allocated_bytes": 7578365952,
+            "logical_bytes": 7560661703,
+            "logical_references": 5746,
+            "physical_logical_bytes": 7560661703,
+            "physical_objects": 5746
+          }
+        },
+        "source-project-transactions": {
+          "totals": {
+            "allocated_bytes": 4096,
+            "logical_bytes": 628,
+            "logical_references": 1,
+            "physical_logical_bytes": 628,
+            "physical_objects": 1
+          }
+        }
+      },
+      "benchexec_authority": {
+        "cpu_seconds": 1747.748051,
+        "peak_rss_bytes": 15500419072,
+        "pressure_cpu_seconds": 2.484156,
+        "pressure_io_seconds": 140.275402,
+        "pressure_memory_seconds": 0.702274,
+        "read_bytes": 1547175919616,
+        "wall_seconds": 1954.184934421035,
+        "write_bytes": 466245177344
+      },
+      "result_sha256": "d9fe70a9dbddbfeb2604399bed540eaeb0f9bc7ec0c66afe75aefa80a46d93a7",
+      "rung_sha256": "8a57c7bb93d9e92603334bad246d37642bd857501e2617d8523d694a6b205e51",
+      "profile_identities_unchanged": true
+    }
+  ],
+  "qualification": {
+    "decision": "refuse",
+    "headroom_bytes": 0,
+    "projected_canonical_edge_bytes": 20213858304,
+    "projected_canonical_node_bytes": 268435456,
+    "projected_lifecycle_peak_bytes": 762866827264,
+    "rate": {
+      "denominator_count": 50331648,
+      "numerator_bytes": 35759382528
+    },
+    "reserved_headroom_bytes": 141258578535,
+    "source_rungs": [
+      "S20",
+      "S22"
+    ],
+    "target": "S26",
+    "volume_bytes": 633354096640
+  },
+  "limitations": [
+    "Engineering evidence only; no S24/S26 execution or release certification.",
+    "Single host observations do not establish variance or isolate each repair contribution.",
+    "BenchExec peak_rss_bytes authority is cgroup memory including charged page cache, not process VmHWM.",
+    "Historical logical I/O instrumentation differs, including recovery attribution.",
+    "Named owner and component inventories overlap; do not sum them with the retained physical union.",
+    "Final owner inventories do not decompose an earlier temporal peak.",
+    "Timing rows measure disjoint public calls, exclude outside decode/checkpoint/open work, and are not CPU or whole-ingest time."
+  ]
+}

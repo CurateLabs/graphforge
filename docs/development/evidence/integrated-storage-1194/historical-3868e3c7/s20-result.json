@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "benchexec_sha256": "0353e390a809bb2cb6f4e7b1b0a5fedea2a2e246d94df804cba611b04f7d37e0",
+    "graphforge_sha256": "64deb7d489df18cc675378e9c53faa5fe8c4c1acb4f63bd95ea13b975c14cbd7",
+    "plan_sha256": "15adf80e7893913911568984289debc33c94f16bfe6d04bf6d204e118021d3da",
+    "rung_sha256": "625e3ccd854c0116530148842cbf38b7a5e37201ab0d2f65a9d9efe9e634a627"
+  },
+  "claim": "engineering_evidence_only",
+  "failure": null,
+  "identities": {
+    "admitted_projection_sha256": "cde01bde574c154eb5fc5004ca957679ec258825e5fb97d34f2756b1c4394679",
+    "benchexec_python_sha256": "b8d8288faefdd300201f43fcf00f6f539a27218eeed3a3dff5ab10b9c4c99700",
+    "benchexec_version": "3.35",
+    "certify_sha256": "0f09a5020a9ede0c6e6d7451384cf6473414e5e448a939e4bcb9aeeeddb19ab1",
+    "commit": "3868e3c751ba0c94928033378d2ddc2b5401cd55",
+    "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+    "generator_executable_sha256": "678cdd89ad68485402841d05302eab9403efad6fbf3ec02f73b84558bef54886",
+    "gf_sha256": "e94d8e762bb6b4139e20ab3ee21677d9197228b471bc904f8d8f3ec5dca4ab03",
+    "host_profile_id": "local-linux-cgroups-v2",
+    "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+    "producer_sha256": "a2911040377d4b992754d206b94895b8aea7c97d0dcee2d163ece83e8183d540",
+    "profile_id": "graph500-s20-provider",
+    "profile_sha256": "922533672e46f4dad2ac96ebd0c4ebdf215ec0214d534bea713b8e4e6cf62700"
+  },
+  "rung": "S20",
+  "schema": "graphforge-progressive-host-run-result/1",
+  "status": "passed"
+}
