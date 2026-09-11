@@ -1235,3 +1235,26 @@ time. Decoder and authenticated-snapshot peaks describe those readers; target
 counts describe retained identities. These counters neither measure the entire
 publication nor bound process RSS. The representative multi-batch regression
 checks exact results and explicit cumulative work ceilings.
+
+Frozen-release measurements cover the entire test process, including fixture
+construction, mutations, exact queries and portable lifecycle work. The original
+baseline refuses corruption before completing that lifecycle, so these are
+corrected-path costs rather than a speedup comparison.
+
+| Fixture | CPU seconds (3 runs) | Maximum RSS (KiB) | Successful syscall read / write bytes | Sampled allocated bytes |
+|---|---:|---:|---:|---:|
+| Mixed construction and ordinary mutation, 33 / 4,097 nodes | 4.20–4.21 | 120,536 | 340,327,349 / 69,275,673 | 14,802,944 |
+| 8,193-edge multi-batch owner and replacement work | 1.57–1.60 | 166,980 | 114,304,045 / 25,674,019 | 5,394,432 |
+| Qualified mutation, reopen and portable lifecycle | 1.07–1.16 | 90,456 | 28,610,264 / 2,582,102 | 2,129,920 |
+
+Syscall bytes include non-file descriptors and count a file copy once as a read
+and once as a write; they are not physical disk I/O. The evidence records GNU
+filesystem counters separately. Disk sampling deduplicates shared device/inode
+pairs across the private workspace and all coexisting lifecycle artifacts. Its
+largest observed gap was 15.10 ms despite a requested 5 ms interval; it excludes
+directories and unlinked open files and is not a hard bound. Native process RSS
+is separate from the logical reader-buffer ceilings above.
+
+See [Cypher ownership evidence](../../development/evidence/cypher-property-ownership-1224.json)
+for executable/source hashes, all observations, deterministic budgets, reproduction
+instructions, failed prototypes and the known local #1192 fixture limitation.

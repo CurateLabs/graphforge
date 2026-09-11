@@ -1,0 +1,376 @@
+{
+  "issue": 1224,
+  "scope": "Ordinary Cypher property ownership; public complete lifecycle and source-bound resource cost, not a speedup claim.",
+  "runtime_source": "055e34574b7bf140a6ce138f8a503ce3257988c0",
+  "executable_sha256": "36aef0711bdc1a1ef9900f18d8cfbedeac65085a8301eed4ba24d536f615e867",
+  "later_changes": "e95a796c and 119d76ec update only cfg(test) route-projection assertions and two plan goldens; runtime implementation is unchanged from the frozen source.",
+  "environment": {
+    "machine": "AMD Ryzen 7 3800X; 16 logical CPUs",
+    "native_project_filesystem": "ext4",
+    "tmpfs_tmp": "The separately tracked #1192 fixture hardcodes /tmp and fails admission; measured projects use private native-volume TMPDIRs.",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)"
+  },
+  "protocol": {
+    "repetitions": 3,
+    "fresh_processes": true,
+    "case_order": "Rotate lifecycle/owners/qualified across repetitions",
+    "freeze": "Successful release compiler artifact copied to a private executable; SHA-256 checked before and after processes. No overlapping builds/tests during measurements.",
+    "timing": "GNU time whole-process user/system CPU, elapsed time, max RSS and filesystem counters. Sampling and syscall tracing are separate runs; their timings are not latency evidence.",
+    "sampling": "Requested 5ms, non-atomic recursive regular-file walk of the entire private TMPDIR; globally deduplicate (st_dev,st_ino), sum st_blocks*512. Includes coexisting source, retained generations, workspace temporaries, portable package and clean import. Excludes directories and unlinked open files; sampled peak is not a hard bound.",
+    "io": "Successful read/pread/readv/preadv/write/pwrite/writev/pwritev/copy_file_range/sendfile returns across the tracee process tree, including non-file descriptors. Copy/sendfile contributes one read and one write. Does not count memory accesses or mapped-file page faults as syscall bytes. GNU filesystem counters are reported separately, without equating them to syscall bytes."
+  },
+  "cases": {
+    "lifecycle": {
+      "test": "constructed_edge_cypher_maps_and_removals_preserve_portable_lifecycle",
+      "observations": [
+        {
+          "user_seconds": 2.19,
+          "system_seconds": 2.01,
+          "peak_rss_kib": 118592,
+          "filesystem_input_blocks": 32504,
+          "filesystem_output_blocks": 157560,
+          "major_page_faults": 0,
+          "minor_page_faults": 20975,
+          "cpu_seconds": 4.2,
+          "gnu_elapsed": "0:04.31"
+        },
+        {
+          "user_seconds": 2.23,
+          "system_seconds": 1.97,
+          "peak_rss_kib": 118676,
+          "filesystem_input_blocks": 32504,
+          "filesystem_output_blocks": 157560,
+          "major_page_faults": 0,
+          "minor_page_faults": 19524,
+          "cpu_seconds": 4.2,
+          "gnu_elapsed": "0:04.31"
+        },
+        {
+          "user_seconds": 2.17,
+          "system_seconds": 2.04,
+          "peak_rss_kib": 120536,
+          "filesystem_input_blocks": 32504,
+          "filesystem_output_blocks": 157560,
+          "major_page_faults": 0,
+          "minor_page_faults": 20191,
+          "cpu_seconds": 4.21,
+          "gnu_elapsed": "0:04.32"
+        }
+      ],
+      "cpu_seconds_range": [
+        4.2,
+        4.21
+      ],
+      "maximum_observed_rss_kib": 120536,
+      "sample": {
+        "samples": 474,
+        "sampled_allocated_peak": 14802944,
+        "sampled_logical_peak": 12763965,
+        "max_sample_gap_seconds": 0.015093212015926838
+      },
+      "trace": {
+        "read_bytes": 340327349,
+        "write_bytes": 69275673,
+        "syscalls": {
+          "read": {
+            "calls": 76476,
+            "bytes": 244933093,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 221389,
+            "bytes": 81289043,
+            "errors": 0
+          },
+          "write": {
+            "calls": 11855,
+            "bytes": 55170460,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 5859,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 2640,
+            "bytes": 14105213,
+            "errors": 0
+          }
+        },
+        "unfinished_calls": 34670,
+        "resumed_calls": 34670,
+        "unparsed_results": 0
+      },
+      "all_oracles_passed": true
+    },
+    "owners": {
+      "test": "cypher_edge_owner_work_accounts_for_multiple_batches_and_items",
+      "observations": [
+        {
+          "user_seconds": 1.03,
+          "system_seconds": 0.57,
+          "peak_rss_kib": 157316,
+          "filesystem_input_blocks": 101000,
+          "filesystem_output_blocks": 55808,
+          "major_page_faults": 0,
+          "minor_page_faults": 47308,
+          "cpu_seconds": 1.6,
+          "gnu_elapsed": "0:01.91"
+        },
+        {
+          "user_seconds": 1.0,
+          "system_seconds": 0.57,
+          "peak_rss_kib": 166980,
+          "filesystem_input_blocks": 101000,
+          "filesystem_output_blocks": 55808,
+          "major_page_faults": 0,
+          "minor_page_faults": 52330,
+          "cpu_seconds": 1.57,
+          "gnu_elapsed": "0:01.86"
+        },
+        {
+          "user_seconds": 1.02,
+          "system_seconds": 0.57,
+          "peak_rss_kib": 163100,
+          "filesystem_input_blocks": 101000,
+          "filesystem_output_blocks": 55808,
+          "major_page_faults": 0,
+          "minor_page_faults": 42104,
+          "cpu_seconds": 1.59,
+          "gnu_elapsed": "0:01.88"
+        }
+      ],
+      "cpu_seconds_range": [
+        1.57,
+        1.6
+      ],
+      "maximum_observed_rss_kib": 166980,
+      "sample": {
+        "samples": 269,
+        "sampled_allocated_peak": 5394432,
+        "sampled_logical_peak": 5052849,
+        "max_sample_gap_seconds": 0.009272310067899525
+      },
+      "trace": {
+        "read_bytes": 114304045,
+        "write_bytes": 25674019,
+        "syscalls": {
+          "read": {
+            "calls": 11605,
+            "bytes": 78762257,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 47568,
+            "bytes": 33971541,
+            "errors": 0
+          },
+          "write": {
+            "calls": 1461,
+            "bytes": 24103772,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 2181,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 170,
+            "bytes": 1570247,
+            "errors": 0
+          }
+        },
+        "unfinished_calls": 1102,
+        "resumed_calls": 1102,
+        "unparsed_results": 0
+      },
+      "all_oracles_passed": true
+    },
+    "qualified": {
+      "test": "qualified_cypher_edge_owners_preserve_constructed_and_pending_values",
+      "observations": [
+        {
+          "user_seconds": 0.4,
+          "system_seconds": 0.75,
+          "peak_rss_kib": 90456,
+          "filesystem_input_blocks": 8464,
+          "filesystem_output_blocks": 13808,
+          "major_page_faults": 0,
+          "minor_page_faults": 5526,
+          "cpu_seconds": 1.15,
+          "gnu_elapsed": "0:01.49"
+        },
+        {
+          "user_seconds": 0.33,
+          "system_seconds": 0.74,
+          "peak_rss_kib": 89176,
+          "filesystem_input_blocks": 8464,
+          "filesystem_output_blocks": 13808,
+          "major_page_faults": 0,
+          "minor_page_faults": 5982,
+          "cpu_seconds": 1.07,
+          "gnu_elapsed": "0:01.40"
+        },
+        {
+          "user_seconds": 0.36,
+          "system_seconds": 0.8,
+          "peak_rss_kib": 89564,
+          "filesystem_input_blocks": 8464,
+          "filesystem_output_blocks": 13808,
+          "major_page_faults": 0,
+          "minor_page_faults": 5374,
+          "cpu_seconds": 1.16,
+          "gnu_elapsed": "0:01.50"
+        }
+      ],
+      "cpu_seconds_range": [
+        1.07,
+        1.16
+      ],
+      "maximum_observed_rss_kib": 90456,
+      "sample": {
+        "samples": 186,
+        "sampled_allocated_peak": 2129920,
+        "sampled_logical_peak": 764396,
+        "max_sample_gap_seconds": 0.010875510983169079
+      },
+      "trace": {
+        "read_bytes": 28610264,
+        "write_bytes": 2582102,
+        "syscalls": {
+          "read": {
+            "calls": 30294,
+            "bytes": 22281337,
+            "errors": 0
+          },
+          "pread64": {
+            "calls": 16319,
+            "bytes": 5680172,
+            "errors": 0
+          },
+          "write": {
+            "calls": 2572,
+            "bytes": 1933347,
+            "errors": 0
+          },
+          "fsync": {
+            "calls": 3135,
+            "bytes": 0,
+            "errors": 0
+          },
+          "copy_file_range": {
+            "calls": 844,
+            "bytes": 648755,
+            "errors": 0
+          }
+        },
+        "unfinished_calls": 718,
+        "resumed_calls": 718,
+        "unparsed_results": 0
+      },
+      "all_oracles_passed": true
+    }
+  },
+  "deterministic_work": {
+    "replacement": {
+      "owner_authentication_bytes": 686158,
+      "owner_batches": 2,
+      "owner_candidate_routes": 2,
+      "owner_decoder_peak_bytes": 701,
+      "owner_fragments": 36,
+      "owner_physical_bytes": 1747572,
+      "owner_row_groups": 36,
+      "owner_rows": 49158,
+      "owner_snapshot_bytes": 686158,
+      "owner_snapshot_peak_bytes": 133060,
+      "owner_target_memberships": 8193,
+      "owner_target_peak": 8192,
+      "owner_targets": 8193,
+      "replacement_authentication_bytes": 686158,
+      "replacement_batches": 2,
+      "replacement_decoder_peak_bytes": 701,
+      "replacement_fragments": 36,
+      "replacement_physical_bytes": 1747572,
+      "replacement_rows": 49158,
+      "replacement_snapshot_bytes": 686158,
+      "replacement_snapshot_peak_bytes": 133060,
+      "replacement_target_peak": 8192,
+      "replacement_targets": 8193
+    },
+    "scalar": {
+      "owner_authentication_bytes": 840076,
+      "owner_batches": 4,
+      "owner_candidate_routes": 4,
+      "owner_decoder_peak_bytes": 701,
+      "owner_fragments": 68,
+      "owner_physical_bytes": 2327176,
+      "owner_row_groups": 68,
+      "owner_rows": 50192,
+      "owner_snapshot_bytes": 840076,
+      "owner_snapshot_peak_bytes": 14382,
+      "owner_target_memberships": 16386,
+      "owner_target_peak": 8192,
+      "owner_targets": 16386
+    }
+  },
+  "deterministic_budgets": {
+    "fixture_edges": 8193,
+    "fixture_nodes": 33,
+    "routes": 2,
+    "scalar_items": 2,
+    "scalar_owner_batches": 4,
+    "scalar_owner_target_memberships": 16386,
+    "replacement_owner_batches": 2,
+    "replacement_key_batches": 2,
+    "target_peak": 8192,
+    "scalar_owner_rows_max": 57351,
+    "scalar_owner_physical_bytes_max": 2621760,
+    "scalar_owner_authentication_bytes_max": 1048704,
+    "replacement_owner_and_key_each_rows_max": 49158,
+    "replacement_owner_and_key_each_physical_bytes_max": 2097408,
+    "replacement_owner_and_key_each_authentication_bytes_max": 1048704,
+    "replacement_each_snapshot_peak_bytes_max": 262144,
+    "decoder_peak_bytes_max": 4096,
+    "scope": "Owner probing and replacement-key reads only. Cumulative counters count repeated reads/items/batches again. Snapshot/decoder peaks are logical reader buffers, not full-publication memory or native RSS. Workspace admission and existing complete transaction costs are included only in whole-process observations."
+  },
+  "correctness": {
+    "lifecycle": "33 and 4097 original nodes, 129 constructed edges, two routes plus two ordinary-created edges (including one initially propertyless). Scalar SET, map merge/replacement, nulling and REMOVE; exact identities/endpoints/types/nullable values; retained old stream; reopen, export/full verify/clean import and imported mutation/reopen.",
+    "qualified": "Mixed exploratory/qualified construction, first qualified property publication, reopen after mutations, same-statement qualified CREATE/SET/REMOVE/map merge, public relationship type through direct and WITH returns, portable verification/import and subsequent mutation.",
+    "refusal": "Ambiguous authenticated owners refuse SET and REMOVE before accumulation; exact graph-file inventory remains unchanged. Existing malformed-route, mask, null, pending-create and deletion regressions retained."
+  },
+  "verification": {
+    "write_driver": "27 passed",
+    "rel_units": "244 passed after exact projection assertions",
+    "plan_goldens": "15 passed after reviewing two route-only diffs; all prior plan content preserved",
+    "public_boundary_tests": "4 passed; all nine uninstrumented and six separately instrumented resource runs passed their exact oracles",
+    "fast_gate": "make pre-push-fast passed; exact new public symbols recorded in property-overlay contract ledger",
+    "initial_ci": {
+      "run": 34551535010,
+      "head": "055e34574b7bf140a6ce138f8a503ce3257988c0",
+      "result": "FAILURE: 99 of 101 Bazel targets passed; rel unit and golden targets contained old plan-shape expectations. All independent Python/Node/platform/quality/policy lanes passed. Structural expectations corrected in later test-only commits."
+    },
+    "local_full": "Full workspace stopped at old lowerer assertions. Corrected rel unit/golden runs passed. Remaining-crate --no-fail-fast census and corrected full pre-push encountered only known #1192 UnsupportedFilesystem in the hardcoded /tmp socket fixture. Neither full command is claimed green."
+  },
+  "failed_and_superseded": [
+    "Main c7a8cdd0 plus test-only 3983d97e reproduced successful constructed-edge SET followed by immediate duplicate-owner corruption refusal. That incomplete lifecycle cannot be a latency baseline.",
+    "Earlier qualified-route prototype omitted the provider-backed route column; a subsequent attempt failed reopen semantic metadata validation. Neither is counted as successful lifecycle evidence.",
+    "Passing pinned historical property counts directly into writer staging caused live-schema/physical-row-bound and mixed-generation errors. The uncommitted prototype was discarded; current workspace counts plus pinned missing-route declarations passed.",
+    "Broader relationship-container diagnostics failed on both main and the candidate. They do not establish an internal-route leak or general list/UNWIND conformance. Required direct and WITH-qualified value assertions pass.",
+    "Earlier frozen caa58d48/18d4b01f executables were superseded before resource acceptance. Only the stated 055e3457 executable supplies these observations.",
+    "Supplementary process-FD sampling did not produce accepted evidence: the first collector failed with a missing stat import; the corrected collector encountered PermissionError reading a child process /proc/PID/fd. Both runs are excluded. Reported disk peaks retain the explicit regular-file-only scope and exclude unlinked open files."
+  ],
+  "reproduce": [
+    "Build cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json with isolated CARGO_TARGET_DIR and native-volume TMPDIR. Copy the successful compiler-artifact executable and hash it before any subprocess.",
+    "For each named case, run /usr/bin/time -v FROZEN_EXECUTABLE --exact TEST --nocapture --test-threads=1 three times with separate private native TMPDIRs; rotate case order.",
+    "Run separate strace -f -qq -yy -s 0 -e trace=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,copy_file_range,sendfile,fsync,fdatasync executions and sum successful return lengths. Retain unfinished/resumed and unparsed-result counts.",
+    "Separately sample all private TMPDIR regular files by unique device/inode as specified above; retain actual maximum sampling gap."
+  ],
+  "collector_sha256": {
+    "gf1224-measure.py": "ea8505062100c4452de86fa1cb2c8cab1c940c5ead869d186b269cb07df63fdb",
+    "gf1224-trace.py": "31d840b148aa527a4169a8772b66cc610d1859e247e875ab2386be29e90276bf",
+    "gf1224-run-measurements.py": "c3f456b24c63149f6f8f3084d8b039635a2abd8507d2828961de70dc19d794f9",
+    "gf1224-run-instrumented.py": "1eae0b5991b7680892ea00def73c497b0f153abce14ba60eda90bdfffb3641ea"
+  }
+}
