@@ -4842,6 +4842,7 @@ mod tests {
                 Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
                 Field::new(PROPERTY_TOMBSTONE_FIELD, DataType::Boolean, false),
                 Field::new("name", DataType::Int64, true),
+                Field::new("extra", DataType::Int64, true),
             ],
             HashMap::from([
                 (
@@ -4862,6 +4863,7 @@ mod tests {
                 ),
                 Arc::new(BooleanArray::from(vec![false])),
                 Arc::new(Int64Array::from(vec![Some(9)])),
+                Arc::new(Int64Array::from(vec![Some(42)])),
             ],
         )
         .unwrap();
@@ -4910,6 +4912,7 @@ mod tests {
                     FixedSizeBinaryArray::try_from_iter(vec![vec![6; 16]].into_iter()).unwrap(),
                 ),
                 Arc::new(BooleanArray::from(vec![true])),
+                Arc::new(Int64Array::from(vec![None])),
                 Arc::new(Int64Array::from(vec![None])),
             ],
         )
@@ -4980,6 +4983,47 @@ mod tests {
             vec![[4; 16], [5; 16]]
         );
         assert_eq!(targeted_metrics.fragments_considered, 3);
+
+        let context = SessionContext::new();
+        context
+            .register_table(
+                "evolved",
+                Arc::new(crate::catalog::PropertyTable::open_authenticated(
+                    dir.path(),
+                    "Person",
+                    Arc::new(evolved),
+                )),
+            )
+            .unwrap();
+        let projected = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            context
+                .sql("SELECT extra, name, node_uuid FROM evolved ORDER BY node_uuid")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap()
+        });
+        let projected = arrow::compute::concat_batches(&projected[0].schema(), &projected).unwrap();
+        assert_eq!(projected.num_rows(), 2);
+        let extra = projected
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert!(extra.is_null(0));
+        assert_eq!(extra.value(1), 42);
+        assert_eq!(
+            projected.schema().field(1).data_type(),
+            &DataType::Struct(crate::writer::heterogeneous_scalar_fields())
+        );
+        let ids = projected
+            .column(2)
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(ids.value(0), &[4; 16]);
+        assert_eq!(ids.value(1), &[5; 16]);
 
         fs::write(&path, b"same-name attacker replacement").unwrap();
         assert!(
@@ -5228,6 +5272,16 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("injected late authenticated"));
 
+        inventory.fail_decoder_on_row(2);
+        let error = context
+            .sql("SELECT node_uuid FROM props LIMIT 1")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected late authenticated"));
+
         let tampered_bytes = || {
             let mut tampered = bytes.clone();
             let needle = b"authenticated-two";
@@ -5413,6 +5467,100 @@ mod tests {
         );
         assert!(projected.validation_bytes < full.validation_bytes);
         assert_eq!(projected.per_record_seeks, 0);
+
+        // Cross the actual DataFusion scan boundary: direct-reader tests alone
+        // cannot detect accidentally restoring unprojected scan materialization.
+        let inventory = Arc::new(inventory);
+        let schema = inventory
+            .route_schema(PropertyRouteKind::Edge, "KNOWS")
+            .unwrap();
+        let keep = schema.index_of("keep").unwrap();
+        let uuid = schema.index_of("edge_uuid").unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut full_spill = None;
+        for projection in [None, Some(vec![keep, uuid, keep]), Some(vec![])] {
+            let expected_schema = projection.as_ref().map_or_else(
+                || schema.as_ref().clone(),
+                |indices| schema.project(indices).unwrap(),
+            );
+            let plan: Arc<dyn datafusion::physical_plan::ExecutionPlan> = Arc::new(
+                crate::property_scan::PropertyOverlayExec::try_new(
+                    root.path().to_path_buf(),
+                    Some(Arc::clone(&inventory)),
+                    "KNOWS".into(),
+                    true,
+                    Arc::clone(&schema),
+                    crate::property_scan::PropertyScanOptions {
+                        projection: projection.as_ref(),
+                        limit: None,
+                        batch_size: 17,
+                    },
+                )
+                .unwrap(),
+            );
+            let output = runtime
+                .block_on(datafusion::physical_plan::collect(
+                    Arc::clone(&plan),
+                    Arc::new(datafusion::execution::TaskContext::default()),
+                ))
+                .unwrap();
+            assert_eq!(
+                output.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                rows
+            );
+            for batch in &output {
+                assert_eq!(batch.schema().as_ref(), &expected_schema);
+                if projection
+                    .as_ref()
+                    .is_some_and(|indices| !indices.is_empty())
+                {
+                    assert_eq!(batch.column(0), batch.column(2));
+                    let kept = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert!(kept.iter().all(|value| value == Some("kept")));
+                }
+            }
+            if projection
+                .as_ref()
+                .is_none_or(|indices| !indices.is_empty())
+            {
+                let identity_column = if projection.is_none() { uuid } else { 1 };
+                let actual = output
+                    .iter()
+                    .flat_map(|batch| {
+                        let ids = batch
+                            .column(identity_column)
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap();
+                        (0..batch.num_rows())
+                            .map(|row| ids.value(row).to_vec())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    (1..=rows)
+                        .map(|row| vec![u8::try_from(row).unwrap(); 16])
+                        .collect::<Vec<_>>()
+                );
+            }
+            let metrics = plan.metrics().unwrap();
+            let value = |name| metrics.sum_by_name(name).unwrap().as_usize();
+            assert_eq!(value("property_physical_rows"), rows);
+            assert_eq!(value("property_authentication_bytes"), bytes.len());
+            let spill = value("property_spill_bytes");
+            if projection.is_none() {
+                full_spill = Some(spill);
+            } else {
+                assert!(spill <= rows * 256);
+                assert!(full_spill.unwrap() - spill >= rows * 8192);
+                assert!(value("property_decoder_peak_bytes") <= rows * 256);
+            }
+        }
     }
 
     #[test]

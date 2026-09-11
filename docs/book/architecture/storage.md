@@ -1258,3 +1258,51 @@ is separate from the logical reader-buffer ceilings above.
 See [Cypher ownership evidence](../../development/evidence/cypher-property-ownership-1224.json)
 for executable/source hashes, all observations, deterministic budgets, reproduction
 instructions, failed prototypes and the known local #1192 fixture limitation.
+
+Property scan projection reaches the authenticated overlay reader before decoded
+rows and external merge runs are built. The scan restores requested column order
+and duplicates afterward; an empty projection retains its row count. UUID and
+tombstone keys, full-file authentication, schema/resource admission and late
+failure refusal remain mandatory. This changes query materialization, without
+changing permanent encoding or replay/compaction policy.
+
+A frozen release comparison on 4,097 random-ID nodes with sixteen nullable
+256-byte text columns measured three fresh processes per query, each executing
+five queries. Exact nullable values and identities passed for every run.
+
+| Query | First-query median ms, before → after | Reused-query median ms, before → after | Process CPU seconds, before → after |
+|---|---:|---:|---:|
+| UUID and score | 321 → 37 | 291 → 28 | 1.49–1.55 → 0.21–0.22 |
+| All properties | 327 → 342 | 294 → 309 | 2.61–2.72 → 2.71–2.77 |
+| Ordered LIMIT 16 | 323 → 38 | 291 → 28 | 1.53–1.57 → 0.21–0.22 |
+| Negative text lookup | 321 → 57 | 277 → 46 | 1.46–1.56 → 0.29–0.31 |
+
+For UUID/score projection, five-query successful syscall reads fell from
+227,678,948 to 90,168,422 bytes and writes from 131,441,481 to 44,041,853 bytes.
+Avoided writes exceeded the preselected 76,267,520-byte threshold: one raw pass
+over all unrequested payload values per query. Maximum observed RSS fell from
+136,192 to 76,692 KiB. GNU filesystem inputs remained 84,808 blocks; this is not
+physical-read reduction evidence. Full projection has effectively unchanged I/O
+and slightly higher measured latency/CPU within its baseline-derived envelope.
+Process CPU includes facade open and exact result checking, so comparisons use
+the same query and oracle on both executables.
+
+A separate descriptor-aware sample counted private regular files and open
+unlinked files together, globally deduplicated by device/inode. Narrow-query
+sampled overlapping allocation fell from 37,019,648 to 20,127,744 bytes, including
+the unchanged 17,768,448-byte retained project. The collector inspected only the
+private roots and descendant descriptors; the executable retained its original
+user/group identity. Sampling is non-atomic, excludes directory blocks and
+unlinked mappings without an open descriptor, and is not a hard bound. Earlier
+directory-only samples remain recorded with their narrower scope.
+
+Physical-plan metrics retain cumulative completed-reader spill/authentication
+bytes and rows, plus the maximum logical decoder retention. They are neither
+native RSS nor failed-reader work. An executed scan regression asserts exact
+reordered/duplicate/empty projections and payload-derived spill/decoder ceilings;
+public lifecycle tests additionally cover mutation, snapshots, reopen and portable
+verification/import followed by mutation.
+
+See [property projection evidence](../../development/evidence/property-projection-1247.json)
+for source/executable hashes, all observations, selection budgets, instrumentation
+limits, reproduction commands and validation results.

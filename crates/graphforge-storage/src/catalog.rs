@@ -1876,6 +1876,7 @@ where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     visit_property_overlay_batched_projected(dir, None, stem, is_edge, batch_size, None, visit)
+        .map(|_| ())
 }
 
 pub(crate) fn visit_property_overlay_batched_with_inventory<F>(
@@ -1890,10 +1891,11 @@ where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     visit_property_overlay_batched_projected(dir, inventory, stem, is_edge, batch_size, None, visit)
+        .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn visit_property_overlay_batched_projected<F>(
+pub(crate) fn visit_property_overlay_batched_projected<F>(
     dir: &Path,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
     stem: &str,
@@ -1901,12 +1903,12 @@ fn visit_property_overlay_batched_projected<F>(
     batch_size: usize,
     selected_properties: Option<&std::collections::BTreeSet<String>>,
     mut visit: F,
-) -> Result<(), DataFusionError>
+) -> Result<crate::PropertyOverlayMetrics, DataFusionError>
 where
     F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
 {
     if !dir.exists() {
-        return Ok(());
+        return Ok(crate::PropertyOverlayMetrics::default());
     }
     let kind = if is_edge {
         crate::property_overlay::PropertyRouteKind::Edge
@@ -1926,7 +1928,7 @@ where
     let scratch = tempfile::tempdir().map_err(|error| io_err(&error))?;
     let mut rows = Vec::with_capacity(batch_size.max(1));
     let mut stopped = false;
-    inventory
+    let metrics = inventory
         .visit_route_projected(
             kind,
             stem,
@@ -1967,7 +1969,7 @@ where
             .map_err(|error| DataFusionError::Execution(error.to_string()))?;
         let _ = visit(&batch)?;
     }
-    Ok(())
+    Ok(metrics)
 }
 
 fn project_property_batch(

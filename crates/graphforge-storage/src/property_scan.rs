@@ -11,6 +11,9 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
+use datafusion::physical_plan::metrics::{
+    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -31,11 +34,14 @@ pub(crate) struct PropertyOverlayExec {
     route: String,
     is_edge: bool,
     schema: SchemaRef,
-    projection: Option<Vec<usize>>,
+    projection: Option<Vec<String>>,
     limit: Option<usize>,
     batch_size: usize,
     row_upper_bound: Option<usize>,
     props: Arc<PlanProperties>,
+    metrics: ExecutionPlanMetricsSet,
+    work_counts: [Count; 3],
+    decoder_peak: Gauge,
 }
 
 impl fmt::Debug for PropertyOverlayExec {
@@ -71,6 +77,13 @@ impl PropertyOverlayExec {
                     .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
             },
         )?;
+        let projection = projection.map(|_| {
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect()
+        });
         let kind = if is_edge {
             crate::PropertyRouteKind::Edge
         } else {
@@ -91,6 +104,14 @@ impl PropertyOverlayExec {
             // backpressured channel, so polling never blocks the async worker.
             .with_scheduling_type(SchedulingType::Cooperative),
         );
+        let metrics = ExecutionPlanMetricsSet::new();
+        let work_counts = [
+            "property_spill_bytes",
+            "property_authentication_bytes",
+            "property_physical_rows",
+        ]
+        .map(|name| MetricBuilder::new(&metrics).counter(name, 0));
+        let decoder_peak = MetricBuilder::new(&metrics).gauge("property_decoder_peak_bytes", 0);
         Ok(Self {
             project,
             inventory,
@@ -102,6 +123,9 @@ impl PropertyOverlayExec {
             batch_size: options.batch_size.max(1),
             row_upper_bound,
             props,
+            metrics,
+            work_counts,
+            decoder_peak,
         })
     }
 }
@@ -164,6 +188,10 @@ impl ExecutionPlan for PropertyOverlayExec {
         }))
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -182,19 +210,32 @@ impl ExecutionPlan for PropertyOverlayExec {
         let projection = self.projection.clone();
         let mut remaining = self.limit;
         let batch_size = self.batch_size;
+        let work_counts = self.work_counts.clone();
+        let decoder_peak = self.decoder_peak.clone();
         tokio::task::spawn_blocking(move || {
-            let result = crate::catalog::visit_property_overlay_batched_with_inventory(
+            let selected_properties = projection
+                .as_ref()
+                .map(|names| names.iter().cloned().collect());
+            let result = crate::catalog::visit_property_overlay_batched_projected(
                 &project,
                 inventory.as_deref(),
                 &route,
                 is_edge,
                 batch_size,
+                selected_properties.as_ref(),
                 |batch| {
                     let mut batch = projection.as_ref().map_or_else(
                         || Ok(batch.clone()),
-                        |indices| {
+                        |names| {
+                            let indices = names
+                                .iter()
+                                .map(|name| batch.schema().index_of(name))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    DataFusionError::ArrowError(Box::new(error), None)
+                                })?;
                             batch
-                                .project(indices)
+                                .project(&indices)
                                 .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
                         },
                     )?;
@@ -213,6 +254,23 @@ impl ExecutionPlan for PropertyOverlayExec {
                     Ok(true)
                 },
             );
+            let result = result.and_then(|work| {
+                // Completed reader work only; these logical counters are not native RSS.
+                let measured = |value| {
+                    usize::try_from(value).map_err(|_| {
+                        DataFusionError::Execution("property metric exceeds platform range".into())
+                    })
+                };
+                for (counter, value) in work_counts.iter().zip([
+                    work.spill_bytes,
+                    work.authentication_bytes,
+                    work.physical_rows,
+                ]) {
+                    counter.add(measured(value)?);
+                }
+                decoder_peak.set_max(measured(work.decoder_peak_bytes)?);
+                Ok(())
+            });
             if let Err(error) = result {
                 let _ = sender.blocking_send(Err(error));
             }

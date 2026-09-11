@@ -1,0 +1,1147 @@
+{
+  "issue": 1247,
+  "decision": "Implement authenticated property projection before overlay materialization; selected budgets passed.",
+  "baseline": {
+    "source": "3925c91c49b31381957053fd1a8abb2ceef99897",
+    "integrated_core_source": "8b854b9b9c096f10e1d48538ef5ad8e13d9ebc19",
+    "executable": "/tmp/gf1207-wide-baseline-bin",
+    "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+    "profile": "release optimized",
+    "build_command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+    "flags": {
+      "RUSTFLAGS": null,
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "LLVM_PROFILE_FILE": null
+    }
+  },
+  "candidate": {
+    "source": "54bd7d6c1ecbed9085dc30ce19b5b29c725fe9f3",
+    "integrated_core_source": "8b854b9b9c096f10e1d48538ef5ad8e13d9ebc19",
+    "executable": "/tmp/gf1247-candidate-bin",
+    "sha256": "142d50591ef7b81095bf9a401d2ca9c363dc8eed982b45a1e2b088853a281681",
+    "profile": "release optimized",
+    "build_command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+    "flags": {
+      "RUSTFLAGS": null,
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "LLVM_PROFILE_FILE": null
+    }
+  },
+  "environment": {
+    "cpu": "AMD Ryzen 7 3800X, 16 logical CPUs",
+    "filesystem": "native ext4",
+    "build_jobs": 4,
+    "measurements": "No overlapping builds/tests; source-bound frozen executables. Three fresh processes/case, five queries each; rotating case order. Separate tracing/directory sampling/descriptor sampling executions."
+  },
+  "fixture": {
+    "nodes": 4097,
+    "width": 16,
+    "nullable_payload_bytes_per_nonnull_column": 256,
+    "raw_unrequested_payload_bytes": 15253504,
+    "permanent_allocated_bytes": 17768448,
+    "permanent_logical_bytes": 17296857,
+    "oracle": "Exact deterministic random UUIDs, nullable score and all returned text values; exact UUID order for LIMIT16; zero rows for negative lookup."
+  },
+  "selection_protocol_before_candidate": {
+    "candidate": "Push requested properties into the existing authenticated overlay reader before row/spill materialization",
+    "created_before_candidate_edits": true,
+    "source": {
+      "source": "3925c91c49b31381957053fd1a8abb2ceef99897",
+      "integrated_core_source": "8b854b9b9c096f10e1d48538ef5ad8e13d9ebc19",
+      "executable": "/tmp/gf1207-wide-baseline-bin",
+      "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+      "profile": "release optimized",
+      "build_command": "cargo test --release -p graphforge-api --test permanent_storage_budgets --no-run --message-format=json",
+      "flags": {
+        "RUSTFLAGS": null,
+        "CARGO_ENCODED_RUSTFLAGS": null,
+        "LLVM_PROFILE_FILE": null
+      }
+    },
+    "raw_unselected_payload_bytes_per_query": 15253504,
+    "minimum_avoided_syscall_write_bytes_five_queries": 76267520,
+    "write_reduction_fraction": 0.5802393538155585,
+    "rationale": "Remove at least one full pass over the 16 unrequested nullable payload columns per query. Baseline writes90547165 bytes of overlay JSONL across fivequeries, separately from authenticatedsnapshotcopies. No newwriter/format/metadata required.",
+    "permanent_allocated_bytes_max": 17768448,
+    "sampled_temporary_allocated_bytes_max": 18309120,
+    "sampled_overlap_allocated_bytes_max": 36077568,
+    "sampling": "Regular-file globaldev/inodededup; nonatomicsampledpeak excludesdirectory/unlinkedopenfiles; nothardbound. Actualmaxgap8.78ms.",
+    "baseline_scope": "Three fresh processes per query case, five same-facade queries; execute-only wall time. GNU CPU/RSS/filesystem counters include facade open and exact oracle. fsync+POSIX_FADV_DONTNEED on private source files only is advice, not guaranteed OS eviction. No overlapping builds/tests.",
+    "cases": {
+      "narrow": {
+        "cpu_baseline_range": [
+          1.49,
+          1.55
+        ],
+        "whole_process_cpu_seconds_max": 1.61,
+        "rss_baseline_kib": [
+          136192,
+          135984,
+          135136
+        ],
+        "rss_kib_max": 137248,
+        "median_latency_ns_max": 374634063,
+        "rss_rationale": "Baseline max plus its observed process-to-process span; sampled observation gate, not deterministic native bound."
+      },
+      "full": {
+        "cpu_baseline_range": [
+          2.61,
+          2.7199999999999998
+        ],
+        "whole_process_cpu_seconds_max": 2.83,
+        "rss_baseline_kib": [
+          151464,
+          151984,
+          150824
+        ],
+        "rss_kib_max": 153144,
+        "median_latency_ns_max": 378723400,
+        "rss_rationale": "Baseline max plus its observed process-to-process span; sampled observation gate, not deterministic native bound."
+      },
+      "limit": {
+        "cpu_baseline_range": [
+          1.53,
+          1.57
+        ],
+        "whole_process_cpu_seconds_max": 1.61,
+        "rss_baseline_kib": [
+          138452,
+          138512,
+          137720
+        ],
+        "rss_kib_max": 139304,
+        "median_latency_ns_max": 382200706,
+        "rss_rationale": "Baseline max plus its observed process-to-process span; sampled observation gate, not deterministic native bound."
+      },
+      "negative": {
+        "cpu_baseline_range": [
+          1.46,
+          1.56
+        ],
+        "whole_process_cpu_seconds_max": 1.66,
+        "rss_baseline_kib": [
+          137756,
+          138120,
+          136888
+        ],
+        "rss_kib_max": 139352,
+        "median_latency_ns_max": 373820758,
+        "rss_rationale": "Baseline max plus its observed process-to-process span; sampled observation gate, not deterministic native bound."
+      }
+    },
+    "write_maintenance": "Production publishing/encoding unchanged. Identical fixture must retain exact allocatedbytes and properties. No added durablemetadata or maintenancepass accepted; assess any unexpected writing separately.",
+    "correctness": "All four exactpublicqueryoracles; selectedrepair must also exercise updates/removes/nulls, active snapshots, reopen/export/fullverify/import/subsequentmutation and existing projected-reader malformed/unselectedcorruption tests. MandatoryUUID/tombstone/keyvalidation remains.",
+    "timing_rule": "Timingobservations notCI gates. Candidate CPU/run andmedianquerylatency must be no worse than baseline maximum plus observed baseline span; disclose any outlier, no retries to hide failures. Deterministic byte/space assertions remainselectiongates."
+  },
+  "cases": {
+    "narrow": {
+      "baseline": {
+        "observations": [
+          {
+            "query_ns": [
+              321275312,
+              290854395,
+              289160993,
+              290881015,
+              292015936
+            ],
+            "user_seconds": 1.23,
+            "system_seconds": 0.32,
+            "rss_kib": 136192,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              303233129,
+              272705151,
+              275330260,
+              277667945,
+              294531555
+            ],
+            "user_seconds": 1.19,
+            "system_seconds": 0.3,
+            "rss_kib": 135984,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              323669607,
+              289655672,
+              290422487,
+              293036006,
+              291635890
+            ],
+            "user_seconds": 1.24,
+            "system_seconds": 0.31,
+            "rss_kib": 135136,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          }
+        ],
+        "first_query_median_ns": 321275312,
+        "reused_query_median_ns": 290638441.0,
+        "trace": {
+          "read_bytes": 227678948,
+          "write_bytes": 131441481,
+          "syscalls": {
+            "read": {
+              "calls": 12703,
+              "bytes": 126744190,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 19963,
+              "bytes": 100934758,
+              "errors": 0
+            },
+            "write": {
+              "calls": 11919,
+              "bytes": 131441481,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "narrow",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 36077568,
+          "sampled_private_temporary_allocated_peak_bytes": 18309120,
+          "samples": 205,
+          "maximum_sample_gap_seconds": 0.008772916975431144,
+          "vanished_files": 0,
+          "fingerprint": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+        },
+        "open_descriptor_sample": {
+          "variant": "baseline",
+          "case": "narrow",
+          "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+          "query_oracle": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2",
+          "samples": 197,
+          "sampled_allocated_peak": 37019648,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.008853247971273959,
+          "vanished_entries": 3,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+      },
+      "candidate": {
+        "observations": [
+          {
+            "query_ns": [
+              37054061,
+              28780694,
+              27873967,
+              27812875,
+              27257706
+            ],
+            "user_seconds": 0.12,
+            "system_seconds": 0.09,
+            "rss_kib": 76692,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          },
+          {
+            "query_ns": [
+              37009519,
+              28628921,
+              27978829,
+              27669063,
+              27368357
+            ],
+            "user_seconds": 0.14,
+            "system_seconds": 0.08,
+            "rss_kib": 75444,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          },
+          {
+            "query_ns": [
+              37033830,
+              28387807,
+              27835726,
+              27371507,
+              27269045
+            ],
+            "user_seconds": 0.13,
+            "system_seconds": 0.08,
+            "rss_kib": 76572,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          }
+        ],
+        "first_query_median_ns": 37033830,
+        "reused_query_median_ns": 27824300.5,
+        "trace": {
+          "read_bytes": 90168422,
+          "write_bytes": 44041853,
+          "syscalls": {
+            "read": {
+              "calls": 2038,
+              "bytes": 39344554,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 18043,
+              "bytes": 50823868,
+              "errors": 0
+            },
+            "write": {
+              "calls": 1078,
+              "bytes": 44041853,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "narrow",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 18595840,
+          "sampled_private_temporary_allocated_peak_bytes": 827392,
+          "samples": 36,
+          "maximum_sample_gap_seconds": 0.008499411051161587,
+          "vanished_files": 0,
+          "fingerprint": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+        },
+        "open_descriptor_sample": {
+          "variant": "candidate",
+          "case": "narrow",
+          "sha256": "142d50591ef7b81095bf9a401d2ca9c363dc8eed982b45a1e2b088853a281681",
+          "query_oracle": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2",
+          "samples": 32,
+          "sampled_allocated_peak": 20127744,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.008824086980894208,
+          "vanished_entries": 3,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+      }
+    },
+    "full": {
+      "baseline": {
+        "observations": [
+          {
+            "query_ns": [
+              327085321,
+              284494464,
+              279826255,
+              280130012,
+              279429458
+            ],
+            "user_seconds": 2.27,
+            "system_seconds": 0.34,
+            "rss_kib": 151464,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              311694389,
+              296241556,
+              297727685,
+              296840567,
+              298906047
+            ],
+            "user_seconds": 2.39,
+            "system_seconds": 0.32,
+            "rss_kib": 151984,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              329076429,
+              295300939,
+              294200828,
+              293032666,
+              292613868
+            ],
+            "user_seconds": 2.38,
+            "system_seconds": 0.34,
+            "rss_kib": 150824,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          }
+        ],
+        "first_query_median_ns": 327085321,
+        "reused_query_median_ns": 293616747.0,
+        "trace": {
+          "read_bytes": 227678948,
+          "write_bytes": 131441495,
+          "syscalls": {
+            "read": {
+              "calls": 12703,
+              "bytes": 126744190,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 19963,
+              "bytes": 100934758,
+              "errors": 0
+            },
+            "write": {
+              "calls": 11921,
+              "bytes": 131441495,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "full",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 36077568,
+          "sampled_private_temporary_allocated_peak_bytes": 18309120,
+          "samples": 356,
+          "maximum_sample_gap_seconds": 0.008292358019389212,
+          "vanished_files": 0,
+          "fingerprint": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+        },
+        "open_descriptor_sample": {
+          "variant": "baseline",
+          "case": "full",
+          "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+          "query_oracle": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2",
+          "samples": 321,
+          "sampled_allocated_peak": 37675008,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.00874292606022209,
+          "vanished_entries": 5,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+      },
+      "candidate": {
+        "observations": [
+          {
+            "query_ns": [
+              342470543,
+              308481011,
+              296810220,
+              291609922,
+              292118042
+            ],
+            "user_seconds": 2.37,
+            "system_seconds": 0.34,
+            "rss_kib": 151032,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              342288370,
+              310324455,
+              307672455,
+              309875457,
+              310590971
+            ],
+            "user_seconds": 2.41,
+            "system_seconds": 0.36,
+            "rss_kib": 151596,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              343515783,
+              300758505,
+              313687809,
+              313486886,
+              313256402
+            ],
+            "user_seconds": 2.44,
+            "system_seconds": 0.33,
+            "rss_kib": 151584,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          }
+        ],
+        "first_query_median_ns": 342470543,
+        "reused_query_median_ns": 309178234.0,
+        "trace": {
+          "read_bytes": 227678932,
+          "write_bytes": 131441487,
+          "syscalls": {
+            "read": {
+              "calls": 12703,
+              "bytes": 126744174,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 19963,
+              "bytes": 100934758,
+              "errors": 0
+            },
+            "write": {
+              "calls": 11920,
+              "bytes": 131441487,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "full",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 36077568,
+          "sampled_private_temporary_allocated_peak_bytes": 18309120,
+          "samples": 362,
+          "maximum_sample_gap_seconds": 0.009140443056821823,
+          "vanished_files": 0,
+          "fingerprint": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+        },
+        "open_descriptor_sample": {
+          "variant": "candidate",
+          "case": "full",
+          "sha256": "142d50591ef7b81095bf9a401d2ca9c363dc8eed982b45a1e2b088853a281681",
+          "query_oracle": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2",
+          "samples": 312,
+          "sampled_allocated_peak": 36077568,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.009089962928555906,
+          "vanished_entries": 12,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "f9a8372f8e33796fd0d61e8f3843f12bf8a5e3f08f99249b0d4627d6f81ad4b2"
+      }
+    },
+    "limit": {
+      "baseline": {
+        "observations": [
+          {
+            "query_ns": [
+              330457625,
+              292991205,
+              293416443,
+              290256894,
+              292547456
+            ],
+            "user_seconds": 1.26,
+            "system_seconds": 0.31,
+            "rss_kib": 138452,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              322987503,
+              291997136,
+              291951336,
+              291297243,
+              278714544
+            ],
+            "user_seconds": 1.25,
+            "system_seconds": 0.29,
+            "rss_kib": 138512,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              322604266,
+              285833009,
+              287232546,
+              286325399,
+              284782529
+            ],
+            "user_seconds": 1.25,
+            "system_seconds": 0.28,
+            "rss_kib": 137720,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          }
+        ],
+        "first_query_median_ns": 322987503,
+        "reused_query_median_ns": 290777068.5,
+        "trace": {
+          "read_bytes": 227678948,
+          "write_bytes": 131441494,
+          "syscalls": {
+            "read": {
+              "calls": 12703,
+              "bytes": 126744190,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 19963,
+              "bytes": 100934758,
+              "errors": 0
+            },
+            "write": {
+              "calls": 11921,
+              "bytes": 131441494,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "limit",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 36077568,
+          "sampled_private_temporary_allocated_peak_bytes": 18309120,
+          "samples": 207,
+          "maximum_sample_gap_seconds": 0.008312817895784974,
+          "vanished_files": 0,
+          "fingerprint": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5"
+        },
+        "open_descriptor_sample": {
+          "variant": "baseline",
+          "case": "limit",
+          "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+          "query_oracle": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5",
+          "samples": 191,
+          "sampled_allocated_peak": 36085760,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.009359647985547781,
+          "vanished_entries": 3,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5"
+      },
+      "candidate": {
+        "observations": [
+          {
+            "query_ns": [
+              38235553,
+              27091602,
+              26204645,
+              26615993,
+              26510911
+            ],
+            "user_seconds": 0.13,
+            "system_seconds": 0.08,
+            "rss_kib": 76576,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          },
+          {
+            "query_ns": [
+              38134501,
+              29036329,
+              27886897,
+              27847816,
+              28278465
+            ],
+            "user_seconds": 0.13,
+            "system_seconds": 0.09,
+            "rss_kib": 76632,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          },
+          {
+            "query_ns": [
+              38189392,
+              29255144,
+              28375676,
+              28131192,
+              27961768
+            ],
+            "user_seconds": 0.13,
+            "system_seconds": 0.08,
+            "rss_kib": 77408,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 86272
+          }
+        ],
+        "first_query_median_ns": 38189392,
+        "reused_query_median_ns": 27924332.5,
+        "trace": {
+          "read_bytes": 90168422,
+          "write_bytes": 44041874,
+          "syscalls": {
+            "read": {
+              "calls": 2038,
+              "bytes": 39344554,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 18043,
+              "bytes": 50823868,
+              "errors": 0
+            },
+            "write": {
+              "calls": 1081,
+              "bytes": 44041874,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "limit",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 18595840,
+          "sampled_private_temporary_allocated_peak_bytes": 827392,
+          "samples": 35,
+          "maximum_sample_gap_seconds": 0.00815574498847127,
+          "vanished_files": 0,
+          "fingerprint": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5"
+        },
+        "open_descriptor_sample": {
+          "variant": "candidate",
+          "case": "limit",
+          "sha256": "142d50591ef7b81095bf9a401d2ca9c363dc8eed982b45a1e2b088853a281681",
+          "query_oracle": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5",
+          "samples": 31,
+          "sampled_allocated_peak": 20135936,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.009340537013486028,
+          "vanished_entries": 2,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "c912ec6c94a6955c4b4adafa780933de8f8dcb7c2dbf2e34dcd8ce16d79186a5"
+      }
+    },
+    "negative": {
+      "baseline": {
+        "observations": [
+          {
+            "query_ns": [
+              323016324,
+              289330996,
+              279743824,
+              274185148,
+              272295083
+            ],
+            "user_seconds": 1.22,
+            "system_seconds": 0.29,
+            "rss_kib": 137756,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              307485380,
+              273374954,
+              272556217,
+              272910335,
+              272211890
+            ],
+            "user_seconds": 1.18,
+            "system_seconds": 0.28,
+            "rss_kib": 138120,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          },
+          {
+            "query_ns": [
+              321334373,
+              288514620,
+              294641656,
+              290826004,
+              288988749
+            ],
+            "user_seconds": 1.26,
+            "system_seconds": 0.3,
+            "rss_kib": 136888,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 256992
+          }
+        ],
+        "first_query_median_ns": 321334373,
+        "reused_query_median_ns": 276964486.0,
+        "trace": {
+          "read_bytes": 227678948,
+          "write_bytes": 131441472,
+          "syscalls": {
+            "read": {
+              "calls": 12703,
+              "bytes": 126744190,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 19963,
+              "bytes": 100934758,
+              "errors": 0
+            },
+            "write": {
+              "calls": 11918,
+              "bytes": 131441472,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "negative",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 36077568,
+          "sampled_private_temporary_allocated_peak_bytes": 18309120,
+          "samples": 207,
+          "maximum_sample_gap_seconds": 0.008162564947269857,
+          "vanished_files": 0,
+          "fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "open_descriptor_sample": {
+          "variant": "baseline",
+          "case": "negative",
+          "sha256": "a1f565ac417cde5ddf23b9252ebd926ea23ad15ed7f84f90ff318f2e2a37ab65",
+          "query_oracle": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "samples": 189,
+          "sampled_allocated_peak": 37199872,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.009415269014425576,
+          "vanished_entries": 6,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "candidate": {
+        "observations": [
+          {
+            "query_ns": [
+              52944561,
+              43379550,
+              48533757,
+              47570509,
+              43928251
+            ],
+            "user_seconds": 0.2,
+            "system_seconds": 0.09,
+            "rss_kib": 81564,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 96952
+          },
+          {
+            "query_ns": [
+              57704851,
+              47001308,
+              46258455,
+              44826137,
+              45159433
+            ],
+            "user_seconds": 0.21,
+            "system_seconds": 0.09,
+            "rss_kib": 80756,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 96952
+          },
+          {
+            "query_ns": [
+              57395155,
+              46998168,
+              46610821,
+              46149422,
+              45962939
+            ],
+            "user_seconds": 0.21,
+            "system_seconds": 0.1,
+            "rss_kib": 81108,
+            "filesystem_input_blocks": 84808,
+            "filesystem_output_blocks": 96952
+          }
+        ],
+        "first_query_median_ns": 57395155,
+        "reused_query_median_ns": 46203938.5,
+        "trace": {
+          "read_bytes": 98753347,
+          "write_bytes": 49494860,
+          "syscalls": {
+            "read": {
+              "calls": 2703,
+              "bytes": 44797554,
+              "errors": 0
+            },
+            "pread64": {
+              "calls": 18163,
+              "bytes": 53955793,
+              "errors": 0
+            },
+            "write": {
+              "calls": 1754,
+              "bytes": 49494860,
+              "errors": 0
+            },
+            "fsync": {
+              "calls": 28,
+              "bytes": 0,
+              "errors": 0
+            }
+          },
+          "unfinished_calls": 0,
+          "resumed_calls": 0,
+          "unparsed_results": 0
+        },
+        "regular_file_sample": {
+          "case": "negative",
+          "baseline": [
+            {
+              "allocated_bytes": 17768448,
+              "logical_bytes": 17296857,
+              "unique_files": 150
+            },
+            {
+              "allocated_bytes": 0,
+              "logical_bytes": 0,
+              "unique_files": 0
+            }
+          ],
+          "sampled_overlapping_allocated_peak_bytes": 19689472,
+          "sampled_private_temporary_allocated_peak_bytes": 1921024,
+          "samples": 48,
+          "maximum_sample_gap_seconds": 0.008676175028085709,
+          "vanished_files": 1,
+          "fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "open_descriptor_sample": {
+          "variant": "candidate",
+          "case": "negative",
+          "sha256": "142d50591ef7b81095bf9a401d2ca9c363dc8eed982b45a1e2b088853a281681",
+          "query_oracle": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "samples": 45,
+          "sampled_allocated_peak": 20840448,
+          "sampled_unlinked_peak": 2064384,
+          "maximum_sample_gap_seconds": 0.008469481021165848,
+          "vanished_entries": 11,
+          "permission_denials": 0
+        },
+        "oracle_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      }
+    }
+  },
+  "selection_results": {
+    "narrow": {
+      "cpu_max": 0.22000000000000003,
+      "rss_max_kib": 76692,
+      "median_query_ns": 27873967,
+      "all_preselected_checks": "pass",
+      "filesystem_input_blocks": [
+        84808,
+        84808,
+        84808
+      ],
+      "filesystem_output_blocks": [
+        86272,
+        86272,
+        86272
+      ]
+    },
+    "full": {
+      "cpu_max": 2.77,
+      "rss_max_kib": 151596,
+      "median_query_ns": 310324455,
+      "all_preselected_checks": "pass",
+      "filesystem_input_blocks": [
+        84808,
+        84808,
+        84808
+      ],
+      "filesystem_output_blocks": [
+        256992,
+        256992,
+        256992
+      ]
+    },
+    "limit": {
+      "cpu_max": 0.22,
+      "rss_max_kib": 77408,
+      "median_query_ns": 28131192,
+      "all_preselected_checks": "pass",
+      "filesystem_input_blocks": [
+        84808,
+        84808,
+        84808
+      ],
+      "filesystem_output_blocks": [
+        86272,
+        86272,
+        86272
+      ]
+    },
+    "negative": {
+      "cpu_max": 0.31,
+      "rss_max_kib": 81564,
+      "median_query_ns": 46610821,
+      "all_preselected_checks": "pass",
+      "filesystem_input_blocks": [
+        84808,
+        84808,
+        84808
+      ],
+      "filesystem_output_blocks": [
+        96952,
+        96952,
+        96952
+      ]
+    }
+  },
+  "interpretation": [
+    "Whole-process CPU/RSS include facade open and the exact oracle. Full projection additionally validates every text value; compare like-for-like variants, not narrow-vs-full whole-process CPU. Query wall timings cover execute only.",
+    "Successful syscall bytes include non-file descriptors and are not physical disk bytes; copy/sendfile counts one read and one write. GNU filesystem inputs remained84808 blocks for every process: no physical-read reduction is claimed. Narrow filesystem outputs fell256992 to86272 blocks.",
+    "Full projection has effectively identical syscall I/O and slightly higher measured query latency/CPU, within the baseline-span selection envelope. No full-scan speedup or storage-format reduction is claimed.",
+    "Regular-file and descriptor sampling are separate observations. Root collector inspected only private roots and descendant FDs; executable retained original ubuntu UID/GID/groups. Descriptor pass includes unlinked open files, globally deduplicated by device/inode. Both passes exclude directory allocation; descriptor pass still excludes unlinked mappings with no open FD. Non-atomic sampled peaks are not hard bounds; phase alignment explains differing full-projection samples.",
+    "Logical DataFusion reader counters cover completed readers only. Cumulative spill/authentication/rows add repeated executions, while decoder peak uses a maximum. These do not represent native RSS or failed-reader work.",
+    "Publishing, permanent encoding, replay and compaction are unchanged by this query reader repair. Public lifecycle regression evidence covers their interoperability; construction CPU is not claimed improved."
+  ],
+  "deterministic_regression": {
+    "boundary": "Actual PropertyOverlayExec collection, not a logical-plan assertion or reader-only wrapper test.",
+    "fixture": "128 UUID-ordered rows, kept text and8192-byte unused value each; batches17.",
+    "assertions": [
+      "Full versus reordered duplicate/empty projection preserve exact schema, identities and row count.",
+      "Physical rows128 and full authentication bytes remain exact.",
+      "Projected spill <=128*256 bytes; avoided spill >=128*8192 bytes; logical decoder peak <=128*256 bytes.",
+      "Evolved projected SQL preserves older missing-field null, newer42 value, heterogeneous schema and newest tombstone exclusion.",
+      "Narrow UUID-only LIMIT still refuses injected late authenticated decoder failure."
+    ]
+  },
+  "verification": {
+    "wide_public_oracles": "All4 pass in default integration test.",
+    "overlay_suite": "24 passed, including unselected/older-generation corruption, resource admission, descriptors, new executed-scan budgets.",
+    "public_lifecycle": "4 Cypher ownership fixtures passed: construction, scalar/map SET/REMOVE, exact queries, active snapshots, reopen, export/fullverify/cleanimport/subsequentmutation.",
+    "quality": "Workspace Clippy, formatting, fast policy checks and gate-registry14tests passed.",
+    "full_local_gate": "make pre-push failed only known1192 hardcoded /tmp filesystem admission fixture; storage1096passed1failed2pre-existingignored. Preceding instrumented suites passed. Fullcommand notgreen; exact-head CI stillrequired.",
+    "failed_superseded": [
+      "First physical-test compile failed because route_schema already returned owned Arc; corrected before passing tests.",
+      "Earlier bb6642f9 release build succeeded but was superseded before any accepted candidate measurements.",
+      "Earlier source7e Python-wide probe was preparation only and is not this baseline."
+    ]
+  },
+  "reproduction": [
+    "Build the permanent_storage_budgets release test artifact at each recorded source with isolated CARGO_TARGET_DIR; copy and SHA256-freeze before subprocess execution.",
+    "Fresh native-volume ROOT: TMPDIR=ROOT GF_WIDE_PROBE_ROOT=ROOT GF_WIDE_PROBE_MODE=prepare FROZEN --exact wide_property_public_query_probe --nocapture --test-threads=1.",
+    "For each narrow/full/limit/negative case, run three fresh processes with TMPDIR in private native scratch, GF_WIDE_PROBE_ROOT=ROOT, GF_WIDE_PROBE_MODE=read and GF_WIDE_PROBE_QUERY=CASE; use /usr/bin/time -v. Each process performs five queries and exact oracles. fsync+POSIX_FADV_DONTNEED on unique source files is advice, not guaranteed OS eviction.",
+    "Separately trace successful read/pread64/readv/preadv/write/pwrite64/writev/pwritev/copy_file_range/sendfile/fsync/fdatasync with strace -f -qq -yy -s0; retain parsing/error counts.",
+    "Separately sample private fixture+scratch regular files every requested5ms by unique device/inode and st_blocks*512; report actual gaps. Descriptor pass also traverses /proc descendant FD targets within those private roots, including unlinked files, preserving executable UID/GID/groups."
+  ],
+  "collector_sha256": {
+    "gf1207-wide-measure.py": "169f260860148c3bb1441cee9464ede3492505eb20f86cdd0bb7a34f93a03cb1",
+    "gf1247-wide-measure.py": "8a09250d4112293d8e7af28f502b7e1f6661a51d89534d5cc2a9ffb51ced50a8",
+    "gf1207-wide-trace.py": "f18a5d429769ffc1b68ed64f42aadbbc5fe8dd5b207809bb61ad03f3f3e6a214",
+    "gf1247-wide-trace.py": "e1354448c5e61897f31d7a858f0a63d12e1639ee819f0b3ec56eedd19bad73e2",
+    "gf1207-wide-sample-v2.py": "154035cee383eece9265957061740eb5ada649b224eca92b52ff1ce470b3caa0",
+    "gf1247-wide-sample.py": "fcad25a576f51128deb48f9bc40de58f30f9ed50e9e67006a6a56d8405653f8a",
+    "gf1247-sample-open-files.py": "e0e0f4b881a841bfe544de97a0e29057d64f7e0a118e898aa1cfeba48bf47559"
+  }
+}

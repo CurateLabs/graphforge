@@ -6452,3 +6452,155 @@ fn empty_remove_preserves_durable_graph_snapshot_and_portable_mutation() {
     verify_graph(&reopened, fixture, &nodes, &edges);
     assert_eq!(cas_uuid_node_surrogates(&imported_path), imported_ids);
 }
+
+/// Assessment baseline: run prepare/read in separate frozen processes. Timings
+/// cover execute only; whole-process accounting also includes the exact oracle.
+#[test]
+fn wide_property_public_query_probe() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("GF_WIDE_PROBE_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("probe"));
+    let mode = std::env::var("GF_WIDE_PROBE_MODE").unwrap_or_else(|_| "all".into());
+    assert!(matches!(mode.as_str(), "all" | "prepare" | "read"));
+    let count = 4097usize;
+    let width = 16usize;
+    let payload = |column: usize, row: usize| {
+        (row % 11 != 0).then(|| {
+            (0..4)
+                .map(|part| digest_hex(format!("wide/{column}/{row}/{part}").as_bytes()))
+                .collect::<String>()
+        })
+    };
+    let source = root.join("source");
+    if mode != "read" {
+        assert!(!source.exists(), "preparation requires a fresh project");
+        std::fs::create_dir_all(&root).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let mut session = graph
+            .begin_graph_construction(GraphConstructionBudgets {
+                max_batch_rows: 1024,
+                max_run_records: 4096,
+                merge_fan_in: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        for start in (0..count).step_by(1024) {
+            let end = (start + 1024).min(count);
+            let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
+            let mut arrays = vec![
+                uuids((start..end).map(|row| id(17, row, true))),
+                Arc::new(StringArray::from(vec!["Wide"; end - start])) as ArrayRef,
+            ];
+            fields.push(Arc::new(Field::new("score", DataType::Int64, true)));
+            arrays.push(Arc::new(Int64Array::from(
+                (start..end)
+                    .map(|row| (row % 7 != 0).then_some(row as i64))
+                    .collect::<Vec<_>>(),
+            )));
+            for column in 0..width {
+                fields.push(Arc::new(Field::new(
+                    format!("payload{column}"),
+                    DataType::Utf8,
+                    true,
+                )));
+                arrays.push(Arc::new(StringArray::from(
+                    (start..end)
+                        .map(|row| payload(column, row))
+                        .collect::<Vec<_>>(),
+                )));
+            }
+            session
+                .append_nodes(
+                    &format!("wide-{start}"),
+                    &RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap(),
+                )
+                .unwrap();
+        }
+        session.seal_and_publish().unwrap();
+    }
+    if mode == "prepare" {
+        return;
+    }
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let cases = if mode == "all" {
+        vec![
+            "narrow".to_owned(),
+            "full".to_owned(),
+            "limit".to_owned(),
+            "negative".to_owned(),
+        ]
+    } else {
+        vec![std::env::var("GF_WIDE_PROBE_QUERY").unwrap_or_else(|_| "narrow".into())]
+    };
+    for case in cases {
+        let full = format!(
+            "MATCH (n:Wide) RETURN n.node_uuid, n.score, {}",
+            (0..width)
+                .map(|c| format!("n.payload{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let query = match case.as_str() {
+            "narrow" => "MATCH (n:Wide) RETURN n.node_uuid, n.score",
+            "full" => &full,
+            "limit" => "MATCH (n:Wide) RETURN n.node_uuid, n.score ORDER BY n.node_uuid LIMIT 16",
+            "negative" => "MATCH (n:Wide) WHERE n.payload0 = 'absent' RETURN n.node_uuid, n.score",
+            _ => panic!("unknown wide probe case"),
+        };
+        let mut expected: Vec<_> = (0..count).map(|row| (id(17, row, true), row)).collect();
+        expected.sort();
+        if case == "limit" {
+            expected.truncate(16);
+        } else if case == "negative" {
+            expected.clear();
+        }
+        let repeats = if mode == "all" { 1 } else { 5 };
+        let mut query_ns = Vec::new();
+        for _ in 0..repeats {
+            let start = Instant::now();
+            let result = graph.execute(query).unwrap();
+            query_ns.push(start.elapsed().as_nanos());
+            let mut actual = Vec::new();
+            for batch in &result.batches {
+                for row in 0..batch.num_rows() {
+                    let uuid = uuid_at(batch, 0, row);
+                    let index = expected.binary_search_by_key(&uuid, |item| item.0).unwrap();
+                    let ordinal = expected[index].1;
+                    assert_eq!(
+                        int_at(batch, 1, row),
+                        (ordinal % 7 != 0).then_some(ordinal as i64)
+                    );
+                    if case == "full" {
+                        for column in 0..width {
+                            let values = batch
+                                .column(column + 2)
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .unwrap();
+                            let actual = (!values.is_null(row)).then(|| values.value(row));
+                            assert_eq!(actual, payload(column, ordinal).as_deref());
+                        }
+                    }
+                    actual.push((uuid, ordinal));
+                }
+            }
+            if case != "limit" {
+                actual.sort();
+            }
+            assert_eq!(actual, expected);
+        }
+        if std::env::var_os("GF_WIDE_PROBE_DIAGNOSTICS").is_some() {
+            println!(
+                "WIDE_PROPERTY_PLAN {}",
+                graph
+                    .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+                    .unwrap()
+            );
+        }
+        println!(
+            "WIDE_PROPERTY_QUERY {}",
+            json!({"case":case,"nodes":count,"width":width,"payload_bytes_per_nonnull_column":256,"rows":expected.len(),"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap())})
+        );
+    }
+}
