@@ -571,26 +571,6 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         Ok(Arc::new(Self::new(input)))
     }
 
-    fn partition_statistics(
-        &self,
-        partition: Option<usize>,
-    ) -> Result<Arc<Statistics>, DataFusionError> {
-        if partition.is_some_and(|partition| partition != 0) {
-            return Err(DataFusionError::Internal(
-                "OrderedPartitionStreamExec statistics only has partition 0".into(),
-            ));
-        }
-        // Assessment experiment: expose cardinality only as an estimate so
-        // metadata cannot eliminate execution or its validation obligations.
-        Ok(Arc::new(
-            self.input
-                .partition_statistics(None)?
-                .as_ref()
-                .clone()
-                .to_inexact(),
-        ))
-    }
-
     fn execute(
         &self,
         partition: usize,
