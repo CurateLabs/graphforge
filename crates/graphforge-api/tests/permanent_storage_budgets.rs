@@ -5986,3 +5986,30 @@ fn selective_fixed_paths_preserve_public_mutation_and_portable_lifecycle() {
     verify_selective_fixed_paths(&reopened, &nodes, &edges);
     verify_graph(&reopened, fixture, &nodes, &edges);
 }
+
+#[test]
+fn constructed_edge_cypher_set_has_one_authenticated_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "constructed_edge_cypher_owner",
+        nodes: 33,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_graph(&graph, fixture, &nodes, &edges);
+    graph
+        .execute("MATCH ()-[r]->() WHERE r.weight IS NOT NULL SET r.weight = r.weight + 1")
+        .unwrap();
+    for edge in &mut edges {
+        edge.4 = edge.4.map(|weight| weight + 1);
+    }
+    verify_graph(&graph, fixture, &nodes, &edges);
+}
