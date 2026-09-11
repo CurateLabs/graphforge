@@ -172,6 +172,24 @@ pub struct OperatorRssSnapshot {
     pub after_bytes: u64,
 }
 
+/// Statistics and completed work for one executed hash join. Memory is the
+/// operator's logical allocation counter, not process RSS or a hard bound.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JoinSnapshot {
+    /// Physical tree encounter order; repeated occurrences are not additive.
+    pub ordinal: usize,
+    /// Build/probe row estimates with Exact/Inexact/Absent precision preserved.
+    pub input_row_statistics: Vec<String>,
+    /// Actual rows consumed by the hash build.
+    pub build_input_rows: u64,
+    /// DataFusion input_rows: probe batches plus final build-side output indices
+    /// for join kinds that emit unmatched build rows.
+    pub input_rows: u64,
+    /// DataFusion build_mem_used, including its build batches and hash table.
+    pub build_memory_bytes: u64,
+}
+
 /// Aggregate-only diagnostic snapshot for the most recently reset capture.
 #[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -182,6 +200,8 @@ pub struct DemandSnapshot {
     pub filters: BTreeMap<usize, FilterSnapshot>,
     /// Fetch-aware sort work collected from the executed ordinary plan.
     pub sorts: Vec<SortSnapshot>,
+    /// Executed hash-join estimates and aggregate work.
+    pub joins: Vec<JoinSnapshot>,
     /// Per-operator observational RSS lifetimes.
     pub operator_rss: Vec<OperatorRssSnapshot>,
     /// Number of query cancellation signals.
@@ -389,7 +409,11 @@ pub(crate) fn record_plan_completion(
             .map_or(0, |value| value.as_usize() as u64)
     }
 
-    fn visit(plan: &Arc<dyn ExecutionPlan>, sorts: &mut Vec<SortSnapshot>) {
+    fn visit(
+        plan: &Arc<dyn ExecutionPlan>,
+        sorts: &mut Vec<SortSnapshot>,
+        joins: &mut Vec<JoinSnapshot>,
+    ) {
         if plan.downcast_ref::<SortExec>().is_some() {
             let metrics = plan.metrics().unwrap_or_default();
             sorts.push(SortSnapshot {
@@ -402,8 +426,28 @@ pub(crate) fn record_plan_completion(
                 retained_bytes: metric(&metrics, "mem_used"),
             });
         }
+        if plan
+            .downcast_ref::<datafusion::physical_plan::joins::HashJoinExec>()
+            .is_some()
+        {
+            let metrics = plan.metrics().unwrap_or_default();
+            joins.push(JoinSnapshot {
+                ordinal: joins.len(),
+                input_row_statistics: plan
+                    .children()
+                    .iter()
+                    .map(|child| match child.partition_statistics(None) {
+                        Ok(stats) => format!("{:?}", stats.num_rows),
+                        Err(_) => "unavailable: statistics error".into(),
+                    })
+                    .collect(),
+                build_input_rows: metric(&metrics, "build_input_rows"),
+                input_rows: metric(&metrics, "input_rows"),
+                build_memory_bytes: metric(&metrics, "build_mem_used"),
+            });
+        }
         for child in plan.children() {
-            visit(child, sorts);
+            visit(child, sorts, joins);
         }
     }
 
@@ -418,7 +462,8 @@ pub(crate) fn record_plan_completion(
     }
 
     let mut sorts = Vec::new();
-    visit(plan, &mut sorts);
+    let mut joins = Vec::new();
+    visit(plan, &mut sorts, &mut joins);
     let completion_rss = current_rss_bytes();
     let mut state = CAPTURE
         .lock()
@@ -439,6 +484,7 @@ pub(crate) fn record_plan_completion(
     hydration_metrics(plan, &mut hydration);
     state.snapshot.hydration = hydration;
     state.snapshot.sorts = sorts;
+    state.snapshot.joins = joins;
     state.snapshot.memory_reserved_before = memory_reserved_before as u64;
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;

@@ -6604,3 +6604,651 @@ fn wide_property_public_query_probe() {
         );
     }
 }
+
+/// Canonical #1207 observation fixture. Separate prepare/read/compact processes
+/// distinguish mutation cost, query work and existing maintenance cost.
+#[test]
+fn fragmentation_statistics_public_probe() {
+    use graphforge_api::{CompositeGraphMutation as Mutation, PropValue};
+    use graphforge_storage::{
+        GraphDeltaCompactionRequest, ProjectRetentionLimits, ProjectRetentionPolicy,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::env::var_os("GF_FRAGMENT_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("probe"));
+    let mode = std::env::var("GF_FRAGMENT_MODE").unwrap_or_else(|_| "all".into());
+    assert!(matches!(
+        mode.as_str(),
+        "all" | "prepare" | "read" | "compact"
+    ));
+    let rounds: usize = std::env::var("GF_FRAGMENT_ROUNDS")
+        .unwrap_or_else(|_| "8".into())
+        .parse()
+        .unwrap();
+    assert!(matches!(rounds, 1 | 8 | 32));
+    let source = root.join("source");
+    let fixture = Fixture {
+        name: "fragmentation_statistics",
+        nodes: 4097,
+        edges: 0,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: true,
+    };
+    if matches!(mode.as_str(), "all" | "prepare") {
+        assert!(!source.exists());
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let mut topology_ns = Vec::new();
+        for round in 0..8 {
+            let started = Instant::now();
+            let created_score = -100_000 - round as i64;
+            let created = graph
+                .execute(&format!(
+                    "CREATE (n:Node0 {{score: {created_score}}}) RETURN n.node_uuid"
+                ))
+                .unwrap();
+            let uuid = uuid_at(&created.batches[0], 0, 0);
+            nodes.push((uuid, "Node0".into(), Some(created_score)));
+            if round % 2 == 1 {
+                graph
+                    .execute(&format!(
+                        "MATCH (n) WHERE n.score = {created_score} DELETE n"
+                    ))
+                    .unwrap();
+                nodes.retain(|node| node.0 != uuid);
+            }
+            topology_ns.push(started.elapsed().as_nanos());
+        }
+        assert!(nodes[64].2.is_some());
+        let mut mutation_ns = Vec::new();
+        // Topology publications can fold earlier deltas. Accumulate the measured
+        // property chain afterwards and report its actual verified length.
+        for round in 0..rounds {
+            let started = Instant::now();
+            graph
+                .publish_composite_transaction(graphforge_api::CompositeTransactionRequest {
+                    contract_version: graphforge_api::COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                    context: graphforge_api::WriteContext {
+                        operation_uuid: OperationId(Uuid::now_v7()),
+                        actor_uuid: None,
+                    },
+                    graph_mutations: vec![
+                        Mutation::SetNodeProperty {
+                            node_uuid: nodes[1].0,
+                            property: "score".into(),
+                            value: PropValue::Int(10_000 + round as i64),
+                        },
+                        if round % 2 == 0 {
+                            assert!(nodes[64].2.is_some());
+                            Mutation::RemoveNodeProperty {
+                                node_uuid: nodes[64].0,
+                                property: "score".into(),
+                            }
+                        } else {
+                            Mutation::SetNodeProperty {
+                                node_uuid: nodes[64].0,
+                                property: "score".into(),
+                                value: PropValue::Int(20_000 + round as i64),
+                            }
+                        },
+                    ],
+                    knowledge: graphforge_api::CompositeKnowledgeParticipants::default(),
+                })
+                .unwrap();
+            nodes[1].2 = Some(10_000 + round as i64);
+            nodes[64].2 = (round % 2 == 1).then_some(20_000 + round as i64);
+            mutation_ns.push(started.elapsed().as_nanos());
+        }
+        let status = graph
+            .graph_delta_compaction_status(Default::default(), Default::default())
+            .unwrap();
+        assert_eq!(status.run_count, rounds as u64);
+        std::fs::write(
+            root.join("oracle.json"),
+            serde_json::to_vec(&nodes).unwrap(),
+        )
+        .unwrap();
+        println!(
+            "FRAGMENT_PREPARE {}",
+            json!({"rounds":rounds,"topology_elapsed_ns":topology_ns,"property_elapsed_ns":mutation_ns,"expected_rows":nodes.len()})
+        );
+    }
+    let nodes: Vec<Node> =
+        serde_json::from_slice(&std::fs::read(root.join("oracle.json")).unwrap()).unwrap();
+    let mut graph = GraphForge::new(source.to_str()).unwrap();
+    if mode == "compact" || mode == "all" {
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: Default::default(),
+            cleanup_after_commit: false,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+        let report = graph.compact_graph_delta(&request, None).unwrap();
+        assert_eq!(report.input_runs, rounds as u64);
+        assert_eq!(report.input_rows, 2 * rounds as u64);
+        println!(
+            "FRAGMENT_COMPACTION {}",
+            json!({"input_runs":report.input_runs,"input_rows":report.input_rows,"output_rows":report.output_rows,"input_bytes":report.input_bytes,"output_bytes":report.output_bytes,"logical_peak_memory_bytes":report.peak_memory_bytes,"spill_bytes":report.spill_bytes,"elapsed_ms":report.elapsed_ms})
+        );
+    }
+    for (name, query) in [
+        ("all", "MATCH (n) RETURN n.node_uuid, n.score"),
+        (
+            "selective",
+            "MATCH (n) WHERE n.score >= 10000 RETURN n.node_uuid, n.score",
+        ),
+        (
+            "null",
+            "MATCH (n) WHERE n.score IS NULL RETURN n.node_uuid, n.score",
+        ),
+    ] {
+        let mut expected: Vec<_> = nodes
+            .iter()
+            .filter(|node| match name {
+                "selective" => node.2.is_some_and(|score| score >= 10000),
+                "null" => node.2.is_none(),
+                _ => true,
+            })
+            .map(|node| (node.0, node.2))
+            .collect();
+        expected.sort();
+        let mut query_ns = Vec::new();
+        let mut join_work = Vec::new();
+        for _ in 0..if mode == "read" { 5 } else { 1 } {
+            let start = Instant::now();
+            let result = if mode != "read" || std::env::var_os("GF_FRAGMENT_DIAGNOSTICS").is_some()
+            {
+                let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
+                assert_eq!(captured.joins.len(), 1);
+                for join in captured.joins {
+                    assert!(join.build_input_rows > 0);
+                    assert!(join.input_rows > 0);
+                    assert!(join.build_memory_bytes > 0);
+                    assert!(
+                        join.input_row_statistics
+                            .iter()
+                            .all(|value| !value.contains("error"))
+                    );
+                    join_work.push(json!({"ordinal":join.ordinal,"input_row_statistics":join.input_row_statistics,"build_input_rows":join.build_input_rows,"input_rows":join.input_rows,"build_memory_bytes":join.build_memory_bytes}));
+                }
+                result.unwrap()
+            } else {
+                graph.execute(query).unwrap()
+            };
+            query_ns.push(start.elapsed().as_nanos());
+            let mut actual = Vec::new();
+            for batch in result.batches {
+                for row in 0..batch.num_rows() {
+                    actual.push((uuid_at(&batch, 0, row), int_at(&batch, 1, row)));
+                }
+            }
+            actual.sort();
+            assert_eq!(actual, expected, "{name}");
+        }
+        println!(
+            "FRAGMENT_QUERY {}",
+            json!({"case":name,"rows":expected.len(),"join_work":join_work,"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap()),"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
+        );
+    }
+    let status = graph
+        .graph_delta_compaction_status(Default::default(), Default::default())
+        .unwrap();
+    println!(
+        "FRAGMENT_STATUS {}",
+        json!({"run_count":status.run_count,"run_bytes":status.run_bytes,"estimated_replay_memory_bytes":status.estimated_replay_memory_bytes,"inventory":publishing_parquet_inventory(&source)})
+    );
+}
+
+/// Real scalar queries distinguish consumed statistics from physical-plan text.
+#[test]
+fn statistics_public_query_probe() {
+    let temporary = tempfile::tempdir().unwrap();
+    let configured = std::env::var_os("GF_STATS_ROOT");
+    let root = configured
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("statistics"));
+    let source = root.join("source");
+    let nodes: Vec<Node> = if configured.is_some() {
+        serde_json::from_slice(&std::fs::read(root.join("oracle.json")).unwrap()).unwrap()
+    } else {
+        let fixture = Fixture {
+            name: "statistics",
+            nodes: 4097,
+            edges: 0,
+            routes: 2,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: true,
+        };
+        std::fs::create_dir_all(&root).unwrap();
+        let (nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        nodes
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let selected = std::env::var("GF_STATS_CASE").unwrap_or_else(|_| "all".into());
+    let cases = [
+        (
+            "count_all",
+            "MATCH (n) RETURN count(*) AS value",
+            nodes.len() as i64,
+        ),
+        (
+            "count_identity",
+            "MATCH (n) RETURN count(n.node_uuid) AS value",
+            nodes.len() as i64,
+        ),
+        (
+            "count_label",
+            "MATCH (n:Node0) RETURN count(*) AS value",
+            nodes.iter().filter(|node| node.1 == "Node0").count() as i64,
+        ),
+        (
+            "count_property",
+            "MATCH (n) RETURN count(n.score) AS value",
+            nodes.iter().filter(|node| node.2.is_some()).count() as i64,
+        ),
+        (
+            "sum_property",
+            "MATCH (n) RETURN sum(n.score) AS value",
+            nodes.iter().filter_map(|node| node.2).sum(),
+        ),
+        (
+            "selective",
+            "MATCH (n) WHERE n.score >= 10000 RETURN count(*) AS value",
+            nodes
+                .iter()
+                .filter(|node| node.2.is_some_and(|value| value >= 10_000))
+                .count() as i64,
+        ),
+        ("empty", "MATCH (n:Missing) RETURN count(*) AS value", 0),
+    ];
+    assert!(selected == "all" || cases.iter().any(|case| case.0 == selected));
+    for (name, query, expected) in cases {
+        if selected != "all" && selected != name {
+            continue;
+        }
+        let mut elapsed_ns = Vec::new();
+        for _ in 0..if configured.is_some() { 5 } else { 1 } {
+            let started = Instant::now();
+            let result = graph.execute(query).unwrap();
+            elapsed_ns.push(started.elapsed().as_nanos());
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                1
+            );
+            let batch = result
+                .batches
+                .iter()
+                .find(|batch| batch.num_rows() == 1)
+                .unwrap();
+            assert_eq!(batch.num_columns(), 1);
+            assert_eq!(batch.schema().field(0).name(), "value");
+            assert_eq!(int_at(batch, 0, 0), Some(expected), "{query}");
+        }
+        println!(
+            "STATISTICS_QUERY {}",
+            json!({"case":name,"expected":expected,"query_elapsed_ns":elapsed_ns,"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
+        );
+    }
+}
+
+/// Offline layout/Bloom cost experiment on authenticated CURRENT property shards.
+/// Rewrites private files only; it does not assert production predicate pushdown.
+#[test]
+fn property_layout_bloom_assessment() {
+    use parquet::file::reader::FileReader;
+    use parquet::schema::types::ColumnPath;
+    let temporary = tempfile::tempdir().unwrap();
+    let source = if let Some(source) = std::env::var_os("GF_LAYOUT_SOURCE") {
+        std::path::PathBuf::from(source)
+    } else {
+        let source = temporary.path().join("source");
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
+        fields.push(Arc::new(Field::new("payload0", DataType::Utf8, true)));
+        let arrays = vec![
+            uuids((0..129).map(|row| id(19, row, true))),
+            Arc::new(StringArray::from(vec!["Layout"; 129])) as ArrayRef,
+            Arc::new(StringArray::from(
+                (0..129)
+                    .map(|row| {
+                        (row % 11 != 0).then(|| digest_hex(format!("layout/{row}").as_bytes()))
+                    })
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ];
+        session
+            .append_nodes(
+                "layout",
+                &RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap(),
+            )
+            .unwrap();
+        session.seal_and_publish().unwrap();
+        source
+    };
+    let output_root = std::env::var_os("GF_LAYOUT_OUTPUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("output"));
+    let variants = std::env::var("GF_LAYOUT_VARIANT")
+        .map(|variant| vec![variant])
+        .unwrap_or_else(|_| {
+            [
+                "baseline",
+                "row_group_128",
+                "page_16k",
+                "string_plain",
+                "bloom",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        });
+    let configured_data = std::env::var("GF_LAYOUT_DATA").ok();
+    let datasets = configured_data
+        .clone()
+        .map(|data| vec![data])
+        .unwrap_or_else(|| vec!["random".into(), "repeated".into()]);
+    for data in datasets {
+        assert!(matches!(data.as_str(), "random" | "repeated"));
+        let output_root = if configured_data.is_some() {
+            output_root.clone()
+        } else {
+            output_root.join(&data)
+        };
+        for variant in variants.clone() {
+            let output = output_root.join(&variant);
+            std::fs::create_dir_all(&output_root).unwrap();
+            std::fs::create_dir(&output).unwrap();
+            assert!(
+                [
+                    "baseline",
+                    "row_group_128",
+                    "page_16k",
+                    "string_plain",
+                    "bloom"
+                ]
+                .contains(&variant.as_str())
+            );
+            let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+            let inventory = selected.graph_files_inventory().unwrap().unwrap();
+            let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
+            let mut files = Vec::new();
+            for entry in inventory
+                .files
+                .iter()
+                .filter(|entry| entry.relative_path.ends_with(".parquet"))
+            {
+                let path = if generation_owned {
+                    selected.graph_tree_root().join(&entry.relative_path)
+                } else {
+                    graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap()
+                };
+                let reader =
+                    ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+                let schema = reader.schema().clone();
+                if schema.index_of("payload0").is_err() {
+                    continue;
+                }
+                assert_eq!(
+                    digest_hex(&std::fs::read(&path).unwrap()),
+                    entry.content_sha256
+                );
+                let metadata = reader
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .cloned();
+                let batches = reader
+                    .build()
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let mut batch = arrow::compute::concat_batches(&schema, &batches).unwrap();
+                if data == "repeated" {
+                    let arrays = batch
+                        .columns()
+                        .iter()
+                        .zip(schema.fields())
+                        .map(|(array, field)| {
+                            if field.name().starts_with("payload")
+                                && field.data_type() == &DataType::Utf8
+                            {
+                                Arc::new(StringArray::from(
+                                    (0..array.len())
+                                        .map(|row| {
+                                            (!array.is_null(row))
+                                                .then(|| format!("group-{}", row % 8))
+                                        })
+                                        .collect::<Vec<_>>(),
+                                )) as ArrayRef
+                            } else {
+                                array.clone()
+                            }
+                        })
+                        .collect();
+                    batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+                }
+                let values = batch
+                    .column_by_name("payload0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let distinct = values.iter().flatten().collect::<BTreeSet<_>>();
+                let absent = (0..4096)
+                    .map(|i| format!("absent-layout-probe-{i}"))
+                    .collect::<Vec<_>>();
+                assert!(
+                    absent
+                        .iter()
+                        .all(|value| !distinct.contains(value.as_str()))
+                );
+                let mut properties = graphforge_storage::permanent_parquet::writer_properties()
+                    .set_key_value_metadata(metadata);
+                match variant.as_str() {
+                    "row_group_128" => {
+                        properties = properties.set_max_row_group_row_count(Some(128))
+                    }
+                    "page_16k" => properties = properties.set_data_page_size_limit(16 * 1024),
+                    "string_plain" => {
+                        for field in schema.fields() {
+                            if field.data_type() == &DataType::Utf8 {
+                                properties = properties.set_column_dictionary_enabled(
+                                    ColumnPath::from(field.name().as_str()),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    "bloom" => {
+                        properties = properties
+                            .set_column_bloom_filter_enabled(ColumnPath::from("payload0"), true)
+                            .set_column_bloom_filter_ndv(ColumnPath::from("payload0"), 1024)
+                            .set_column_bloom_filter_fpp(ColumnPath::from("payload0"), 0.01)
+                    }
+                    _ => {}
+                }
+                let destination = output.join(format!("{}.parquet", files.len()));
+                let started = Instant::now();
+                let mut writer = ArrowWriter::try_new(
+                    File::create(&destination).unwrap(),
+                    schema.clone(),
+                    Some(properties.build()),
+                )
+                .unwrap();
+                writer.write(&batch).unwrap();
+                writer.close().unwrap();
+                File::open(&destination).unwrap().sync_all().unwrap();
+                let encode_ns = started.elapsed().as_nanos();
+                let builder =
+                    ParquetRecordBatchReaderBuilder::try_new(File::open(&destination).unwrap())
+                        .unwrap();
+                assert_eq!(builder.schema(), &schema);
+                let bloom_started = Instant::now();
+                let mut bloom_bytes = 0;
+                let mut bloom_checks = 0;
+                let mut false_positives = 0;
+                for group in 0..builder.metadata().num_row_groups() {
+                    let column = builder
+                        .parquet_schema()
+                        .columns()
+                        .iter()
+                        .position(|c| c.path().string() == "payload0")
+                        .unwrap();
+                    bloom_bytes += builder
+                        .metadata()
+                        .row_group(group)
+                        .column(column)
+                        .bloom_filter_length()
+                        .unwrap_or(0);
+                    let filter = builder
+                        .get_row_group_column_bloom_filter(group, column)
+                        .unwrap();
+                    assert_eq!(
+                        filter.is_some(),
+                        variant == "bloom",
+                        "Bloom experiment must produce its filter"
+                    );
+                    if let Some(filter) = filter {
+                        // Bloom variant keeps each original shard in one row group.
+                        assert_eq!(builder.metadata().num_row_groups(), 1);
+                        for value in &distinct {
+                            assert!(filter.check(*value), "false negative");
+                        }
+                        for value in &absent {
+                            false_positives += usize::from(filter.check(value.as_str()));
+                            bloom_checks += 1;
+                        }
+                    }
+                }
+                assert_eq!(bloom_checks, if variant == "bloom" { 4096 } else { 0 });
+                assert!(
+                    bloom_bytes <= 4096,
+                    "one-shard serialized Bloom byte budget"
+                );
+                let bloom_probe_ns = bloom_started.elapsed().as_nanos();
+                let started = Instant::now();
+                let decoded = builder
+                    .build()
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(
+                    arrow::compute::concat_batches(&schema, &decoded).unwrap(),
+                    batch
+                );
+                let decode_and_oracle_ns = started.elapsed().as_nanos();
+                let serialized = parquet::file::serialized_reader::SerializedFileReader::new(
+                    File::open(&destination).unwrap(),
+                )
+                .unwrap();
+                let mut pages = 0;
+                let mut row_groups = Vec::new();
+                for index in 0..serialized.num_row_groups() {
+                    let group = serialized.get_row_group(index).unwrap();
+                    row_groups.push(group.metadata().num_rows());
+                    for column in 0..group.num_columns() {
+                        pages += group
+                            .get_column_page_reader(column)
+                            .unwrap()
+                            .map(|page| page.unwrap())
+                            .count();
+                    }
+                }
+                let mut targeted = Vec::new();
+                for requested in [1usize, 16, 129] {
+                    let count = requested.min(batch.num_rows());
+                    let targets = (0..count)
+                        .map(|i| i * batch.num_rows() / count)
+                        .collect::<Vec<_>>();
+                    let mut groups = Vec::new();
+                    let mut selected_indices = Vec::new();
+                    let mut original_offset = 0;
+                    let mut selected_rows = 0;
+                    let mut compressed_bytes = 0;
+                    for (index, rows) in row_groups.iter().enumerate() {
+                        let rows = *rows as usize;
+                        let local = targets
+                            .iter()
+                            .filter(|target| {
+                                **target >= original_offset && **target < original_offset + rows
+                            })
+                            .collect::<Vec<_>>();
+                        if !local.is_empty() {
+                            groups.push(index);
+                            selected_indices.extend(
+                                local.into_iter().map(|target| {
+                                    (selected_rows + target - original_offset) as u32
+                                }),
+                            );
+                            selected_rows += rows;
+                            compressed_bytes +=
+                                serialized.metadata().row_group(index).compressed_size();
+                        }
+                        original_offset += rows;
+                    }
+                    if variant == "row_group_128" && requested == 1 {
+                        assert!(selected_rows <= 128);
+                    }
+                    let started = Instant::now();
+                    let selected_batches =
+                        ParquetRecordBatchReaderBuilder::try_new(File::open(&destination).unwrap())
+                            .unwrap()
+                            .with_row_groups(groups.clone())
+                            .build()
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap();
+                    let selected_batch =
+                        arrow::compute::concat_batches(&schema, &selected_batches).unwrap();
+                    let take = |batch: &RecordBatch, indices: Vec<u32>| {
+                        let indices = arrow::array::UInt32Array::from(indices);
+                        RecordBatch::try_new(
+                            batch.schema(),
+                            batch
+                                .columns()
+                                .iter()
+                                .map(|array| arrow::compute::take(array, &indices, None).unwrap())
+                                .collect(),
+                        )
+                        .unwrap()
+                    };
+                    assert_eq!(
+                        take(&selected_batch, selected_indices),
+                        take(
+                            &batch,
+                            targets.iter().map(|target| *target as u32).collect()
+                        )
+                    );
+                    targeted.push(json!({"requested_rows":count,"groups":groups.len(),"decoded_rows_second_pass":selected_rows,"compressed_column_bytes_second_pass":compressed_bytes,"decode_and_oracle_ns":started.elapsed().as_nanos()}));
+                }
+                let space =
+                    graphforge_filesystem::file_space_usage(&File::open(&destination).unwrap())
+                        .unwrap();
+                let bytes = std::fs::metadata(&destination).unwrap().len();
+                files.push(json!({"data":data,"source_sha256":entry.content_sha256,"rows":batch.num_rows(),"source_bytes":entry.byte_length,"bytes":bytes,"allocated_bytes":space.allocated_bytes,"row_groups":row_groups,"pages_including_dictionary":pages,"targeted_second_pass":targeted,"bloom_bytes":bloom_bytes,"negative_checks":bloom_checks,"false_positives":false_positives,"encode_sync_ns":encode_ns,"decode_and_oracle_ns":decode_and_oracle_ns,"bloom_probe_ns":bloom_probe_ns}));
+            }
+            assert!(!files.is_empty());
+            println!(
+                "LAYOUT_ASSESSMENT {}",
+                json!({"variant":variant,"files":files})
+            );
+        }
+    }
+}
