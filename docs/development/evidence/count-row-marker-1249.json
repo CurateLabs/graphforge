@@ -11,11 +11,12 @@
     "profile": "release optimized, no coverage instrumentation",
     "cargo_lock_sha256": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
     "frozen_at_utc": "2026-09-11T08:08:44.495704+00:00",
-    "pending_merge_pr": 1254,
-    "measurement_state": "ready; exact source tree matches merged main; no measurement has run",
     "cache_invalidation": "cargo clean --profile release -p graphforge-api -p graphforge-exec -p graphforge-rel -p graphforge-ir -p graphforge-storage",
     "integrated_main": "b9765e8e1b3441503f07f8ac389892a1e7518406",
-    "merged_tree_equal": true
+    "merged_tree_equal": true,
+    "freeze_time_measurement_state": "ready; exact source tree matches merged main; no measurement has run",
+    "baseline_pr": 1254,
+    "measurement_state": "Completed paired measurements recorded below; freeze-time status is retained separately."
   },
   "candidate": {
     "source": "e8cb7dcb5d3f65e207df3edca72d7f2e7611d7a8",
