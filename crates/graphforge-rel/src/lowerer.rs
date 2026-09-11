@@ -2706,13 +2706,13 @@ fn lower_aggregate(
                 && let Some((qualifier, field)) = input
                     .schema()
                     .iter()
-                    .filter(|(_, field)| {
+                    .rev()
+                    .find(|(_, field)| {
                         matches!(
                             field.name().as_str(),
                             "node_uuid" | "edge_uuid" | "node_id" | "edge_id" | "src_id" | "dst_id"
                         )
                     })
-                    .last()
                     .or_else(|| input.schema().iter().last())
             {
                 let column = DfExpr::Column(datafusion::common::Column::new(
