@@ -214,3 +214,33 @@ fn parameter() {
         insta::assert_json_snapshot!("parameter", plan);
     });
 }
+
+#[test]
+fn count_retains_explicit_nullable_arguments() {
+    use graphforge_ir::{AggFunc, GraphOp, IrExpr};
+    for query in [
+        "MATCH (a:Employee) OPTIONAL MATCH (a)-[r:REPORTS_TO]->(b) RETURN count(*), count(r), count(DISTINCT r)",
+        "UNWIND [null,1,1] AS x WITH x AS y RETURN count(*), count(y), count(DISTINCT y)",
+    ] {
+        let plan = bind_query(query);
+        let aggs = plan
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                GraphOp::Aggregate { aggs, .. } => Some(aggs),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(aggs.len(), 3);
+        assert_eq!(aggs[0].func, AggFunc::Count);
+        assert!(aggs[0].arg.is_none());
+        assert_eq!(aggs[1].func, AggFunc::Count);
+        assert_eq!(aggs[2].func, AggFunc::CountDistinct);
+        for agg in &aggs[1..] {
+            assert!(matches!(
+                plan.exprs.get(agg.arg.unwrap()),
+                IrExpr::VarRef(_)
+            ));
+        }
+    }
+}

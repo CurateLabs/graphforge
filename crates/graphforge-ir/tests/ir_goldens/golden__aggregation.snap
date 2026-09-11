@@ -1,5 +1,6 @@
 ---
 source: crates/graphforge-ir/tests/golden.rs
+assertion_line: 179
 ---
 {
   "ir_version": {
@@ -24,7 +25,7 @@ source: crates/graphforge-ir/tests/golden.rs
         "aggs": [
           {
             "func": "Count",
-            "arg": null,
+            "arg": 0,
             "alias": "total",
             "out_var": 1
           }
@@ -33,6 +34,10 @@ source: crates/graphforge-ir/tests/golden.rs
     }
   ],
   "exprs": {
-    "nodes": []
+    "nodes": [
+      {
+        "VarRef": 0
+      }
+    ]
   }
 }
