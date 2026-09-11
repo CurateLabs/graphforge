@@ -2703,8 +2703,20 @@ fn lower_aggregate(
             let mut arg = a.arg.map(|id| lowerer.lower(id)).transpose()?;
             if a.func == AggFunc::Count
                 && arg.is_none()
-                && let Some((qualifier, field)) = input.schema().iter().last()
+                && let Some((qualifier, field)) = input
+                    .schema()
+                    .iter()
+                    .filter(|(_, field)| {
+                        matches!(
+                            field.name().as_str(),
+                            "node_uuid" | "edge_uuid" | "node_id" | "edge_id" | "src_id" | "dst_id"
+                        )
+                    })
+                    .last()
+                    .or_else(|| input.schema().iter().last())
             {
+                // The marker is true even for null OPTIONAL rows. Its value
+                // does not need a property payload when an identity is in scope.
                 let column = DfExpr::Column(datafusion::common::Column::new(
                     qualifier.cloned(),
                     field.name(),
