@@ -278,6 +278,31 @@ def validate_growth(observations: list[dict[str, object]]) -> None:
         positive_slopes(field, values, work)
 
 
+def validate_operation_timings(evidence: dict[str, object]) -> None:
+    """Prove ordinary child receipts retain disjoint per-command observations."""
+    receipts = [
+        receipt
+        for phase in evidence["phases"]
+        for receipt in phase.get("receipts", [])
+        if receipt.get("contract") == "graphforge-import-session/1"
+        and receipt.get("outcome") in {"validated", "committed"}
+    ]
+    if [receipt["outcome"] for receipt in receipts] != ["validated", "committed"]:
+        raise SystemExit("tiny lifecycle omitted validation/publication timing receipts")
+    expected_calls = (
+        {"begin": 1, "resume": 0, "append": None, "seal": 1, "publish": 0},
+        {"begin": 0, "resume": 1, "append": 0, "seal": 0, "publish": 1},
+    )
+    for receipt, expected in zip(receipts, expected_calls, strict=True):
+        timings = receipt.get("operation_timings")
+        if not isinstance(timings, dict) or set(timings) != set(expected):
+            raise SystemExit("tiny lifecycle omitted closed operation timings")
+        for name, calls in expected.items():
+            row = timings[name]
+            if row["errors"] != 0 or (row["calls"] < 2 if calls is None else row["calls"] != calls):
+                raise SystemExit("tiny lifecycle operation timing calls differ from executed path")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gf", required=True, type=executable)
@@ -410,6 +435,7 @@ def run(args: argparse.Namespace, scale: int) -> dict[str, object]:
         jsonschema.Draft202012Validator(schema).validate(evidence)
         if evidence["status"] != "passed" or len(evidence["phases"]) != 10:
             raise SystemExit("tiny lifecycle did not assemble complete passed evidence")
+        validate_operation_timings(evidence)
         queries = {
             phase["phase"]: [
                 receipt
