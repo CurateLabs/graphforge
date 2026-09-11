@@ -257,3 +257,36 @@ If reader preparation fails after durable publication, the error still reports
 `committed=true` and recovery by reopen or resume. The facade retains its prior
 workspace until all replacement readers are ready; exact retry adopts the
 already committed generation.
+
+### Import operation timing receipts
+
+`import-session validate` and `import-session commit` JSON receipts include
+`operation_timings`. Each of the five closed rows (`begin`, `resume`, `append`,
+`seal`, `publish`) contains `calls`, `errors`, and `elapsed_ns`. These are
+monotonic wall-time observations around disjoint public construction calls.
+`GraphImportSession::operation_timings()` exposes the same observations after
+the latest validation or commit, including returned errors. Each invocation
+resets them before checking preconditions; a repeated operation cannot replay
+previously reported time.
+
+`begin` measures fresh construction creation; `resume` measures reopening and
+reconciling construction authority. `append` covers construction append calls,
+`seal` covers validation/sealing, and `publish` covers seal-and-publication.
+Internal authentication performed within those calls belongs to that call's
+wall time: the timing rows do not have the same boundaries as the durable
+`application_io` attribution rows. In particular, `resume` is not the total time
+of every recovery-authentication read elsewhere in sealing or publication.
+
+Source decoding, normalization, facade opening and import-manifest checkpoints
+outside those calls are excluded. The sum therefore does not equal whole-ingest
+time. These values are observations, not performance limits or CPU measurements.
+The certifier preserves only the closed numeric timing object; it rejects
+unknown fields and invalid counters.
+
+Timings are held only by the live handle and never written into import or
+construction manifests. Durable `status` does not return old operation timings.
+Successful CLI validate/commit receipts can be summed for an invocation sequence.
+A failed CLI command does not emit a progress receipt, and a lost process cannot
+report its missing time; neither duration is reconstructed from persisted state.
+Existing durable I/O, allocation, accepted-row and recovery evidence remains
+independent of these timing observations.

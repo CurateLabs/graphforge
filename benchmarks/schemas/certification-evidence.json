@@ -22,6 +22,30 @@
   "required": ["schema", "profile_id", "status", "phases", "failed_phase"],
   "additionalProperties": false,
   "$defs": {
+    "importCallTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["calls", "errors", "elapsed_ns"],
+      "properties": {
+        "calls": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "errors": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "elapsed_ns": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+      },
+      "if": { "properties": { "calls": { "const": 0 } } },
+      "then": { "properties": { "errors": { "const": 0 }, "elapsed_ns": { "const": 0 } } }
+    },
+    "importOperationTimings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["begin", "resume", "append", "seal", "publish"],
+      "properties": {
+        "begin": { "$ref": "#/$defs/importCallTiming" },
+        "resume": { "$ref": "#/$defs/importCallTiming" },
+        "append": { "$ref": "#/$defs/importCallTiming" },
+        "seal": { "$ref": "#/$defs/importCallTiming" },
+        "publish": { "$ref": "#/$defs/importCallTiming" }
+      }
+    },
     "phaseName": {
       "enum": [
         "admission",
@@ -66,9 +90,22 @@
           "items": {
             "type": "object",
             "propertyNames": {
-              "enum": ["retained_owners", "contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects", "integrity", "compatibility", "idempotent_replay"]
+              "enum": ["retained_owners", "contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "operation_timings", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects", "integrity", "compatibility", "idempotent_replay"]
+            },
+            "properties": {
+              "operation_timings": { "$ref": "#/$defs/importOperationTimings" }
             },
             "allOf": [
+              {
+                "if": { "required": ["operation_timings"] },
+                "then": {
+                  "required": ["contract", "outcome"],
+                  "properties": {
+                    "contract": { "const": "graphforge-import-session/1" },
+                    "outcome": { "enum": ["validated", "committed"] }
+                  }
+                }
+              },
               {
                 "if": {
                   "properties": {

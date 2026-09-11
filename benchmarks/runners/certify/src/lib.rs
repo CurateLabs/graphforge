@@ -1003,6 +1003,14 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             {
                 return None;
             }
+            if object.get("operation_timings").is_some_and(|timings| {
+                !matches!(
+                    object.get("outcome").and_then(serde_json::Value::as_str),
+                    Some("validated" | "committed")
+                ) || !sanitized_import_operation_timings(timings)
+            }) {
+                return None;
+            }
             let mut receipt = serde_json::Map::new();
             for key in [
                 "contract",
@@ -1011,6 +1019,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "rows_rejected",
                 "bytes_accepted",
                 "construction",
+                "operation_timings",
             ] {
                 if let Some(item) = object.get(key) {
                     receipt.insert(key.to_owned(), item.clone());
@@ -1162,6 +1171,31 @@ fn sanitized_numeric_tree(value: &serde_json::Value) -> bool {
         }),
         serde_json::Value::String(_) => false,
     }
+}
+
+fn sanitized_import_operation_timings(value: &serde_json::Value) -> bool {
+    let Some(phases) = value.as_object() else {
+        return false;
+    };
+    phases.len() == 5
+        && ["begin", "resume", "append", "seal", "publish"]
+            .iter()
+            .all(|phase| {
+                let Some(timing) = phases.get(*phase).and_then(serde_json::Value::as_object) else {
+                    return false;
+                };
+                if timing.len() != 3 {
+                    return false;
+                }
+                let (Some(calls), Some(errors), Some(elapsed)) = (
+                    timing.get("calls").and_then(serde_json::Value::as_u64),
+                    timing.get("errors").and_then(serde_json::Value::as_u64),
+                    timing.get("elapsed_ns").and_then(serde_json::Value::as_u64),
+                ) else {
+                    return false;
+                };
+                errors <= calls && (calls != 0 || elapsed == 0)
+            })
 }
 
 fn sanitized_construction_tree(value: &serde_json::Value) -> bool {
@@ -2028,6 +2062,44 @@ mod tests {
 
     use super::*;
     use std::collections::VecDeque;
+
+    #[test]
+    fn import_operation_timings_are_closed_numeric_observations() {
+        let mut timings = serde_json::json!({});
+        for phase in ["begin", "resume", "append", "seal", "publish"] {
+            timings[phase] = serde_json::json!({"calls": 0, "errors": 0, "elapsed_ns": 0});
+        }
+        timings["resume"] = serde_json::json!({"calls": 1, "errors": 0, "elapsed_ns": 25});
+        timings["publish"] = serde_json::json!({"calls": 2, "errors": 1, "elapsed_ns": 50});
+        let receipt = serde_json::json!({"contract":"graphforge-import-session/1", "outcome":"committed", "operation_timings":timings});
+        let parsed = parse_receipts(&serde_json::to_vec(&receipt).unwrap(), true).unwrap();
+        assert_eq!(parsed[0]["operation_timings"], timings);
+        for (phase, key, value) in [
+            ("append", "elapsed_ns", serde_json::json!(1)),
+            ("append", "errors", serde_json::json!(1)),
+            ("resume", "elapsed_ns", serde_json::json!(-1)),
+            ("resume", "calls", serde_json::json!(1.5)),
+            ("resume", "errors", serde_json::json!(2)),
+            ("publish", "elapsed_ns", serde_json::json!("/private/path")),
+            ("publish", "path", serde_json::json!(0)),
+        ] {
+            let mut malformed = receipt.clone();
+            malformed["operation_timings"][phase][key] = value;
+            assert!(
+                parse_receipts(&serde_json::to_vec(&malformed).unwrap(), true).is_err(),
+                "{phase}.{key}"
+            );
+        }
+        let mut missing = receipt.clone();
+        missing["operation_timings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("seal");
+        assert!(parse_receipts(&serde_json::to_vec(&missing).unwrap(), true).is_err());
+        let mut extra = receipt;
+        extra["operation_timings"]["private_path"] = serde_json::json!({});
+        assert!(parse_receipts(&serde_json::to_vec(&extra).unwrap(), true).is_err());
+    }
 
     #[test]
     fn child_receipts_are_bounded_allowlisted_and_strip_content_bearing_paths() {

@@ -496,3 +496,113 @@ fn shared_verification_golden_matches_real_facade_and_cli() {
         assert_eq!(json(&cli), expected[key]);
     }
 }
+
+#[test]
+fn import_operation_timings_survive_separate_cli_processes() {
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let input = root.path().join("nodes.parquet");
+    let ids = [uuid::Uuid::now_v7(), uuid::Uuid::now_v7()];
+    let batch = RecordBatch::try_new(
+        graphforge_api::bulk_node_input_schema(Vec::new()).unwrap(),
+        vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice()))
+                    .unwrap(),
+            ),
+            Arc::new(StringArray::from(vec!["Person", "Person"])),
+        ],
+    )
+    .unwrap();
+    let mut writer =
+        ArrowWriter::try_new(fs::File::create(&input).unwrap(), batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let operation = uuid::Uuid::now_v7().to_string();
+    let begun = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "begin",
+            "--operation-uuid",
+            &operation,
+        ],
+    ));
+    let session = begun["session_uuid"].as_str().unwrap();
+    json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "register-parquet",
+            "--session-uuid",
+            session,
+            "--kind",
+            "nodes",
+            "--path",
+            input.to_str().unwrap(),
+        ],
+    ));
+    let validated = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "validate",
+            "--session-uuid",
+            session,
+        ],
+    ));
+    let timing = &validated["operation_timings"];
+    assert_eq!(timing["begin"]["calls"], 1);
+    assert_eq!(timing["resume"]["calls"], 0);
+    assert_eq!(timing["append"]["calls"], 1);
+    assert_eq!(timing["seal"]["calls"], 1);
+    assert_eq!(timing["publish"]["calls"], 0);
+    for phase in ["begin", "append", "seal"] {
+        assert!(timing[phase]["elapsed_ns"].as_u64().is_some());
+        assert_eq!(timing[phase]["errors"], 0);
+    }
+    let committed = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "commit",
+            "--session-uuid",
+            session,
+        ],
+    ));
+    let timing = &committed["operation_timings"];
+    assert_eq!(timing["begin"]["calls"], 0);
+    assert_eq!(timing["resume"]["calls"], 1);
+    assert_eq!(timing["append"]["calls"], 0);
+    assert_eq!(timing["seal"]["calls"], 0);
+    assert_eq!(timing["publish"]["calls"], 1);
+    assert!(timing["resume"]["elapsed_ns"].as_u64().is_some());
+    assert!(timing["publish"]["elapsed_ns"].as_u64().is_some());
+    assert_eq!(committed["construction"]["input_rows"], 2);
+    assert_eq!(committed["construction"]["publication_committed"], true);
+    let status = json(&gf(
+        &project,
+        &[
+            "--json",
+            "import-session",
+            "status",
+            "--session-uuid",
+            session,
+        ],
+    ));
+    assert!(
+        status.get("operation_timings").is_none(),
+        "durable status must not replay timings"
+    );
+    let graph = graphforge_api::GraphForge::new(project.to_str()).unwrap();
+    assert_eq!(graph.node_count("Person").unwrap(), 2);
+}
