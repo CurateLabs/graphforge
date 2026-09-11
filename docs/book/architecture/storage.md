@@ -1208,3 +1208,28 @@ temporary-disk bounds. The separate point census includes retained generations.
 See [`bounded-csr-1205.json`](../../development/evidence/bounded-csr-1205.json)
 for frozen source/executable hashes, exact observations, commands, decoded bounds,
 CPU/I/O costs and limitations, including the superseded incomplete baseline trace.
+
+### Ordinary Cypher property ownership
+
+Committed edge SET, map updates and REMOVE resolve the authenticated property
+owner before accumulating effects. Each input batch probes only its logical
+relation routes and `_exploratory`, including newest tombstones. Multiple owners
+are refused; an entity without a property row keeps its logical route. Edges
+created in the same statement retain the pending writer's route. Replacement
+maps read existing keys in batches from the resolved owner, so omitted properties
+are removed from the same authority that receives the replacement.
+
+Typed scans and fixed expansions carry their catalog-resolved route as an
+internal constant column. This uses the generation's storage binding, without
+reinterpreting ontology IDs as runtime IDs. The statement retains its pinned
+property inventory through SET/REMOVE staging, including declared semantic
+schema metadata for a route's first property write. Immediate query success is
+insufficient: ownership fixtures also reopen after qualified mutations and
+exercise full portable verification, clean import and later mutation.
+
+The `property_writes` demand diagnostics sum owner probes and replacement-key
+reads across every input batch and SET item. Repeated reads are counted each
+time. Decoder and authenticated-snapshot peaks describe those readers; target
+counts describe retained identities. These counters neither measure the entire
+publication nor bound process RSS. The representative multi-batch regression
+checks exact results and explicit cumulative work ceilings.

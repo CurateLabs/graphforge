@@ -190,6 +190,9 @@ pub struct DemandSnapshot {
     pub max_in_flight_reads: u64,
     /// Query-owned path hydration work, using physical operator metric names.
     pub hydration: BTreeMap<String, u64>,
+    /// Statement-wide owner-resolution and replacement-key work. Decoder peaks
+    /// and identity counts are logical accounting, not process-memory bounds.
+    pub property_writes: BTreeMap<String, u64>,
     /// Query memory-pool reservation before physical execution.
     pub memory_reserved_before: u64,
     /// Query memory-pool reservation after every operator stream was dropped.
@@ -440,6 +443,27 @@ pub(crate) fn record_plan_completion(
     state.snapshot.memory_reserved_after = memory_reserved_after as u64;
     state.snapshot.returned_batch_bytes = returned_batch_bytes as u64;
     state.snapshot.execution_batch_rows = execution_batch_rows as u64;
+}
+
+pub(crate) fn record_property_write_work(sums: &[(&str, u64)], peaks: &[(&str, u64)]) {
+    let epoch = bound_capture_session();
+    if epoch == 0 || !capture_enabled() {
+        return;
+    }
+    let mut state = CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !session_active_locked(&state, epoch) {
+        return;
+    }
+    let work = &mut state.snapshot.property_writes;
+    for (name, value) in sums {
+        *work.entry((*name).to_owned()).or_default() += value;
+    }
+    for (name, value) in peaks {
+        let current = work.entry((*name).to_owned()).or_default();
+        *current = (*current).max(*value);
+    }
 }
 
 fn with_hop(epoch: u64, edge_var: u32, update: impl FnOnce(&mut HopSnapshot)) {
@@ -1612,6 +1636,65 @@ fn hydration_metrics(plan: &Arc<dyn ExecutionPlan>, result: &mut BTreeMap<String
     for child in plan.children() {
         hydration_metrics(child, result);
     }
+}
+
+pub(crate) fn record_edge_owner_work(
+    work: &graphforge_storage::EdgeOwnerProbeWork,
+    target_count: usize,
+) {
+    record_property_write_work(
+        &[
+            ("owner_batches", 1),
+            ("owner_targets", target_count as u64),
+            ("owner_candidate_routes", work.candidate_routes as u64),
+            ("owner_target_memberships", work.target_memberships as u64),
+            ("owner_physical_bytes", work.physical_bytes),
+            ("owner_authentication_bytes", work.authentication_bytes),
+            ("owner_snapshot_bytes", work.authenticated_snapshot_bytes),
+            ("owner_rows", work.physical_rows),
+            ("owner_fragments", work.fragments_considered),
+            ("owner_row_groups", work.row_groups_considered),
+        ],
+        &[
+            ("owner_target_peak", target_count as u64),
+            ("owner_decoder_peak_bytes", work.decoder_peak_bytes),
+            (
+                "owner_snapshot_peak_bytes",
+                work.authenticated_snapshot_peak_bytes,
+            ),
+        ],
+    );
+}
+
+pub(crate) fn record_replacement_key_work(
+    work: &graphforge_storage::PropertyOverlayMetrics,
+    target_count: usize,
+) {
+    record_property_write_work(
+        &[
+            ("replacement_batches", 1),
+            ("replacement_targets", target_count as u64),
+            ("replacement_physical_bytes", work.physical_bytes),
+            (
+                "replacement_authentication_bytes",
+                work.authentication_bytes,
+            ),
+            (
+                "replacement_snapshot_bytes",
+                work.authenticated_snapshot_bytes,
+            ),
+            ("replacement_rows", work.physical_rows),
+            ("replacement_fragments", work.fragments_considered),
+        ],
+        &[
+            ("replacement_target_peak", target_count as u64),
+            ("replacement_decoder_peak_bytes", work.decoder_peak_bytes),
+            (
+                "replacement_snapshot_peak_bytes",
+                work.authenticated_snapshot_peak_bytes,
+            ),
+        ],
+    );
 }
 
 #[cfg(test)]

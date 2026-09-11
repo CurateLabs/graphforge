@@ -2743,6 +2743,83 @@ fn resolve_kind(schema: &DFSchema, var: VarId, clause: &str) -> Result<bool, GfE
     }
 }
 
+/// Per-input-batch routing and replacement keys. Pending creations keep their
+/// writer-owned route; committed edges resolve tombstone-inclusive ownership.
+struct PropertyWriteBatch {
+    stems: HashMap<[u8; 16], String>,
+    keys: HashMap<[u8; 16], HashSet<String>>,
+}
+
+fn resolve_property_write_batch(
+    env: &PhaseEnv<'_>,
+    ctx: &StatementWriteContext,
+    col: &WriteCol,
+    batch: &RecordBatch,
+    selected: Option<&[bool]>,
+    replacement: bool,
+) -> Result<PropertyWriteBatch, GfError> {
+    use graphforge_storage::{AuthenticatedPropertyInventory, PropertyRouteKind};
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut stems = HashMap::new();
+    let mut committed = BTreeMap::new();
+    for row in 0..batch.num_rows() {
+        if selected.is_some_and(|mask| !mask[row]) || batch.column(col.uuid_idx).is_null(row) {
+            continue;
+        }
+        let uuid = fixed_binary_uuid(batch, col.uuid_idx, row)?;
+        let bytes = to_bytes(&uuid);
+        let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
+        stems.insert(bytes, stem.clone());
+        let pending = if col.is_edge {
+            ctx.writer.contains_pending_edge(&bytes)
+        } else {
+            ctx.writer.contains_pending_node(&bytes)
+        };
+        if !pending {
+            committed.insert(uuid, stem);
+        }
+    }
+    let mut keys = HashMap::new();
+    if committed.is_empty() || (!col.is_edge && !replacement) {
+        return Ok(PropertyWriteBatch { stems, keys });
+    }
+    let captured;
+    let inventory = if let Some(inventory) = env.inventory.as_deref() {
+        inventory
+    } else {
+        captured = AuthenticatedPropertyInventory::capture(env.dir)?;
+        &captured
+    };
+    if col.is_edge {
+        let work =
+            graphforge_storage::resolve_existing_edge_property_owners(inventory, &mut committed)?;
+        crate::demand::record_edge_owner_work(&work, committed.len());
+    }
+    let mut routes: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+    for (uuid, stem) in committed {
+        let bytes = uuid.into_bytes();
+        stems.insert(bytes, stem.clone());
+        if replacement {
+            routes.entry(stem).or_default().insert(bytes);
+        }
+    }
+    let kind = if col.is_edge {
+        PropertyRouteKind::Edge
+    } else {
+        PropertyRouteKind::Node
+    };
+    for (route, targets) in routes {
+        let (rows, work) = graphforge_storage::read_authenticated_property_snapshots_for_inventory(
+            inventory, kind, &route, &targets,
+        )?;
+        crate::demand::record_replacement_key_work(&work, targets.len());
+        for (uuid, row) in rows {
+            keys.insert(uuid, row.values.into_keys().collect());
+        }
+    }
+    Ok(PropertyWriteBatch { stems, keys })
+}
+
 /// SET phase: evaluate each item's value per frontier row; route the write to
 /// the pending buffer (created entities), reject deleted targets, accumulate
 /// the rest for the commit-time rewrite.
@@ -2808,6 +2885,7 @@ fn run_set_phase_masked(
                 .and_then(|cv| cv.into_array(n))
                 .map_err(GfError::from_execution_error)?;
             let selected = mask.map(|mask| &mask[offset..offset + n]);
+            let owners = resolve_property_write_batch(env, ctx, &col, batch, selected, false)?;
             let overlay_values = if let Some(selected) = selected {
                 let selection = BooleanArray::from(selected.to_vec());
                 let previous = frontier
@@ -2849,7 +2927,7 @@ fn run_set_phase_masked(
                 }
                 let scalar = ScalarValue::try_from_array(&values, row)
                     .map_err(GfError::from_execution_error)?;
-                let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
+                let stem = owners.stems[&uuid].clone();
                 if scalar.is_null() {
                     let present = property_is_present(
                         &frontier.df_schema,
@@ -2998,16 +3076,27 @@ fn run_set_map_phase_with_input(
                 .ok_or_else(|| {
                     GfError::Execution("SET map expression must evaluate to a map".into())
                 })?;
+            let selected: Vec<_> = (0..batch.num_rows())
+                .map(|row| !maps.is_null(row))
+                .collect();
+            let owners = resolve_property_write_batch(
+                env,
+                ctx,
+                &identity,
+                batch,
+                Some(&selected),
+                item.replace,
+            )?;
             if maps
                 .column_by_name(graphforge_value::heterogeneous::TAG)
                 .is_some()
             {
                 for row in 0..batch.num_rows() {
-                    if maps.is_null(row) {
+                    if maps.is_null(row) || batch.column(identity.uuid_idx).is_null(row) {
                         continue;
                     }
                     let uuid = to_bytes(&fixed_binary_uuid(batch, identity.uuid_idx, row)?);
-                    let stem = identity.stem_for_row(batch, row, env.mode, &env.type_map)?;
+                    let stem = owners.stems[&uuid].clone();
                     let updates = decode_tagged_map_updates(maps, row)?;
                     let mut present: HashSet<_> = existing_names
                         .iter()
@@ -3020,9 +3109,7 @@ fn run_set_map_phase_with_input(
                         && !ctx.writer.contains_pending_node(&uuid)
                         && !ctx.writer.contains_pending_edge(&uuid)
                     {
-                        present.extend(graphforge_storage::read_entity_property_keys(
-                            env.dir, &stem, &uuid, is_edge,
-                        )?);
+                        present.extend(owners.keys.get(&uuid).into_iter().flatten().cloned());
                     }
                     let removals = if item.replace {
                         present
@@ -3071,7 +3158,7 @@ fn run_set_map_phase_with_input(
                         "cannot SET properties on an entity deleted in this statement".into(),
                     ));
                 }
-                let stem = identity.stem_for_row(batch, row, env.mode, &env.type_map)?;
+                let stem = owners.stems[&uuid].clone();
                 let mut updates = HashMap::with_capacity(maps.num_columns());
                 let mut null_keys = HashSet::new();
                 for (field, column) in maps.fields().iter().zip(maps.columns()) {
@@ -3096,9 +3183,7 @@ fn run_set_map_phase_with_input(
                     && !ctx.writer.contains_pending_node(&uuid)
                     && !ctx.writer.contains_pending_edge(&uuid)
                 {
-                    present.extend(graphforge_storage::read_entity_property_keys(
-                        env.dir, &stem, &uuid, is_edge,
-                    )?);
+                    present.extend(owners.keys.get(&uuid).into_iter().flatten().cloned());
                 }
                 let (removals, replaced) =
                     map_removals(item.replace, &present, &updates, &null_keys);
@@ -3321,6 +3406,19 @@ fn run_remove_phase(
         });
         let mut overlay = Vec::with_capacity(frontier.batches.len());
         for batch in &frontier.batches {
+            let selected: Vec<_> = (0..batch.num_rows())
+                .map(|row| {
+                    property_is_present(
+                        &frontier.df_schema,
+                        batch,
+                        item.target,
+                        &item.prop_name,
+                        row,
+                    )
+                })
+                .collect();
+            let owners =
+                resolve_property_write_batch(env, ctx, &col, batch, Some(&selected), false)?;
             let id_col = batch.column(col.uuid_idx);
             for row in 0..batch.num_rows() {
                 if id_col.is_null(row) {
@@ -3341,7 +3439,7 @@ fn run_remove_phase(
                 ) {
                     continue;
                 }
-                let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
+                let stem = owners.stems[&uuid].clone();
                 let keys = HashSet::from([item.prop_name.clone()]);
                 if is_edge && ctx.writer.contains_pending_edge(&uuid) {
                     ctx.writer.remove_pending_edge_props(&uuid, &keys);
@@ -3495,6 +3593,7 @@ fn run_label_phase(
 pub(crate) fn stage_statement(
     ctx: &mut StatementWriteContext,
     dir: &Path,
+    inventory: Option<&graphforge_storage::AuthenticatedPropertyInventory>,
 ) -> Result<graphforge_storage::RewriteBatch, GfError> {
     // Writes to entities deleted later in the statement are unobservable —
     // they must not resurrect rows in the rewrite.
@@ -3502,8 +3601,8 @@ pub(crate) fn stage_statement(
     ctx.remove_acc.scrub(&ctx.deleted);
 
     let mut staged = graphforge_storage::RewriteBatch::new();
-    ctx.set_acc.stage_into(&mut staged, dir)?;
-    ctx.remove_acc.stage_into(&mut staged, dir)?;
+    ctx.set_acc.stage_into(&mut staged, dir, inventory)?;
+    ctx.remove_acc.stage_into(&mut staged, dir, inventory)?;
     graphforge_storage::stage_mutate_node_labels(
         &mut staged,
         dir,
@@ -4186,6 +4285,88 @@ mod tests {
                     datafusion::execution::memory_pool::UnboundedMemoryPool::default(),
                 ),
             ),
+        }
+    }
+
+    #[test]
+    fn ambiguous_edge_owner_refuses_before_accumulation_or_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
+                .unwrap();
+        for route in ["KNOWS", "_exploratory"] {
+            writer
+                .set_edge_properties(
+                    &graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                    Some(route),
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+        let before = graphforge_storage::capture_graph_files(dir.path())
+            .unwrap()
+            .0;
+        let catalog = graphforge_storage::GraphCatalog::open(
+            dir.path(),
+            None,
+            &graphforge_ir::RuntimeCatalog::new(),
+        )
+        .unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            &graphforge_storage::lowering_snapshot(Some(&catalog), Some(dir.path())).unwrap(),
+            None,
+            OntologyMode::Exploratory,
+        )
+        .unwrap();
+        let mut exprs = ExprArena::new();
+        let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
+        let params = HashMap::new();
+        let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+        let mut var_map = VarMap::new();
+        var_map.insert(VarId(1), "var_1");
+        for remove in [false, true] {
+            let mut ctx =
+                StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+            let mut frontier = write_frontier(true);
+            let result = if remove {
+                run_remove_phase(
+                    &env,
+                    &[RemovePropItem {
+                        target: VarId(1),
+                        prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
+                        prop_name: "score".into(),
+                    }],
+                    &mut frontier,
+                    &mut ctx,
+                )
+            } else {
+                run_set_phase(
+                    &env,
+                    &[SetPropItem {
+                        target: VarId(1),
+                        prop: graphforge_value::PropertyId::ontology(PropId(9)).unwrap(),
+                        prop_name: "score".into(),
+                        value,
+                    }],
+                    &mut frontier,
+                    &var_map,
+                    &mut ctx,
+                )
+            };
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("edge property owner is ambiguous")
+            );
+            assert!(ctx.set_acc.nodes.is_empty() && ctx.set_acc.edges.is_empty());
+            assert!(ctx.remove_acc.nodes.is_empty() && ctx.remove_acc.edges.is_empty());
+            assert_eq!(ctx.mutation.counters, WriteCounters::default());
+            let after = graphforge_storage::capture_graph_files(dir.path())
+                .unwrap()
+                .0;
+            assert_eq!(before, after);
         }
     }
 
