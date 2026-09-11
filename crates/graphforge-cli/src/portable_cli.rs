@@ -621,6 +621,7 @@ pub(crate) fn run_import_session(
                 session_uuid,
                 &format!("{phase:?}").to_ascii_lowercase(),
                 &progress,
+                None,
                 json,
                 output,
             )
@@ -641,6 +642,7 @@ pub(crate) fn run_import_session(
                 session.session_uuid(),
                 "checkpointed",
                 &progress,
+                None,
                 json,
                 output,
             )
@@ -648,37 +650,25 @@ pub(crate) fn run_import_session(
         ImportSessionCommand::Validate(args) => {
             let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let progress = session.validate(graph)?;
-            write_progress(session.session_uuid(), "validated", &progress, json, output)
+            write_progress(
+                session.session_uuid(),
+                "validated",
+                &progress,
+                Some(session.operation_timings()),
+                json,
+                output,
+            )
         }
         ImportSessionCommand::Commit(args) => {
             let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let generation = session.commit(graph, None)?;
-            let (_, progress) = session.status();
-            if json {
-                write_json(
-                    &serde_json::json!({
-                        "contract": "graphforge-import-session/1",
-                        "outcome": "committed",
-                        "session_uuid": session.session_uuid(),
-                        "generation_uuid": generation,
-                        "construction": progress.construction,
-                    }),
-                    output,
-                )
-            } else {
-                writeln!(
-                    output,
-                    "committed session {} generation {generation}",
-                    session.session_uuid()
-                )
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
-            }
+            write_import_commit(&session, generation, json, output)
         }
         ImportSessionCommand::Abort(args) => {
             let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let session_uuid = session.session_uuid();
             let progress = session.abort(graph)?;
-            write_progress(session_uuid, "aborted", &progress, json, output)
+            write_progress(session_uuid, "aborted", &progress, None, json, output)
         }
         ImportSessionCommand::Cleanup(args) => {
             let removed =
@@ -696,6 +686,35 @@ pub(crate) fn run_import_session(
                     .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
             }
         }
+    }
+}
+
+fn write_import_commit(
+    session: &graphforge_api::GraphImportSession,
+    generation: Uuid,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
+    let (_, progress) = session.status();
+    if json {
+        write_json(
+            &serde_json::json!({
+                "contract": "graphforge-import-session/1",
+                "outcome": "committed",
+                "session_uuid": session.session_uuid(),
+                "generation_uuid": generation,
+                "construction": progress.construction,
+                "operation_timings": session.operation_timings(),
+            }),
+            output,
+        )
+    } else {
+        writeln!(
+            output,
+            "committed session {} generation {generation}",
+            session.session_uuid()
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
     }
 }
 
@@ -724,22 +743,24 @@ fn write_progress(
     session_uuid: Uuid,
     outcome: &str,
     progress: &graphforge_api::ImportProgress,
+    timings: Option<graphforge_api::ImportOperationTimings>,
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     if json {
-        write_json(
-            &serde_json::json!({
-                "contract": "graphforge-import-session/1",
-                "outcome": outcome,
-                "session_uuid": session_uuid,
-                "rows_accepted": progress.rows_accepted,
-                "rows_rejected": progress.rows_rejected,
-                "bytes_accepted": progress.bytes_accepted,
-                "construction": progress.construction,
-            }),
-            output,
-        )
+        let mut receipt = serde_json::json!({
+            "contract": "graphforge-import-session/1",
+            "outcome": outcome,
+            "session_uuid": session_uuid,
+            "rows_accepted": progress.rows_accepted,
+            "rows_rejected": progress.rows_rejected,
+            "bytes_accepted": progress.bytes_accepted,
+            "construction": progress.construction,
+        });
+        if let Some(timings) = timings {
+            receipt["operation_timings"] = serde_json::json!(timings);
+        }
+        write_json(&receipt, output)
     } else {
         writeln!(
             output,

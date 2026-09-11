@@ -328,12 +328,53 @@ struct SessionManifest {
     updated_unix_millis: u64,
 }
 
+/// Monotonic wall time for attempted calls, including returned errors.
+/// These observations are not durable progress or performance limits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ImportCallTiming {
+    /// Number of attempted calls.
+    pub calls: u64,
+    /// Calls that returned an error.
+    pub errors: u64,
+    /// Sum of elapsed nanoseconds around these calls.
+    pub elapsed_ns: u64,
+}
+
+impl ImportCallTiming {
+    fn record(&mut self, started: Instant, failed: bool) {
+        self.elapsed_ns = self
+            .elapsed_ns
+            .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        self.calls = self.calls.saturating_add(1);
+        self.errors = self.errors.saturating_add(u64::from(failed));
+    }
+}
+
+/// Disjoint call timings from the latest import validation or commit invocation.
+/// Reset before either operation, including precondition errors; never persisted.
+/// Lost-process work and source decoding, normalization, and checkpoints outside
+/// these calls are not measured. The sum is not whole-import elapsed time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ImportOperationTimings {
+    /// Fresh construction creation, excluding the import manifest checkpoint.
+    pub begin: ImportCallTiming,
+    /// Resumed construction authentication/reconciliation, excluding facade open.
+    pub resume: ImportCallTiming,
+    /// Construction append calls, including idempotent replay attempts.
+    pub append: ImportCallTiming,
+    /// Validation and sealing of construction artifacts.
+    pub seal: ImportCallTiming,
+    /// Publication, including work inside the public seal-and-publish call.
+    pub publish: ImportCallTiming,
+}
+
 /// Owned handle for a durable staged import. The handle contains no live rows.
 pub struct GraphImportSession {
     allocation_operation: Option<graphforge_storage::StorageAllocationOperation>,
     root: PathBuf,
     manifest: SessionManifest,
     observed: Instant,
+    operation_timings: ImportOperationTimings,
 }
 
 impl GraphForge {
@@ -376,6 +417,7 @@ impl GraphForge {
             root,
             manifest,
             observed: Instant::now(),
+            operation_timings: ImportOperationTimings::default(),
         })
     }
 
@@ -397,6 +439,7 @@ impl GraphForge {
             root,
             manifest,
             observed: Instant::now(),
+            operation_timings: ImportOperationTimings::default(),
         })
     }
 
@@ -445,6 +488,7 @@ impl GraphForge {
                 root,
                 manifest,
                 observed: Instant::now(),
+                operation_timings: ImportOperationTimings::default(),
             }
             .abort(self)?;
             cleaned = cleaned.saturating_add(1);
@@ -454,6 +498,12 @@ impl GraphForge {
 }
 
 impl GraphImportSession {
+    /// Timings from the latest validation or commit on this handle, including
+    /// calls that returned errors. Reading these observations performs no I/O.
+    #[must_use]
+    pub fn operation_timings(&self) -> ImportOperationTimings {
+        self.operation_timings
+    }
     fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
         let observed = if let Some(allocation) = &self.allocation_operation {
             let directory = graphforge_filesystem::StableDirectory::open(
@@ -651,6 +701,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        self.operation_timings = ImportOperationTimings::default();
         self.ensure_open()?;
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
@@ -694,6 +745,7 @@ impl GraphImportSession {
                         self.persist_manifest()?;
                     }
                     let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
+                    let started = Instant::now();
                     let staged = match (input_kind, cancellation) {
                         (BulkInputKind::Node, Some(token)) => {
                             construction.append_nodes_with_cancellation(&chunk_id, &batch, token)
@@ -704,6 +756,9 @@ impl GraphImportSession {
                         }
                         (BulkInputKind::Edge, None) => construction.append_edges(&chunk_id, &batch),
                     };
+                    self.operation_timings
+                        .append
+                        .record(started, staged.is_err());
                     if let Err(error) = staged {
                         self.manifest.sources[source_index].inflight_batch = None;
                         let remaining = self
@@ -742,7 +797,18 @@ impl GraphImportSession {
                 self.persist_manifest()?;
             }
         }
-        construction.validate_and_seal(cancellation)?;
+        self.seal_construction(&mut construction, cancellation)
+    }
+
+    fn seal_construction(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ImportProgress, GfError> {
+        let started = Instant::now();
+        let sealed = construction.validate_and_seal(cancellation);
+        self.operation_timings.seal.record(started, sealed.is_err());
+        sealed?;
         self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Validated;
         self.checkpoint()
@@ -785,6 +851,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
+        self.operation_timings = ImportOperationTimings::default();
         if self.manifest.phase != ImportPhase::Validated
             || self.manifest.progress.files_pending != 0
         {
@@ -792,10 +859,15 @@ impl GraphImportSession {
         }
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
+        let started = Instant::now();
         let publication = match cancellation {
-            Some(token) => construction.seal_and_publish_with_cancellation(token)?,
-            None => construction.seal_and_publish()?,
+            Some(token) => construction.seal_and_publish_with_cancellation(token),
+            None => construction.seal_and_publish(),
         };
+        self.operation_timings
+            .publish
+            .record(started, publication.is_err());
+        let publication = publication?;
         self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Committed;
         self.checkpoint()?;
@@ -838,10 +910,19 @@ impl GraphImportSession {
         graph: &'a GraphForge,
     ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
         let budgets = self.construction_budgets();
+        let started = Instant::now();
         if let Some(session_uuid) = self.manifest.construction_session_uuid {
-            return graph.resume_graph_construction(session_uuid, budgets);
+            let resumed = graph.resume_graph_construction(session_uuid, budgets);
+            self.operation_timings
+                .resume
+                .record(started, resumed.is_err());
+            return resumed;
         }
-        let session = graph.begin_graph_construction(budgets)?;
+        let session = graph.begin_graph_construction(budgets);
+        self.operation_timings
+            .begin
+            .record(started, session.is_err());
+        let session = session?;
         self.manifest.construction_session_uuid = Some(session.session_uuid());
         self.persist_manifest()?;
         Ok(session)
@@ -1358,6 +1439,117 @@ mod tests {
             .container_root()
             .join(".graphforge-construction")
             .join(session_uuid.simple().to_string())
+    }
+
+    #[test]
+    fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(
+                OperationId(Uuid::now_v7()),
+                ImportSessionLimits {
+                    batch_rows: 1,
+                    ..ImportSessionLimits::default()
+                },
+            )
+            .unwrap();
+        let ids = [Uuid::now_v7(), Uuid::now_v7()];
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids[..1]), nodes(&ids[1..])])
+            .unwrap();
+        session
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edges(Uuid::now_v7(), ids[0], ids[1])],
+            )
+            .unwrap();
+        let prior = *graph.current_generation_uuid.lock().unwrap();
+        session.validate(&graph).unwrap();
+        let timing = session.operation_timings();
+        assert_eq!(
+            (
+                timing.begin.calls,
+                timing.resume.calls,
+                timing.append.calls,
+                timing.seal.calls,
+                timing.publish.calls
+            ),
+            (1, 0, 3, 1, 0)
+        );
+        for call in [timing.begin, timing.append, timing.seal] {
+            assert_eq!(call.errors, 0);
+        }
+        session.validate(&graph).unwrap();
+        let timing = session.operation_timings();
+        assert_eq!(
+            (
+                timing.begin.calls,
+                timing.resume.calls,
+                timing.append.calls,
+                timing.seal.calls
+            ),
+            (0, 1, 0, 1)
+        );
+        let manifest_path = session.root.join(MANIFEST);
+        let persisted = fs::read(&manifest_path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&persisted).unwrap();
+        assert!(!value.to_string().contains("elapsed_ns"));
+        assert!(!value.to_string().contains("operation_timings"));
+        let session_uuid = session.session_uuid();
+        drop(session);
+        let mut session = graph.resume_import_session(session_uuid).unwrap();
+        assert_eq!(
+            session.operation_timings(),
+            ImportOperationTimings::default()
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let error = session.commit(&graph, Some(&cancelled)).unwrap_err();
+        assert_eq!(error.code(), "GF_CANCELLED");
+        let timing = session.operation_timings();
+        assert_eq!(
+            (
+                timing.resume.calls,
+                timing.publish.calls,
+                timing.publish.errors
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), prior);
+        assert_eq!(session.status().0, ImportPhase::Validated);
+        assert_eq!(fs::read(&manifest_path).unwrap(), persisted);
+        session.commit(&graph, None).unwrap();
+        let timing = session.operation_timings();
+        assert_eq!(
+            (
+                timing.begin.calls,
+                timing.resume.calls,
+                timing.append.calls,
+                timing.seal.calls,
+                timing.publish.calls,
+                timing.publish.errors
+            ),
+            (0, 1, 0, 0, 1, 0)
+        );
+        assert_eq!(graph.node_count("Person").unwrap(), 2);
+        let result = graph
+            .execute("MATCH ()-[r:KNOWS]->() RETURN count(r) AS n")
+            .unwrap();
+        assert_eq!(
+            result.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0),
+            1
+        );
+        assert!(session.commit(&graph, None).is_err());
+        assert_eq!(
+            session.operation_timings(),
+            ImportOperationTimings::default()
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,63 @@ from tests.lifecycle_storage_fixture import retained_owners
 
 
 class WorkspaceSmokeTests(unittest.TestCase):
+    def test_import_operation_timings_schema_preserves_closed_unsigned_fields(self) -> None:
+        schema = json.loads(
+            (workspace_root() / "schemas" / "certification-evidence.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator = Draft202012Validator(schema)
+        timings = {
+            phase: {"calls": 0, "errors": 0, "elapsed_ns": 0}
+            for phase in ("begin", "resume", "append", "seal", "publish")
+        }
+        timings["append"] = {"calls": 2, "errors": 0, "elapsed_ns": 17}
+        document = {
+            "schema": "graphforge-public-certification/1",
+            "profile_id": "tiny-public-certification",
+            "status": "passed",
+            "failed_phase": None,
+            "phases": [
+                {
+                    "phase": "ingest",
+                    "status": "passed",
+                    "duration_ms": 1,
+                    "peak_rss_bytes": 0,
+                    "exit_code": 0,
+                    "receipts": [
+                        {
+                            "contract": "graphforge-import-session/1",
+                            "outcome": "validated",
+                            "operation_timings": timings,
+                        }
+                    ],
+                }
+            ],
+        }
+        validator.validate(document)
+        for key, value in [
+            ("elapsed_ns", -1),
+            ("elapsed_ns", 2**64),
+            ("elapsed_ns", "private"),
+            ("calls", True),
+            ("calls", 1.5),
+            ("path", 0),
+        ]:
+            candidate = deepcopy(document)
+            candidate["phases"][0]["receipts"][0]["operation_timings"]["append"][key] = value
+            self.assertFalse(validator.is_valid(candidate), (key, value))
+        for phase, key in [("resume", "elapsed_ns"), ("resume", "errors")]:
+            candidate = deepcopy(document)
+            candidate["phases"][0]["receipts"][0]["operation_timings"][phase][key] = 1
+            self.assertFalse(validator.is_valid(candidate))
+        candidate = deepcopy(document)
+        del candidate["phases"][0]["receipts"][0]["operation_timings"]["seal"]
+        self.assertFalse(validator.is_valid(candidate))
+        candidate = deepcopy(document)
+        candidate["phases"][0]["receipts"][0]["outcome"] = "registered"
+        self.assertFalse(validator.is_valid(candidate))
+
     def test_checked_in_fixtures_are_discoverable(self) -> None:
         discovered = discover_fixtures()
         self.assertEqual(set(discovered), set(FIXTURE_DIRECTORIES))

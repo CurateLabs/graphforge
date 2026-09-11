@@ -230,8 +230,8 @@ pub use graphforge_core::{
     SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue, TemporalValue,
 };
 pub use import_session::{
-    GraphImportSession, ImportConstructionEvidence, ImportPhase, ImportProgress,
-    ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
+    GraphImportSession, ImportCallTiming, ImportConstructionEvidence, ImportOperationTimings,
+    ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind, PublicationWorkComponents,
 };
 pub use query_evidence::{
     QueryExecutionEvidence, QueryHopEvidence, QueryOperatorRssEvidence, QuerySinkEvidenceReceipt,
