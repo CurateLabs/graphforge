@@ -255,11 +255,16 @@ fn count_preserves_nullable_variables_and_row_cardinality() {
         ),
         ("MATCH ()-[r:R]->() RETURN count(*) AS total", vec![1]),
         ("MATCH ()-[r:R*1..2]->() RETURN count(*) AS total", vec![1]),
+        ("MATCH ()-[r:R*1..2]->() RETURN count(r) AS total", vec![1]),
+        ("MATCH ()-[r:R*0..2]->() RETURN count(r) AS total", vec![4]),
         (
             "MATCH (a)-[:R]->() WHERE a.score = 999 RETURN count(*) AS total",
             vec![0],
         ),
     ] {
+        if query.contains("R*") {
+            assert!(!graph.explain(query).unwrap().contains("EdgeCountExec"));
+        }
         let result = graph.execute(query).unwrap();
         assert_eq!(
             result
@@ -298,7 +303,7 @@ fn count_preserves_nullable_variables_and_row_cardinality() {
         0
     );
     let grouped = graph
-        .execute("UNWIND [null,1,2] AS x RETURN null AS k, count(*) AS total")
+        .execute("UNWIND [null,1,2] AS x RETURN null AS k, count(*) AS total, count(x) AS present")
         .unwrap();
     assert_eq!(
         grouped
@@ -314,6 +319,15 @@ fn count_preserves_nullable_variables_and_row_cardinality() {
         .find(|batch| batch.num_rows() == 1)
         .unwrap();
     assert_eq!(batch.column(0).logical_null_count(), 1);
+    assert_eq!(
+        batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
     assert_eq!(
         batch
             .column(1)
