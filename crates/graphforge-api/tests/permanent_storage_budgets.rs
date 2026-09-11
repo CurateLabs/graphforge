@@ -6807,3 +6807,103 @@ fn fragmentation_statistics_public_probe() {
         json!({"run_count":status.run_count,"run_bytes":status.run_bytes,"estimated_replay_memory_bytes":status.estimated_replay_memory_bytes,"inventory":publishing_parquet_inventory(&source)})
     );
 }
+
+/// Real scalar queries distinguish consumed statistics from physical-plan text.
+#[test]
+fn statistics_public_query_probe() {
+    let temporary = tempfile::tempdir().unwrap();
+    let configured = std::env::var_os("GF_STATS_ROOT");
+    let root = configured
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temporary.path().join("statistics"));
+    let source = root.join("source");
+    let nodes: Vec<Node> = if configured.is_some() {
+        serde_json::from_slice(&std::fs::read(root.join("oracle.json")).unwrap()).unwrap()
+    } else {
+        let fixture = Fixture {
+            name: "statistics",
+            nodes: 4097,
+            edges: 0,
+            routes: 2,
+            identifiers: Identifiers::Random,
+            properties: true,
+            adjacency: false,
+            heterogeneous: true,
+        };
+        std::fs::create_dir_all(&root).unwrap();
+        let (nodes, edges) = rows(fixture);
+        construct(&source, fixture, &nodes, &edges);
+        nodes
+    };
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let selected = std::env::var("GF_STATS_CASE").unwrap_or_else(|_| "all".into());
+    let cases = [
+        (
+            "count_all",
+            "MATCH (n) RETURN count(*) AS value",
+            nodes.len() as i64,
+        ),
+        (
+            "count_identity",
+            "MATCH (n) RETURN count(n.node_uuid) AS value",
+            nodes.len() as i64,
+        ),
+        (
+            "count_label",
+            "MATCH (n:Node0) RETURN count(*) AS value",
+            nodes.iter().filter(|node| node.1 == "Node0").count() as i64,
+        ),
+        (
+            "count_property",
+            "MATCH (n) RETURN count(n.score) AS value",
+            nodes.iter().filter(|node| node.2.is_some()).count() as i64,
+        ),
+        (
+            "sum_property",
+            "MATCH (n) RETURN sum(n.score) AS value",
+            nodes.iter().filter_map(|node| node.2).sum(),
+        ),
+        (
+            "selective",
+            "MATCH (n) WHERE n.score >= 10000 RETURN count(*) AS value",
+            nodes
+                .iter()
+                .filter(|node| node.2.is_some_and(|value| value >= 10_000))
+                .count() as i64,
+        ),
+        ("empty", "MATCH (n:Missing) RETURN count(*) AS value", 0),
+    ];
+    assert!(selected == "all" || cases.iter().any(|case| case.0 == selected));
+    for (name, query, expected) in cases {
+        if selected != "all" && selected != name {
+            continue;
+        }
+        let mut elapsed_ns = Vec::new();
+        for _ in 0..if configured.is_some() { 5 } else { 1 } {
+            let started = Instant::now();
+            let result = graph.execute(query).unwrap();
+            elapsed_ns.push(started.elapsed().as_nanos());
+            assert_eq!(
+                result
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                1
+            );
+            let batch = result
+                .batches
+                .iter()
+                .find(|batch| batch.num_rows() == 1)
+                .unwrap();
+            assert_eq!(batch.num_columns(), 1);
+            assert_eq!(batch.schema().field(0).name(), "value");
+            assert_eq!(int_at(batch, 0, 0), Some(expected), "{query}");
+        }
+        println!(
+            "STATISTICS_QUERY {}",
+            json!({"case":name,"expected":expected,"query_elapsed_ns":elapsed_ns,"physical_plan":graph.explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan).unwrap()})
+        );
+    }
+}
