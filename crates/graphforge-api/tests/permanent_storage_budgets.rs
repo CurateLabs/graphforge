@@ -7138,7 +7138,10 @@ fn property_layout_bloom_assessment() {
                     }
                 }
                 assert_eq!(bloom_checks, if variant == "bloom" { 4096 } else { 0 });
-                assert!(bloom_bytes <= 4096, "one-shard serialized Bloom byte budget");
+                assert!(
+                    bloom_bytes <= 4096,
+                    "one-shard serialized Bloom byte budget"
+                );
                 let bloom_probe_ns = bloom_started.elapsed().as_nanos();
                 let started = Instant::now();
                 let decoded = builder
