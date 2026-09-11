@@ -1221,9 +1221,11 @@ are removed from the same authority that receives the replacement.
 
 Typed scans and fixed expansions carry their catalog-resolved route as an
 internal constant column. This uses the generation's storage binding, without
-reinterpreting ontology IDs as runtime IDs. The statement retains its pinned
-property inventory through SET/REMOVE staging, including declared semantic
-schema metadata for a route's first property write. Immediate query success is
+reinterpreting ontology IDs as runtime IDs. During staging, current property
+rows and live counts come from the writable workspace. The pinned generation
+supplies declared semantic schema metadata for a route's first property write;
+its historical counts and generation authority are not substituted for the
+workspace's. SET/REMOVE and pending appends therefore share workspace authority. Immediate query success is
 insufficient: ownership fixtures also reopen after qualified mutations and
 exercise full portable verification, clean import and later mutation.
 

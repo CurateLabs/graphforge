@@ -3600,6 +3600,11 @@ pub(crate) fn stage_statement(
     ctx.set_acc.scrub(&ctx.deleted);
     ctx.remove_acc.scrub(&ctx.deleted);
 
+    // Property values/counts belong to the writable workspace; the pinned
+    // generation contributes only declared semantic owners for absent routes.
+    let workspace_inventory =
+        graphforge_storage::AuthenticatedPropertyInventory::capture_workspace(dir, inventory)?;
+    let inventory = Some(&workspace_inventory);
     let mut staged = graphforge_storage::RewriteBatch::new();
     ctx.set_acc.stage_into(&mut staged, dir, inventory)?;
     ctx.remove_acc.stage_into(&mut staged, dir, inventory)?;

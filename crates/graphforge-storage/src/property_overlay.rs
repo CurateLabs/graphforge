@@ -963,6 +963,17 @@ impl AuthenticatedPropertyInventory {
         })
     }
 
+    /// Admit the writable workspace's current property rows and statistics,
+    /// retaining declared semantic owners from the transaction's pinned generation.
+    /// The generation's historical live counts are not workspace statistics.
+    pub fn capture_workspace(project: &Path, pinned: Option<&Self>) -> Result<Self, GfError> {
+        let mut inventory = Self::capture(project)?;
+        if let Some(generation) = pinned.and_then(|pinned| pinned.generation_lease.as_ref()) {
+            inventory.seed_semantic_property_schemas(generation)?;
+        }
+        Ok(inventory)
+    }
+
     // A declared owner may not have a property payload yet. Its authenticated
     // binding still owns the metadata of the first fragment we publish.
     fn seed_semantic_property_schemas(

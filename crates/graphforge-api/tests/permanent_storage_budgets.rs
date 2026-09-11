@@ -6252,6 +6252,46 @@ fn qualified_cypher_edge_owners_preserve_constructed_and_pending_values() {
     let query = "MATCH (a:`mixed:NewNode`)-[r:`mixed:NEW_TYPED`]->(b:`mixed:NewNode`) RETURN r.edge_uuid, a.node_uuid, b.node_uuid, r.weight";
     let mut expected = vec![(edge, a, b, None)];
     let verify = |graph: &GraphForge, expected: &[(Uuid, Uuid, Uuid, Option<i64>)]| {
+        for suffix in [
+            "RETURN type(r) AS kind, r AS relationship",
+            "WITH r AS x RETURN type(x) AS kind, x AS relationship",
+        ] {
+            let values = graph
+                .execute(&format!("MATCH ()-[r:`mixed:NEW_TYPED`]->() {suffix}"))
+                .unwrap_or_else(|error| panic!("{suffix}: {error}"));
+            assert_eq!(
+                values
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                expected.len()
+            );
+            for batch in &values.batches {
+                let kinds = batch
+                    .column_by_name("kind")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let relationships = batch
+                    .column_by_name("relationship")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<arrow::array::StructArray>()
+                    .unwrap();
+                let types = relationships
+                    .column_by_name("rel_type")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                for row in 0..batch.num_rows() {
+                    assert_eq!(kinds.value(row), "mixed:NEW_TYPED", "{suffix}");
+                    assert_eq!(types.value(row), "mixed:NEW_TYPED", "{suffix}");
+                }
+            }
+        }
         let mut actual = Vec::new();
         for batch in graph.execute(query).unwrap().batches {
             for row in 0..batch.num_rows() {
