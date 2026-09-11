@@ -1921,7 +1921,7 @@ where
     } else {
         captured =
             crate::property_overlay::authenticated_property_inventory_for_route(dir, kind, stem)
-                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
         &captured
     };
     let schema = inventory.route_schema(kind, stem);
@@ -1952,21 +1952,21 @@ where
                     let batch = normalize_property_batch(batch, schema.as_ref())?;
                     let batch =
                         project_property_batch(batch, kind.uuid_field(), selected_properties)?;
-                    stopped = !visit(&batch)
-                        .map_err(|error| graphforge_core::GfError::Storage(error.to_string()))?;
+                    stopped =
+                        !visit(&batch).map_err(graphforge_core::GfError::from_execution_error)?;
                 }
                 Ok(())
             },
         )
-        .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
     if !stopped && !rows.is_empty() {
         let batch = crate::writer::property_snapshots_to_batch(stem, is_edge, rows)
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
             .ok_or_else(|| DataFusionError::Execution("property batch disappeared".into()))?;
         let batch = normalize_property_batch(batch, schema.as_ref())
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let batch = project_property_batch(batch, kind.uuid_field(), selected_properties)
-            .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
         let _ = visit(&batch)?;
     }
     Ok(metrics)
@@ -4126,6 +4126,105 @@ mod tests {
                 .all(|batch| batch.schema() == batches[0].schema())
         );
         assert!(batches[0].column_by_name("year").is_some());
+    }
+
+    #[test]
+    fn property_overlay_adapter_preserves_error_sources() {
+        use graphforge_core::{GfError, ProjectErrorCode};
+        let dir = TempDir::new().unwrap();
+        let mut writer =
+            crate::GraphWriter::open_at(dir.path(), graphforge_core::OntologyMode::Strict, 1)
+                .unwrap();
+        let uuid = graphforge_core::uuid::new_v7();
+        writer
+            .create_node(
+                uuid,
+                graphforge_value::EntityTypeId::ontology(graphforge_core::TypeId(1)).unwrap(),
+            )
+            .unwrap();
+        writer
+            .set_properties(
+                &uuid,
+                Some("Person"),
+                HashMap::from([(
+                    "name".to_owned(),
+                    graphforge_ir::IrLiteral::Str("Ada".to_owned()),
+                )]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        let inventory = crate::property_overlay::authenticated_property_inventory_for_route(
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            "Person",
+        )
+        .unwrap();
+        let original = GfError::Project {
+            code: ProjectErrorCode::ProjectCorrupt,
+            message: "typed visitor failure".into(),
+        };
+        // Exercise both callbacks inside the reader and the trailing batch.
+        for batch_size in [1, 1024] {
+            let error = visit_property_overlay_batched_projected(
+                dir.path(),
+                Some(&inventory),
+                "Person",
+                false,
+                batch_size,
+                None,
+                |_| Err(DataFusionError::External(Box::new(original.clone()))),
+            )
+            .unwrap_err();
+            let recovered = GfError::from_execution_error(error);
+            assert_eq!(recovered.code(), original.code());
+            assert_eq!(recovered.to_string(), original.to_string());
+            let error = visit_property_overlay_batched_projected(
+                dir.path(),
+                Some(&inventory),
+                "Person",
+                false,
+                batch_size,
+                None,
+                |_| {
+                    Err(DataFusionError::Execution(
+                        "GF_PROJECT_CORRUPT: diagnostic only".into(),
+                    ))
+                },
+            )
+            .unwrap_err();
+            assert_eq!(GfError::from_execution_error(error).code(), "GF_EXECUTION");
+        }
+        // Inventory acquisition and consumption of retained inventory must both
+        // preserve the reader's structured refusal, before delivering any rows.
+        let fragment = crate::property_overlay::enumerate_property_fragments(
+            dir.path(),
+            crate::PropertyRouteKind::Node,
+            &crate::route_component::component("Person"),
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+        .path;
+        std::fs::write(fragment, b"corrupt").unwrap();
+        for retained in [None, Some(&inventory)] {
+            let error = visit_property_overlay_batched_projected(
+                dir.path(),
+                retained,
+                "Person",
+                false,
+                1,
+                None,
+                |_| panic!("corrupt property data must not reach the visitor"),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                GfError::from_execution_error(error),
+                GfError::Project {
+                    code: ProjectErrorCode::ProjectCorrupt,
+                    ..
+                }
+            ));
+        }
     }
 
     #[tokio::test]

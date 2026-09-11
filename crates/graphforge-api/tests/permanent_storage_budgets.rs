@@ -7252,3 +7252,149 @@ fn property_layout_bloom_assessment() {
         }
     }
 }
+
+fn construct_count_marker_fixture(source: &Path) -> (Vec<Node>, Vec<Option<String>>) {
+    let fixture = Fixture {
+        name: "count_marker",
+        nodes: 129,
+        edges: 0,
+        routes: 1,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: false,
+        heterogeneous: false,
+    };
+    let (nodes, _) = rows(fixture);
+    let payloads = (0..nodes.len())
+        .map(|row| {
+            (row % 11 != 0).then(|| digest_hex(format!("count-marker/{row}").as_bytes()).repeat(4))
+        })
+        .collect::<Vec<_>>();
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let mut session = graph
+        .begin_graph_construction(GraphConstructionBudgets {
+            max_batch_rows: 1024,
+            max_run_records: 4096,
+            merge_fan_in: 2,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut fields = CONSTRUCTION_NODE_SCHEMA.fields().to_vec();
+    fields.extend([
+        Arc::new(Field::new("score", DataType::Int64, true)),
+        Arc::new(Field::new("z_payload", DataType::Utf8, true)),
+    ]);
+    let arrays = vec![
+        uuids(nodes.iter().map(|node| node.0)),
+        Arc::new(StringArray::from(
+            nodes.iter().map(|node| node.1.as_str()).collect::<Vec<_>>(),
+        )) as ArrayRef,
+        Arc::new(Int64Array::from(
+            nodes.iter().map(|node| node.2).collect::<Vec<_>>(),
+        )) as ArrayRef,
+        Arc::new(StringArray::from(payloads.clone())) as ArrayRef,
+    ];
+    session
+        .append_nodes(
+            "count-marker",
+            &RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap(),
+        )
+        .unwrap();
+    session.seal_and_publish().unwrap();
+    (nodes, payloads)
+}
+
+#[test]
+fn count_row_marker_rejects_property_corruption_after_facade_open() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    construct_count_marker_fixture(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let selected = graphforge_storage::resolve_project_generation(&source).unwrap();
+    let generation_owned = selected.declared_graph_files_inventory().unwrap().is_some();
+    let inventory = selected.graph_files_inventory().unwrap().unwrap();
+    let path = inventory
+        .files
+        .iter()
+        .filter(|entry| entry.relative_path.ends_with(".parquet"))
+        .find_map(|entry| {
+            let path = if generation_owned {
+                selected.graph_tree_root().join(&entry.relative_path)
+            } else {
+                graphforge_storage::graph_object_path(&source, &entry.content_sha256).unwrap()
+            };
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(&path).unwrap()).unwrap();
+            reader
+                .schema()
+                .index_of("z_payload")
+                .is_ok()
+                .then_some(path)
+        })
+        .unwrap();
+    // Deliberately damage this test-owned immutable object after opening the
+    // facade, so query authentication must detect the hostile in-place change.
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    file.seek(SeekFrom::Start(4)).unwrap();
+    let mut byte = [0_u8; 1];
+    file.read_exact(&mut byte).unwrap();
+    byte[0] ^= 1;
+    file.seek(SeekFrom::Start(4)).unwrap();
+    file.write_all(&byte).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    // An unknown route is resolved without demanding this property's payload.
+    // A demanded route must authenticate even when its predicate yields no rows.
+    let absent = graph
+        .execute("MATCH (n:Missing) RETURN count(*) AS value")
+        .unwrap();
+    assert_eq!(
+        absent
+            .batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(absent.batches[0].column(0).logical_null_count(), 0);
+    assert_eq!(
+        absent.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        0
+    );
+    for query in [
+        "MATCH (n) RETURN count(*) AS value",
+        "MATCH (n) WHERE n.score = 999 RETURN count(*) AS value",
+    ] {
+        let error = graph.execute(query).unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT", "{query}: {error}");
+        assert!(
+            matches!(
+                error,
+                graphforge_core::GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    ..
+                }
+            ),
+            "{query}: {error}"
+        );
+    }
+}
