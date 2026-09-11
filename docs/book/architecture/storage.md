@@ -1134,7 +1134,9 @@ superseded fixture attempts. No incomparable baseline improvement is claimed.
 
 This ledger maps ordinary implementation criteria to their existing tests. It
 adds no release-certification requirement and does not claim final capacity
-completion; integrated S20/S22 evidence remains under #1194.
+completion. The [integrated #1194 report](../../development/integrated-storage-1194.md)
+reconciles the merged repairs, admitted S20/S22 measurements, physical owners,
+resource tradeoffs and the separate final-capacity outcome.
 
 ### Bounded manifest allocation evidence (#1204)
 
