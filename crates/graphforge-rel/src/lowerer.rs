@@ -2703,17 +2703,7 @@ fn lower_aggregate(
             let mut arg = a.arg.map(|id| lowerer.lower(id)).transpose()?;
             if a.func == AggFunc::Count
                 && arg.is_none()
-                && let Some((qualifier, field)) = input
-                    .schema()
-                    .iter()
-                    .rev()
-                    .find(|(_, field)| {
-                        matches!(
-                            field.name().as_str(),
-                            "node_uuid" | "edge_uuid" | "node_id" | "edge_id" | "src_id" | "dst_id"
-                        )
-                    })
-                    .or_else(|| input.schema().iter().last())
+                && let Some((qualifier, field)) = input.schema().iter().last()
             {
                 let column = DfExpr::Column(datafusion::common::Column::new(
                     qualifier.cloned(),
