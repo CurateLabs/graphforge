@@ -6366,3 +6366,89 @@ fn qualified_cypher_edge_owners_preserve_constructed_and_pending_values() {
     drop(imported);
     verify(&GraphForge::new(imported_path.to_str()).unwrap(), &expected);
 }
+
+#[test]
+fn empty_remove_preserves_durable_graph_snapshot_and_portable_mutation() {
+    use futures::TryStreamExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "empty_remove_lifecycle",
+        nodes: 33,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (mut nodes, mut edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let original_ids = cas_uuid_node_surrogates(&source);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    let expected_snapshot = nodes
+        .iter()
+        .map(|row| (row.0, row.2))
+        .collect::<BTreeMap<_, _>>();
+    let snapshot = graph
+        .execute_stream("MATCH (n) RETURN n.node_uuid, n.score")
+        .unwrap();
+    let check_noop = |graph: &GraphForge| {
+        for query in [
+            "MATCH (n) WHERE n.score = 999999 REMOVE n.score",
+            "MATCH ()-[r]->() WHERE r.weight = 999999 REMOVE r.weight",
+        ] {
+            let result = graph.execute(query).unwrap();
+            assert_eq!(result.side_effects.as_ref().unwrap().properties_removed, 0);
+        }
+    };
+    check_noop(&graph);
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let mutation = graph
+        .execute("MATCH (n) WHERE n.score = -2047 SET n.score = 4242")
+        .unwrap();
+    assert_eq!(mutation.side_effects.as_ref().unwrap().properties_set, 1);
+    nodes[1].2 = Some(4242);
+    verify_graph(&graph, fixture, &nodes, &edges);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let batches = runtime.block_on(snapshot.try_collect::<Vec<_>>()).unwrap();
+    let mut observed = BTreeMap::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            assert!(
+                observed
+                    .insert(uuid_at(&batch, 0, row), int_at(&batch, 1, row))
+                    .is_none()
+            );
+        }
+    }
+    assert_eq!(observed, expected_snapshot);
+    drop(graph);
+    assert_eq!(cas_uuid_node_surrogates(&source), original_ids);
+    round_trip_checked(root.path(), &source, |graph| {
+        verify_graph(graph, fixture, &nodes, &edges)
+    });
+    let imported_path = root.path().join("imported");
+    let imported_ids = cas_uuid_node_surrogates(&imported_path);
+    assert_eq!(imported_ids, original_ids);
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    check_noop(&imported);
+    let mutation = imported
+        .execute("MATCH ()-[r]->() WHERE r.weight IS NOT NULL SET r.weight = r.weight + 1")
+        .unwrap();
+    assert_eq!(
+        mutation.side_effects.as_ref().unwrap().properties_set,
+        edges.iter().filter(|edge| edge.4.is_some()).count() as u64
+    );
+    for edge in &mut edges {
+        edge.4 = edge.4.map(|weight| weight + 1);
+    }
+    verify_graph(&imported, fixture, &nodes, &edges);
+    drop(imported);
+    let reopened = GraphForge::new(imported_path.to_str()).unwrap();
+    verify_graph(&reopened, fixture, &nodes, &edges);
+    assert_eq!(cas_uuid_node_surrogates(&imported_path), imported_ids);
+}
