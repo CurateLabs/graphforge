@@ -3047,7 +3047,8 @@ fi
             .observe(Phase::Reopen, &source_command, &[])
             .unwrap();
         let operation =
-            graphforge_storage::StorageAllocationOperation::from_paths(&[root.clone()]).unwrap();
+            graphforge_storage::StorageAllocationOperation::from_paths(std::slice::from_ref(&root))
+                .unwrap();
         let baseline_current = operation.totals().unwrap().0;
         let temporary = root.join("transient");
         let file = fs::File::create(&temporary).unwrap();
