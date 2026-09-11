@@ -501,7 +501,7 @@ impl GraphImportSession {
     /// Timings from the latest validation or commit on this handle, including
     /// calls that returned errors. Reading these observations performs no I/O.
     #[must_use]
-    pub const fn operation_timings(&self) -> ImportOperationTimings {
+    pub fn operation_timings(&self) -> ImportOperationTimings {
         self.operation_timings
     }
     fn publish_source(&self, temporary: &Path, destination: &Path) -> Result<(), GfError> {
@@ -797,6 +797,14 @@ impl GraphImportSession {
                 self.persist_manifest()?;
             }
         }
+        self.seal_construction(&mut construction, cancellation)
+    }
+
+    fn seal_construction(
+        &mut self,
+        construction: &mut crate::GraphConstructionSession<'_>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ImportProgress, GfError> {
         let started = Instant::now();
         let sealed = construction.validate_and_seal(cancellation);
         self.operation_timings.seal.record(started, sealed.is_err());

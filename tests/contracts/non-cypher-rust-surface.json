@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "3199148900ac01b875528b26e6d900423998dcaaa5cc40014c200e55400afc13",
+  "public_method_digest": "3862aaa8a3f03efbf83a3360a97352a576611b94761af5d2a87891007fd41be6",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -25,9 +25,9 @@
       "CancellationToken": "introspection",
       "FindExecutionResult": "introspection",
       "InvocationDescriptor": "introspection",
-    "InvocationError": "introspection",
-    "MultiOntologyError": "introspection",
-    "PageToken": "introspection",
+      "InvocationError": "introspection",
+      "MultiOntologyError": "introspection",
+      "PageToken": "introspection",
       "ProviderRerankedFindResult": "introspection",
       "ResolvedBeliefProjection": "introspection",
       "SearchIndexOptions": "introspection",
@@ -912,6 +912,7 @@
         "GraphImportSession.append_arrow",
         "GraphImportSession.checkpoint",
         "GraphImportSession.commit",
+        "GraphImportSession.operation_timings",
         "GraphImportSession.register_parquet",
         "GraphImportSession.status",
         "GraphImportSession.validate",
@@ -937,6 +938,10 @@
         {
           "path": "crates/graphforge-api/src/import_session.rs",
           "symbol": "interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit"
         }
       ]
     },

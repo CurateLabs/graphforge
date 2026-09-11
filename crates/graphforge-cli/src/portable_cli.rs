@@ -662,27 +662,7 @@ pub(crate) fn run_import_session(
         ImportSessionCommand::Commit(args) => {
             let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
             let generation = session.commit(graph, None)?;
-            let (_, progress) = session.status();
-            if json {
-                write_json(
-                    &serde_json::json!({
-                        "contract": "graphforge-import-session/1",
-                        "outcome": "committed",
-                        "session_uuid": session.session_uuid(),
-                        "generation_uuid": generation,
-                        "construction": progress.construction,
-                        "operation_timings": session.operation_timings(),
-                    }),
-                    output,
-                )
-            } else {
-                writeln!(
-                    output,
-                    "committed session {} generation {generation}",
-                    session.session_uuid()
-                )
-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
-            }
+            write_import_commit(&session, generation, json, output)
         }
         ImportSessionCommand::Abort(args) => {
             let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
@@ -706,6 +686,35 @@ pub(crate) fn run_import_session(
                     .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
             }
         }
+    }
+}
+
+fn write_import_commit(
+    session: &graphforge_api::GraphImportSession,
+    generation: Uuid,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
+    let (_, progress) = session.status();
+    if json {
+        write_json(
+            &serde_json::json!({
+                "contract": "graphforge-import-session/1",
+                "outcome": "committed",
+                "session_uuid": session.session_uuid(),
+                "generation_uuid": generation,
+                "construction": progress.construction,
+                "operation_timings": session.operation_timings(),
+            }),
+            output,
+        )
+    } else {
+        writeln!(
+            output,
+            "committed session {} generation {generation}",
+            session.session_uuid()
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
     }
 }
 
