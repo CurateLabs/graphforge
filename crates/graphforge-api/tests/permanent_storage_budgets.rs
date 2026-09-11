@@ -5781,6 +5781,30 @@ fn csr_cold_public_query_probe() {
         let graph = GraphForge::new(source.to_str()).unwrap();
         let open_ns = opened.elapsed().as_nanos();
         let query = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score = -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+        if std::env::var_os("GF_CSR_PROBE_DIAGNOSTICS").is_some() {
+            query_efficiency_diagnostics(&graph, query, &expected);
+            return;
+        }
+        if mode == "all" {
+            for (_, case) in query_efficiency_cases(query) {
+                let (result, work) = graphforge_exec::demand::capture(|| graph.execute(case));
+                assert_eq!(csr_two_hop_rows(&result.unwrap().batches), expected);
+                let hops: Vec<_> = work.hops.values().collect();
+                assert_eq!(hops.len(), 2);
+                assert_eq!((hops[0].input_rows, hops[0].candidates_generated), (1, 16));
+                assert_eq!(
+                    (hops[1].input_rows, hops[1].candidates_generated),
+                    (16, 256)
+                );
+                assert!(hops.iter().map(|hop| hop.edge_rows_scanned).sum::<u64>() <= 80_898);
+            }
+        }
+        let selected_case =
+            std::env::var("GF_CSR_PROBE_QUERY").unwrap_or_else(|_| "original".into());
+        let (_, query) = query_efficiency_cases(query)
+            .into_iter()
+            .find(|(name, _)| *name == selected_case)
+            .expect("known probe query case");
         let mut query_ns = Vec::new();
         for _ in 0..5 {
             let started = Instant::now();
@@ -5791,10 +5815,174 @@ fn csr_cold_public_query_probe() {
         println!(
             "CSR_COLD_PUBLIC_QUERY {}",
             json!({
-                "mode":mode,"open_elapsed_ns":open_ns,"query_elapsed_ns":query_ns,
+                "mode":mode,"case":selected_case,"open_elapsed_ns":open_ns,"query_elapsed_ns":query_ns,
                 "rows":expected.len(),"fingerprint":digest_hex(&serde_json::to_vec(&expected).unwrap()),
                 "cache_scope":"first query is application-cold only in separate read process; subsequent queries reuse the same facade; OS cache advice is external and separately recorded"
             })
         );
     }
+}
+
+// Aggregate-only diagnostics for #1207. Run this exact probe in a dedicated
+// process; query-scoped demand capture excludes concurrent unbound executions.
+fn query_efficiency_cases(original: &str) -> [(&'static str, &str); 3] {
+    let prefiltered = "MATCH (a) WHERE a.score = -2047 WITH a MATCH (a)-[r]->(b)-[s]->(c) RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    let range = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score >= -2047 AND a.score <= -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    [
+        ("original", original),
+        ("prefiltered", prefiltered),
+        ("range", range),
+    ]
+}
+
+fn query_efficiency_diagnostics(graph: &GraphForge, original: &str, expected: &[[Uuid; 5]]) {
+    for (name, query) in query_efficiency_cases(original) {
+        let plan = graph
+            .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+            .unwrap();
+        let started = Instant::now();
+        let (result, captured) = graphforge_exec::demand::capture(|| graph.execute(query));
+        let elapsed_ns = started.elapsed().as_nanos();
+        let result = result.unwrap();
+        assert_eq!(csr_two_hop_rows(&result.batches), expected);
+        let hops: Vec<_> = captured.hops.iter().map(|(id, hop)| json!({
+            "hop":id,"input_rows":hop.input_rows,"input_batches":hop.input_batches,
+            "candidates":hop.candidates_generated,"emitted":hop.rows_emitted,
+            "edge_reads":hop.edge_reads_completed,"edge_full_reads":hop.edge_full_reads,
+            "edge_rows_scanned":hop.edge_rows_scanned,"edge_rows_returned":hop.edge_rows_returned,
+            "node_reads":hop.node_reads_completed,"node_full_reads":hop.node_full_reads,
+            "node_rows_scanned":hop.node_rows_scanned,"node_rows_returned":hop.node_rows_returned,
+            "edge_projected_columns":hop.edge_projected_columns,"node_projected_columns":hop.node_projected_columns
+        })).collect();
+        let filters: Vec<_> = captured.filters.values().map(|f| json!({"ordinal":f.ordinal,
+            "relationship_uniqueness":f.relationship_uniqueness,"input_rows":f.input_rows,"output_rows":f.output_rows})).collect();
+        println!(
+            "QUERY_EFFICIENCY_DIAGNOSTICS {}",
+            json!({"case":name,"rows":expected.len(),
+            "fingerprint":digest_hex(&serde_json::to_vec(expected).unwrap()),"elapsed_ns":elapsed_ns,
+            "hops":hops,"filters":filters,"hydration":captured.hydration,
+            "memory_reserved_before":captured.memory_reserved_before,"memory_reserved_after":captured.memory_reserved_after,
+            "returned_batch_bytes":captured.returned_batch_bytes,"execution_batch_rows":captured.execution_batch_rows,
+            "plan":plan.replace("-2047", "<fixture literal>")})
+        );
+    }
+}
+
+fn verify_selective_fixed_paths(graph: &GraphForge, nodes: &[Node], edges: &[Edge]) {
+    let score = nodes[1].2.unwrap();
+    let by_id: BTreeMap<_, _> = nodes.iter().map(|node| (node.0, node.2)).collect();
+    for case in 0..5 {
+        let predicate = match case {
+            0 => format!("a.score = {score}"),
+            1 => format!("a.score >= {score} AND a.score <= {score}"),
+            2 => "a.score IS NULL".into(),
+            3 => format!("a.score = {score} AND b.score IS NOT NULL"),
+            _ => format!("a.score = {score} OR b.score IS NULL"),
+        };
+        let mut expected = Vec::new();
+        for first in edges {
+            let start = by_id[&first.1];
+            let middle = by_id[&first.2];
+            let eligible = match case {
+                0 | 1 => start == Some(score),
+                2 => start.is_none(),
+                3 => start == Some(score) && middle.is_some(),
+                _ => start == Some(score) || middle.is_none(),
+            };
+            if !eligible {
+                continue;
+            }
+            for second in edges
+                .iter()
+                .filter(|second| second.1 == first.2 && second.0 != first.0)
+            {
+                expected.push([first.1, first.0, first.2, second.0, second.2]);
+            }
+        }
+        expected.sort();
+        let query = format!(
+            "MATCH (a)-[r]->(b)-[s]->(c) WHERE {predicate} RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid"
+        );
+        assert_eq!(
+            csr_two_hop_rows(&graph.execute(&query).unwrap().batches),
+            expected,
+            "case {case}"
+        );
+        let ordered = format!(
+            "{query} ORDER BY a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid LIMIT 7"
+        );
+        expected.truncate(7);
+        let result = graph.execute(&ordered).unwrap();
+        let actual: Vec<[Uuid; 5]> = result
+            .batches
+            .iter()
+            .flat_map(|batch| {
+                (0..batch.num_rows())
+                    .map(|row| std::array::from_fn(|column| uuid_at(batch, column, row)))
+            })
+            .collect();
+        assert_eq!(actual, expected, "ordered case {case}");
+    }
+}
+
+#[test]
+fn selective_fixed_paths_preserve_public_mutation_and_portable_lifecycle() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    let fixture = Fixture {
+        name: "selective_fixed_paths",
+        nodes: 33,
+        edges: 129,
+        routes: 2,
+        identifiers: Identifiers::Random,
+        properties: true,
+        adjacency: true,
+        heterogeneous: false,
+    };
+    let (mut nodes, edges) = rows(fixture);
+    construct(&source, fixture, &nodes, &edges);
+    let graph = GraphForge::new(source.to_str()).unwrap();
+    verify_selective_fixed_paths(&graph, &nodes, &edges);
+    use futures::TryStreamExt as _;
+    let snapshot_query = "MATCH (a)-[r]->(b)-[s]->(c) WHERE a.score = -2047 RETURN a.node_uuid, r.edge_uuid, b.node_uuid, s.edge_uuid, c.node_uuid";
+    let snapshot_expected = csr_two_hop_rows(&graph.execute(snapshot_query).unwrap().batches);
+    let snapshot = graph.execute_stream(snapshot_query).unwrap();
+    graph
+        .execute("MATCH (n) WHERE n.score = -2046 SET n.score = -2047")
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let retained: Vec<RecordBatch> = runtime.block_on(snapshot.try_collect()).unwrap();
+    assert_eq!(csr_two_hop_rows(&retained), snapshot_expected);
+
+    for node in &mut nodes {
+        if node.2 == Some(-2046) {
+            node.2 = Some(-2047);
+        }
+    }
+    verify_selective_fixed_paths(&graph, &nodes, &edges);
+    verify_graph(&graph, fixture, &nodes, &edges);
+    drop(graph);
+    round_trip_checked(root.path(), &source, |graph| {
+        verify_selective_fixed_paths(graph, &nodes, &edges);
+        verify_graph(graph, fixture, &nodes, &edges)
+    });
+    let imported_path = root.path().join("imported");
+    let imported = GraphForge::new(imported_path.to_str()).unwrap();
+    imported
+        .execute("MATCH (n) WHERE n.score = -2045 REMOVE n.score")
+        .unwrap();
+    for node in &mut nodes {
+        if node.2 == Some(-2045) {
+            node.2 = None;
+        }
+    }
+    verify_selective_fixed_paths(&imported, &nodes, &edges);
+    verify_graph(&imported, fixture, &nodes, &edges);
+    drop(imported);
+    let reopened = GraphForge::new(imported_path.to_str()).unwrap();
+    verify_selective_fixed_paths(&reopened, &nodes, &edges);
+    verify_graph(&reopened, fixture, &nodes, &edges);
 }

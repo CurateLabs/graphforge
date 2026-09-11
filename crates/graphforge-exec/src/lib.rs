@@ -5422,6 +5422,7 @@ impl ExecutionSession {
             .with_config(config)
             .with_runtime_env(runtime_env)
             .with_query_planner(Arc::new(GraphForgeQueryPlanner))
+            .with_optimizer_rules(graphforge_rel::input_predicates::optimizer_rules())
             // Runs after DataFusion's default rules, when terminal fetches and
             // eager round-robin exchanges are visible (#1269).
             .with_physical_optimizer_rule(Arc::new(demand::FixedHopDemandRule))
