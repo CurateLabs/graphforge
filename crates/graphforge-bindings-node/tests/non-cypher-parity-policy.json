@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 267,
-  "releaseSurfaceDigest": "9c5cda8accc92758d15741874439ad5d194e4e64483a275f36c2ef7c5aedfe49",
+  "releaseSurfaceCount": 268,
+  "releaseSurfaceDigest": "b1356b7e0931bf1e71d8dc8f893e45303b3700f5153c649f68827f0a430a419c",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -313,7 +313,8 @@
       "GraphConstructionSession": "Resumable graph construction is not yet shipped through the Node product facade; all session operations remain explicitly Rust-only.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
-      "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
+      "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226.",
+      "GraphImportSession": "Per-operation timing observations are Rust/CLI diagnostics; the Node import adapter keeps its explicitly mapped lifecycle methods."
     }
   },
   "evidence": {

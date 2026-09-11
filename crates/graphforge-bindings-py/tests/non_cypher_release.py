@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "3199148900ac01b875528b26e6d900423998dcaaa5cc40014c200e55400afc13"
-EXPECTED_RELEASE_DIGEST = "9c5cda8accc92758d15741874439ad5d194e4e64483a275f36c2ef7c5aedfe49"
+EXPECTED_RUST_DIGEST = "3862aaa8a3f03efbf83a3360a97352a576611b94761af5d2a87891007fd41be6"
+EXPECTED_RELEASE_DIGEST = "b1356b7e0931bf1e71d8dc8f893e45303b3700f5153c649f68827f0a430a419c"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -257,7 +257,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 267
+    assert len(release_methods) == 268
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -316,6 +316,9 @@ def _classification_report() -> dict[str, object]:
         if python_id in python_methods:
             classification = "equivalent"
             reason = "same receiver operation delegates through the compiled PyO3 extension"
+        elif rust_id == "GraphImportSession.operation_timings":
+            classification = "not-exposed"
+            reason = "per-operation timing observations are Rust/CLI diagnostics"
         elif rust_id.startswith("OpenRouterProviderSession."):
             classification = "intentionally-language-specific"
             reason = (

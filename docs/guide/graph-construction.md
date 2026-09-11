@@ -264,6 +264,7 @@ already committed generation.
 `operation_timings`. Each of the five closed rows (`begin`, `resume`, `append`,
 `seal`, `publish`) contains `calls`, `errors`, and `elapsed_ns`. These are
 monotonic wall-time observations around disjoint public construction calls.
+These diagnostics are exposed through Rust and the CLI.
 `GraphImportSession::operation_timings()` exposes the same observations after
 the latest validation or commit, including returned errors. Each invocation
 resets them before checking preconditions; a repeated operation cannot replay
