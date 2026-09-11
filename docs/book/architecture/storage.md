@@ -1348,6 +1348,56 @@ SUM and selective-property count remain controls. All measured RSS ceilings
 pass. The prototype is reverted from this assessment; #1249 owns production
 implementation and its direct correctness/CI close gate.
 
+### Qualified row-count marker — #1249
+
+The production marker now selects an existing qualified identity from the
+aggregate input, retaining the scalar-only fallback and true-for-null behavior.
+Explicit nullable counts keep their argument. The earlier prototype observations
+above remain historical; the [final paired evidence](../../development/evidence/count-row-marker-1249.json)
+uses baseline `6907d926` (tree-identical to merged `b9765e8e`) and candidate
+`e8cb7dcb`, frozen before any subprocess measurement.
+
+On the same 4,101-node fixture, count-all warm execution changes from 14.453 to
+10.926 ms, label count from 14.482 to 11.314 ms and empty-label count from
+14.701 to 11.064 ms. Median process CPU falls by 0.03/0.02/0.03 seconds,
+meeting those cases' original 0.02-second thresholds. Each avoids 923,911 syscall
+read bytes and approximately 308.8 KB writes over five queries. Process CPU
+includes facade opening and the oracle; warm timing covers execution only.
+Filesystem input blocks remain 3,328: these are not block-device read savings.
+
+All exact scalar oracles pass, and six of seven original RSS ceilings pass.
+The explicit identity-count control reaches 70,184 KiB against its unchanged
+69,952 KiB ceiling. That observation remains **failed**. A fixed eight-pair,
+alternating diagnostic crosses the same ceiling on the unchanged baseline
+three times and candidate once. Executed plans and work are identical for this
+control; sampled residence is dominated by executable mappings. This supports
+retaining the targeted improvement with a disclosed control-budget limitation,
+not claiming all ceilings pass, proving RSS equivalence, or conclusively
+attributing the original unsampled peak. No threshold or failed result is
+replaced by the diagnostic.
+
+The 129-row deterministic public regression writes 16,184 logical spill bytes
+for row counting versus 50,465 for nullable property counting, avoiding at least
+the 29,952 unrequested payload bytes. Both authenticate 8,850 bytes and validate
+129 physical rows. Logical decoder peaks are 38 versus 624 bytes; these are
+reader admission estimates, not process RSS. Completed diagnostic counters are
+reported per physical-plan occurrence and are not additive shared-plan totals.
+
+Exact UUIDs, nullable scores and payload hashes survive public construction,
+SET with an active old stream, immediate queries, reopen, export/full verification,
+clean import, subsequent REMOVE and another reopen. A property-file modification
+after facade admission returns structured `GF_PROJECT_CORRUPT` for demanded-route
+counts, including an empty-result predicate. Unknown labels return exact non-null
+zero without opening an unrelated payload, preserving the existing demand
+contract. The nullable-count and typed-error repairs in #1251/#1253, mandatory-key
+and late-decoder refusal tests remain in force.
+
+The permanent and whole-fixture physical inventories are unchanged. Descriptor
+samples include unlinked open files and globally deduplicate overlapping owners;
+both variants have a sampled whole-fixture maximum of 5,447,680 bytes. Individual
+samples and their scheduling gaps are not hard bounds. This repair changes no
+publishing, replay, compaction or permanent-format policy.
+
 The fragmentation test fixes topology cardinality at 4,101 live nodes across
 chain lengths; it repeatedly overwrites the same score and removes/restores an
 actually present nullable property. It asserts the verified run count rather
