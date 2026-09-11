@@ -6523,73 +6523,84 @@ fn wide_property_public_query_probe() {
         return;
     }
     let graph = GraphForge::new(source.to_str()).unwrap();
-    let case = std::env::var("GF_WIDE_PROBE_QUERY").unwrap_or_else(|_| "narrow".into());
-    let full = format!(
-        "MATCH (n:Wide) RETURN n.node_uuid, n.score, {}",
-        (0..width)
-            .map(|c| format!("n.payload{c}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let query = match case.as_str() {
-        "narrow" => "MATCH (n:Wide) RETURN n.node_uuid, n.score",
-        "full" => &full,
-        "limit" => "MATCH (n:Wide) RETURN n.node_uuid, n.score ORDER BY n.node_uuid LIMIT 16",
-        "negative" => "MATCH (n:Wide) WHERE n.payload0 = 'absent' RETURN n.node_uuid, n.score",
-        _ => panic!("unknown wide probe case"),
+    let cases = if mode == "all" {
+        vec![
+            "narrow".to_owned(),
+            "full".to_owned(),
+            "limit".to_owned(),
+            "negative".to_owned(),
+        ]
+    } else {
+        vec![std::env::var("GF_WIDE_PROBE_QUERY").unwrap_or_else(|_| "narrow".into())]
     };
-    let mut expected: Vec<_> = (0..count).map(|row| (id(17, row, true), row)).collect();
-    expected.sort();
-    if case == "limit" {
-        expected.truncate(16);
-    } else if case == "negative" {
-        expected.clear();
-    }
-    let repeats = if mode == "all" { 1 } else { 5 };
-    let mut query_ns = Vec::new();
-    for _ in 0..repeats {
-        let start = Instant::now();
-        let result = graph.execute(query).unwrap();
-        query_ns.push(start.elapsed().as_nanos());
-        let mut actual = Vec::new();
-        for batch in &result.batches {
-            for row in 0..batch.num_rows() {
-                let uuid = uuid_at(batch, 0, row);
-                let index = expected.binary_search_by_key(&uuid, |item| item.0).unwrap();
-                let ordinal = expected[index].1;
-                assert_eq!(
-                    int_at(batch, 1, row),
-                    (ordinal % 7 != 0).then_some(ordinal as i64)
-                );
-                if case == "full" {
-                    for column in 0..width {
-                        let values = batch
-                            .column(column + 2)
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .unwrap();
-                        let actual = (!values.is_null(row)).then(|| values.value(row));
-                        assert_eq!(actual, payload(column, ordinal).as_deref());
+    for case in cases {
+        let full = format!(
+            "MATCH (n:Wide) RETURN n.node_uuid, n.score, {}",
+            (0..width)
+                .map(|c| format!("n.payload{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let query = match case.as_str() {
+            "narrow" => "MATCH (n:Wide) RETURN n.node_uuid, n.score",
+            "full" => &full,
+            "limit" => "MATCH (n:Wide) RETURN n.node_uuid, n.score ORDER BY n.node_uuid LIMIT 16",
+            "negative" => "MATCH (n:Wide) WHERE n.payload0 = 'absent' RETURN n.node_uuid, n.score",
+            _ => panic!("unknown wide probe case"),
+        };
+        let mut expected: Vec<_> = (0..count).map(|row| (id(17, row, true), row)).collect();
+        expected.sort();
+        if case == "limit" {
+            expected.truncate(16);
+        } else if case == "negative" {
+            expected.clear();
+        }
+        let repeats = if mode == "all" { 1 } else { 5 };
+        let mut query_ns = Vec::new();
+        for _ in 0..repeats {
+            let start = Instant::now();
+            let result = graph.execute(query).unwrap();
+            query_ns.push(start.elapsed().as_nanos());
+            let mut actual = Vec::new();
+            for batch in &result.batches {
+                for row in 0..batch.num_rows() {
+                    let uuid = uuid_at(batch, 0, row);
+                    let index = expected.binary_search_by_key(&uuid, |item| item.0).unwrap();
+                    let ordinal = expected[index].1;
+                    assert_eq!(
+                        int_at(batch, 1, row),
+                        (ordinal % 7 != 0).then_some(ordinal as i64)
+                    );
+                    if case == "full" {
+                        for column in 0..width {
+                            let values = batch
+                                .column(column + 2)
+                                .as_any()
+                                .downcast_ref::<StringArray>()
+                                .unwrap();
+                            let actual = (!values.is_null(row)).then(|| values.value(row));
+                            assert_eq!(actual, payload(column, ordinal).as_deref());
+                        }
                     }
+                    actual.push((uuid, ordinal));
                 }
-                actual.push((uuid, ordinal));
             }
+            if case != "limit" {
+                actual.sort();
+            }
+            assert_eq!(actual, expected);
         }
-        if case != "limit" {
-            actual.sort();
+        if std::env::var_os("GF_WIDE_PROBE_DIAGNOSTICS").is_some() {
+            println!(
+                "WIDE_PROPERTY_PLAN {}",
+                graph
+                    .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
+                    .unwrap()
+            );
         }
-        assert_eq!(actual, expected);
-    }
-    if std::env::var_os("GF_WIDE_PROBE_DIAGNOSTICS").is_some() {
         println!(
-            "WIDE_PROPERTY_PLAN {}",
-            graph
-                .explain_stage(query, graphforge_api::ExplainStage::PhysicalPlan)
-                .unwrap()
+            "WIDE_PROPERTY_QUERY {}",
+            json!({"case":case,"nodes":count,"width":width,"payload_bytes_per_nonnull_column":256,"rows":expected.len(),"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap())})
         );
     }
-    println!(
-        "WIDE_PROPERTY_QUERY {}",
-        json!({"case":case,"nodes":count,"width":width,"payload_bytes_per_nonnull_column":256,"rows":expected.len(),"query_elapsed_ns":query_ns,"oracle_sha256":digest_hex(&serde_json::to_vec(&expected).unwrap())})
-    );
 }
