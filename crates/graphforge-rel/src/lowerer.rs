@@ -6584,6 +6584,30 @@ relation_types:
         (tmp, catalog, plan)
     }
 
+    fn assert_typed_route_projection(plan: &DfLogicalPlan) -> &Extension {
+        let DfLogicalPlan::Projection(projection) = plan else {
+            panic!("expected typed route projection, got {plan:?}");
+        };
+        let mut expected = projection
+            .input
+            .schema()
+            .columns()
+            .into_iter()
+            .map(DfExpr::Column)
+            .collect::<Vec<_>>();
+        expected.push(
+            datafusion::logical_expr::lit("KNOWS").alias_qualified(Some("var_1"), "rel_type_name"),
+        );
+        assert_eq!(
+            projection.expr, expected,
+            "preserve all input columns and exact route"
+        );
+        let DfLogicalPlan::Extension(extension) = projection.input.as_ref() else {
+            panic!("expected ExpandNode directly beneath route projection, got {plan:?}");
+        };
+        extension
+    }
+
     #[test]
     fn project_backed_single_hop_emits_expand_extension_node() {
         use datafusion::logical_expr::UserDefinedLogicalNodeCore;
@@ -6597,9 +6621,7 @@ relation_types:
         .unwrap();
 
         let lp = lowerer.lower_plan(&plan).unwrap();
-        let DfLogicalPlan::Extension(ext) = &lp else {
-            panic!("expected Extension (ExpandNode), got {lp:?}");
-        };
+        let ext = assert_typed_route_projection(&lp);
         let node = ext
             .node
             .as_any()
@@ -6649,9 +6671,7 @@ relation_types:
         // No DISTINCT wrapper: the self-loop dedup happens inside ExpandExec
         // (a wrapping Distinct trips DataFusion's duplicate-field-name
         // disambiguation against the extension's multi-var schema).
-        let DfLogicalPlan::Extension(ext) = &lp else {
-            panic!("expected Extension (ExpandNode), got {lp:?}");
-        };
+        let ext = assert_typed_route_projection(&lp);
         let node = ext
             .node
             .as_any()
