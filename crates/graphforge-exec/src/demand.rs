@@ -183,8 +183,9 @@ pub struct JoinSnapshot {
     pub input_row_statistics: Vec<String>,
     /// Actual rows consumed by the hash build.
     pub build_input_rows: u64,
-    /// Actual rows consumed by the probe.
-    pub probe_input_rows: u64,
+    /// DataFusion input_rows: probe batches plus final build-side output indices
+    /// for join kinds that emit unmatched build rows.
+    pub input_rows: u64,
     /// DataFusion build_mem_used, including its build batches and hash table.
     pub build_memory_bytes: u64,
 }
@@ -441,7 +442,7 @@ pub(crate) fn record_plan_completion(
                     })
                     .collect(),
                 build_input_rows: metric(&metrics, "build_input_rows"),
-                probe_input_rows: metric(&metrics, "input_rows"),
+                input_rows: metric(&metrics, "input_rows"),
                 build_memory_bytes: metric(&metrics, "build_mem_used"),
             });
         }

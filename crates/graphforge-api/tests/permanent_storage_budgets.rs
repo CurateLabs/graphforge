@@ -6771,14 +6771,14 @@ fn fragmentation_statistics_public_probe() {
                 assert_eq!(captured.joins.len(), 1);
                 for join in captured.joins {
                     assert!(join.build_input_rows > 0);
-                    assert!(join.probe_input_rows > 0);
+                    assert!(join.input_rows > 0);
                     assert!(join.build_memory_bytes > 0);
                     assert!(
                         join.input_row_statistics
                             .iter()
                             .all(|value| !value.contains("error"))
                     );
-                    join_work.push(json!({"ordinal":join.ordinal,"input_row_statistics":join.input_row_statistics,"build_input_rows":join.build_input_rows,"probe_input_rows":join.probe_input_rows,"build_memory_bytes":join.build_memory_bytes}));
+                    join_work.push(json!({"ordinal":join.ordinal,"input_row_statistics":join.input_row_statistics,"build_input_rows":join.build_input_rows,"input_rows":join.input_rows,"build_memory_bytes":join.build_memory_bytes}));
                 }
                 result.unwrap()
             } else {
