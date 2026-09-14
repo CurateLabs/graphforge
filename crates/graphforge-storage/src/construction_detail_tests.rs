@@ -5,11 +5,10 @@ mod compact_details {
     fn create(
         root: &TempDir,
         operation: Uuid,
-        version: u32,
         budgets: GraphConstructionBudgets,
         allocation: Option<&crate::StorageAllocationOperation>,
     ) -> GraphConstructionSession {
-        GraphConstructionSession::open_internal_with_format(
+        GraphConstructionSession::open_internal_with_allocation(
             root.path(),
             root.path(),
             operation,
@@ -19,7 +18,6 @@ mod compact_details {
             budgets,
             crate::filesystem_admission::ProjectLifecycleMode::Durable,
             allocation,
-            version,
         )
         .unwrap()
     }
@@ -61,13 +59,14 @@ mod compact_details {
     }
 
     #[test]
-    fn mapped_encoding_versions_resume_with_explicit_layout_authority() {
-        for version in [6, 7, 8] {
+    fn mapped_encoding_current_format_resumes_with_explicit_layout_authority() {
+        {
+            let version = FORMAT_VERSION;
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let operation = Uuid::new_v4();
             let budgets = GraphConstructionBudgets::default();
-            let mut session = create(&root, operation, version, budgets, None);
+            let mut session = create(&root, operation, budgets, None);
             session
                 .append(
                     ConstructionChunkKind::Node,
@@ -89,7 +88,7 @@ mod compact_details {
                     .artifacts
                     .iter()
                     .any(|entry| entry.path == crate::route_component::TABLE_FILE),
-                version == 8
+                true
             );
             resumed
                 .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
@@ -103,9 +102,9 @@ mod compact_details {
             else {
                 panic!("compact publication required")
             };
-            assert_eq!(compact.format_version, if version == 8 { 4 } else { 2 });
+            assert_eq!(compact.format_version, 4);
             let inventory = selected.graph_files_inventory().unwrap().unwrap();
-            assert_eq!(inventory.format_version, if version == 8 { 3 } else { 1 });
+            assert_eq!(inventory.format_version, 3);
             let admitted =
                 crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
             let edges = crate::read_edges_from_inventory(
@@ -130,11 +129,10 @@ mod compact_details {
             assert_eq!(evidence.authority_read_bytes, expected);
             assert!(evidence.decoded_bytes > 0);
         }
-        assert!(DetailCodec::from_version(10).is_err());
-        assert_eq!(
-            DetailCodec::from_version(7).unwrap(),
-            DetailCodec::from_version(8).unwrap()
-        );
+        assert!(DetailCodec::from_version(FORMAT_VERSION).is_ok());
+        for old in 6..FORMAT_VERSION {
+            assert!(DetailCodec::from_version(old).is_err());
+        }
     }
 
     #[test]
@@ -144,7 +142,6 @@ mod compact_details {
         let mut initial = create(
             &root,
             Uuid::new_v4(),
-            7,
             GraphConstructionBudgets::default(),
             None,
         );
@@ -172,7 +169,7 @@ mod compact_details {
         for generation in [2, 3] {
             let (_source, mut session, shape) =
                 ordinal_append_session(&root, generation, u128::from(generation + 2), 1);
-            assert_eq!(session.checkpoint.format_version, 9);
+            assert_eq!(session.checkpoint.format_version, FORMAT_VERSION);
             let encoding = session.encode_canonical(&shape, generation).unwrap();
             let path = session
                 .root
@@ -222,17 +219,7 @@ mod compact_details {
                 {
                     continue;
                 }
-                let path = if prior.format_version == 1 {
-                    crate::route_component::encode_relative_route(
-                        &old.relative_path,
-                        &mut crate::route_component::RouteTable::default(),
-                        64 * 1024 * 1024,
-                        100_000,
-                    )
-                    .unwrap()
-                } else {
-                    old.relative_path.clone()
-                };
+                let path = old.relative_path.clone();
                 let retained = current
                     .files
                     .iter()
@@ -260,9 +247,9 @@ mod compact_details {
     }
 
     #[test]
-    fn detail_codec_legacy_and_compact_resume_cross_multiple_merge_levels() {
-        let mut measurements = Vec::new();
-        for version in [6, 7] {
+    fn detail_codec_current_format_resumes_cross_multiple_merge_levels() {
+        {
+            let version = FORMAT_VERSION;
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let operation = Uuid::new_v4();
@@ -278,8 +265,7 @@ mod compact_details {
             drop(crate::project_publication::wait_for_writer_lock(root.path()).unwrap());
             let paths = crate::StorageAllocationOperation::project_paths(root.path()).unwrap();
             let allocation = crate::StorageAllocationOperation::from_paths(&paths).unwrap();
-            let mut session = create(&root, operation, version, budgets, Some(&allocation));
-            // Genuine legacy output: selected before the initial checkpoint exists.
+            let mut session = create(&root, operation, budgets, Some(&allocation));
             for chunk in 0..8 {
                 session
                     .append(
@@ -321,12 +307,9 @@ mod compact_details {
                     .open_child_file(OsStr::new(&receipt_name(sequence)))
                     .unwrap();
                 let receipt: ConstructionChunkReceipt = decode_bounded(&mut file).unwrap();
-                let expected_width = match (version, receipt.kind) {
-                    (6, ConstructionChunkKind::Node) => NODE_DETAIL_WIDTH,
-                    (6, ConstructionChunkKind::Edge) => EDGE_DETAIL_WIDTH,
-                    (7, ConstructionChunkKind::Node) => 16 + 1 + "Person".len(),
-                    (7, ConstructionChunkKind::Edge) => 48 + 1 + "R".len(),
-                    _ => unreachable!(),
+                let expected_width = match receipt.kind {
+                    ConstructionChunkKind::Node => 16 + 1 + "Person".len(),
+                    ConstructionChunkKind::Edge => 48 + 1 + "R".len(),
                 };
                 assert_eq!(receipt.details.bytes, receipt.rows * expected_width as u64);
                 let physical = session
@@ -415,26 +398,40 @@ mod compact_details {
                 )
                 .unwrap();
             assert_eq!(repeated.generation_uuid, publication.generation_uuid);
-            measurements.push((detail_bytes, detail_allocated, peak, canonical));
+            assert_eq!(detail_bytes, 1024 * (23 + 50));
+            assert!(detail_allocated > 0);
+            assert!(peak >= detail_allocated);
+            let mut expected = Vec::new();
+            for uuid in 1_u128..=1024 {
+                let mut record = vec![0; NODE_DETAIL_WIDTH];
+                record[..16].copy_from_slice(&uuid.to_be_bytes());
+                record[16] = 6;
+                record[17..23].copy_from_slice(b"Person");
+                expected.push(record);
+            }
+            for chunk in 0_u128..8 {
+                for row in 0_u128..128 {
+                    let mut record = vec![0; EDGE_DETAIL_WIDTH];
+                    record[..16].copy_from_slice(&(10_000 + chunk * 128 + row).to_be_bytes());
+                    record[16..32].copy_from_slice(&(row + 1).to_be_bytes());
+                    record[32..48].copy_from_slice(&(row + 2).to_be_bytes());
+                    record[48] = 1;
+                    record[49] = b'R';
+                    expected.push(record);
+                }
+            }
+            assert_eq!(canonical, expected);
         }
-        assert_eq!(measurements[0].3, measurements[1].3);
-        assert!(measurements[1].0 < measurements[0].0);
-        assert!(measurements[1].1 < measurements[0].1);
-        assert!(measurements[1].2 < measurements[0].2);
-        eprintln!(
-            "legacy/compact detail EOF, allocation, construction peak: {:?} {:?}",
-            (measurements[0].0, measurements[0].1, measurements[0].2),
-            (measurements[1].0, measurements[1].1, measurements[1].2)
-        );
     }
     #[test]
     fn detail_codec_partial_control_temp_preserved_and_mixed_version_refused() {
-        for version in [6, 7] {
+        {
+            let version = FORMAT_VERSION;
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let operation = Uuid::new_v4();
             let budgets = GraphConstructionBudgets::default();
-            let mut session = create(&root, operation, version, budgets, None);
+            let mut session = create(&root, operation, budgets, None);
             session
                 .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
                 .unwrap();
@@ -447,7 +444,7 @@ mod compact_details {
             assert_eq!(session.checkpoint.format_version, version);
             assert_eq!(std::fs::read(&partial).unwrap(), b"{\"format_version\":");
             let mut wrong = session.checkpoint.clone();
-            wrong.format_version = if version == 6 { 7 } else { 6 };
+            wrong.format_version = FORMAT_VERSION - 1;
             let mixed = private.join(control_temp(CHECKPOINT));
             let bytes = serde_json::to_vec(&wrong).unwrap();
             std::fs::write(&mixed, &bytes).unwrap();
@@ -481,12 +478,8 @@ mod compact_details {
         let Ok(path) = std::env::var("GF_DETAIL_CODEC_CRASH_ROOT") else {
             return;
         };
-        let version: u32 = std::env::var("GF_DETAIL_CODEC_VERSION")
-            .unwrap()
-            .parse()
-            .unwrap();
         let root = Path::new(&path);
-        let mut session = GraphConstructionSession::open_internal_with_format(
+        let mut session = GraphConstructionSession::open_internal_with_allocation(
             root,
             root,
             Uuid::from_u128(117_200),
@@ -496,7 +489,6 @@ mod compact_details {
             GraphConstructionBudgets::default(),
             crate::filesystem_admission::ProjectLifecycleMode::Durable,
             None,
-            version,
         )
         .unwrap();
         session
@@ -513,7 +505,7 @@ mod compact_details {
     }
 
     #[test]
-    fn detail_codec_both_versions_crash_replay_preserves_authority() {
+    fn detail_codec_current_format_crash_replay_preserves_authority() {
         let boundaries = [
             "control.install.after_temp_fsync.checkpoint.json",
             "control.install.after_install.intent.json",
@@ -522,7 +514,8 @@ mod compact_details {
             "publication.after_current_before_receipt",
         ];
         let mut failed = Vec::new();
-        for version in [6, 7] {
+        {
+            let version = FORMAT_VERSION;
             for boundary in boundaries {
                 let root = TempDir::new().unwrap();
                 crate::open_or_initialize_project(root.path()).unwrap();
@@ -533,7 +526,6 @@ mod compact_details {
                         "--nocapture",
                     ])
                     .env("GF_DETAIL_CODEC_CRASH_ROOT", root.path())
-                    .env("GF_DETAIL_CODEC_VERSION", version.to_string())
                     .env(
                         "GF_CONSTRUCTION_FAILPOINT_COOKIE",
                         "graphforge-construction-test-v1",
@@ -599,14 +591,14 @@ mod compact_details {
         assert!(failed.is_empty(), "{failed:?}");
     }
     #[test]
-    fn detail_codec_both_versions_cancel_corrupt_copy_and_retry() {
-        for version in [6, 7] {
+    fn detail_codec_current_format_cancel_corrupt_copy_and_retry() {
+        {
+            let version = FORMAT_VERSION;
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let mut session = create(
                 &root,
                 Uuid::new_v4(),
-                version,
                 GraphConstructionBudgets::default(),
                 None,
             );
@@ -680,7 +672,6 @@ mod compact_details {
                     "--nocapture",
                 ])
                 .env("GF_DETAIL_CODEC_CRASH_ROOT", root.path())
-                .env("GF_DETAIL_CODEC_VERSION", "6")
                 .env(
                     "GF_CONSTRUCTION_FAILPOINT_COOKIE",
                     "graphforge-construction-test-v1",
