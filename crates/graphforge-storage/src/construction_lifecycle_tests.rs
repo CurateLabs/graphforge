@@ -776,4 +776,43 @@ mod lifecycle_budget {
             assert_eq!(std::fs::read(held).unwrap(), bytes);
         }
     }
+    #[test]
+    fn consumed_shape_roots_have_bounded_multilevel_peak() {
+        for scale in [1_u64, 2, 4] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let budgets = GraphConstructionBudgets {
+                merge_fan_in: 2,
+                max_batch_rows: 4096,
+                max_run_records: 16384,
+                ..Default::default()
+            };
+            let mut session = GraphConstructionSession::open_with_mode(
+                root.path(), Uuid::from_u128(126_800 + u128::from(scale)), 0,
+                graphforge_core::OntologyMode::Exploratory, budgets,
+            ).unwrap();
+            for chunk in 0..2 {
+                session.append(ConstructionChunkKind::Node, &format!("nodes-{chunk}"),
+                    &node_batch(1 + chunk * 4096, 4096)).unwrap();
+            }
+            for chunk in 0..8 * scale {
+                session.append(ConstructionChunkKind::Edge, &format!("edges-{chunk}"),
+                    &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096)).unwrap();
+            }
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
+            assert!(session.evidence().merge_passes >= 3);
+            println!("CONSUMED_ROOTS {}", serde_json::json!({
+                "scale":scale,"nodes":shape.node_count,"edges":shape.edge_count,
+                "peak":session.evidence().storage_transient_peak_total_allocated_bytes,
+                "retained":session.evidence().storage_current,
+                "shape_reads":session.evidence().shape_application_read_bytes,
+                "merge_writes":session.evidence().merge_written_bytes,
+                "merge_passes":session.evidence().merge_passes,
+                "census":census(session.root.path()),
+            }));
+        }
+    }
+
 }
