@@ -1,13 +1,13 @@
 {
   "authority": {
-    "cpu_seconds": 160.435314,
-    "peak_rss_bytes": 1576611840,
-    "pressure_cpu_seconds": 0.250506,
-    "pressure_io_seconds": 9.319706,
+    "cpu_seconds": 327.278453,
+    "peak_rss_bytes": 3118157824,
+    "pressure_cpu_seconds": 0.49856,
+    "pressure_io_seconds": 35.844997,
     "pressure_memory_seconds": 0.0,
-    "read_bytes": 102905856000,
-    "wall_seconds": 175.96881015296094,
-    "write_bytes": 32509587456
+    "read_bytes": 222907678720,
+    "wall_seconds": 384.6858612350188,
+    "write_bytes": 74677432320
   },
   "disagreements": [],
   "exit_code": 0,
@@ -17,21 +17,21 @@
       {
         "duration_ms": 10,
         "exit_code": 0,
-        "peak_rss_bytes": 126976,
+        "peak_rss_bytes": 16384,
         "phase": "admission",
         "status": "passed"
       },
       {
-        "duration_ms": 3157,
+        "duration_ms": 6626,
         "exit_code": 0,
-        "peak_rss_bytes": 73580544,
+        "peak_rss_bytes": 73936896,
         "phase": "generate",
         "status": "passed"
       },
       {
-        "duration_ms": 105205,
+        "duration_ms": 228672,
         "exit_code": 0,
-        "peak_rss_bytes": 150732800,
+        "peak_rss_bytes": 153645056,
         "phase": "ingest",
         "receipts": [
           {
@@ -47,19 +47,19 @@
             "outcome": "registered"
           },
           {
-            "bytes_accepted": 411169177,
+            "bytes_accepted": 822337680,
             "construction": {
-              "accepted_chunks": 136,
+              "accepted_chunks": 272,
               "application_io": {
                 "phases": {
                   "append_merge": {
                     "block_count": 0,
                     "fsync_calls": 0,
-                    "object_count": 136,
+                    "object_count": 272,
                     "read_bytes": 0,
                     "read_calls": 0,
-                    "write_bytes": 1563186992,
-                    "write_calls": 4008
+                    "write_bytes": 3629690464,
+                    "write_calls": 8528
                   },
                   "cas_install_read_write": {
                     "block_count": 0,
@@ -72,16 +72,16 @@
                   },
                   "encode_write_postwrite_authentication": {
                     "block_count": 0,
-                    "fsync_calls": 333,
+                    "fsync_calls": 627,
                     "object_count": 0,
-                    "read_bytes": 2892844537,
-                    "read_calls": 82035,
-                    "write_bytes": 743214697,
-                    "write_calls": 20072
+                    "read_bytes": 6355026379,
+                    "read_calls": 164070,
+                    "write_bytes": 1500026997,
+                    "write_calls": 41765
                   },
                   "fsync_synchronization": {
                     "block_count": 0,
-                    "fsync_calls": 5139,
+                    "fsync_calls": 11119,
                     "object_count": 0,
                     "read_bytes": 0,
                     "read_calls": 0,
@@ -110,8 +110,8 @@
                     "block_count": 0,
                     "fsync_calls": 0,
                     "object_count": 0,
-                    "read_bytes": 6449049449,
-                    "read_calls": 6638,
+                    "read_bytes": 16621552773,
+                    "read_calls": 16569,
                     "write_bytes": 0,
                     "write_calls": 0
                   },
@@ -125,41 +125,41 @@
                     "write_calls": 0
                   },
                   "shape_consume_reauthentication": {
-                    "block_count": 12228,
+                    "block_count": 28731,
                     "fsync_calls": 0,
                     "object_count": 0,
-                    "read_bytes": 8047991245,
-                    "read_calls": 135768,
-                    "write_bytes": 6015923395,
-                    "write_calls": 7326
+                    "read_bytes": 19227027175,
+                    "read_calls": 275017,
+                    "write_bytes": 14674255319,
+                    "write_calls": 17698
                   }
                 },
                 "totals": {
-                  "block_count": 12228,
-                  "fsync_calls": 5472,
-                  "object_count": 136,
-                  "read_bytes": 17389885231,
-                  "read_calls": 224441,
-                  "write_bytes": 8322325084,
-                  "write_calls": 31406
+                  "block_count": 28731,
+                  "fsync_calls": 11746,
+                  "object_count": 272,
+                  "read_bytes": 42203606327,
+                  "read_calls": 455656,
+                  "write_bytes": 19803972780,
+                  "write_calls": 67991
                 }
               },
-              "cache_release_operations": 20740,
+              "cache_release_operations": 43769,
               "cache_release_unsupported_operations": 0,
-              "cache_released_bytes": 32030046508,
+              "cache_released_bytes": 73926234525,
               "configured_batch_rows": 65536,
               "construction_staging": {
-                "allocated_bytes": 332464128,
-                "logical_bytes": 332048220,
-                "logical_references": 152,
-                "physical_logical_bytes": 332048220,
-                "physical_objects": 152
+                "allocated_bytes": 678465536,
+                "logical_bytes": 677697400,
+                "logical_references": 288,
+                "physical_logical_bytes": 677697400,
+                "physical_objects": 288
               },
-              "construction_staging_transient_peak_allocated_bytes": 3760926720,
-              "fsync_operations": 1744,
-              "immutable_artifacts": 536,
-              "input_batches": 136,
-              "input_rows": 8912896,
+              "construction_staging_transient_peak_allocated_bytes": 10246037504,
+              "fsync_operations": 3488,
+              "immutable_artifacts": 1072,
+              "input_batches": 272,
+              "input_rows": 17825792,
               "peak_batch_bytes": 3670536,
               "peak_batch_rows": 65536,
               "peak_cache_release_window_bytes": 67108864,
@@ -177,16 +177,16 @@
                 "contract": "graphforge-publication-work/1",
                 "encode_write_postwrite_authentication": {
                   "block_count": 0,
-                  "fsync_calls": 333,
+                  "fsync_calls": 627,
                   "object_count": 0,
-                  "read_bytes": 2892844537,
-                  "read_calls": 82035,
-                  "write_bytes": 743214697,
-                  "write_calls": 20072
+                  "read_bytes": 6355026379,
+                  "read_calls": 164070,
+                  "write_bytes": 1500026997,
+                  "write_calls": 41765
                 },
                 "fsync_synchronization": {
                   "block_count": 0,
-                  "fsync_calls": 5139,
+                  "fsync_calls": 11119,
                   "object_count": 0,
                   "read_bytes": 0,
                   "read_calls": 0,
@@ -211,22 +211,22 @@
                   "write_bytes": 0,
                   "write_calls": 0
                 },
-                "semantic_total_operations": 107579
+                "semantic_total_operations": 217581
               },
-              "transient_peak_allocated_bytes": 3760926720,
-              "write_bytes": 1563186992,
-              "write_operations": 4008
+              "transient_peak_allocated_bytes": 10246037504,
+              "write_bytes": 3629690464,
+              "write_operations": 8528
             },
             "contract": "graphforge-import-session/1",
             "operation_timings": {
               "append": {
-                "calls": 136,
-                "elapsed_ns": 8109726758,
+                "calls": 272,
+                "elapsed_ns": 16737040531,
                 "errors": 0
               },
               "begin": {
                 "calls": 1,
-                "elapsed_ns": 933688,
+                "elapsed_ns": 954668,
                 "errors": 0
               },
               "publish": {
@@ -241,49 +241,49 @@
               },
               "seal": {
                 "calls": 1,
-                "elapsed_ns": 81791090329,
+                "elapsed_ns": 177088074484,
                 "errors": 0
               }
             },
             "outcome": "validated",
-            "rows_accepted": 8912896,
+            "rows_accepted": 17825792,
             "rows_rejected": 0
           },
           {
             "construction": {
-              "accepted_chunks": 136,
+              "accepted_chunks": 272,
               "application_io": {
                 "phases": {
                   "append_merge": {
                     "block_count": 0,
                     "fsync_calls": 0,
-                    "object_count": 136,
+                    "object_count": 272,
                     "read_bytes": 0,
                     "read_calls": 0,
-                    "write_bytes": 1563186992,
-                    "write_calls": 4008
+                    "write_bytes": 3629690464,
+                    "write_calls": 8528
                   },
                   "cas_install_read_write": {
                     "block_count": 0,
-                    "fsync_calls": 1651,
+                    "fsync_calls": 3360,
                     "object_count": 0,
-                    "read_bytes": 332806943,
-                    "read_calls": 5799,
-                    "write_bytes": 332459564,
-                    "write_calls": 5504
+                    "read_bytes": 679174824,
+                    "read_calls": 11925,
+                    "write_bytes": 678496326,
+                    "write_calls": 11289
                   },
                   "encode_write_postwrite_authentication": {
                     "block_count": 0,
-                    "fsync_calls": 333,
+                    "fsync_calls": 627,
                     "object_count": 0,
-                    "read_bytes": 2892844537,
-                    "read_calls": 82035,
-                    "write_bytes": 743214697,
-                    "write_calls": 20072
+                    "read_bytes": 6355026379,
+                    "read_calls": 164070,
+                    "write_bytes": 1500026997,
+                    "write_calls": 41765
                   },
                   "fsync_synchronization": {
                     "block_count": 0,
-                    "fsync_calls": 5151,
+                    "fsync_calls": 11131,
                     "object_count": 0,
                     "read_bytes": 0,
                     "read_calls": 0,
@@ -294,16 +294,16 @@
                     "block_count": 0,
                     "fsync_calls": 16,
                     "object_count": 0,
-                    "read_bytes": 353068460,
-                    "read_calls": 5429,
-                    "write_bytes": 21020063,
-                    "write_calls": 324
+                    "read_bytes": 719735541,
+                    "read_calls": 11103,
+                    "write_bytes": 42037964,
+                    "write_calls": 645
                   },
                   "publication_preauthentication": {
                     "block_count": 0,
                     "fsync_calls": 0,
                     "object_count": 0,
-                    "read_bytes": 50297,
+                    "read_bytes": 95647,
                     "read_calls": 3,
                     "write_bytes": 0,
                     "write_calls": 0
@@ -312,8 +312,8 @@
                     "block_count": 0,
                     "fsync_calls": 0,
                     "object_count": 0,
-                    "read_bytes": 7445258251,
-                    "read_calls": 12754,
+                    "read_bytes": 18654765578,
+                    "read_calls": 29017,
                     "write_bytes": 0,
                     "write_calls": 0
                   },
@@ -327,41 +327,41 @@
                     "write_calls": 0
                   },
                   "shape_consume_reauthentication": {
-                    "block_count": 12228,
+                    "block_count": 28731,
                     "fsync_calls": 0,
                     "object_count": 0,
-                    "read_bytes": 8047991245,
-                    "read_calls": 135768,
-                    "write_bytes": 6015923395,
-                    "write_calls": 7326
+                    "read_bytes": 19227027175,
+                    "read_calls": 275017,
+                    "write_bytes": 14674255319,
+                    "write_calls": 17698
                   }
                 },
                 "totals": {
-                  "block_count": 12228,
-                  "fsync_calls": 7151,
-                  "object_count": 136,
-                  "read_bytes": 19072019733,
-                  "read_calls": 241788,
-                  "write_bytes": 8675804711,
-                  "write_calls": 37234
+                  "block_count": 28731,
+                  "fsync_calls": 15134,
+                  "object_count": 272,
+                  "read_bytes": 45635825144,
+                  "read_calls": 491135,
+                  "write_bytes": 20524507070,
+                  "write_calls": 79925
                 }
               },
-              "cache_release_operations": 21190,
+              "cache_release_operations": 44633,
               "cache_release_unsupported_operations": 0,
-              "cache_released_bytes": 33026191168,
+              "cache_released_bytes": 75959326725,
               "configured_batch_rows": 65536,
               "construction_staging": {
-                "allocated_bytes": 332464128,
-                "logical_bytes": 332048220,
-                "logical_references": 152,
-                "physical_logical_bytes": 332048220,
-                "physical_objects": 152
+                "allocated_bytes": 678465536,
+                "logical_bytes": 677697400,
+                "logical_references": 288,
+                "physical_logical_bytes": 677697400,
+                "physical_objects": 288
               },
-              "construction_staging_transient_peak_allocated_bytes": 3760926720,
-              "fsync_operations": 1744,
-              "immutable_artifacts": 536,
-              "input_batches": 136,
-              "input_rows": 8912896,
+              "construction_staging_transient_peak_allocated_bytes": 10246037504,
+              "fsync_operations": 3488,
+              "immutable_artifacts": 1072,
+              "input_batches": 272,
+              "input_rows": 17825792,
               "peak_batch_bytes": 3670536,
               "peak_batch_rows": 65536,
               "peak_cache_release_window_bytes": 67108864,
@@ -369,26 +369,26 @@
               "publication_work": {
                 "cas_install_read_write": {
                   "block_count": 0,
-                  "fsync_calls": 1651,
+                  "fsync_calls": 3360,
                   "object_count": 0,
-                  "read_bytes": 332806943,
-                  "read_calls": 5799,
-                  "write_bytes": 332459564,
-                  "write_calls": 5504
+                  "read_bytes": 679174824,
+                  "read_calls": 11925,
+                  "write_bytes": 678496326,
+                  "write_calls": 11289
                 },
                 "contract": "graphforge-publication-work/1",
                 "encode_write_postwrite_authentication": {
                   "block_count": 0,
-                  "fsync_calls": 333,
+                  "fsync_calls": 627,
                   "object_count": 0,
-                  "read_bytes": 2892844537,
-                  "read_calls": 82035,
-                  "write_bytes": 743214697,
-                  "write_calls": 20072
+                  "read_bytes": 6355026379,
+                  "read_calls": 164070,
+                  "write_bytes": 1500026997,
+                  "write_calls": 41765
                 },
                 "fsync_synchronization": {
                   "block_count": 0,
-                  "fsync_calls": 5151,
+                  "fsync_calls": 11131,
                   "object_count": 0,
                   "read_bytes": 0,
                   "read_calls": 0,
@@ -399,25 +399,25 @@
                   "block_count": 0,
                   "fsync_calls": 16,
                   "object_count": 0,
-                  "read_bytes": 353068460,
-                  "read_calls": 5429,
-                  "write_bytes": 21020063,
-                  "write_calls": 324
+                  "read_bytes": 719735541,
+                  "read_calls": 11103,
+                  "write_bytes": 42037964,
+                  "write_calls": 645
                 },
                 "publication_preauthentication": {
                   "block_count": 0,
                   "fsync_calls": 0,
                   "object_count": 0,
-                  "read_bytes": 50297,
+                  "read_bytes": 95647,
                   "read_calls": 3,
                   "write_bytes": 0,
                   "write_calls": 0
                 },
-                "semantic_total_operations": 126317
+                "semantic_total_operations": 255934
               },
-              "transient_peak_allocated_bytes": 3760926720,
-              "write_bytes": 1563186992,
-              "write_operations": 4008
+              "transient_peak_allocated_bytes": 10246037504,
+              "write_bytes": 3629690464,
+              "write_operations": 8528
             },
             "contract": "graphforge-import-session/1",
             "operation_timings": {
@@ -433,12 +433,12 @@
               },
               "publish": {
                 "calls": 1,
-                "elapsed_ns": 3893310009,
+                "elapsed_ns": 9436727862,
                 "errors": 0
               },
               "resume": {
                 "calls": 1,
-                "elapsed_ns": 412605125,
+                "elapsed_ns": 975586822,
                 "errors": 0
               },
               "seal": {
@@ -453,9 +453,9 @@
         "status": "passed"
       },
       {
-        "duration_ms": 5253,
+        "duration_ms": 12622,
         "exit_code": 0,
-        "peak_rss_bytes": 37892096,
+        "peak_rss_bytes": 38563840,
         "phase": "reopen",
         "receipts": [
           {
@@ -473,7 +473,7 @@
             "contract": "graphforge-storage-attribution-command/1",
             "reopen_agrees": true,
             "storage": {
-              "allocated_physical_bytes": 332910592,
+              "allocated_physical_bytes": 679284736,
               "categories": {
                 "adjacency": {
                   "allocated_bytes": 0,
@@ -483,11 +483,11 @@
                   "physical_objects": 0
                 },
                 "catalog_and_manifests": {
-                  "allocated_bytes": 462848,
-                  "logical_bytes": 68555,
-                  "logical_references": 113,
-                  "physical_logical_bytes": 68555,
-                  "physical_objects": 113
+                  "allocated_bytes": 835584,
+                  "logical_bytes": 125018,
+                  "logical_references": 204,
+                  "physical_logical_bytes": 125018,
+                  "physical_objects": 204
                 },
                 "clean_imported_project": {
                   "allocated_bytes": 0,
@@ -525,41 +525,41 @@
                   "physical_objects": 0
                 },
                 "topology_edges": {
-                  "allocated_bytes": 141017088,
-                  "logical_bytes": 140648263,
-                  "logical_references": 128,
-                  "physical_logical_bytes": 140648263,
-                  "physical_objects": 128
+                  "allocated_bytes": 295608320,
+                  "logical_bytes": 294903662,
+                  "logical_references": 256,
+                  "physical_logical_bytes": 294903662,
+                  "physical_objects": 256
                 },
                 "topology_nodes": {
-                  "allocated_bytes": 2097152,
-                  "logical_bytes": 2080111,
-                  "logical_references": 8,
-                  "physical_logical_bytes": 2080111,
-                  "physical_objects": 8
+                  "allocated_bytes": 4194304,
+                  "logical_bytes": 4159543,
+                  "logical_references": 16,
+                  "physical_logical_bytes": 4159543,
+                  "physical_objects": 16
                 },
                 "uuid_and_surrogates": {
-                  "allocated_bytes": 189333504,
-                  "logical_bytes": 189317146,
+                  "allocated_bytes": 378646528,
+                  "logical_bytes": 378631495,
                   "logical_references": 12,
-                  "physical_logical_bytes": 189317146,
+                  "physical_logical_bytes": 378631495,
                   "physical_objects": 9
                 }
               },
               "contract": "graphforge-storage-attribution/1",
-              "logical_bytes": 332114075,
-              "logical_references": 261,
-              "physical_objects": 258,
-              "retained_logical_eof_bytes": 332114075
+              "logical_bytes": 677819718,
+              "logical_references": 488,
+              "physical_objects": 485,
+              "retained_logical_eof_bytes": 677819718
             }
           }
         ],
         "status": "passed"
       },
       {
-        "duration_ms": 3395,
+        "duration_ms": 7970,
         "exit_code": 0,
-        "peak_rss_bytes": 84238336,
+        "peak_rss_bytes": 78213120,
         "phase": "recount",
         "receipts": [
           {
@@ -581,9 +581,9 @@
               "rss_after_release_bytes": 0,
               "sorts": []
             },
-            "result_sha256": "4e0d83ac4f39024a66341b361c0e788c18cc166d8521218e74abf8acc1e33e45",
+            "result_sha256": "d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066",
             "rows": 1,
-            "scalar_u64": 524288
+            "scalar_u64": 1048576
           },
           {
             "batches": 1,
@@ -629,29 +629,29 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 78659584,
-                  "before_bytes": 77656064,
+                  "after_bytes": 79118336,
+                  "before_bytes": 78082048,
                   "operator": "edge_count",
                   "ordinal": 0,
-                  "peak_bytes": 78659584
+                  "peak_bytes": 79118336
                 }
               ],
-              "peak_rss_bytes": 78659584,
+              "peak_rss_bytes": 79118336,
               "returned_batch_bytes": 104,
-              "rss_after_release_bytes": 78659584,
+              "rss_after_release_bytes": 79118336,
               "sorts": []
             },
-            "result_sha256": "24c9d3c08d04ec974fa8a6246cd2e2d99c3284a313f03ffca20bc0c479b2e987",
+            "result_sha256": "3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150",
             "rows": 1,
-            "scalar_u64": 8388608
+            "scalar_u64": 16777216
           }
         ],
         "status": "passed"
       },
       {
-        "duration_ms": 19040,
+        "duration_ms": 40136,
         "exit_code": 0,
-        "peak_rss_bytes": 189353984,
+        "peak_rss_bytes": 199983104,
         "phase": "query",
         "receipts": [
           {
@@ -665,7 +665,7 @@
               "execution_batch_rows": 8192,
               "hops": [
                 {
-                  "adjacency_rows_examined": 46,
+                  "adjacency_rows_examined": 78,
                   "candidates_generated": 1000,
                   "edge_full_reads": 0,
                   "edge_logical_rows_scanned": 0,
@@ -673,7 +673,7 @@
                   "edge_reader_calls": 0,
                   "edge_rows_returned": 0,
                   "identity_logical_bytes": 65536,
-                  "identity_peak_buffer_bytes": 68928,
+                  "identity_peak_buffer_bytes": 71104,
                   "identity_per_record_seeks": 0,
                   "identity_ranges_selected": 1,
                   "identity_reader_calls": 1,
@@ -689,7 +689,7 @@
                   "ordinal": 0,
                   "projected_chunks": 1,
                   "projected_columns": 1,
-                  "projected_rows": 26,
+                  "projected_rows": 43,
                   "rows_emitted": 1000
                 }
               ],
@@ -698,19 +698,19 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 125812736,
-                  "before_bytes": 76570624,
+                  "after_bytes": 127995904,
+                  "before_bytes": 78024704,
                   "operator": "ordered_one_hop",
                   "ordinal": 0,
-                  "peak_bytes": 125812736
+                  "peak_bytes": 127995904
                 }
               ],
-              "peak_rss_bytes": 125812736,
+              "peak_rss_bytes": 127995904,
               "returned_batch_bytes": 16112,
-              "rss_after_release_bytes": 125812736,
+              "rss_after_release_bytes": 127995904,
               "sorts": []
             },
-            "result_sha256": "46b96c2f5a4b01d3b4ea0b0fb18d92b8be2380ba809b803b1cb9ee14e8084fc4",
+            "result_sha256": "da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116",
             "rows": 1000,
             "scalar_u64": null
           },
@@ -725,18 +725,18 @@
               "execution_batch_rows": 8192,
               "hops": [
                 {
-                  "adjacency_rows_examined": 4,
+                  "adjacency_rows_examined": 6,
                   "candidates_generated": 1000,
                   "edge_full_reads": 0,
                   "edge_logical_rows_scanned": 0,
                   "edge_projected_columns": 0,
                   "edge_reader_calls": 0,
                   "edge_rows_returned": 0,
-                  "identity_logical_bytes": 65536,
+                  "identity_logical_bytes": 131072,
                   "identity_peak_buffer_bytes": 65728,
                   "identity_per_record_seeks": 0,
-                  "identity_ranges_selected": 1,
-                  "identity_reader_calls": 1,
+                  "identity_ranges_selected": 2,
+                  "identity_reader_calls": 2,
                   "identity_revalidation_bytes": 0,
                   "identity_revalidation_calls": 11,
                   "input_batches": 0,
@@ -747,9 +747,9 @@
                   "node_reader_calls": 0,
                   "node_rows_returned": 0,
                   "ordinal": 0,
-                  "projected_chunks": 1,
+                  "projected_chunks": 2,
                   "projected_columns": 1,
-                  "projected_rows": 1,
+                  "projected_rows": 2,
                   "rows_emitted": 1000
                 }
               ],
@@ -758,19 +758,19 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 144904192,
-                  "before_bytes": 78086144,
+                  "after_bytes": 146006016,
+                  "before_bytes": 78983168,
                   "operator": "ordered_two_hop",
                   "ordinal": 0,
-                  "peak_bytes": 144904192
+                  "peak_bytes": 146006016
                 }
               ],
-              "peak_rss_bytes": 144904192,
+              "peak_rss_bytes": 146006016,
               "returned_batch_bytes": 16112,
-              "rss_after_release_bytes": 144904192,
+              "rss_after_release_bytes": 146006016,
               "sorts": []
             },
-            "result_sha256": "3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60",
+            "result_sha256": "404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255",
             "rows": 1000,
             "scalar_u64": null
           }
@@ -778,65 +778,65 @@
         "status": "passed"
       },
       {
-        "duration_ms": 3546,
+        "duration_ms": 7901,
         "exit_code": 0,
-        "peak_rss_bytes": 36880384,
+        "peak_rss_bytes": 38801408,
         "phase": "export",
         "receipts": [
           {
-            "allocation_allocated_bytes": 332263424,
-            "allocation_logical_bytes": 332256768,
+            "allocation_allocated_bytes": 678088704,
+            "allocation_logical_bytes": 678083072,
             "allocation_physical_objects": 1,
             "contract": "graphforge-portable-export/2",
-            "entry_count": 161,
-            "package_digest": "sha256:ae06512d0f74c60eaf9795d3889ae8dbfafa49b6686cdde66de05a1b1d0684ff",
-            "payload_bytes": 332049745,
+            "entry_count": 297,
+            "package_digest": "sha256:9d1fe7ab1792ff6e01b2cccb64d4678206b7025521b8f7d04c0d5e3258c8f809",
+            "payload_bytes": 677698925,
             "representation": "bundle",
-            "selection_fingerprint": "sha256:1277e2d5e4cd61cc212dedd5c62881196aa1fb2553ecabc065275e46ec482527",
-            "transport_digest": "sha256:c9fce24b8ea6caa1ef708cddf8070d2c8828f4826e2047274c7ab8e0a455e9c3"
+            "selection_fingerprint": "sha256:8f77409edf74ad451d8db71f041782ab54cf9b9724bd120bc02fd5c19122a16d",
+            "transport_digest": "sha256:091718eef991e3af4105de546493bcfb73710be7aca638d35a734e8fef221972"
           }
         ],
         "status": "passed"
       },
       {
-        "duration_ms": 462,
+        "duration_ms": 973,
         "exit_code": 0,
-        "peak_rss_bytes": 22945792,
+        "peak_rss_bytes": 24481792,
         "phase": "verify",
         "receipts": [
           {
             "compatibility": "supported",
             "contract": "graphforge-portable-verify/2",
-            "entry_count": 161,
+            "entry_count": 297,
             "integrity": "verified",
-            "package_digest": "sha256:ae06512d0f74c60eaf9795d3889ae8dbfafa49b6686cdde66de05a1b1d0684ff",
-            "payload_bytes": 332133619,
+            "package_digest": "sha256:9d1fe7ab1792ff6e01b2cccb64d4678206b7025521b8f7d04c0d5e3258c8f809",
+            "payload_bytes": 677857336,
             "representation": "bundle",
-            "transport_digest": "sha256:c9fce24b8ea6caa1ef708cddf8070d2c8828f4826e2047274c7ab8e0a455e9c3"
+            "transport_digest": "sha256:091718eef991e3af4105de546493bcfb73710be7aca638d35a734e8fef221972"
           }
         ],
         "status": "passed"
       },
       {
-        "duration_ms": 4656,
+        "duration_ms": 10841,
         "exit_code": 0,
-        "peak_rss_bytes": 34926592,
+        "peak_rss_bytes": 40542208,
         "phase": "clean_import",
         "receipts": [
           {
             "contract": "graphforge-portable-import/2",
             "idempotent_replay": false,
-            "package_digest": "sha256:ae06512d0f74c60eaf9795d3889ae8dbfafa49b6686cdde66de05a1b1d0684ff",
-            "transient_peak_allocated_bytes": 666628096,
-            "transport_digest": "sha256:c9fce24b8ea6caa1ef708cddf8070d2c8828f4826e2047274c7ab8e0a455e9c3"
+            "package_digest": "sha256:9d1fe7ab1792ff6e01b2cccb64d4678206b7025521b8f7d04c0d5e3258c8f809",
+            "transient_peak_allocated_bytes": 1360400384,
+            "transport_digest": "sha256:091718eef991e3af4105de546493bcfb73710be7aca638d35a734e8fef221972"
           }
         ],
         "status": "passed"
       },
       {
-        "duration_ms": 26444,
+        "duration_ms": 58618,
         "exit_code": 0,
-        "peak_rss_bytes": 189415424,
+        "peak_rss_bytes": 200232960,
         "phase": "reopen_proof",
         "receipts": [
           {
@@ -858,9 +858,9 @@
               "rss_after_release_bytes": 0,
               "sorts": []
             },
-            "result_sha256": "4e0d83ac4f39024a66341b361c0e788c18cc166d8521218e74abf8acc1e33e45",
+            "result_sha256": "d41814e11f492a8c36191b100c805a370de2b4bdbe6ca88c7eef41360ef53066",
             "rows": 1,
-            "scalar_u64": 524288
+            "scalar_u64": 1048576
           },
           {
             "batches": 1,
@@ -906,21 +906,21 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 79056896,
-                  "before_bytes": 78151680,
+                  "after_bytes": 80351232,
+                  "before_bytes": 79237120,
                   "operator": "edge_count",
                   "ordinal": 0,
-                  "peak_bytes": 79056896
+                  "peak_bytes": 80351232
                 }
               ],
-              "peak_rss_bytes": 79056896,
+              "peak_rss_bytes": 80351232,
               "returned_batch_bytes": 104,
-              "rss_after_release_bytes": 79056896,
+              "rss_after_release_bytes": 80351232,
               "sorts": []
             },
-            "result_sha256": "24c9d3c08d04ec974fa8a6246cd2e2d99c3284a313f03ffca20bc0c479b2e987",
+            "result_sha256": "3daeda0e54a362622ffdc547a631479e3f18cd0f7fa1b28c3b1fce9b7e88a150",
             "rows": 1,
-            "scalar_u64": 8388608
+            "scalar_u64": 16777216
           },
           {
             "batches": 1,
@@ -933,7 +933,7 @@
               "execution_batch_rows": 8192,
               "hops": [
                 {
-                  "adjacency_rows_examined": 46,
+                  "adjacency_rows_examined": 78,
                   "candidates_generated": 1000,
                   "edge_full_reads": 0,
                   "edge_logical_rows_scanned": 0,
@@ -941,7 +941,7 @@
                   "edge_reader_calls": 0,
                   "edge_rows_returned": 0,
                   "identity_logical_bytes": 65536,
-                  "identity_peak_buffer_bytes": 68928,
+                  "identity_peak_buffer_bytes": 71104,
                   "identity_per_record_seeks": 0,
                   "identity_ranges_selected": 1,
                   "identity_reader_calls": 1,
@@ -957,7 +957,7 @@
                   "ordinal": 0,
                   "projected_chunks": 1,
                   "projected_columns": 1,
-                  "projected_rows": 26,
+                  "projected_rows": 43,
                   "rows_emitted": 1000
                 }
               ],
@@ -966,19 +966,19 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 127639552,
-                  "before_bytes": 78135296,
+                  "after_bytes": 128458752,
+                  "before_bytes": 78262272,
                   "operator": "ordered_one_hop",
                   "ordinal": 0,
-                  "peak_bytes": 127639552
+                  "peak_bytes": 128458752
                 }
               ],
-              "peak_rss_bytes": 127639552,
+              "peak_rss_bytes": 128458752,
               "returned_batch_bytes": 16112,
-              "rss_after_release_bytes": 127639552,
+              "rss_after_release_bytes": 128458752,
               "sorts": []
             },
-            "result_sha256": "46b96c2f5a4b01d3b4ea0b0fb18d92b8be2380ba809b803b1cb9ee14e8084fc4",
+            "result_sha256": "da48cf8bd82d136635cba999906d07a783deabf66427e13128f645d756adb116",
             "rows": 1000,
             "scalar_u64": null
           },
@@ -993,18 +993,18 @@
               "execution_batch_rows": 8192,
               "hops": [
                 {
-                  "adjacency_rows_examined": 4,
+                  "adjacency_rows_examined": 6,
                   "candidates_generated": 1000,
                   "edge_full_reads": 0,
                   "edge_logical_rows_scanned": 0,
                   "edge_projected_columns": 0,
                   "edge_reader_calls": 0,
                   "edge_rows_returned": 0,
-                  "identity_logical_bytes": 65536,
+                  "identity_logical_bytes": 131072,
                   "identity_peak_buffer_bytes": 65728,
                   "identity_per_record_seeks": 0,
-                  "identity_ranges_selected": 1,
-                  "identity_reader_calls": 1,
+                  "identity_ranges_selected": 2,
+                  "identity_reader_calls": 2,
                   "identity_revalidation_bytes": 0,
                   "identity_revalidation_calls": 11,
                   "input_batches": 0,
@@ -1015,9 +1015,9 @@
                   "node_reader_calls": 0,
                   "node_rows_returned": 0,
                   "ordinal": 0,
-                  "projected_chunks": 1,
+                  "projected_chunks": 2,
                   "projected_columns": 1,
-                  "projected_rows": 1,
+                  "projected_rows": 2,
                   "rows_emitted": 1000
                 }
               ],
@@ -1026,19 +1026,19 @@
               "memory_reserved_before": 0,
               "operator_rss": [
                 {
-                  "after_bytes": 144916480,
-                  "before_bytes": 78413824,
+                  "after_bytes": 146726912,
+                  "before_bytes": 79597568,
                   "operator": "ordered_two_hop",
                   "ordinal": 0,
-                  "peak_bytes": 144916480
+                  "peak_bytes": 146726912
                 }
               ],
-              "peak_rss_bytes": 144916480,
+              "peak_rss_bytes": 146726912,
               "returned_batch_bytes": 16112,
-              "rss_after_release_bytes": 144916480,
+              "rss_after_release_bytes": 146726912,
               "sorts": []
             },
-            "result_sha256": "3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60",
+            "result_sha256": "404560fda0d6c2f6988aa4cee9c8d1d465c7254181b8c760e659e00b3f1bd255",
             "rows": 1000,
             "scalar_u64": null
           },
@@ -1046,7 +1046,7 @@
             "contract": "graphforge-storage-attribution-command/1",
             "reopen_agrees": true,
             "storage": {
-              "allocated_physical_bytes": 332910592,
+              "allocated_physical_bytes": 679284736,
               "categories": {
                 "adjacency": {
                   "allocated_bytes": 0,
@@ -1056,11 +1056,11 @@
                   "physical_objects": 0
                 },
                 "catalog_and_manifests": {
-                  "allocated_bytes": 462848,
-                  "logical_bytes": 68555,
-                  "logical_references": 113,
-                  "physical_logical_bytes": 68555,
-                  "physical_objects": 113
+                  "allocated_bytes": 835584,
+                  "logical_bytes": 125018,
+                  "logical_references": 204,
+                  "physical_logical_bytes": 125018,
+                  "physical_objects": 204
                 },
                 "clean_imported_project": {
                   "allocated_bytes": 0,
@@ -1098,32 +1098,32 @@
                   "physical_objects": 0
                 },
                 "topology_edges": {
-                  "allocated_bytes": 141017088,
-                  "logical_bytes": 140648263,
-                  "logical_references": 128,
-                  "physical_logical_bytes": 140648263,
-                  "physical_objects": 128
+                  "allocated_bytes": 295608320,
+                  "logical_bytes": 294903662,
+                  "logical_references": 256,
+                  "physical_logical_bytes": 294903662,
+                  "physical_objects": 256
                 },
                 "topology_nodes": {
-                  "allocated_bytes": 2097152,
-                  "logical_bytes": 2080111,
-                  "logical_references": 8,
-                  "physical_logical_bytes": 2080111,
-                  "physical_objects": 8
+                  "allocated_bytes": 4194304,
+                  "logical_bytes": 4159543,
+                  "logical_references": 16,
+                  "physical_logical_bytes": 4159543,
+                  "physical_objects": 16
                 },
                 "uuid_and_surrogates": {
-                  "allocated_bytes": 189333504,
-                  "logical_bytes": 189317146,
+                  "allocated_bytes": 378646528,
+                  "logical_bytes": 378631495,
                   "logical_references": 12,
-                  "physical_logical_bytes": 189317146,
+                  "physical_logical_bytes": 378631495,
                   "physical_objects": 9
                 }
               },
               "contract": "graphforge-storage-attribution/1",
-              "logical_bytes": 332114075,
-              "logical_references": 261,
-              "physical_objects": 258,
-              "retained_logical_eof_bytes": 332114075
+              "logical_bytes": 677819718,
+              "logical_references": 488,
+              "physical_objects": 485,
+              "retained_logical_eof_bytes": 677819718
             }
           },
           {
@@ -1131,10 +1131,10 @@
             "retained_owners": {
               "generated-inputs": {
                 "totals": {
-                  "allocated_bytes": 411181056,
-                  "logical_bytes": 411169177,
+                  "allocated_bytes": 822345728,
+                  "logical_bytes": 822337680,
                   "logical_references": 2,
-                  "physical_logical_bytes": 411169177,
+                  "physical_logical_bytes": 822337680,
                   "physical_objects": 2
                 }
               },
@@ -1176,11 +1176,11 @@
               },
               "imported-project-published": {
                 "totals": {
-                  "allocated_bytes": 334139392,
-                  "logical_bytes": 332462979,
-                  "logical_references": 559,
-                  "physical_logical_bytes": 332462979,
-                  "physical_objects": 559
+                  "allocated_bytes": 681910272,
+                  "logical_bytes": 678499741,
+                  "logical_references": 1127,
+                  "physical_logical_bytes": 678499741,
+                  "physical_objects": 1127
                 }
               },
               "imported-project-transactions": {
@@ -1194,10 +1194,10 @@
               },
               "portable-package": {
                 "totals": {
-                  "allocated_bytes": 332263424,
-                  "logical_bytes": 332256768,
+                  "allocated_bytes": 678088704,
+                  "logical_bytes": 678083072,
                   "logical_references": 1,
-                  "physical_logical_bytes": 332256768,
+                  "physical_logical_bytes": 678083072,
                   "physical_objects": 1
                 }
               },
@@ -1221,19 +1221,19 @@
               },
               "source-project-construction": {
                 "totals": {
-                  "allocated_bytes": 336162816,
-                  "logical_bytes": 332870439,
-                  "logical_references": 973,
-                  "physical_logical_bytes": 332870439,
-                  "physical_objects": 973
+                  "allocated_bytes": 685801472,
+                  "logical_bytes": 679305946,
+                  "logical_references": 1919,
+                  "physical_logical_bytes": 679305946,
+                  "physical_objects": 1919
                 }
               },
               "source-project-import": {
                 "totals": {
-                  "allocated_bytes": 411189248,
-                  "logical_bytes": 411173327,
+                  "allocated_bytes": 822353920,
+                  "logical_bytes": 822341855,
                   "logical_references": 3,
-                  "physical_logical_bytes": 411173327,
+                  "physical_logical_bytes": 822341855,
                   "physical_objects": 3
                 }
               },
@@ -1248,11 +1248,11 @@
               },
               "source-project-published": {
                 "totals": {
-                  "allocated_bytes": 334139392,
-                  "logical_bytes": 332462979,
-                  "logical_references": 559,
-                  "physical_logical_bytes": 332462979,
-                  "physical_objects": 559
+                  "allocated_bytes": 681910272,
+                  "logical_bytes": 678499741,
+                  "logical_references": 1127,
+                  "physical_logical_bytes": 678499741,
+                  "physical_objects": 1127
                 }
               },
               "source-project-transactions": {
@@ -1265,15 +1265,15 @@
                 }
               }
             },
-            "retained_storage_bytes": 2159181824,
-            "source_project_current_allocated_bytes": 334139392,
-            "transient_peak_storage_bytes": 4586803200
+            "retained_storage_bytes": 4372516864,
+            "source_project_current_allocated_bytes": 681910272,
+            "transient_peak_storage_bytes": 11897737216
           }
         ],
         "status": "passed"
       }
     ],
-    "profile_id": "graph500-s19-local",
+    "profile_id": "graph500-s20-provider",
     "schema": "graphforge-public-certification/1",
     "status": "passed"
   },
