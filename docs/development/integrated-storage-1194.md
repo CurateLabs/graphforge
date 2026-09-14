@@ -381,11 +381,16 @@ speedup claim.
 
 Local validation passes the 20 runtime/progressive-admission tests, the 14
 selected-row matching storage tests, and the real fan-in-boundary regression.
-The full storage suite reports 1,108 passed, one failed and two existing ignored
-tests. The failure is the existing `wave9_participant_inventory_rejects_links_and_special_files`
+The initial full storage suite reports 1,108 passed, one failed and two existing
+ignored tests. The failure is the existing `wave9_participant_inventory_rejects_links_and_special_files`
 test tracked by #1192: it explicitly uses `/tmp` (tmpfs on this host), bypassing
 the admitted ext4 `TMPDIR`. The unchanged frozen baseline reproduces the same
-filesystem-admission failure. No assertion or test was disabled. Workspace
+filesystem-admission failure. Running the full frozen suite with an ext4-backed
+`/tmp` in a private mount namespace passes **1,109 tests, zero failed, two existing
+ignored**. This includes the existing corruption, cancellation, recovery and
+publication regressions. The host mounts and production admission checks are
+unchanged; no assertion or test was disabled. The command, environment and both
+log hashes are retained in the lifecycle summary. Workspace
 Clippy, formatting, `make pre-push-fast`, and `make gate-registry-check` pass;
 the full pre-push workflow is recorded separately and must not be inferred green
 from these targeted checks.

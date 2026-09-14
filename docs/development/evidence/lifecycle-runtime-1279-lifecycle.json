@@ -375,5 +375,22 @@
     "summarize.py": "59ec0e7f4aa4626aa499eabc51fb436261132b6f350c86d52822100294692285"
   },
   "source_imported_edges": 4194304,
-  "source_imported_nodes": 262144
+  "source_imported_nodes": 262144,
+  "storage_regression_validation": {
+    "command": "sudo -n unshare --mount --propagation private bash -c 'mount --bind \"$PRIVATE_NATIVE_TMP\" /tmp && runuser -u ubuntu -- env TMPDIR=\"$NATIVE_TMP\" \"$FROZEN_STORAGE_TESTS\" --test-threads=4'",
+    "environment": "PRIVATE_NATIVE_TMP and NATIVE_TMP are admitted ext4 directories; /tmp bind exists only in the child mount namespace. Host mounts and production admission checks are unchanged.",
+    "executable_sha256": "9856f40856f7f25ac0d4678e14bd7288a1005f3b2fb57116524dd4b3143f7b4b",
+    "existing_ignored": 2,
+    "failed": 0,
+    "initial_host_tmpfs_run": {
+      "existing_ignored": 2,
+      "failed": 1,
+      "failure": "project_generation::tests::wave9_participant_inventory_rejects_links_and_special_files explicitly creates projects in /tmp; tracked by #1192 and reproduced on frozen baseline",
+      "log_sha256": "9115c233a85a3c3b9a4cc1810f29df17a0b4cbcd73e10a12e2d7a5c748fc6d96",
+      "passed": 1108
+    },
+    "log_sha256": "b2df39afe2daa2e21b836e1f5de4e7a9eb2b6e9adcfc316f4fad61363b06bbe8",
+    "passed": 1109,
+    "wall_seconds": 24.32
+  }
 }
