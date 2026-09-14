@@ -1789,7 +1789,8 @@
     "Initial exact-property test mistakenly queried topology for properties, then used a noncanonical route; corrected oracle reads authenticated property route.",
     "Successor corruption test found real1269, fixed and merged separately in1270.",
     "First full1268 storage run1105pass2fail2existingignored: new malformed-tail fixture lacked category maps; corrected without weakening assertions. Other failure is known1192 hardcoded /tmp unsupported filesystem.",
-    "Initial Clippy if_not_else finding corrected with equivalent branch inversion."
+    "Initial Clippy if_not_else finding corrected with equivalent branch inversion.",
+    "Exact-head CI34869384852 failed the aggregate peak derivative check after all ordinary lifecycle phases passed. Every candidate SCALE6/7/8 peak was lower than baseline. Native blocker1272 corrected the maximum-envelope invariant with a stricter adjacent peak/work bound, merged via1273 as880c9a7a after CI34872510638 passed. Failed CI remains failed; this PR is refreshed and its full gate rerun."
   ],
   "candidate_envelope_results": {
     "cpu_pass": true,

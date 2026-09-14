@@ -33,6 +33,8 @@ Three frozen runs reproduced each allocation value. Whole-fixture CPU was 4.55â€
 
 The peak floor was selected from baseline identity-root bytes before implementation; the final deterministic test additionally retains the measured saving from deferring the final carry. Failed diagnostic publication, superseded first-candidate results, corrected test setup/oracles and the independently repaired corruption cause remain documented in the evidence. Public construction and four publishing-contract fixtures separately cover exact mutation/query/reopen/export/full verification/clean import/subsequent mutation. Integrated S20/S22 evidence below remains the September 11 historical run until the authorized follow-up ladder completes.
 
+The first #1268 CI run exposed an aggregate-peak derivative false positive. [#1272 evidence](evidence/lifecycle-peak-envelope-1272.md) preserves that failed run and the stronger corrected growth envelope; the focused gate repair merged separately before this change was refreshed.
+
 ## Public publishing and correctness
 
 The [current publishing contract](../book/architecture/storage.md#current-publishing-contract) and [#1221 evidence](evidence/publishing-contract-1221.json) cover public construction, ordinary mutation, property replay, compaction, ontology publication, projections, portable clean import and participant writers. All verified permanent Parquet publishers use the shared policy; replay and compaction retain it. Separate lifecycle implementations remain.
