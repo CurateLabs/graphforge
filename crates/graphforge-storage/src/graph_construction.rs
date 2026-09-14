@@ -3449,6 +3449,17 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        // Original chunks remain recovery authority until shaping completes. The
+        // assigned identity successor now owns every later identity consumer.
+        shape_publication_failure("shape.before_identity_retirement")?;
+        unlink_shape_artifact(
+            &self.root,
+            &staged_identities,
+            &mut self.checkpoint.evidence,
+        )?;
+        construction_failpoint("shape.after_identity_retirement");
+        shape_publication_failure("shape.after_identity_retirement")?;
+        reject_cancelled(&mut cancelled)?;
         let edge_endpoints = resolve_endpoint_surrogates(
             &self.root,
             &identities,
@@ -5934,6 +5945,7 @@ fn unlink_shape_artifact(
 ) -> Result<(), GfError> {
     let receipt = receipt_for_existing(root, name)?;
     unlink_artifact(root, &receipt)?;
+    construction_failpoint("shape.after_derived_unlink");
     let identity_key = format!(
         "{:016x}:{}",
         receipt.identity.volume_serial, receipt.identity.file_id
@@ -7234,6 +7246,14 @@ fn resolve_endpoint_surrogates(
     }
     account_fixed_read_operations(&identities_counter, evidence)?;
     account_fixed_read_operations(&endpoints_counter, evidence)?;
+    // All resolved windows are durable; the final merge needs only those runs.
+    drop(identities);
+    drop(endpoints);
+    shape_publication_failure("shape.before_endpoint_retirement")?;
+    unlink_shape_artifact(root, endpoints_name, evidence)?;
+    construction_failpoint("shape.after_endpoint_retirement");
+    shape_publication_failure("shape.after_endpoint_retirement")?;
+    reject_cancelled(cancelled)?;
     resolved.finish_optional::<RESOLVED_ENDPOINT_WIDTH>(root, cancelled, evidence)
 }
 

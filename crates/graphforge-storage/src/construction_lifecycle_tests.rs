@@ -49,6 +49,9 @@ mod lifecycle_budget {
     #[test]
     fn supersession_crashes_reconcile_removed_allocations_and_replay() {
         for boundary in [
+            "shape.after_identity_retirement",
+            "shape.after_endpoint_retirement",
+            "shape.after_derived_unlink",
             "supersession.shape_authenticated",
             "supersession.encoded_authenticated",
             "supersession.before_unlink",
@@ -95,6 +98,7 @@ mod lifecycle_budget {
                 .evidence()
                 .storage_transient_peak_total_allocated_bytes;
             drop(recovered);
+            assert_retirement_publication(root.path());
             let mut replay = small_session(root.path());
             complete_small(&mut replay);
             assert_eq!(replay.evidence().storage_current, current);
@@ -788,31 +792,303 @@ mod lifecycle_budget {
                 ..Default::default()
             };
             let mut session = GraphConstructionSession::open_with_mode(
-                root.path(), Uuid::from_u128(126_800 + u128::from(scale)), 0,
-                graphforge_core::OntologyMode::Exploratory, budgets,
-            ).unwrap();
+                root.path(),
+                Uuid::from_u128(126_800 + u128::from(scale)),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                budgets,
+            )
+            .unwrap();
             for chunk in 0..2 {
-                session.append(ConstructionChunkKind::Node, &format!("nodes-{chunk}"),
-                    &node_batch(1 + chunk * 4096, 4096)).unwrap();
+                session
+                    .append(
+                        ConstructionChunkKind::Node,
+                        &format!("nodes-{chunk}"),
+                        &node_batch(1 + chunk * 4096, 4096),
+                    )
+                    .unwrap();
             }
             for chunk in 0..8 * scale {
-                session.append(ConstructionChunkKind::Edge, &format!("edges-{chunk}"),
-                    &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096)).unwrap();
+                session
+                    .append(
+                        ConstructionChunkKind::Edge,
+                        &format!("edges-{chunk}"),
+                        &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096),
+                    )
+                    .unwrap();
             }
             session.seal().unwrap();
             let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
             assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
             assert!(session.evidence().merge_passes >= 3);
-            println!("CONSUMED_ROOTS {}", serde_json::json!({
-                "scale":scale,"nodes":shape.node_count,"edges":shape.edge_count,
-                "peak":session.evidence().storage_transient_peak_total_allocated_bytes,
-                "retained":session.evidence().storage_current,
-                "shape_reads":session.evidence().shape_application_read_bytes,
-                "merge_writes":session.evidence().merge_written_bytes,
-                "merge_passes":session.evidence().merge_passes,
-                "census":census(session.root.path()),
-            }));
+            let baseline_peak = match scale {
+                1 => 20_873_216,
+                2 => 40_435_712,
+                4 => 79_560_704,
+                _ => unreachable!(),
+            };
+            let obsolete_identity_bytes = 32 * (8192 + 32768 * scale);
+            assert!(
+                session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes
+                    <= baseline_peak - obsolete_identity_bytes
+            );
+
+            println!(
+                "CONSUMED_ROOTS {}",
+                serde_json::json!({
+                    "scale":scale,"nodes":shape.node_count,"edges":shape.edge_count,
+                    "peak":session.evidence().storage_transient_peak_total_allocated_bytes,
+                    "retained":session.evidence().storage_current,
+                    "shape_reads":session.evidence().shape_application_read_bytes,
+                    "merge_writes":session.evidence().merge_written_bytes,
+                    "merge_passes":session.evidence().merge_passes,
+                    "census":census(session.root.path()),
+                })
+            );
         }
     }
 
+    fn sealed_retirement_fixture(root: &TempDir) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Edge,
+                "edges",
+                &edge_property_batch(100, 2),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        session
+    }
+
+    fn assert_retirement_publication(root: &Path) {
+        let selected = crate::resolve_project_generation(root).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+        let batches = crate::read_edges_from_inventory(
+            &inventory,
+            "*",
+            graphforge_core::OntologyMode::Exploratory,
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        for batch in batches {
+            let ids = |name: &str| {
+                let array = batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                assert_eq!(array.null_count(), 0);
+                array
+            };
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    u128::from_be_bytes(ids("edge_uuid").value(row).try_into().unwrap()),
+                    u128::from_be_bytes(ids("src_uuid").value(row).try_into().unwrap()),
+                    u128::from_be_bytes(ids("dst_uuid").value(row).try_into().unwrap()),
+                ));
+            }
+        }
+        actual.sort_unstable();
+        assert_eq!(actual, [(100, 1, 2), (101, 2, 3)]);
+        let mut properties = Vec::new();
+        let routes = inventory.routes(crate::PropertyRouteKind::Edge).collect::<Vec<_>>();
+        assert_eq!(routes.len(), 1);
+        for batch in crate::read_edge_properties_from_inventory(root, &inventory, routes[0]).unwrap() {
+            let ids = batch
+                .column_by_name("edge_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let weights = batch
+                .column_by_name("weight")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(ids.null_count(), 0);
+            assert_eq!(weights.null_count(), 0);
+            for row in 0..batch.num_rows() {
+                properties.push((
+                    u128::from_be_bytes(ids.value(row).try_into().unwrap()),
+                    weights.value(row),
+                ));
+            }
+        }
+        properties.sort_unstable();
+        assert_eq!(properties, [(100, 20), (101, 21)]);
+    }
+
+    #[test]
+    fn consumed_shape_roots_returned_failures_recover_exact_properties() {
+        for boundary in [
+            "shape.before_identity_retirement",
+            "shape.after_identity_retirement",
+            "shape.before_endpoint_retirement",
+            "shape.after_endpoint_retirement",
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            inject_shape_publication_failure(boundary);
+            let error = session.prepare_canonical_encoding(1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected shape publication failure")
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            for sequence in 0..2 {
+                let receipt = session.read_receipt(sequence).unwrap();
+                assert!(session.root.path().join(receipt.parquet.name).exists());
+            }
+            // A live incomplete shape must refuse reuse until reopen reconciles it.
+            let before_retry = session.evidence().clone();
+            assert!(
+                session
+                    .prepare_canonical_encoding(1)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("incomplete construction shape was not recovered")
+            );
+            assert_eq!(session.evidence(), &before_retry);
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            drop(session);
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            assert_eq!(
+                resumed.evidence().current_merge_temporary_allocated_bytes,
+                0
+            );
+            drop(resumed);
+            assert_retirement_publication(root.path());
+        }
+    }
+
+    #[test]
+    fn consumed_shape_roots_cancellation_reconstructs_exact_properties() {
+        for endpoint_boundary in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            let directory = session.root.path().to_path_buf();
+            let mut observed_boundary = false;
+            let result = session.shape_canonical_with_cancellation(|| {
+                if !directory.join("shaped-identities.run").exists() {
+                    return false;
+                }
+                let names = std::fs::read_dir(&directory)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().into_string().unwrap())
+                    .collect::<Vec<_>>();
+                let obsolete_exists = names.iter().any(|name| {
+                    name.ends_with(".run")
+                        && if endpoint_boundary {
+                            name.starts_with("merge-endpoint")
+                        } else {
+                            name.starts_with("merge-identities")
+                                || name.starts_with("merge-unified")
+                        }
+                });
+                let successor_exists = !endpoint_boundary
+                    || names
+                        .iter()
+                        .any(|name| name.starts_with("merge-resolved") && name.ends_with(".run"));
+                observed_boundary = !obsolete_exists && successor_exists;
+                observed_boundary
+            });
+            assert!(observed_boundary);
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("construction cancelled")
+            );
+            drop(session);
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            drop(resumed);
+            assert_retirement_publication(root.path());
+        }
+    }
+
+    #[test]
+    fn consumed_shape_root_removal_refuses_replaced_and_linked_files() {
+        for extra_link in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            inject_shape_publication_failure("shape.before_identity_retirement");
+            assert!(session.prepare_canonical_encoding(1).is_err());
+            let name = session
+                .root
+                .child_names()
+                .unwrap()
+                .into_iter()
+                .filter_map(|s| s.into_string().ok())
+                .find(|n| n.starts_with("merge-identities") && n.ends_with(".run"))
+                .unwrap();
+            let path = session.root.path().join(&name);
+            let held = root.path().join("held-original.run");
+            if extra_link {
+                std::fs::hard_link(&path, &held).unwrap();
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                std::fs::rename(&path, &held).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let before = session.evidence().clone();
+            assert!(
+                unlink_shape_artifact(&session.root, &name, &mut session.checkpoint.evidence)
+                    .is_err()
+            );
+            assert!(path.exists());
+            assert_eq!(session.evidence(), &before);
+        }
+    }
+
+    #[test]
+    fn consumed_shape_roots_preserve_successor_corruption_refusal() {
+        for boundary in [
+            "shape.after_identity_retirement",
+            "shape.after_endpoint_retirement",
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            inject_shape_publication_failure(boundary);
+            assert!(session.prepare_canonical_encoding(1).is_err());
+            let path = session.root.path().join("shaped-identities.run");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(path, bytes).unwrap();
+            drop(session);
+            assert!(
+                GraphConstructionSession::open_with_mode(
+                    root.path(),
+                    Uuid::from_u128(119_500),
+                    0,
+                    graphforge_core::OntologyMode::Exploratory,
+                    GraphConstructionBudgets::default()
+                )
+                .is_err()
+            );
+        }
+    }
 }
