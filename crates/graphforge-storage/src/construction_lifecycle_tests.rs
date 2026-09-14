@@ -675,16 +675,24 @@ mod lifecycle_budget {
     #[test]
     fn shaping_recovery_counts_surviving_payload_reads_and_retries() {
         let root = TempDir::new().unwrap();
-        let mut session = shaping_recovery_fixture(&root);
+        let session = shaping_recovery_fixture(&root);
+        let initial = session.evidence().clone();
+        drop(session);
+        // An uninterrupted reopen measures the same unchanged parent authority.
+        let mut session = small_session(root.path());
         let baseline = session.evidence().clone();
+        let parent_bytes =
+            baseline.recovery_application_read_bytes - initial.recovery_application_read_bytes;
+        let parent_operations = baseline.recovery_application_read_operations
+            - initial.recovery_application_read_operations;
         let path = session.root.path().join("shaped-identities.run");
         assert!(
             session
                 .shape_canonical_with_cancellation(|| path.exists())
                 .is_err()
         );
-        let mut expected_bytes = baseline.parent_catalog_read_bytes;
-        let mut expected_operations = baseline.parent_catalog_read_operations;
+        let mut expected_bytes = parent_bytes;
+        let mut expected_operations = parent_operations;
         for name in session.root.child_names().unwrap() {
             let Some(name) = name.to_str() else { continue };
             if !name.starts_with("shape-receipt-") {
