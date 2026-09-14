@@ -322,3 +322,37 @@ captures; our build was paused during entry/return capture. These are scoped
 work observations, not a statistical overhead estimate or a controlled
 before/after speedup. The ordinary historical receipts remain the authority
 for admission. Fresh comparable integration still waits for the RSS repair.
+
+### Verified repair: share decoded row sources
+
+The measured Parquet row-merge path retained a `RecordBatch` clone for every
+selected row and constructed one Arrow source descriptor per row per column.
+The repair retains each decoded batch once per output window and stores
+`(source_index, row_index)` selections. A per-cursor batch generation prevents
+confusing successive decoder batches; flushing an output window clears cached
+indices and retained sources. Output row/byte limits and all selected columns
+remain unchanged. No authentication, merge pass, fsync or verification is
+removed, and no public API or storage format changes.
+
+The deterministic regression reduces 4,096 selections from one batch to one
+retained source. Additional tests exercise interleaved inputs, sliced nullable
+strings, decoder refills and output-window resets. The production fan-in test
+measures actual fixed-run merges at 31/32/33 and 1,023/1,024/1,025 inputs, plus
+the S20/S22 chunk counts. Its one-record-per-input model reads/writes 544
+records for 272 inputs and 3,264 for 1,088 inputs: crossing the level boundary
+adds real work. This is a model of that accumulator, not a claim that every
+construction artifact family has identical pass counts.
+
+[Three alternating fixture comparisons](evidence/lifecycle-runtime-1279-comparison.json)
+use frozen optimized binaries with the same Rust toolchain and lockfile. All
+observed compilers were stopped before the six measurements; there was no
+manual cache drop. Median total CPU falls 4.69 → 3.90 seconds (16.84%); median
+wall time falls 6.20 → 5.28 seconds (14.84%). All six 1×/2×/4× observations
+preserve exact counts, logical shape reads, merge writes, merge passes and
+storage peaks. This is representative shaping evidence, not a statistical
+significance claim, whole-lifecycle speedup or higher-rung admission.
+
+The repair reduces avoidable descriptor work but retains the bounded external
+merge algorithm's additional passes. Do not apply the fixture speedup as a
+multiplier to S25/S26 projections. Until a fresh comparable prefix is accepted,
+the preserved S20/S22 admission results and the RSS refusal remain authoritative.

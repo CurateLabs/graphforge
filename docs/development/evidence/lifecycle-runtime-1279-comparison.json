@@ -1,0 +1,292 @@
+{
+  "baseline_binary_sha256": "ad3a8d19e86078b43e801cba6b77dcf625d39fffcb7c6a9a5d5e35c26afe4066",
+  "candidate_binary_sha256": "9856f40856f7f25ac0d4678e14bd7288a1005f3b2fb57116524dd4b3143f7b4b",
+  "cargo_lock_sha256": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
+  "cpu_reduction_fraction": 0.16844349680170567,
+  "issue": 1279,
+  "limitations": [
+    "Three sequential alternating pairs, not randomized; no claim of statistical significance or S26 admission.",
+    "Fixture ends after shaping. Whole-lifecycle comparison and facade recovery/corruption tests are separate.",
+    "Baseline storage source differs from pre-repair main only by three lines adding truncation assertions in a different test; runtime code and measured fixture are unchanged."
+  ],
+  "logical_work_and_storage_peaks_unchanged": true,
+  "medians": {
+    "baseline": {
+      "cpu_seconds": 4.6899999999999995,
+      "wall_seconds": 6.2
+    },
+    "candidate": {
+      "cpu_seconds": 3.9,
+      "wall_seconds": 5.28
+    }
+  },
+  "observations": {
+    "baseline": [
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "f5d2a189619cc9fef13d97c192c42453a8e5b68458d24d0506de6769e5a1dd80",
+        "output_blocks": 747776,
+        "peak_rss_kib": 51164,
+        "system_seconds": 1.23,
+        "time_sha256": "0ac4f532c68a644bf4ebc26b9ff4d37f214c065ae6175f039cd742d8e9f82138",
+        "user_seconds": 3.62,
+        "wall_seconds": 6.32,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      },
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "eefe678fa626650ffefec31527128d9edbe400d785a959d01072188717e7c52d",
+        "output_blocks": 747776,
+        "peak_rss_kib": 49876,
+        "system_seconds": 1.19,
+        "time_sha256": "a621bfd1f7651c295c524cdd1a48061c5614a434367438bad527a74ca0f95f43",
+        "user_seconds": 3.5,
+        "wall_seconds": 6.2,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      },
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "50484cc83eaef0a9969a8e839c74fd780f5b4a9e4a6af119e4d180bd3c3cd3cd",
+        "output_blocks": 747776,
+        "peak_rss_kib": 49912,
+        "system_seconds": 1.17,
+        "time_sha256": "03fbfcf781320721095031c19169c4c7e5b8f4e284992459b82def9fe4b33cc5",
+        "user_seconds": 3.51,
+        "wall_seconds": 6.07,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      }
+    ],
+    "candidate": [
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "28c43b462be3227d56424bf611d0301aeab5749a768348bf46319033b26aedbb",
+        "output_blocks": 747776,
+        "peak_rss_kib": 48784,
+        "system_seconds": 1.21,
+        "time_sha256": "5b409ae5c88c71225980842c946508d7385b95258b83374dafa854ff8f05abbc",
+        "user_seconds": 2.79,
+        "wall_seconds": 5.43,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      },
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "dd7b34ab24d5e0159847967c1db2851ead8c2bf790f5fe0a65096a46212ca502",
+        "output_blocks": 747776,
+        "peak_rss_kib": 49916,
+        "system_seconds": 1.23,
+        "time_sha256": "62b66a086d60986e95de5442368183744ea775fedf2a439e41def9fa9b0ecdf2",
+        "user_seconds": 2.67,
+        "wall_seconds": 5.28,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      },
+      {
+        "exit_status": 0,
+        "input_blocks": 1509928,
+        "log_sha256": "22db609811b0be034c46961882ce15da97656ae67d26879420bc1d521ee2b5ea",
+        "output_blocks": 747776,
+        "peak_rss_kib": 49608,
+        "system_seconds": 1.22,
+        "time_sha256": "3ad2f3112c4bac1aaf2d2a38e9812adcbea5c25c3f2bbc1df2c4b5f133548785",
+        "user_seconds": 2.62,
+        "wall_seconds": 5.22,
+        "work": [
+          {
+            "edges": 32768,
+            "merge_passes": 4,
+            "merge_writes": 29736960,
+            "nodes": 8192,
+            "peak": 15319040,
+            "scale": 1,
+            "shape_reads": 45926452
+          },
+          {
+            "edges": 65536,
+            "merge_passes": 5,
+            "merge_writes": 70828032,
+            "nodes": 8192,
+            "peak": 29638656,
+            "scale": 2,
+            "shape_reads": 104027460
+          },
+          {
+            "edges": 131072,
+            "merge_passes": 6,
+            "merge_writes": 165593088,
+            "nodes": 8192,
+            "peak": 58277888,
+            "scale": 4,
+            "shape_reads": 235958310
+          }
+        ]
+      }
+    ]
+  },
+  "profile": {
+    "debug_assertions": false,
+    "debuginfo": 0,
+    "opt_level": 3,
+    "overflow_checks": false
+  },
+  "protocol": {
+    "builds": "all observed cargo/rustc processes stopped before comparison",
+    "cache_policy": "no manual cache drop; existing cache-release policy unchanged",
+    "candidate_commit": "26372229c05ad6a97af9a2222d5412b2b5a914a2",
+    "claim": "representative shaping fixture, not admission or whole-lifecycle proof",
+    "materiality_target": "at least 10 percent lower median total CPU; confirm ordinary lifecycle before claiming runtime improvement",
+    "order": [
+      "baseline",
+      "candidate",
+      "baseline",
+      "candidate",
+      "baseline",
+      "candidate"
+    ]
+  },
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "wall_reduction_fraction": 0.14838709677419348
+}
