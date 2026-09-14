@@ -700,11 +700,13 @@ mod lifecycle_budget {
             }
             let mut file = session.root.open_child_file(OsStr::new(name)).unwrap();
             let receipt: ArtifactReceipt = decode_bounded(&mut file).unwrap();
+            // Both control passes read receipts even when their payload is not
+            // a derived shape artifact owned by this cleanup.
+            expected_bytes += 2 * file.metadata().unwrap().len();
+            expected_operations += 2;
             if !is_shape_artifact_name(&receipt.name) {
                 continue;
             }
-            expected_bytes += 2 * file.metadata().unwrap().len();
-            expected_operations += 2;
             if session.root.path().join(&receipt.name).exists() {
                 expected_bytes += receipt.bytes;
                 expected_operations += receipt.bytes.div_ceil(BLOCK_BYTES as u64);
