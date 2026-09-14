@@ -1,0 +1,1833 @@
+{
+  "issue": 1268,
+  "scope": "Fresh successful construction through seal and canonical shaping, 8192 nodes and 32768/65536/131072 edges. Not whole public lifecycle or S26 capacity proof.",
+  "budgets": {
+    "baseline_peaks": [
+      20873216,
+      40435712,
+      79560704
+    ],
+    "scales": [
+      1,
+      2,
+      4
+    ],
+    "peak_budget_rule": "baseline minus one obsolete 32-byte identity record per node and edge; excludes any hoped-for endpoint savings",
+    "cpu_observation_envelope_seconds": 5.24,
+    "cpu_rule": "baseline maximum 4.78 plus twice observed span 0.23; diagnostic, not a portable hard bound",
+    "rss_observation_envelope_kib": 53968,
+    "rss_rule": "baseline maximum 49872 plus one 4MiB allocation window; process high-water observation, not native memory hard bound"
+  },
+  "memory_budget_clarification": "The preselected 4096 KiB allowance equals four 1 MiB I/O buffers. It is an explicit diagnostic allowance, not a proven simultaneous-owner or native-memory bound.",
+  "comparability": "Baseline production source 1cba0eeb with test-only commit1156a2f7; final candidate includes merged1269 incomplete-recovery authentication, which fresh successful shaping does not execute. Same workload, toolchain, lockfile, host and release configuration. Executables copied and hashed before measurements; no overlapping builds. Three observations per executable; no causal latency claim.",
+  "observations": {
+    "baseline": {
+      "frozen": {
+        "commit": "1156a2f7794f81ef65516f543bb5108fa1f56416",
+        "tree": "bcd9d0f584acfaeef2ede51db377e7e7e2c90acb",
+        "binary_sha256": "8c893d408e0173324625b0002ef0fe203ac375824e1a70111df0b64be8655141",
+        "binary_bytes": 189511344,
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "cargo_lock_sha256": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
+        "measurement": "consumed_shape_roots_have_bounded_multilevel_peak, scales 1/2/4 in each invocation; fixed source before product change"
+      },
+      "runs": [
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  89472,
+                  331776,
+                  70
+                ],
+                "shape_and_merge": [
+                  11399792,
+                  11407360,
+                  9
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 20873216,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 11407360,
+                  "logical_bytes": 11399792,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 11399792,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  141193,
+                  552960,
+                  118
+                ],
+                "shape_and_merge": [
+                  21951619,
+                  21958656,
+                  9
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 40435712,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 21958656,
+                  "logical_bytes": 21951619,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 21951619,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  244598,
+                  995328,
+                  214
+                ],
+                "shape_and_merge": [
+                  43055010,
+                  43061248,
+                  9
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 79560704,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 43061248,
+                  "logical_bytes": 43055010,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 43055010,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.34,
+          "system_cpu_seconds": 1.21,
+          "rss_kib": 49748,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        },
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  89472,
+                  331776,
+                  70
+                ],
+                "shape_and_merge": [
+                  11399792,
+                  11407360,
+                  9
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 20873216,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 11407360,
+                  "logical_bytes": 11399792,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 11399792,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  141193,
+                  552960,
+                  118
+                ],
+                "shape_and_merge": [
+                  21951619,
+                  21958656,
+                  9
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 40435712,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 21958656,
+                  "logical_bytes": 21951619,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 21951619,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  244598,
+                  995328,
+                  214
+                ],
+                "shape_and_merge": [
+                  43055010,
+                  43061248,
+                  9
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 79560704,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 43061248,
+                  "logical_bytes": 43055010,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 43055010,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.44,
+          "system_cpu_seconds": 1.3,
+          "rss_kib": 49824,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        },
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  89472,
+                  331776,
+                  70
+                ],
+                "shape_and_merge": [
+                  11399792,
+                  11407360,
+                  9
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 20873216,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 11407360,
+                  "logical_bytes": 11399792,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 11399792,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  141193,
+                  552960,
+                  118
+                ],
+                "shape_and_merge": [
+                  21951619,
+                  21958656,
+                  9
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 40435712,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 21958656,
+                  "logical_bytes": 21951619,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 21951619,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  244598,
+                  995328,
+                  214
+                ],
+                "shape_and_merge": [
+                  43055010,
+                  43061248,
+                  9
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 79560704,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 43061248,
+                  "logical_bytes": 43055010,
+                  "logical_references": 9,
+                  "physical_logical_bytes": 43055010,
+                  "physical_objects": 9
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.45,
+          "system_cpu_seconds": 1.33,
+          "rss_kib": 49872,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        }
+      ]
+    },
+    "candidate": {
+      "frozen": {
+        "commit": "eace9b731e4dca93928539c9a06282ddeba3d596",
+        "tree": "9271efaef1b08ae63ebaed22e09617ba764aee84",
+        "binary_sha256": "81a7638ddee89f708fb20e3ecccebfc526917ca08859bedc6e65a663fd2e30e6",
+        "binary_bytes": 190167568,
+        "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+        "cargo_lock_sha256": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
+        "measurement": "consumed_shape_roots_have_bounded_multilevel_peak, scales 1/2/4 in each invocation; frozen final candidate"
+      },
+      "runs": [
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  88817,
+                  323584,
+                  68
+                ],
+                "shape_and_merge": [
+                  6943344,
+                  6950912,
+                  7
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 18513920,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 6950912,
+                  "logical_bytes": 6943344,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 6943344,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  140546,
+                  544768,
+                  116
+                ],
+                "shape_and_merge": [
+                  13300867,
+                  13307904,
+                  7
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 35979264,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 13307904,
+                  "logical_bytes": 13300867,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 13300867,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  243946,
+                  987136,
+                  212
+                ],
+                "shape_and_merge": [
+                  26015650,
+                  26021888,
+                  7
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 70909952,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 26021888,
+                  "logical_bytes": 26015650,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 26015650,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.48,
+          "system_cpu_seconds": 1.25,
+          "rss_kib": 49640,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        },
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  88817,
+                  323584,
+                  68
+                ],
+                "shape_and_merge": [
+                  6943344,
+                  6950912,
+                  7
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 18513920,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 6950912,
+                  "logical_bytes": 6943344,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 6943344,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  140546,
+                  544768,
+                  116
+                ],
+                "shape_and_merge": [
+                  13300867,
+                  13307904,
+                  7
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 35979264,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 13307904,
+                  "logical_bytes": 13300867,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 13300867,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  243946,
+                  987136,
+                  212
+                ],
+                "shape_and_merge": [
+                  26015650,
+                  26021888,
+                  7
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 70909952,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 26021888,
+                  "logical_bytes": 26015650,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 26015650,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.6,
+          "system_cpu_seconds": 1.29,
+          "rss_kib": 49976,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        },
+        {
+          "records": [
+            {
+              "census": {
+                "control": [
+                  88817,
+                  323584,
+                  68
+                ],
+                "shape_and_merge": [
+                  6943344,
+                  6950912,
+                  7
+                ]
+              },
+              "edges": 32768,
+              "merge_passes": 4,
+              "merge_writes": 37339136,
+              "nodes": 8192,
+              "peak": 18513920,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 6950912,
+                  "logical_bytes": 6943344,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 6943344,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 1,
+              "shape_reads": 54544436
+            },
+            {
+              "census": {
+                "control": [
+                  140546,
+                  544768,
+                  116
+                ],
+                "shape_and_merge": [
+                  13300867,
+                  13307904,
+                  7
+                ]
+              },
+              "edges": 65536,
+              "merge_passes": 5,
+              "merge_writes": 89112576,
+              "nodes": 8192,
+              "peak": 35979264,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 13307904,
+                  "logical_bytes": 13300867,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 13300867,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 2,
+              "shape_reads": 124245316
+            },
+            {
+              "census": {
+                "control": [
+                  243946,
+                  987136,
+                  212
+                ],
+                "shape_and_merge": [
+                  26015650,
+                  26021888,
+                  7
+                ]
+              },
+              "edges": 131072,
+              "merge_passes": 6,
+              "merge_writes": 208519168,
+              "nodes": 8192,
+              "peak": 70909952,
+              "retained": {
+                "adjacency": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "catalog_and_manifests": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "clean_imported_project": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "construction_staging": {
+                  "allocated_bytes": 26021888,
+                  "logical_bytes": 26015650,
+                  "logical_references": 7,
+                  "physical_logical_bytes": 26015650,
+                  "physical_objects": 7
+                },
+                "other": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "portable_package": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "properties": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_edges": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "topology_nodes": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                },
+                "uuid_and_surrogates": {
+                  "allocated_bytes": 0,
+                  "logical_bytes": 0,
+                  "logical_references": 0,
+                  "physical_logical_bytes": 0,
+                  "physical_objects": 0
+                }
+              },
+              "scale": 4,
+              "shape_reads": 282652710
+            }
+          ],
+          "user_cpu_seconds": 3.54,
+          "system_cpu_seconds": 1.25,
+          "rss_kib": 46180,
+          "filesystem_input_blocks": 1693576,
+          "filesystem_output_blocks": 895616,
+          "exit": 0
+        }
+      ]
+    }
+  },
+  "io_scope": "shape_reads and merge_writes are logical counters. GNU time filesystem blocks are kernel process-accounted I/O, not syscall bytes; RSS is process high-water, not cgroup page cache or a hard native bound. Peak construction allocation is receipt-accounted transition peak, unique physical owners; final census separately reports control allocation. No path sampler used in paired runs.",
+  "failures_and_superseded": [
+    "S18 diagnostic validation passed but commit failed after publication when TMPDIR was omitted; corrected-environment reopen returned exact4194304edges. Not a full lifecycle baseline.",
+    "Initial candidate missed final online carry, saving only5.6\u20136.3%; refined candidate moves final insertion after retirement.",
+    "Initial exact-property test mistakenly queried topology for properties, then used a noncanonical route; corrected oracle reads authenticated property route.",
+    "Successor corruption test found real1269, fixed and merged separately in1270.",
+    "First full1268 storage run1105pass2fail2existingignored: new malformed-tail fixture lacked category maps; corrected without weakening assertions. Other failure is known1192 hardcoded /tmp unsupported filesystem.",
+    "Initial Clippy if_not_else finding corrected with equivalent branch inversion."
+  ],
+  "candidate_envelope_results": {
+    "cpu_pass": true,
+    "rss_pass": true
+  },
+  "commands": {
+    "build": "CARGO_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195 CARGO_BUILD_JOBS=4 TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 cargo test -p graphforge-storage --release --lib --no-run --message-format=json",
+    "measure": "TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 /usr/bin/time -v -o <frozen>/run-N.time <frozen>/storage-tests --exact graph_construction::tests::lifecycle_budget::consumed_shape_roots_have_bounded_multilevel_peak --nocapture --test-threads=1 (N=1,2,3)",
+    "public_construction": "CARGO_TARGET_DIR=/home/ubuntu/code/graphforge-target-1195 CARGO_BUILD_JOBS=4 TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 cargo test -p graphforge-api --lib resumable_construction:: (5 passed)",
+    "publishing_contract": "same environment: cargo test -p graphforge-api --test permanent_storage_budgets publishing_contract_ (4 passed)"
+  },
+  "raw_receipts": {
+    "baseline": {
+      "run-3.time": "f3e8b21098950983b1257a3e333a0d7596ef1ea7809c0ae4d88cdf7dd5bf8b71",
+      "run-1.time": "e26ee82433092ddd51c28467f04c74404fb2cc19896ac9cdcdb84707e2ab4e1f",
+      "frozen.json": "829eb49d47795bf3ab1c8977b7ddbb71c3c78e43c1bf8ecdf3f95a5b0d5814bd",
+      "run-1.log": "82c61454945a04db210b2ad42e478da431bf45f997a996c35e8adc9b221b6916",
+      "comparison-budgets.json": "18a31c9b0b0a695725b7ae3c24ddef1f3cfc4479a61ba12d0cc9fd5f54c667f6",
+      "run-2.time": "94a6d4581fb5bac26334c81fae856bacaa524f436ec1bcf6661db998383f954c",
+      "run-2.log": "c193ba8685b49b2dfa58989975870e42233bb2d625e86d36375b6c6415e8da2d",
+      "run-3.log": "f2d593a9d1811757ffae72c1272e2d8b3a472cc5d99a3ffa13ab47687811da7e"
+    },
+    "candidate": {
+      "run-3.time": "a619cdbda434402bd3859a119a7f8218e17065eba08342bf4d35946a921eeeb5",
+      "run-1.time": "ee2e7c68678ca117509dc94c1c0739090e7005f2871772fc25c4168cd41e0894",
+      "frozen.json": "62251eb0c5e9c77d19c3f2e7403fa2b8a12deb8fffbb7231438a6f3e91edbb0d",
+      "run-1.log": "00c1ffa98c3f3b08b66aeaec388c9074dce8eb54624f9b4d938fde45794905d4",
+      "run-2.time": "093cd80e791d4c0fe5df4447f8c72ff5fafe09eea03302bfc9def9e7eafb8686",
+      "run-2.log": "6266546f33c0d751cd2f53335b7e8aac7f89b346da10d1d93bf45cb1b82ed661",
+      "run-3.log": "ba786f4caff0ad223edf14260dd349e34865828ef10400b8cd6e60e7d483fa72"
+    }
+  },
+  "validation": {
+    "frozen_storage_suite": "TMPDIR=/home/ubuntu/graphforge-native-tmp-1195 /home/ubuntu/graphforge-ladder/1268-candidate/storage-tests --test-threads=4:1106passed,1failed,2existingignored. Solefailure known1192 wave9_participant_inventory_rejects_links_and_special_files hardcoded /tmp filesystem_class_unproven; no skip or assertion change.",
+    "workspace_clippy": "cargo clippy --workspace -- -D warnings:PASS",
+    "format": "cargo fmt --all -- --check:PASS after final Rust edit",
+    "fast_gate": "make pre-push-fast:PASS",
+    "registry": "make gate-registry-check:PASS",
+    "review": "Independent read-only review verified final source eace9b73; no finding. Required exact-head CI remains PR merge gate."
+  }
+}

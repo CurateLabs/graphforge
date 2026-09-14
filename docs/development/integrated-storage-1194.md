@@ -19,6 +19,20 @@ These are separate representative workloads. Their savings must not be added or 
 
 The [five-candidate assessment](evidence/query-maintenance-assessment-1207.json) also measured optimizer statistics, Parquet layout, property Bloom filters and fragmentation/maintenance. Statistics forwarding changed plans but missed the preselected CPU threshold across seven workloads and was reverted. A 128-row-group layout reduced sparse second-pass compressed column reads from 8,094,549 to 1,012,462 bytes, excluding mandatory validation, but doubled repeated-text allocation and increased dense second-pass reads; the global change was rejected. The 16 KiB page target was byte-identical on 30/30 files. Plain strings saved 45,056 bytes for random text but breached the RSS cap and grew repeated-text allocation. Bloom filters had no false negatives in the tested present-value probes but no admitted public consumer that could skip mandatory validation, so demonstrated public read savings were zero. Existing compaction folded runs and cleanup reclaimed retained generations; approximately 14 ms warm query latency stayed flat, and compaction missed its read-I/O budget in all three cases. These quantified decisions do not substitute for the implemented opportunities above.
 
+## Capacity follow-up: consumed shaping roots (#1268)
+
+[The frozen comparison](evidence/consumed-shaping-roots-1268.json) measures the same 8,192-node, 32,768/65,536/131,072-edge shaping fixture before and after retiring consumed identity and endpoint roots. Endpoint retirement precedes the final online carry insertion, after the final input run is durable and readers are closed. Original accepted chunks remain incomplete-shape recovery authority. The separately merged #1269 repair authenticates surviving derived payloads before recovery removes their controls.
+
+| Edges | Baseline peak B | Candidate peak B | Reduction | Baseline retained B | Candidate retained B |
+| --- | --- | --- | --- | --- | --- |
+| 32,768 | 20,873,216 | 18,513,920 | 11.30% | 11,407,360 | 6,950,912 |
+| 65,536 | 40,435,712 | 35,979,264 | 11.02% | 21,958,656 | 13,307,904 |
+| 131,072 | 79,560,704 | 70,909,952 | 10.87% | 43,061,248 | 26,021,888 |
+
+Three frozen runs reproduced each allocation value. Whole-fixture CPU was 4.55–4.78 seconds before and 4.73–4.89 after; maximum RSS was 49,872 and 49,976 KiB respectively. Both candidate diagnostic envelopes passed (5.24 seconds and 53,968 KiB), with a small observed CPU cost. Logical shape reads and merge writes were identical, as were GNU time filesystem inputs (1,693,576 blocks) and outputs (895,616 blocks). These are process observations, not hard memory limits or isolated algorithm timing. Receipt-accounted construction allocation excludes separately reported JSON control allocation; physical identities are counted once. This fixture ends after shaping and does not establish whole-lifecycle capacity or S26 admission.
+
+The peak floor was selected from baseline identity-root bytes before implementation; the final deterministic test additionally retains the measured saving from deferring the final carry. Failed diagnostic publication, superseded first-candidate results, corrected test setup/oracles and the independently repaired corruption cause remain documented in the evidence. Public construction and four publishing-contract fixtures separately cover exact mutation/query/reopen/export/full verification/clean import/subsequent mutation. Integrated S20/S22 evidence below remains the September 11 historical run until the authorized follow-up ladder completes.
+
 ## Public publishing and correctness
 
 The [current publishing contract](../book/architecture/storage.md#current-publishing-contract) and [#1221 evidence](evidence/publishing-contract-1221.json) cover public construction, ordinary mutation, property replay, compaction, ontology publication, projections, portable clean import and participant writers. All verified permanent Parquet publishers use the shared policy; replay and compaction retain it. Separate lifecycle implementations remain.
