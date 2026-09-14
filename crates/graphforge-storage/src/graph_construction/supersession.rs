@@ -443,7 +443,7 @@ pub(super) fn set_returned_failure(point: Option<&str>) {
     RETURNED_FAILURE.with(|current| *current.borrow_mut() = point.map(str::to_owned));
 }
 
-fn authenticate_payload(
+pub(super) fn authenticate_payload(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
     cancelled: &mut impl FnMut() -> bool,
