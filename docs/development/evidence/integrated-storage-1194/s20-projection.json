@@ -14,66 +14,66 @@
   "decision": "admitted",
   "headroom": {
     "rss_fraction": 0.2,
-    "storage_fraction": 0.22303206570970088,
+    "storage_fraction": 0.20188876281473173,
     "time_fraction": 0.2
   },
   "limits": {
     "rss_bytes": 4294967296,
-    "volume_bytes": 633355468800,
+    "volume_bytes": 699685195776,
     "wall_seconds": 14400
   },
   "native_capacity": {
-    "free_bytes": 633355468800,
+    "free_bytes": 699685195776,
     "observed_rates": {
       "physical_read_bytes_per_second": {
-        "wall_seconds": 97,
-        "work_units": 54517145600
+        "wall_seconds": 88,
+        "work_units": 50825838592
       },
       "physical_write_bytes_per_second": {
-        "wall_seconds": 97,
-        "work_units": 18559918080
+        "wall_seconds": 88,
+        "work_units": 16199606272
       },
       "publication_work_per_second": {
-        "wall_seconds": 97,
-        "work_units": 63163
+        "wall_seconds": 88,
+        "work_units": 62881
       },
       "reader_calls_per_second": {
-        "wall_seconds": 97,
-        "work_units": 122479
+        "wall_seconds": 88,
+        "work_units": 120706
       }
     },
     "rate_source": "completed_adjacent_rungs",
     "reserved_headroom_bytes": 141258578535
   },
   "projected": {
-    "logical_read_bytes": 45590914557,
-    "logical_write_bytes": 20511702943,
-    "peak_rss_bytes": 195112960,
-    "physical_read_bytes": 221838393344,
-    "physical_write_bytes": 74570268672,
-    "publication_work_units": 254356,
-    "reader_calls": 491098,
-    "retained_storage_bytes": 4347404288,
-    "storage_peak_bytes": 11897880576,
-    "transient_peak_storage_bytes": 11897880576,
-    "wall_seconds": 384
+    "logical_read_bytes": 38193210879,
+    "logical_write_bytes": 17365974943,
+    "peak_rss_bytes": 195723264,
+    "physical_read_bytes": 207065890816,
+    "physical_write_bytes": 65129549824,
+    "publication_work_units": 253189,
+    "reader_calls": 483952,
+    "retained_storage_bytes": 4347379712,
+    "storage_peak_bytes": 9173606400,
+    "transient_peak_storage_bytes": 9173606400,
+    "wall_seconds": 352
   },
   "provider_capacity": null,
   "required_rates": {
-    "physical_read_bytes_per_second": 19256805,
-    "physical_write_bytes_per_second": 6473114,
-    "publication_work_per_second": 23,
+    "physical_read_bytes_per_second": 17974470,
+    "physical_write_bytes_per_second": 5653607,
+    "publication_work_per_second": 22,
     "reader_calls_per_second": 43
   },
-  "rss_growth_fraction": 0.03422829329565081,
+  "rss_growth_fraction": 0.0344488188976378,
   "schema": "graphforge-progressive-qualification-evidence/1",
   "slopes_observed": {
-    "logical_read_bytes": 11410283636,
-    "logical_write_bytes": 5131517116,
-    "physical_read_bytes": 55773749248,
-    "physical_write_bytes": 18670116864,
-    "publication_work_units": 63731,
-    "reader_calls": 122873
+    "logical_read_bytes": 9560595573,
+    "logical_write_bytes": 4345085116,
+    "physical_read_bytes": 52080017408,
+    "physical_write_bytes": 16309981184,
+    "publication_work_units": 63436,
+    "reader_calls": 121082
   },
   "source_scales": [
     18,

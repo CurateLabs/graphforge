@@ -1,0 +1,82 @@
+{
+  "timestamp_utc": "2026-09-14T19:05:50.996685+00:00",
+  "before": {
+    "available_bytes": 624598843392,
+    "total_bytes": 941723856896,
+    "filesystem_reserved_bytes": 47912370176
+  },
+  "registered_worktrees_checked": 14,
+  "active_debug_references": [],
+  "scope": "Only isolated task-owned regenerable dev cache and explicitly named unmeasured debug validation/diagnostic copies. Preserve all source worktrees, measured release binaries, raw logs and evidence.",
+  "command": [
+    "cargo",
+    "clean",
+    "--profile",
+    "dev",
+    "--target-dir",
+    "task-owned-isolated-target"
+  ],
+  "removed_debug_copies": [
+    {
+      "sha256": "6f9ce9ef8ba8ba21a66356bdbb3769732f9b85b4800fc43ce11188215d8605c1",
+      "bytes": 564323000,
+      "allocated_bytes": 564330496,
+      "artifact": "1274-candidate/storage-tests"
+    },
+    {
+      "sha256": "a56113f37a6aff107259db17e17554749e2dab23886b5a96b979f45db2b1e14c",
+      "bytes": 564812264,
+      "allocated_bytes": 561913856,
+      "artifact": "1274-diagnostic/storage-tests"
+    },
+    {
+      "sha256": "5f1b734a650e5c6676f9300cdeabfd20e702dcec88630f911931f3fb112e3699",
+      "bytes": 563183840,
+      "allocated_bytes": 560287744,
+      "artifact": "1274-diagnostic-2/storage-tests"
+    },
+    {
+      "sha256": "8e28df4d934d6afa41c2a9deeb50ff1714e362e6bd13f6dcd3d4203192eb4df8",
+      "bytes": 563169624,
+      "allocated_bytes": 560271360,
+      "artifact": "1274-diagnostic-3/storage-tests"
+    },
+    {
+      "sha256": "1b25bf18db742a1c060d0a99d1c5f0b8194bf88ce527256d34ce6cd96915b964",
+      "bytes": 564001112,
+      "allocated_bytes": 561102848,
+      "artifact": "1274-diagnostic-4/storage-tests"
+    },
+    {
+      "sha256": "9297cd3dcaa028af21b9cc63f75b72ac1bfda187b0f1b4f16c4ed58c2a084005",
+      "bytes": 564320936,
+      "allocated_bytes": 561422336,
+      "artifact": "1274-diagnostic-5/storage-tests"
+    },
+    {
+      "sha256": "8a7fac29890cf3de77b4ac5f7e80337e644cd92e4a36b63bc14ad9efd58ad410",
+      "bytes": 564321712,
+      "allocated_bytes": 561422336,
+      "artifact": "1274-diagnostic-6/storage-tests"
+    },
+    {
+      "sha256": "6a6836b10dfd1d5ea540721bdfcf408686deb065b1c501f2281b337ccbb7de2e",
+      "bytes": 564322184,
+      "allocated_bytes": 561422336,
+      "artifact": "1274-validation/storage-tests"
+    }
+  ],
+  "cargo_clean": {
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "     Removed 61033 files, 70.1GiB total\n"
+  },
+  "after": {
+    "available_bytes": 699686653952,
+    "total_bytes": 941723856896,
+    "filesystem_reserved_bytes": 47912370176
+  },
+  "available_capacity_increase_bytes": 75087810560,
+  "accounting": "Actual filesystem available-byte delta; not the sum of overlapping file owners. Concurrent unrelated filesystem activity can affect this observation.",
+  "raw_receipt_sha256": "de5dece3407bd4f3845bb5835afa514e477e657e4447d6f7669afc0aa85a90dd"
+}
