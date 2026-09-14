@@ -10105,6 +10105,9 @@ mod tests {
         }
         assert_eq!(golden.len(), 66);
         assert_eq!(std::fs::read(&path).unwrap(), golden);
+        for tail in 1..33 {
+            assert!(read_fixed::<ENDPOINT_WIDTH>(&mut &golden[..tail]).is_err());
+        }
         let current = std::fs::read(root.path().join("CURRENT")).unwrap();
         for malformed in [golden[..65].to_vec(), {
             let mut bytes = golden.clone();
