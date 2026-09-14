@@ -18,7 +18,7 @@ use shaping_merge::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7190,6 +7190,11 @@ fn resolve_endpoint_surrogates(
             window.push(resolved);
             account_merge_read::<ENDPOINT_WIDTH>(evidence)?;
         }
+        // Defer the final insertion: push can itself trigger the largest carry
+        // merge. The trailing block installs its durable run before retirement.
+        if endpoints.fill_buf().map_err(storage)?.is_empty() {
+            break;
+        }
         if window.len() == window_rows {
             window.sort_unstable();
             let name = format!("merge-resolved-source-{sequence:020}.run");
@@ -7220,7 +7225,9 @@ fn resolve_endpoint_surrogates(
             reject_cancelled(cancelled)?;
         }
     }
-    if !window.is_empty() {
+    let pending = if window.is_empty() {
+        None
+    } else {
         window.sort_unstable();
         let name = format!("merge-resolved-source-{sequence:020}.run");
         let receipt = write_fixed_run(root, &name, &window, evidence)?;
@@ -7239,11 +7246,8 @@ fn resolve_endpoint_surrogates(
             .checked_add(receipt.fsync_operations)
             .ok_or_else(|| storage("merge fsync count overflows"))?;
         account_sequential_write(receipt.bytes, evidence)?;
-        resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
-        evidence.peak_resolved_endpoint_name_slots = evidence
-            .peak_resolved_endpoint_name_slots
-            .max(resolved.slot_count() as u64);
-    }
+        Some(name)
+    };
     account_fixed_read_operations(&identities_counter, evidence)?;
     account_fixed_read_operations(&endpoints_counter, evidence)?;
     // All resolved windows are durable; the final merge needs only those runs.
@@ -7254,6 +7258,12 @@ fn resolve_endpoint_surrogates(
     construction_failpoint("shape.after_endpoint_retirement");
     shape_publication_failure("shape.after_endpoint_retirement")?;
     reject_cancelled(cancelled)?;
+    if let Some(name) = pending {
+        resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
+        evidence.peak_resolved_endpoint_name_slots = evidence
+            .peak_resolved_endpoint_name_slots
+            .max(resolved.slot_count() as u64);
+    }
     resolved.finish_optional::<RESOLVED_ENDPOINT_WIDTH>(root, cancelled, evidence)
 }
 

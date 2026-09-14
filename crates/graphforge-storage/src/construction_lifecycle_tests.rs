@@ -828,11 +828,14 @@ mod lifecycle_budget {
                 _ => unreachable!(),
             };
             let obsolete_identity_bytes = 32 * (8192 + 32768 * scale);
+            // The preselected identity-root floor passed; retain the additional
+            // measured benefit from deferring the final online carry insertion.
+            let measured_carry_saving = 32 * 32768 * scale;
             assert!(
                 session
                     .evidence()
                     .storage_transient_peak_total_allocated_bytes
-                    <= baseline_peak - obsolete_identity_bytes
+                    <= baseline_peak - obsolete_identity_bytes - measured_carry_saving
             );
 
             println!(
@@ -904,9 +907,13 @@ mod lifecycle_budget {
         actual.sort_unstable();
         assert_eq!(actual, [(100, 1, 2), (101, 2, 3)]);
         let mut properties = Vec::new();
-        let routes = inventory.routes(crate::PropertyRouteKind::Edge).collect::<Vec<_>>();
+        let routes = inventory
+            .routes(crate::PropertyRouteKind::Edge)
+            .collect::<Vec<_>>();
         assert_eq!(routes.len(), 1);
-        for batch in crate::read_edge_properties_from_inventory(root, &inventory, routes[0]).unwrap() {
+        for batch in
+            crate::read_edge_properties_from_inventory(root, &inventory, routes[0]).unwrap()
+        {
             let ids = batch
                 .column_by_name("edge_uuid")
                 .unwrap()
@@ -1089,6 +1096,50 @@ mod lifecycle_budget {
                 )
                 .is_err()
             );
+        }
+    }
+    #[test]
+    fn consumed_endpoint_lookahead_refuses_a_partial_record_before_retirement() {
+        for window_rows in [1, 2] {
+            let temporary = TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let mut identity = [0_u8; BASE_IDENTITY_WIDTH];
+            identity[..16].copy_from_slice(&1_u128.to_be_bytes());
+            identity[24..32].copy_from_slice(&1_u64.to_be_bytes());
+            std::fs::write(temporary.path().join("identities.run"), identity).unwrap();
+            let mut endpoint = [0_u8; ENDPOINT_WIDTH];
+            endpoint[..16].copy_from_slice(&1_u128.to_be_bytes());
+            endpoint[16..32].copy_from_slice(&100_u128.to_be_bytes());
+            let mut malformed = endpoint.to_vec();
+            malformed.push(0xff);
+            let path = temporary.path().join("endpoints.run");
+            std::fs::write(&path, &malformed).unwrap();
+            let mut evidence = GraphConstructionEvidence::default();
+            for category in crate::ArtifactCategory::ALL {
+                evidence.storage_current.insert(category, Default::default());
+                evidence
+                    .storage_receipt_category_authorities
+                    .insert(category, Default::default());
+                evidence.storage_transient_peak_allocated_bytes.insert(category, 0);
+                evidence.storage_receipt_transient_peak_authorities.insert(category, 0);
+            }
+            let error = resolve_endpoint_surrogates(
+                &root,
+                "identities.run",
+                Some("endpoints.run"),
+                None,
+                window_rows,
+                2,
+                &mut || false,
+                &mut evidence,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("truncated fixed-width construction run")
+            );
+            assert_eq!(std::fs::read(path).unwrap(), malformed);
         }
     }
 }
