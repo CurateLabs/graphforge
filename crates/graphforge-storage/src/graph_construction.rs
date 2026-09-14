@@ -2598,7 +2598,7 @@ impl GraphConstructionSession {
                 .entry(category)
                 .or_default();
         }
-        recover_shape_intent(&session.root, &mut session.checkpoint)?;
+        let shape_recovery_work = recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.recover_intent()?;
         if session
             .checkpoint
@@ -2628,6 +2628,8 @@ impl GraphConstructionSession {
         session.reclaim_superseded_payloads()?;
         let repaired_parent_phases = repair_unshaped_parent_phase_bytes(&mut session.checkpoint)?;
         if repaired_parent_phases
+            || shape_recovery_work.bytes != 0
+            || shape_recovery_work.operations != 0
             || resumed_parent_work.bytes != 0
             || resumed_parent_work.operations != 0
         {
@@ -2636,6 +2638,7 @@ impl GraphConstructionSession {
                 .evidence
                 .recovery_application_read_bytes
                 .checked_add(resumed_parent_work.bytes)
+                .and_then(|value| value.checked_add(shape_recovery_work.bytes))
                 .ok_or_else(|| storage("recovery read bytes overflow"))?;
             session
                 .checkpoint
@@ -2645,6 +2648,7 @@ impl GraphConstructionSession {
                 .evidence
                 .recovery_application_read_operations
                 .checked_add(resumed_parent_work.operations)
+                .and_then(|value| value.checked_add(shape_recovery_work.operations))
                 .ok_or_else(|| storage("recovery read operations overflow"))?;
             session
                 .checkpoint
@@ -2655,6 +2659,10 @@ impl GraphConstructionSession {
                 .recovery_checkpoint_fsync_operations
                 .checked_add(3)
                 .ok_or_else(|| storage("recovery checkpoint sync count overflow"))?;
+            account_cache_release(
+                shape_recovery_work.cache_release,
+                &mut session.checkpoint.evidence,
+            )?;
             replace_checkpoint_control(&session.root, &session.checkpoint)?;
         }
         if session.checkpoint.next_sequence != 0
@@ -4724,10 +4732,12 @@ fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError
 fn recover_shape_intent(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
-) -> Result<(), GfError> {
+) -> Result<ReadWork, GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReadWork::default());
+        }
         Err(error) => return Err(storage(error)),
     };
     let intent: ShapeIntent = decode_shape_intent(&mut file)?;
@@ -4774,7 +4784,7 @@ fn recover_shape_intent(
             final_evidence,
             expected_shape_authority,
         )?;
-        return Ok(());
+        return Ok(ReadWork::default());
     }
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
@@ -4784,7 +4794,7 @@ fn recover_shape_intent(
     {
         return Err(storage("incomplete shape changed committed evidence"));
     }
-    cleanup_incomplete_shape_capabilities(root)?;
+    let work = cleanup_incomplete_shape_capabilities(root)?;
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
         if !name.starts_with("merge-") && !name.starts_with("shaped-") {
@@ -4802,7 +4812,8 @@ fn recover_shape_intent(
             Err(error) => return Err(storage(error)),
         }
     }
-    unlink_named(root, SHAPE_INTENT)
+    unlink_named(root, SHAPE_INTENT)?;
+    Ok(work)
 }
 
 /// Restore only the known omitted parent contribution before shape authority
@@ -4953,7 +4964,10 @@ fn copy_post_shape_io(target: &mut GraphConstructionEvidence, source: &GraphCons
     target.staged_and_retained_disk_bytes = source.staged_and_retained_disk_bytes;
 }
 
-fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), GfError> {
+fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<ReadWork, GfError> {
+    let mut work = ReadWork::default();
+    // Authenticate every surviving derived payload before removing any recovery
+    // authority. A writer receipt alone cannot detect in-place byte corruption.
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
         if !name.starts_with("shape-receipt-") {
@@ -4963,7 +4977,14 @@ fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), G
         if file_link_count(&file).map_err(storage)? != 1 {
             return Err(storage("shaped writer capability has extra links"));
         }
-        let identity = file_identity(&file).map_err(storage)?;
+        work.bytes = work
+            .bytes
+            .checked_add(file.metadata().map_err(storage)?.len())
+            .ok_or_else(|| storage("shape recovery control bytes overflow"))?;
+        work.operations = work
+            .operations
+            .checked_add(1)
+            .ok_or_else(|| storage("shape recovery control reads overflow"))?;
         let receipt: ArtifactReceipt = decode_bounded(&mut file)?;
         if shape_receipt_name(&receipt.name) != name {
             return Err(storage("shaped writer capability name changed"));
@@ -4977,17 +4998,52 @@ fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<(), G
         match root.open_child_file(OsStr::new(&receipt.name)) {
             Ok(artifact) => {
                 drop(artifact);
-                authenticate_shaped_output(root, &receipt)?;
+                let observed = supersession::authenticate_payload(root, &receipt, &mut || false)?;
+                work.bytes = work
+                    .bytes
+                    .checked_add(observed.bytes)
+                    .ok_or_else(|| storage("shape recovery read bytes overflow"))?;
+                work.operations = work
+                    .operations
+                    .checked_add(observed.operations)
+                    .ok_or_else(|| storage("shape recovery read operations overflow"))?;
+                merge_cache_release_evidence(&mut work.cache_release, observed.cache_release)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(storage(error)),
+        }
+    }
+    for child in root.child_names().map_err(storage)? {
+        let Some(name) = child.to_str() else { continue };
+        if !name.starts_with("shape-receipt-") {
+            continue;
+        }
+        let mut file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
+        let identity = file_identity(&file).map_err(storage)?;
+        if file_link_count(&file).map_err(storage)? != 1 {
+            return Err(storage("shaped writer capability has extra links"));
+        }
+        work.bytes = work
+            .bytes
+            .checked_add(file.metadata().map_err(storage)?.len())
+            .ok_or_else(|| storage("shape recovery control bytes overflow"))?;
+        work.operations = work
+            .operations
+            .checked_add(1)
+            .ok_or_else(|| storage("shape recovery control reads overflow"))?;
+        let receipt: ArtifactReceipt = decode_bounded(&mut file)?;
+        if shape_receipt_name(&receipt.name) != name {
+            return Err(storage("shaped writer capability name changed"));
+        }
+        if !is_shape_artifact_name(&receipt.name) {
+            continue;
         }
         drop(file);
         root.unlink_child_if_identity(OsStr::new(name), identity)
             .map_err(storage)?;
         root.sync().map_err(storage)?;
     }
-    Ok(())
+    Ok(work)
 }
 
 fn validate_shape_binding(intent: &ShapeIntent, checkpoint: &Checkpoint) -> Result<(), GfError> {
@@ -10921,6 +10977,55 @@ mod tests {
         }
     }
 
+    fn expected_shape_recovery_delta(root: &Path, evidence: &mut GraphConstructionEvidence) {
+        let intent: ShapeIntent =
+            serde_json::from_slice(&std::fs::read(root.join(SHAPE_INTENT)).unwrap()).unwrap();
+        if intent.complete {
+            return;
+        }
+        let mut controls = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("shape-receipt-")
+            {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path()).unwrap();
+            evidence.recovery_application_read_bytes += 2 * bytes.len() as u64;
+            evidence.recovery_application_read_operations += 2;
+            controls += 1;
+            let receipt: ArtifactReceipt = serde_json::from_slice(&bytes).unwrap();
+            if !is_shape_artifact_name(&receipt.name) {
+                continue;
+            }
+            let path = root.join(&receipt.name);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = path.metadata().unwrap().len();
+            assert_eq!(bytes, receipt.bytes);
+            assert!(bytes <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES);
+            evidence.recovery_application_read_bytes += bytes;
+            evidence.recovery_application_read_operations += bytes.div_ceil(BLOCK_BYTES as u64);
+            if bytes != 0 {
+                if cfg!(target_os = "linux") {
+                    evidence.cache_release_operations += 1;
+                    evidence.cache_released_bytes += bytes;
+                } else {
+                    evidence.cache_release_unsupported_operations += 1;
+                }
+                evidence.peak_cache_release_window_bytes =
+                    evidence.peak_cache_release_window_bytes.max(bytes);
+            }
+        }
+        if controls != 0 {
+            evidence.recovery_checkpoint_fsync_operations += 3;
+        }
+    }
+
     #[test]
     fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
         fn without_native_identities(
@@ -10972,6 +11077,14 @@ mod tests {
                 .status()
                 .unwrap();
             assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut expected_recovered = expected.clone();
+            expected_shape_recovery_delta(
+                &root
+                    .path()
+                    .join(PRIVATE_ROOT)
+                    .join(Uuid::from_u128(600).simple().to_string()),
+                &mut expected_recovered,
+            );
             let mut resumed = GraphConstructionSession::open(
                 root.path(),
                 Uuid::from_u128(600),
@@ -10982,7 +11095,7 @@ mod tests {
             resumed.shape_canonical_with_cancellation(|| false).unwrap();
             assert_eq!(
                 without_native_identities(resumed.evidence().clone()),
-                expected,
+                expected_recovered,
                 "{failpoint}"
             );
         }
