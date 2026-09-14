@@ -44,7 +44,10 @@ use crate::UuidIndexKind;
 use crate::construction_detail_codec::{DetailCodec, DetailValidator};
 use crate::uuid_membership::{AuthenticatedUuidIndexSnapshot, UuidConstructionSnapshotWork};
 
-const FORMAT_VERSION: u32 = 9;
+use crate::construction_record_layout::{
+    BASE_IDENTITY_WIDTH, ENDPOINT_WIDTH, FORMAT_VERSION, IDENTITY_SURROGATE_OFFSET,
+    RESOLVED_ENDPOINT_WIDTH, RESOLVED_SURROGATE_OFFSET,
+};
 const PRIVATE_ROOT: &str = ".graphforge-construction";
 const SESSION_LOCK: &str = "session.lock";
 const CHECKPOINT: &str = "checkpoint.json";
@@ -59,11 +62,8 @@ const BLOCK_BYTES: usize = 1 << 20;
 const MAX_CONTROL_BYTES: u64 = 1 << 20;
 const MAX_SHAPE_CONTROL_BYTES: u64 = 32 << 20;
 const IDENTITY_WIDTH: usize = 16;
-const ENDPOINT_WIDTH: usize = 48;
-const RESOLVED_ENDPOINT_WIDTH: usize = 32;
 const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
-const BASE_IDENTITY_WIDTH: usize = 32;
 
 const fn durable_lifecycle_mode() -> crate::filesystem_admission::ProjectLifecycleMode {
     crate::filesystem_admission::ProjectLifecycleMode::Durable
@@ -1518,7 +1518,6 @@ impl GraphConstructionSession {
         }
         let encoded = crate::graph_construction_encoding::encode(
             &self.root,
-            self.checkpoint.format_version >= 8,
             DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?,
             shape,
             generation,
@@ -1761,7 +1760,7 @@ impl GraphConstructionSession {
             .publication_application_read_operations
             .checked_add(ordinal_io.read_calls)
             .ok_or_else(|| storage("ordinal publication read calls overflow"))?;
-        let (graph_root, cas_evidence) = if self.checkpoint.format_version >= 8 {
+        let (graph_root, cas_evidence) = {
             let artifact = encoding
                 .artifacts
                 .iter()
@@ -1802,14 +1801,6 @@ impl GraphConstructionSession {
                 &sealed_files,
                 &ordinal_tombstones,
                 &routes,
-            )?
-        } else {
-            crate::graph_object_store::append_authenticated_graph_files_v2(
-                &lease,
-                &workspace,
-                &mut manifest_state,
-                &sealed_files,
-                &ordinal_tombstones,
             )?
         };
         self.checkpoint.evidence.cas_application_read_bytes = self
@@ -2243,34 +2234,6 @@ impl GraphConstructionSession {
         lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
         allocation: Option<&crate::StorageAllocationOperation>,
     ) -> Result<Self, GfError> {
-        Self::open_internal_with_format(
-            project_dir,
-            graph_source_dir,
-            operation_uuid,
-            parent_topology_generation,
-            ontology_mode,
-            semantic_authority,
-            budgets,
-            lifecycle_mode,
-            allocation,
-            FORMAT_VERSION,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    fn open_internal_with_format(
-        project_dir: &Path,
-        graph_source_dir: &Path,
-        operation_uuid: Uuid,
-        parent_topology_generation: u64,
-        ontology_mode: graphforge_core::OntologyMode,
-        semantic_authority: Option<ConstructionSemanticAuthority>,
-        budgets: GraphConstructionBudgets,
-        lifecycle_mode: crate::filesystem_admission::ProjectLifecycleMode,
-        allocation: Option<&crate::StorageAllocationOperation>,
-        initial_format_version: u32,
-    ) -> Result<Self, GfError> {
-        DetailCodec::from_version(initial_format_version).map_err(storage)?;
         let budgets = budgets.validate()?;
         let semantic_authority_sha256 = semantic_authority
             .as_ref()
@@ -2327,6 +2290,7 @@ impl GraphConstructionSession {
             return Err(storage("checkpoint private authority changed"));
         }
         if let Some(checkpoint) = recovered_checkpoint.as_mut() {
+            validate_parent_phase_bytes(checkpoint)?;
             cleanup_authenticated_control_temps(
                 &root,
                 operation_uuid,
@@ -2500,7 +2464,7 @@ impl GraphConstructionSession {
                 ..GraphConstructionEvidence::default()
             };
             let mut initial = Checkpoint {
-                format_version: initial_format_version,
+                format_version: FORMAT_VERSION,
                 operation_uuid,
                 project_identity: project_identity.into(),
                 session_identity: session_identity.into(),
@@ -2626,9 +2590,8 @@ impl GraphConstructionSession {
         }
         session.revalidate_authority()?;
         session.reclaim_superseded_payloads()?;
-        let repaired_parent_phases = repair_unshaped_parent_phase_bytes(&mut session.checkpoint)?;
-        if repaired_parent_phases
-            || shape_recovery_work.bytes != 0
+        validate_parent_phase_bytes(&session.checkpoint)?;
+        if shape_recovery_work.bytes != 0
             || shape_recovery_work.operations != 0
             || resumed_parent_work.bytes != 0
             || resumed_parent_work.operations != 0
@@ -2663,13 +2626,6 @@ impl GraphConstructionSession {
                 shape_recovery_work.cache_release,
                 &mut session.checkpoint.evidence,
             )?;
-            replace_checkpoint_control(&session.root, &session.checkpoint)?;
-        }
-        if session.checkpoint.next_sequence != 0
-            && session.checkpoint.evidence.immutable_artifacts == 0
-        {
-            session.checkpoint.evidence.immutable_artifacts =
-                authenticated_receipt_artifact_count(&session.root, &session.checkpoint)?;
             replace_checkpoint_control(&session.root, &session.checkpoint)?;
         }
         Ok(session)
@@ -2732,20 +2688,21 @@ impl GraphConstructionSession {
         parent_topology_generation: u64,
         budgets: GraphConstructionBudgets,
     ) -> Result<Self, GfError> {
-        // Historical mechanics fixtures use retained v8 payloads and some use
-        // the synthetic pre-container parent authority. V9 lifecycle tests
-        // select their format explicitly and use real project containers.
-        Self::open_internal_with_format(
+        crate::open_or_initialize_project(project_dir)?;
+        let materialized = project_dir.join("fixture-graph");
+        let source = if materialized.is_dir() {
+            materialized.as_path()
+        } else {
+            project_dir
+        };
+        Self::open_with_mode_and_lifecycle_from_graph(
             project_dir,
-            project_dir,
+            source,
             operation_uuid,
             parent_topology_generation,
             graphforge_core::OntologyMode::Exploratory,
-            None,
             budgets,
             crate::filesystem_admission::ProjectLifecycleMode::Durable,
-            None,
-            8,
         )
     }
 
@@ -4773,7 +4730,7 @@ fn recover_shape_intent(
         {
             return Err(storage("complete shape manifest inventory is incomplete"));
         }
-        if checkpoint.format_version < 9 || checkpoint.encoding_inventory_sha256.is_none() {
+        if checkpoint.encoding_inventory_sha256.is_none() {
             for output in &intent.outputs {
                 authenticate_shaped_output(root, output)?;
             }
@@ -4827,56 +4784,26 @@ fn recover_shape_intent(
     Ok(work)
 }
 
-/// Restore only the known omitted parent contribution before shape authority
-/// exists. Authenticated shaped evidence is never rewritten during recovery.
-fn repair_unshaped_parent_phase_bytes(checkpoint: &mut Checkpoint) -> Result<bool, GfError> {
-    let evidence = &mut checkpoint.evidence;
-    let missing_seal = evidence.seal_application_read_bytes != evidence.authentication_read_bytes;
-    let shape_contributors = [
-        evidence.shape_input_validation_read_bytes,
-        evidence.merge_read_bytes,
-        evidence.parquet_read_bytes,
-        evidence.shaped_output_authentication_bytes,
-        evidence.retained_probe_read_bytes,
-    ];
+/// Current-format phase totals must be exact; omitted old-version fields are refused.
+fn validate_parent_phase_bytes(checkpoint: &Checkpoint) -> Result<(), GfError> {
+    let evidence = &checkpoint.evidence;
     let expected_shape = checked_evidence_sum(
         "parent shape phase bytes",
         evidence.parent_catalog_read_bytes,
-        &shape_contributors,
+        &[
+            evidence.shape_input_validation_read_bytes,
+            evidence.merge_read_bytes,
+            evidence.parquet_read_bytes,
+            evidence.shaped_output_authentication_bytes,
+            evidence.retained_probe_read_bytes,
+        ],
     )?;
-    let missing_shape = evidence.shape_application_read_bytes != expected_shape;
-    if !missing_seal && !missing_shape {
-        return Ok(false);
-    }
-    if checkpoint.shape_authority_sha256.is_some() || checkpoint.encoding_inventory_sha256.is_some()
+    if evidence.seal_application_read_bytes != evidence.authentication_read_bytes
+        || evidence.shape_application_read_bytes != expected_shape
     {
-        return Err(storage(
-            "legacy construction parent phase attribution is bound to shape authority",
-        ));
+        return Err(storage("construction parent phase bytes disagree"));
     }
-    if missing_seal
-        && evidence
-            .seal_application_read_bytes
-            .checked_add(checkpoint.base_work.authentication_bytes)
-            != Some(evidence.authentication_read_bytes)
-    {
-        return Err(storage(
-            "construction parent authentication phase bytes disagree",
-        ));
-    }
-    if missing_shape
-        && (evidence.shape_application_read_bytes != 0
-            || shape_contributors.iter().any(|value| *value != 0))
-    {
-        return Err(storage("construction parent catalog phase bytes disagree"));
-    }
-    if missing_seal {
-        evidence.seal_application_read_bytes = evidence.authentication_read_bytes;
-    }
-    if missing_shape {
-        evidence.shape_application_read_bytes = evidence.parent_catalog_read_bytes;
-    }
-    Ok(true)
+    Ok(())
 }
 
 fn recover_final_shape_evidence(
@@ -5204,9 +5131,7 @@ fn authenticate_published_target(
             "project publication journal differs from construction publication authority",
         ));
     }
-    if checkpoint.format_version >= 9 {
-        supersession::authenticate_public_successor(&target, &mut checkpoint.evidence, cancelled)?;
-    }
+    supersession::authenticate_public_successor(&target, &mut checkpoint.evidence, cancelled)?;
     Ok(())
 }
 
@@ -6804,102 +6729,6 @@ fn reject_staged_base_conflicts(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-#[allow(dead_code)]
-fn validate_unified_and_details(
-    root: &StableDirectory,
-    identities_name: &str,
-    node_details_name: Option<&str>,
-    edge_details_name: Option<&str>,
-    endpoints_name: Option<&str>,
-    base_max_node: u64,
-    base_max_edge: u64,
-    cancelled: &mut impl FnMut() -> bool,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<(u64, u64, u64, u64), GfError> {
-    let (mut identities, identities_counter) =
-        open_counted_fixed_reader(root, identities_name, evidence)?;
-    let mut node_count = 0_u64;
-    let mut edge_count = 0_u64;
-    let mut new_nodes = 0_u64;
-    let mut new_edges = 0_u64;
-    while let Some(record) = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)? {
-        match record[16] {
-            0 => {
-                node_count += 1;
-                if record[17] == 0 {
-                    new_nodes += 1;
-                }
-            }
-            1 => {
-                edge_count += 1;
-                if record[17] == 0 {
-                    new_edges += 1;
-                }
-            }
-            _ => return Err(storage("invalid identity kind in unified merge")),
-        }
-        account_merge_read::<BASE_IDENTITY_WIDTH>(evidence)?;
-        if (node_count + edge_count).is_multiple_of(4096) {
-            reject_cancelled(cancelled)?;
-        }
-    }
-    let detail_count = |name: Option<&str>, width: u64| -> Result<u64, GfError> {
-        let Some(name) = name else { return Ok(0) };
-        let bytes = root
-            .open_child_file(OsStr::new(name))
-            .map_err(storage)?
-            .metadata()
-            .map_err(storage)?
-            .len();
-        if bytes % width != 0 {
-            return Err(storage("truncated canonical detail run"));
-        }
-        Ok(bytes / width)
-    };
-    if detail_count(node_details_name, NODE_DETAIL_WIDTH as u64)? != new_nodes
-        || detail_count(edge_details_name, EDGE_DETAIL_WIDTH as u64)? != new_edges
-    {
-        return Err(storage("identity and canonical detail domains disagree"));
-    }
-    validate_detail_domain::<NODE_DETAIL_WIDTH>(
-        root,
-        identities_name,
-        node_details_name,
-        0,
-        DetailCodec::Legacy,
-        cancelled,
-        evidence,
-    )?;
-    validate_detail_domain::<EDGE_DETAIL_WIDTH>(
-        root,
-        identities_name,
-        edge_details_name,
-        1,
-        DetailCodec::Legacy,
-        cancelled,
-        evidence,
-    )?;
-    validate_endpoints(
-        root,
-        identities_name,
-        endpoints_name,
-        new_edges,
-        cancelled,
-        evidence,
-    )?;
-    let max_node = base_max_node
-        .checked_add(new_nodes)
-        .ok_or_else(|| storage("node surrogate overflow"))?;
-    let max_edge = base_max_edge
-        .checked_add(new_edges)
-        .ok_or_else(|| storage("edge surrogate overflow"))?;
-    account_fixed_read_operations(&identities_counter, evidence)?;
-    release_counted_reader_cache(&mut identities, evidence)?;
-    Ok((node_count, edge_count, max_node, max_edge))
-}
-
 fn validate_detail_domain<const N: usize>(
     root: &StableDirectory,
     identities_name: &str,
@@ -7000,7 +6829,7 @@ fn validate_endpoints(
         if node[..16] != endpoint[..16] || node[16] != 0 {
             return Err(storage("edge endpoint is not a node UUID"));
         }
-        if endpoint[32] > 1 || endpoint[33..].iter().any(|byte| *byte != 0) {
+        if endpoint[32] > 1 {
             return Err(storage("endpoint run record is not canonical"));
         }
         endpoint_count = endpoint_count
@@ -7062,7 +6891,8 @@ fn assign_surrogates(
                 }
                 _ => return Err(storage("invalid identity kind during shaping")),
             };
-            record[24..32].copy_from_slice(&surrogate.to_be_bytes());
+            record[IDENTITY_SURROGATE_OFFSET..BASE_IDENTITY_WIDTH]
+                .copy_from_slice(&surrogate.to_be_bytes());
         } else if record[17] != 1 {
             return Err(storage("invalid retained identity marker during shaping"));
         }
@@ -7161,7 +6991,9 @@ fn resolve_endpoint_surrogates(
                 .filter(|record| record[..16] == endpoint[..16] && record[16] == 0)
             {
                 surrogates.push(Some(u64::from_be_bytes(
-                    node[24..32].try_into().expect("fixed"),
+                    node[IDENTITY_SURROGATE_OFFSET..BASE_IDENTITY_WIDTH]
+                        .try_into()
+                        .expect("fixed"),
                 )));
             } else {
                 base_positions.push(surrogates.len());
@@ -7186,7 +7018,8 @@ fn resolve_endpoint_surrogates(
             let mut resolved = [0_u8; RESOLVED_ENDPOINT_WIDTH];
             resolved[..16].copy_from_slice(&endpoint[16..32]);
             resolved[16] = endpoint[32];
-            resolved[24..32].copy_from_slice(&surrogate.to_be_bytes());
+            resolved[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+                .copy_from_slice(&surrogate.to_be_bytes());
             window.push(resolved);
             account_merge_read::<ENDPOINT_WIDTH>(evidence)?;
         }
@@ -7298,7 +7131,7 @@ fn authenticate_artifact(
     receipt: &ArtifactReceipt,
     codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
-    validate_artifact_name(receipt, codec)?;
+    validate_artifact_name(receipt)?;
     let file = root
         .open_child_file(OsStr::new(&receipt.name))
         .map_err(storage)?;
@@ -7358,10 +7191,7 @@ fn authenticate_artifact(
                     {
                         return Err(storage("fixed construction run is not strictly sorted"));
                     }
-                    if width == ENDPOINT_WIDTH
-                        && (!matches!(record[32], 0 | 1)
-                            || record[33..].iter().any(|byte| *byte != 0))
-                    {
+                    if width == ENDPOINT_WIDTH && (!matches!(record[32], 0 | 1)) {
                         return Err(storage("endpoint run record is malformed"));
                     }
                     if width == EDGE_DETAIL_WIDTH {
@@ -7381,9 +7211,14 @@ fn authenticate_artifact(
                     if width == BASE_IDENTITY_WIDTH
                         && (!matches!(record[16], 0 | 1)
                             || record[17] != 1
-                            || record[18..24].iter().any(|byte| *byte != 0)
-                            || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
-                            || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0)))
+                            || (record[16] == 0
+                                && record[IDENTITY_SURROGATE_OFFSET..]
+                                    .iter()
+                                    .all(|byte| *byte == 0))
+                            || (record[16] == 1
+                                && record[IDENTITY_SURROGATE_OFFSET..]
+                                    .iter()
+                                    .any(|byte| *byte != 0)))
                     {
                         return Err(storage("base identity run record is malformed"));
                     }
@@ -7426,7 +7261,7 @@ fn authenticate_artifact(
     })
 }
 
-fn validate_artifact_name(receipt: &ArtifactReceipt, codec: DetailCodec) -> Result<(), GfError> {
+fn validate_artifact_name(receipt: &ArtifactReceipt) -> Result<(), GfError> {
     let valid_suffix = receipt.name.ends_with(".parquet")
         || receipt.name.ends_with(".identities.run")
         || receipt.name.ends_with(".endpoints.run")
@@ -7453,18 +7288,6 @@ fn validate_artifact_name(receipt: &ArtifactReceipt, codec: DetailCodec) -> Resu
         && !receipt.bytes.is_multiple_of(ENDPOINT_WIDTH as u64)
     {
         return Err(storage("truncated endpoint run"));
-    }
-    if codec == DetailCodec::Legacy
-        && receipt.name.ends_with(".node-details.run")
-        && !receipt.bytes.is_multiple_of(NODE_DETAIL_WIDTH as u64)
-    {
-        return Err(storage("truncated node detail run"));
-    }
-    if codec == DetailCodec::Legacy
-        && receipt.name.ends_with(".edge-details.run")
-        && !receipt.bytes.is_multiple_of(EDGE_DETAIL_WIDTH as u64)
-    {
-        return Err(storage("truncated edge detail run"));
     }
     Ok(())
 }
@@ -7559,11 +7382,11 @@ fn validate_receipt_semantics(
     codec
         .validate_size(detail_width, receipt.rows, receipt.details.bytes)
         .map_err(storage)?;
-    validate_artifact_name(&receipt.parquet, codec)?;
-    validate_artifact_name(&receipt.identities, codec)?;
-    validate_artifact_name(&receipt.details, codec)?;
+    validate_artifact_name(&receipt.parquet)?;
+    validate_artifact_name(&receipt.identities)?;
+    validate_artifact_name(&receipt.details)?;
     if let Some(endpoints) = &receipt.endpoints {
-        validate_artifact_name(endpoints, codec)?;
+        validate_artifact_name(endpoints)?;
     }
     Ok(())
 }
@@ -7892,10 +7715,8 @@ fn validate_checkpoint(
             .is_some_and(|digest| !is_canonical_sha256(digest))
         || checkpoint.encoding_inventory_sha256.is_some()
             && checkpoint.shape_authority_sha256.is_none()
-        || checkpoint.inputs_retired
-            && (checkpoint.format_version < 9 || checkpoint.shape_authority_sha256.is_none())
-        || checkpoint.shape_retired
-            && (checkpoint.format_version < 9 || checkpoint.encoding_inventory_sha256.is_none())
+        || checkpoint.inputs_retired && (checkpoint.shape_authority_sha256.is_none())
+        || checkpoint.shape_retired && (checkpoint.encoding_inventory_sha256.is_none())
         || match checkpoint.state {
             GraphConstructionState::Staging | GraphConstructionState::Aborted => {
                 checkpoint.publication_state.is_some()
@@ -7910,9 +7731,8 @@ fn validate_checkpoint(
         ) && checkpoint.encoding_inventory_sha256.is_none()
         || checkpoint.evidence.input_batches != checkpoint.next_sequence
         || checkpoint.evidence.parquet_shards != checkpoint.next_sequence
-        || checkpoint.evidence.immutable_artifacts != 0
-            && (checkpoint.evidence.immutable_artifacts < minimum_artifacts
-                || checkpoint.evidence.immutable_artifacts > maximum_artifacts)
+        || (checkpoint.evidence.immutable_artifacts < minimum_artifacts
+            || checkpoint.evidence.immutable_artifacts > maximum_artifacts)
         || checkpoint.evidence.peak_batch_rows > budgets.max_batch_rows as u64
         || checkpoint.evidence.peak_batch_bytes > budgets.max_batch_bytes as u64
         || checkpoint.evidence.peak_run_records > budgets.max_run_records as u64
@@ -8392,9 +8212,7 @@ fn validate_sorted_run(
                 if previous
                     .as_ref()
                     .is_some_and(|prior| prior.as_slice() >= record)
-                    || (width == ENDPOINT_WIDTH
-                        && (!matches!(record[32], 0 | 1)
-                            || record[33..].iter().any(|byte| *byte != 0)))
+                    || (width == ENDPOINT_WIDTH && (!matches!(record[32], 0 | 1)))
                     || (width == EDGE_DETAIL_WIDTH
                         && (record[48] == 0
                             || record[49 + record[48] as usize..]
@@ -8408,9 +8226,14 @@ fn validate_sorted_run(
                     || (width == BASE_IDENTITY_WIDTH
                         && (!matches!(record[16], 0 | 1)
                             || record[17] != 1
-                            || record[18..24].iter().any(|byte| *byte != 0)
-                            || (record[16] == 0 && record[24..].iter().all(|byte| *byte == 0))
-                            || (record[16] == 1 && record[24..].iter().any(|byte| *byte != 0))))
+                            || (record[16] == 0
+                                && record[IDENTITY_SURROGATE_OFFSET..]
+                                    .iter()
+                                    .all(|byte| *byte == 0))
+                            || (record[16] == 1
+                                && record[IDENTITY_SURROGATE_OFFSET..]
+                                    .iter()
+                                    .any(|byte| *byte != 0))))
                 {
                     return Err(storage("unrecorded fixed run is malformed"));
                 }
@@ -8438,59 +8261,6 @@ fn artifact_stem(sequence: u64, kind: ConstructionChunkKind) -> String {
 
 fn receipt_name(sequence: u64) -> String {
     format!("receipt-{sequence:020}.json")
-}
-
-fn authenticated_receipt_artifact_count(
-    root: &StableDirectory,
-    checkpoint: &Checkpoint,
-) -> Result<u64, GfError> {
-    let mut count = 0_u64;
-    let mut prior_digest = None;
-    let mut saw_edge = false;
-    for sequence in 0..checkpoint.next_sequence {
-        let mut file = root
-            .open_child_file(OsStr::new(&receipt_name(sequence)))
-            .map_err(storage)?;
-        let receipt: ConstructionChunkReceipt = decode_bounded(&mut file)?;
-        validate_receipt_semantics(
-            &receipt,
-            sequence,
-            checkpoint.budgets,
-            DetailCodec::from_version(checkpoint.format_version).map_err(storage)?,
-        )?;
-        if receipt.kind == ConstructionChunkKind::Node && saw_edge {
-            return Err(storage("node receipt follows edge receipt"));
-        }
-        saw_edge |= receipt.kind == ConstructionChunkKind::Edge;
-        if receipt.operation_uuid != checkpoint.operation_uuid
-            || receipt.project_identity != checkpoint.project_identity
-            || receipt.session_identity != checkpoint.session_identity
-            || receipt.parent_topology_generation != checkpoint.parent_topology_generation
-            || receipt.ontology_mode != checkpoint.ontology_mode
-            || receipt.semantic_authority_sha256 != checkpoint.semantic_authority_sha256
-            || receipt.prior_receipt_sha256 != prior_digest
-        {
-            return Err(storage("legacy receipt authority or chain changed"));
-        }
-        count = count
-            .checked_add(
-                3_u64
-                    .checked_add(u64::from(receipt.endpoints.is_some()))
-                    .ok_or_else(|| storage("receipt artifact increment overflow"))?,
-            )
-            .ok_or_else(|| storage("authenticated receipt artifact count overflow"))?;
-        let body = serde_json::to_vec(&receipt).map_err(storage)?;
-        prior_digest = Some(sha256(&body));
-    }
-    if prior_digest != checkpoint.last_receipt_sha256 {
-        return Err(storage(
-            "legacy receipt journal tail differs from checkpoint",
-        ));
-    }
-    if saw_edge != checkpoint.saw_edge {
-        return Err(storage("checkpoint phase differs from receipt journal"));
-    }
-    Ok(count)
 }
 
 fn chunk_key_name(chunk_id: &str) -> String {
@@ -8975,6 +8745,7 @@ mod tests {
     #[test]
     fn generation_zero_accepts_empty_node_parquet() {
         let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
         std::fs::create_dir_all(root.path().join("topology")).unwrap();
         ArrowWriter::try_new(
             File::create(root.path().join("topology/nodes.parquet")).unwrap(),
@@ -8990,6 +8761,7 @@ mod tests {
     #[test]
     fn generation_zero_rejects_unmarked_nonempty_legacy_parent() {
         let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
         let mut writer =
             crate::GraphWriter::open_at(root.path(), graphforge_core::OntologyMode::Exploratory, 1)
                 .unwrap();
@@ -9026,80 +8798,63 @@ mod tests {
         nonempty_project_with_nodes(2)
     }
 
+    fn hydrate_parent_fixture(project: &TempDir) {
+        let selected = crate::resolve_project_generation(project.path()).unwrap();
+        let inventory = selected.graph_files_inventory().unwrap().unwrap();
+        let graph = project.path().join("fixture-graph");
+        if graph.exists() {
+            std::fs::remove_dir_all(&graph).unwrap();
+        }
+        std::fs::create_dir(&graph).unwrap();
+        crate::materialize_graph_objects(project.path(), &inventory, &graph).unwrap();
+    }
+
     fn nonempty_project_with_nodes(node_count: u64) -> TempDir {
         let project = TempDir::new().unwrap();
-        std::fs::create_dir_all(project.path().join("topology")).unwrap();
-        std::fs::write(
-            project.path().join("topology/generation.json"),
-            br#"{"topology_generation":1,"search_generation":1}"#,
-        )
-        .unwrap();
-        let tails_schema = Arc::new(Schema::new(vec![
-            Field::new("max_node_id", DataType::UInt64, false),
-            Field::new("max_edge_id", DataType::UInt64, false),
-        ]));
-        let tails = RecordBatch::try_new(
-            tails_schema.clone(),
-            vec![
-                Arc::new(arrow::array::UInt64Array::from(vec![node_count])),
-                Arc::new(arrow::array::UInt64Array::from(vec![1])),
-            ],
-        )
-        .unwrap();
-        let mut writer = ArrowWriter::try_new(
-            File::create(project.path().join("topology/surrogate_tails.parquet")).unwrap(),
-            tails_schema,
-            None,
-        )
-        .unwrap();
-        writer.write(&tails).unwrap();
-        writer.close().unwrap();
-        crate::uuid_membership::append_uuid_membership_delta(
-            project.path(),
-            1,
-            &(1..=node_count)
-                .map(|value| (Uuid::from_u128(u128::from(value)), value))
-                .collect::<Vec<_>>(),
-            &[Uuid::from_u128(100)],
-        )
-        .unwrap();
+        crate::open_or_initialize_project(project.path()).unwrap();
+        let mut session = open(&project, Uuid::new_v4().as_u128());
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_batch(1, node_count as usize),
+            )
+            .unwrap();
+        session
+            .append(ConstructionChunkKind::Edge, "edge", &edge_batch(100, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let encoded = session.prepare_canonical_encoding(1).unwrap();
+        session
+            .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        drop(session);
+        hydrate_parent_fixture(&project);
         project
     }
 
     fn nonempty_project_generation_two() -> TempDir {
         let project = nonempty_project_with_nodes(2);
-        std::fs::write(
-            project.path().join("topology/generation.json"),
-            br#"{"topology_generation":2,"search_generation":2}"#,
-        )
-        .unwrap();
-        crate::uuid_membership::append_uuid_membership_delta(
+        let mut session = GraphConstructionSession::open(
             project.path(),
-            2,
-            &[(Uuid::from_u128(3), 3)],
-            &[Uuid::from_u128(101)],
+            Uuid::new_v4(),
+            1,
+            GraphConstructionBudgets::default(),
         )
         .unwrap();
-        let tails_schema = Arc::new(Schema::new(vec![
-            Field::new("max_node_id", DataType::UInt64, false),
-            Field::new("max_edge_id", DataType::UInt64, false),
-        ]));
-        let tails = RecordBatch::try_new(
-            tails_schema.clone(),
-            vec![
-                Arc::new(arrow::array::UInt64Array::from(vec![3])),
-                Arc::new(arrow::array::UInt64Array::from(vec![2])),
-            ],
-        )
-        .unwrap();
-        let mut writer = ArrowWriter::try_new(
-            File::create(project.path().join("topology/surrogate_tails.parquet")).unwrap(),
-            tails_schema,
-            None,
-        )
-        .unwrap();
-        writer.write(&tails).unwrap();
-        writer.close().unwrap();
+        session
+            .append(ConstructionChunkKind::Node, "node", &node_batch(3, 1))
+            .unwrap();
+        session
+            .append(ConstructionChunkKind::Edge, "edge", &edge_batch(101, 1))
+            .unwrap();
+        session.seal().unwrap();
+        let encoded = session.prepare_canonical_encoding(2).unwrap();
+        session
+            .publish_canonical(&encoded, Uuid::new_v4(), Uuid::new_v4())
+            .unwrap();
+        drop(session);
+        hydrate_parent_fixture(&project);
         project
     }
 
@@ -9131,7 +8886,7 @@ mod tests {
                 std::fs::metadata(root.join(shape.identities))
                     .unwrap()
                     .len(),
-                32
+                BASE_IDENTITY_WIDTH as u64
             );
             assert_eq!(shape.node_count, base_nodes + 1);
         }
@@ -9259,160 +9014,38 @@ mod tests {
     }
 
     #[test]
-    fn legacy_artifact_evidence_is_authenticated_and_backfilled_before_append() {
-        let root = TempDir::new().unwrap();
-        let operation = 9_801_u128;
-        let mut session = open(&root, operation);
-        session
-            .append(
-                ConstructionChunkKind::Node,
-                "legacy-node",
-                &node_batch(1, 2),
-            )
-            .unwrap();
-        assert_eq!(session.evidence().immutable_artifacts, 3);
-        session.checkpoint.evidence.immutable_artifacts = 0;
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
-        drop(session);
-
-        let mut resumed = open(&root, operation);
-        assert_eq!(resumed.evidence().immutable_artifacts, 3);
-        resumed
-            .append(ConstructionChunkKind::Node, "new-node", &node_batch(3, 1))
-            .unwrap();
-        assert_eq!(resumed.accepted_chunks(), 2);
-        assert_eq!(resumed.evidence().immutable_artifacts, 6);
-    }
-
-    #[test]
-    fn legacy_artifact_backfill_rejects_corrupt_chain_without_rewriting_checkpoint() {
-        let root = TempDir::new().unwrap();
-        let operation = Uuid::from_u128(9_802);
-        let mut session = open(&root, operation.as_u128());
-        session
-            .append(ConstructionChunkKind::Node, "first", &node_batch(1, 1))
-            .unwrap();
-        session
-            .append(ConstructionChunkKind::Node, "second", &node_batch(2, 1))
-            .unwrap();
-        let mut second = session.read_receipt(1).unwrap();
-        second.prior_receipt_sha256 = Some(sha256(b"corrupt receipt chain"));
-        replace_control(&session.root, &receipt_name(1), &second).unwrap();
-        session.checkpoint.evidence.immutable_artifacts = 0;
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
-        let checkpoint_path = root
-            .path()
-            .join(PRIVATE_ROOT)
-            .join(operation.simple().to_string())
-            .join(CHECKPOINT);
-        let before = std::fs::read(&checkpoint_path).unwrap();
-        drop(session);
-
-        let error = GraphConstructionSession::open(
-            root.path(),
-            operation,
-            0,
-            GraphConstructionBudgets::default(),
-        )
-        .err()
-        .expect("corrupt receipt chain must fail closed");
-        assert!(error.to_string().contains("receipt authority or chain"));
-        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
-    }
-
-    #[test]
-    fn legacy_artifact_backfill_reconciles_phase_without_rewriting_checkpoint() {
-        let root = TempDir::new().unwrap();
-        let operation = Uuid::from_u128(9_803);
-        let mut session = open(&root, operation.as_u128());
-        session
-            .append(ConstructionChunkKind::Edge, "edge", &edge_batch(1, 1))
-            .unwrap();
-        session.checkpoint.evidence.immutable_artifacts = 0;
-        session.checkpoint.saw_edge = false;
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
-        let checkpoint_path = root
-            .path()
-            .join(PRIVATE_ROOT)
-            .join(operation.simple().to_string())
-            .join(CHECKPOINT);
-        let before = std::fs::read(&checkpoint_path).unwrap();
-        drop(session);
-
-        let error = GraphConstructionSession::open(
-            root.path(),
-            operation,
-            0,
-            GraphConstructionBudgets::default(),
-        )
-        .err()
-        .expect("receipt phase mismatch must fail closed");
-        assert!(error.to_string().contains("checkpoint phase"));
-        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
-    }
-
-    #[test]
-    fn incompatible_checkpoint_fails_before_legacy_artifact_backfill_rewrite() {
-        let root = TempDir::new().unwrap();
-        let operation = Uuid::from_u128(9_804);
-        let mut session = open(&root, operation.as_u128());
-        session
-            .append(ConstructionChunkKind::Node, "node", &node_batch(1, 1))
-            .unwrap();
-        session.checkpoint.evidence.immutable_artifacts = 0;
-        session.checkpoint.budgets.max_chunks -= 1;
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
-        let checkpoint_path = root
-            .path()
-            .join(PRIVATE_ROOT)
-            .join(operation.simple().to_string())
-            .join(CHECKPOINT);
-        let before = std::fs::read(&checkpoint_path).unwrap();
-        drop(session);
-
-        let error = GraphConstructionSession::open(
-            root.path(),
-            operation,
-            0,
-            GraphConstructionBudgets::default(),
-        )
-        .err()
-        .expect("incompatible checkpoint must fail admission");
-        assert!(error.to_string().contains("checkpoint authority"));
-        assert_eq!(std::fs::read(checkpoint_path).unwrap(), before);
-    }
-
-    #[test]
-    fn complete_legacy_shape_intent_recovers_before_artifact_backfill() {
-        let root = TempDir::new().unwrap();
-        let operation = Uuid::from_u128(9_805);
-        let mut session = open(&root, operation.as_u128());
-        session
-            .append(ConstructionChunkKind::Node, "node", &node_batch(1, 2))
-            .unwrap();
-        session.seal().unwrap();
-        let expected_shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-
-        let mut intent_file = session
-            .root
-            .open_child_file(OsStr::new(SHAPE_INTENT))
-            .unwrap();
-        let mut intent = decode_shape_intent(&mut intent_file).unwrap();
-        intent.baseline_evidence.immutable_artifacts = 0;
-        intent.final_evidence.as_mut().unwrap().immutable_artifacts = 0;
-        session.checkpoint.evidence = intent.baseline_evidence.clone();
-        session.checkpoint.shape_authority_sha256 = None;
-        replace_control(&session.root, SHAPE_INTENT, &intent).unwrap();
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
-        drop(session);
-
-        let mut resumed = open(&root, operation.as_u128());
-        assert_eq!(resumed.evidence().immutable_artifacts, 3);
-        assert!(resumed.checkpoint.shape_authority_sha256.is_some());
-        assert_eq!(
-            resumed.shape_canonical_with_cancellation(|| false).unwrap(),
-            expected_shape
-        );
+    fn unsupported_or_incomplete_checkpoint_is_refused_before_recovery_mutation() {
+        for case in [0, 6, 7, 8, 9, 11, FORMAT_VERSION] {
+            let root = TempDir::new().unwrap();
+            let operation = Uuid::new_v4();
+            let mut session = open(&root, operation.as_u128());
+            session
+                .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+                .unwrap();
+            session.checkpoint.format_version = case;
+            if case == FORMAT_VERSION {
+                session.checkpoint.evidence.immutable_artifacts = 0;
+            }
+            replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+            let private = session.root.path().to_owned();
+            let temporary = private.join(control_temp(CHECKPOINT));
+            std::fs::write(&temporary, b"unfinished authority").unwrap();
+            let before = std::fs::read(private.join(CHECKPOINT)).unwrap();
+            let current = std::fs::read(root.path().join("CURRENT")).unwrap();
+            drop(session);
+            assert!(
+                GraphConstructionSession::open(
+                    root.path(),
+                    operation,
+                    0,
+                    GraphConstructionBudgets::default()
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(private.join(CHECKPOINT)).unwrap(), before);
+            assert_eq!(std::fs::read(temporary).unwrap(), b"unfinished authority");
+            assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
+        }
     }
 
     #[test]
@@ -10183,7 +9816,7 @@ mod tests {
             std::fs::metadata(operation_root.join(&shape.identities))
                 .unwrap()
                 .len(),
-            32
+            BASE_IDENTITY_WIDTH as u64
         );
         assert!(
             !operation_root
@@ -10229,7 +9862,7 @@ mod tests {
             u64::from_be_bytes(
                 read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
                     .unwrap()
-                    .unwrap()[24..32]
+                    .unwrap()[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
                     .try_into()
                     .unwrap()
             ),
@@ -10239,7 +9872,7 @@ mod tests {
             u64::from_be_bytes(
                 read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
                     .unwrap()
-                    .unwrap()[24..32]
+                    .unwrap()[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
                     .try_into()
                     .unwrap()
             ),
@@ -10441,6 +10074,86 @@ mod tests {
     }
 
     #[test]
+    fn packed_endpoint_wire_preserves_full_width_fields_and_refuses_malformed_roles() {
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 127_400);
+        let node = u128::MAX - 2;
+        let edge = u128::MAX;
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(node, 2))
+            .unwrap();
+        let batch = RecordBatch::try_new(
+            CONSTRUCTION_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(fixed(&[edge.to_be_bytes()])),
+                Arc::new(StringArray::from(vec!["R"])),
+                Arc::new(fixed(&[node.to_be_bytes()])),
+                Arc::new(fixed(&[(node + 1).to_be_bytes()])),
+            ],
+        )
+        .unwrap();
+        session
+            .append(ConstructionChunkKind::Edge, "edge", &batch)
+            .unwrap();
+        let receipt = session.read_receipt(1).unwrap().endpoints.unwrap();
+        let path = session.root.path().join(&receipt.name);
+        let mut golden = Vec::new();
+        for role in 0..=1_u8 {
+            golden.extend_from_slice(&(node + u128::from(role)).to_be_bytes());
+            golden.extend_from_slice(&edge.to_be_bytes());
+            golden.push(role);
+        }
+        assert_eq!(golden.len(), 66);
+        assert_eq!(std::fs::read(&path).unwrap(), golden);
+        for tail in 1..33 {
+            assert!(read_fixed::<ENDPOINT_WIDTH>(&mut &golden[..tail]).is_err());
+        }
+        let current = std::fs::read(root.path().join("CURRENT")).unwrap();
+        for malformed in [golden[..65].to_vec(), {
+            let mut bytes = golden.clone();
+            bytes[32] = 2;
+            bytes
+        }] {
+            std::fs::write(&path, &malformed).unwrap();
+            let mut authority = receipt.clone();
+            authority.bytes = malformed.len() as u64;
+            authority.sha256 = sha256(&malformed);
+            assert!(
+                authenticate_artifact(&session.root, &authority, DetailCodec::Compact).is_err()
+            );
+            assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
+        }
+        std::fs::write(&path, golden).unwrap();
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let identities = std::fs::read(session.root.path().join(&shape.identities)).unwrap();
+        let mut expected = Vec::new();
+        for (uuid, kind, surrogate) in [(node, 0_u8, 1_u64), (node + 1, 0, 2), (edge, 1, 1)] {
+            expected.extend_from_slice(&uuid.to_be_bytes());
+            expected.extend_from_slice(&[kind, 0]);
+            expected.extend_from_slice(&surrogate.to_be_bytes());
+        }
+        assert_eq!(expected.len(), 78);
+        assert_eq!(identities, expected);
+        for tail in 1..26 {
+            assert!(read_fixed::<BASE_IDENTITY_WIDTH>(&mut &expected[..tail]).is_err());
+        }
+        let resolved =
+            std::fs::read(session.root.path().join(shape.edge_endpoints.unwrap())).unwrap();
+        let mut expected = Vec::new();
+        for role in 0..=1_u8 {
+            expected.extend_from_slice(&edge.to_be_bytes());
+            expected.push(role);
+            expected.extend_from_slice(&(u64::from(role) + 1).to_be_bytes());
+        }
+        assert_eq!(expected.len(), 50);
+        assert_eq!(resolved, expected);
+        for tail in 1..25 {
+            assert!(read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut &expected[..tail]).is_err());
+        }
+    }
+
+    #[test]
     fn fixed_merge_reader_rejects_truncation_and_self_loop_is_valid() {
         assert!(read_fixed::<16>(&mut std::io::Cursor::new(vec![0_u8; 15])).is_err());
         let root = TempDir::new().unwrap();
@@ -10479,7 +10192,10 @@ mod tests {
             .unwrap();
         assert_eq!(&source[..16], &9_000_u128.to_be_bytes());
         assert_eq!((source[16], target[16]), (0, 1));
-        assert_eq!(&source[24..32], &target[24..32]);
+        assert_eq!(
+            &source[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH],
+            &target[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+        );
         assert!(
             read_fixed::<RESOLVED_ENDPOINT_WIDTH>(&mut resolved)
                 .unwrap()
@@ -11011,6 +10727,27 @@ mod tests {
         let intent: ShapeIntent =
             serde_json::from_slice(&std::fs::read(root.join(SHAPE_INTENT)).unwrap()).unwrap();
         if intent.complete {
+            // Reopen authenticates the completed successor before retirement;
+            // the original successful shape already included its own pass.
+            for receipt in &intent.outputs {
+                let bytes = std::fs::metadata(root.join(&receipt.name)).unwrap().len();
+                assert_eq!(bytes, receipt.bytes);
+                assert!(bytes <= graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES);
+                evidence.recovery_application_read_bytes += bytes;
+                evidence.recovery_application_read_operations += bytes.div_ceil(BLOCK_BYTES as u64);
+                if bytes != 0 {
+                    if cfg!(target_os = "linux") {
+                        evidence.cache_release_operations += 1;
+                        evidence.cache_released_bytes += bytes;
+                    } else {
+                        evidence.cache_release_unsupported_operations += 1;
+                    }
+                    evidence.peak_cache_release_window_bytes =
+                        evidence.peak_cache_release_window_bytes.max(bytes);
+                }
+            }
+            // Reopen seals the retirement checkpoint, then its recovery-I/O checkpoint.
+            evidence.recovery_checkpoint_fsync_operations += 6;
             return;
         }
         let mut controls = 0;
@@ -11775,7 +11512,9 @@ mod tests {
                 .evidence()
                 .cache_release_operations
                 .saturating_sub(cache_after_first),
-            second.invocation.evidence.cache_release_operations
+            // Entry and exit successor authentication each read the same
+            // encoded payloads once, in addition to encoder reuse authentication.
+            3 * second.invocation.evidence.cache_release_operations
         );
     }
 
@@ -11924,10 +11663,20 @@ mod tests {
                 changed = true;
             }
         })));
-        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        let result = session.encode_canonical(&shape, 1);
         crate::graph_construction_encoding::set_source_spool_hook(None);
-        assert!(encoded.evidence.source_spool_read_bytes > 0);
-        assert_ne!(std::fs::read(source).unwrap()[0], original);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("supersession payload digest changed")
+        );
+        assert_ne!(std::fs::read(&source).unwrap()[0], original);
+        let mut bytes = std::fs::read(&source).unwrap();
+        bytes[0] = original;
+        std::fs::write(source, bytes).unwrap();
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        assert!(encoded.invocation.reused);
     }
 
     #[test]
@@ -11963,7 +11712,12 @@ mod tests {
         )
         .unwrap();
         let error = session.encode_canonical(&shape, 1).unwrap_err();
-        assert!(error.to_string().contains("checkpoint inventory authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("supersession encoding authority changed"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -12115,8 +11869,8 @@ mod tests {
     #[test]
     fn generation_two_parent_index_is_structurally_referenced_without_payload_copy() {
         let project = nonempty_project_generation_two();
-        assert!(!crate::has_runtime_entity_label_encoding_marker(
-            project.path()
+        assert!(crate::has_runtime_entity_label_encoding_marker(
+            &project.path().join("fixture-graph")
         ));
         let operation = Uuid::from_u128(9_340);
         let mut session = GraphConstructionSession::open(
@@ -12132,13 +11886,6 @@ mod tests {
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoded = session.encode_canonical(&shape, 3).unwrap();
-        assert!(
-            encoded
-                .artifacts
-                .iter()
-                .all(|artifact| artifact.path != "topology/runtime_entity_label_encoding.json"),
-            "an append cannot certify the label encoding of an unmarked legacy parent"
-        );
         assert_eq!(encoded.evidence.retained_index_payload_bytes, 0);
         assert_eq!(encoded.evidence.retained_topology_bytes_copied, 0);
         assert_eq!(encoded.evidence.prior_topology_rows_decoded, 0);
@@ -12146,7 +11893,12 @@ mod tests {
         let index_outputs = encoded
             .artifacts
             .iter()
-            .filter(|artifact| artifact.path.contains("uuid-membership"))
+            .filter(|artifact| {
+                artifact.path.contains("uuid-membership")
+                    && !artifact.path.contains("ordinal-v4")
+                    && !artifact.path.contains("forward-v4")
+                    && !artifact.path.contains("tombstones-v4")
+            })
             .count();
         // New identity + reverse runs and the new manifest. The retained base
         // and level-one descriptors remain structural references.
@@ -12172,55 +11924,46 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unshaped_parent_phase_checkpoint_repairs_only_exact_omission() {
+    fn current_parent_phase_checkpoint_refuses_omission_without_rewrite() {
         let project = nonempty_project_generation_two();
-        let operation = Uuid::from_u128(1157);
-        let open = || {
-            GraphConstructionSession::open_with_mode(
+        let operation = Uuid::new_v4();
+        let mut session = GraphConstructionSession::open(
+            project.path(),
+            operation,
+            2,
+            GraphConstructionBudgets::default(),
+        )
+        .unwrap();
+        assert!(session.evidence().authentication_read_bytes > 0);
+        for shaped in [false, true] {
+            let mut malformed = session.checkpoint.clone();
+            malformed.evidence.seal_application_read_bytes = 0;
+            if shaped {
+                malformed.shape_authority_sha256 = Some("0".repeat(64));
+            }
+            assert!(validate_parent_phase_bytes(&malformed).is_err());
+            assert_eq!(malformed.evidence.seal_application_read_bytes, 0);
+        }
+        session.checkpoint.evidence.seal_application_read_bytes = 0;
+        replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
+        let path = session.root.path().join(CHECKPOINT);
+        let before = std::fs::read(&path).unwrap();
+        drop(session);
+        assert!(
+            GraphConstructionSession::open(
                 project.path(),
                 operation,
                 2,
-                graphforge_core::OntologyMode::Exploratory,
-                GraphConstructionBudgets::default(),
+                GraphConstructionBudgets::default()
             )
-            .unwrap()
-        };
-        let mut session = open();
-        let bytes = session.evidence().authentication_read_bytes;
-        assert!(bytes > 0);
-        session.checkpoint.evidence.seal_application_read_bytes = 0;
-        replace_checkpoint_control(&session.root, &session.checkpoint).unwrap();
-        drop(session);
-        let session = open();
-        assert_eq!(session.evidence().seal_application_read_bytes, bytes);
-        let mut malformed = session.checkpoint.clone();
-        malformed.evidence.seal_application_read_bytes = bytes + 1;
-        assert!(repair_unshaped_parent_phase_bytes(&mut malformed).is_err());
-        let mut wrong_shape = session.checkpoint.clone();
-        wrong_shape.evidence.shape_application_read_bytes =
-            wrong_shape.evidence.parent_catalog_read_bytes + 1;
-        assert!(repair_unshaped_parent_phase_bytes(&mut wrong_shape).is_err());
-        let mut bound = session.checkpoint.clone();
-        bound.evidence.seal_application_read_bytes = 0;
-        bound.shape_authority_sha256 = Some("0".repeat(64));
-        assert!(repair_unshaped_parent_phase_bytes(&mut bound).is_err());
-        assert_eq!(bound.evidence.seal_application_read_bytes, 0);
+            .is_err()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]
     fn parent_phase_observations_survive_staging_sealed_and_shaped_resumes() {
         let project = nonempty_project_generation_two();
-        let mut catalog = RuntimeCatalog::new();
-        catalog.intern_label_at("Person", 1).unwrap();
-        let batch = catalog.to_record_batch();
-        let mut writer = ArrowWriter::try_new(
-            File::create(project.path().join("topology/runtime_catalog.parquet")).unwrap(),
-            batch.schema(),
-            None,
-        )
-        .unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
         let operation = Uuid::from_u128(1156);
         let open = || {
             GraphConstructionSession::open(
@@ -12258,6 +12001,16 @@ mod tests {
             }
             for _ in 0..2 {
                 let before = session.evidence().clone();
+                let outputs = if stage == 2 {
+                    read_completed_shape_outputs(&session.root, &session.checkpoint).unwrap()
+                } else {
+                    Vec::new()
+                };
+                let successor_bytes: u64 = outputs.iter().map(|receipt| receipt.bytes).sum();
+                let successor_calls: u64 = outputs
+                    .iter()
+                    .map(|receipt| receipt.bytes.div_ceil(BLOCK_BYTES as u64))
+                    .sum();
                 drop(session);
                 session = open();
                 let after = session.evidence();
@@ -12287,17 +12040,17 @@ mod tests {
                 );
                 assert_eq!(
                     after.recovery_application_read_bytes - before.recovery_application_read_bytes,
-                    parent_bytes
+                    parent_bytes + successor_bytes
                 );
                 assert_eq!(
                     after.recovery_application_read_operations
                         - before.recovery_application_read_operations,
-                    parent_calls
+                    parent_calls + successor_calls
                 );
                 assert_eq!(
                     after.recovery_checkpoint_fsync_operations
                         - before.recovery_checkpoint_fsync_operations,
-                    3
+                    if stage == 2 { 9 } else { 3 }
                 );
                 assert_eq!(after.fsync_operations, before.fsync_operations);
                 crate::ConstructionPhaseAttribution::from_construction(after)
@@ -12325,15 +12078,31 @@ mod tests {
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         let encoded = session.encode_canonical(&shape, 3).unwrap();
-        let retained = encoded.retained_artifacts.first().unwrap();
+        let retained = encoded
+            .retained_artifacts
+            .iter()
+            .find(|artifact| artifact.bytes > 0)
+            .unwrap();
         let path = std::path::Path::new(&retained.source_root).join(&retained.source_path);
-        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         use std::io::{Seek as _, SeekFrom};
         file.seek(SeekFrom::Start(0)).unwrap();
         file.write_all(&[0xff]).unwrap();
         file.sync_all().unwrap();
+        drop(file);
+        std::fs::set_permissions(&path, original_permissions).unwrap();
         let error = session.encode_canonical(&shape, 3).unwrap_err();
-        assert!(error.to_string().contains("retained construction"));
+        assert!(error.to_string().contains("digest"), "{error}");
     }
 
     #[test]
@@ -12365,7 +12134,9 @@ mod tests {
             .join(operation.simple().to_string())
             .join(&encoded.root)
             .join("graph");
-        let parent_index = project.path().join("topology/uuid-membership");
+        let parent_index = project
+            .path()
+            .join("fixture-graph/topology/uuid-membership");
         let encoded_index = graph.join("topology/uuid-membership");
         let parent_manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(parent_index.join("manifest.json")).unwrap())
@@ -12389,11 +12160,10 @@ mod tests {
     fn parent_uuid_path_substitution_is_rejected_before_encoding() {
         let project = nonempty_project_with_nodes(2);
         let operation = Uuid::from_u128(9_342);
-        let mut session = GraphConstructionSession::open_with_mode(
+        let mut session = GraphConstructionSession::open(
             project.path(),
             operation,
             1,
-            graphforge_core::OntologyMode::Exploratory,
             GraphConstructionBudgets::default(),
         )
         .unwrap();
@@ -12402,16 +12172,17 @@ mod tests {
             .unwrap();
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        let membership = project.path().join("topology/uuid-membership");
-        let victim = std::fs::read_dir(&membership)
+        let inventory = crate::resolve_project_generation(project.path())
             .unwrap()
-            .map(Result::unwrap)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "uuidx")
-            })
+            .graph_files_inventory()
+            .unwrap()
             .unwrap();
+        let victim = inventory
+            .files
+            .iter()
+            .find(|entry| entry.relative_path.contains("/identities-") && entry.byte_length != 0)
+            .unwrap();
+        let victim = crate::graph_object_path(project.path(), &victim.content_sha256).unwrap();
         let saved = victim.with_extension("uuidx.saved");
         std::fs::rename(&victim, &saved).unwrap();
         std::fs::copy(&saved, &victim).unwrap();
@@ -12490,6 +12261,23 @@ mod tests {
             .unwrap()
     }
 
+    fn publish_session(
+        session: &mut GraphConstructionSession,
+        target: Uuid,
+        transaction: Uuid,
+    ) -> crate::ProjectPublicationReceipt {
+        let output = session
+            .root
+            .open_child_directory(OsStr::new("encoded-v1"))
+            .unwrap();
+        let encoded = crate::graph_construction_encoding::read_inventory(&output)
+            .unwrap()
+            .unwrap();
+        session
+            .publish_canonical(&encoded, target, transaction)
+            .unwrap()
+    }
+
     #[test]
     fn publication_state_is_idempotent_and_rejects_changed_target() {
         let root = TempDir::new().unwrap();
@@ -12513,7 +12301,7 @@ mod tests {
                 .to_string()
                 .contains("target changed")
         );
-        let published = publish_empty_generation(&root, target, transaction);
+        let published = publish_session(&mut session, target, transaction);
         let digest = hex(&published.generation_manifest_sha256);
         let receipt = session.finish_publication(target, &digest).unwrap();
         assert_eq!(
@@ -13095,9 +12883,12 @@ mod tests {
         let mut session = encoded_publication_session(&root, operation);
         session.begin_publication(target, transaction).unwrap();
         session.checkpoint.publication_state = Some(ConstructionPublicationState::Sealed);
-        replace_control(&session.root, CHECKPOINT, &session.checkpoint).unwrap();
+        let interrupted = session.checkpoint.clone();
+        session.checkpoint.publication_state = Some(ConstructionPublicationState::Publishing);
+        let published = publish_session(&mut session, target, transaction);
+        replace_control(&session.root, CHECKPOINT, &interrupted).unwrap();
+        unlink_named(&session.root, PUBLICATION_RECEIPT).unwrap();
         drop(session);
-        let published = publish_empty_generation(&root, target, transaction);
         publish_empty_generation(&root, Uuid::from_u128(9_413), Uuid::from_u128(9_414));
         let mut reopened = GraphConstructionSession::open(
             root.path(),
@@ -13213,7 +13004,7 @@ mod tests {
         let target = Uuid::from_u128(9_451);
         let transaction = Uuid::from_u128(9_452);
         session.begin_publication(target, transaction).unwrap();
-        let target_receipt = publish_empty_generation(&root, target, transaction);
+        let target_receipt = publish_session(&mut session, target, transaction);
         let construction_receipt = session
             .finish_publication(target, &hex(&target_receipt.generation_manifest_sha256))
             .unwrap();

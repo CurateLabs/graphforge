@@ -35,6 +35,26 @@ The peak floor was selected from baseline identity-root bytes before implementat
 
 The first #1268 CI run exposed an aggregate-peak derivative false positive. [#1272 evidence](evidence/lifecycle-peak-envelope-1272.md) preserves that failed run and the stronger corrected growth envelope; the focused gate repair merged separately before this change was refreshed.
 
+## Capacity follow-up: packed construction records (#1274)
+
+[The frozen comparison](evidence/packed-construction-records-1274.json) uses the post-#1268 retirement implementation as its baseline. Current construction format 10 packs endpoint records from 48 to 33 bytes, resolved endpoints from 32 to 25, and shaped identities from 32 to 26. UUIDs, roles, retained markers and 64-bit surrogates remain exact. The permanent membership record remains 25 bytes. Earlier private construction formats and omitted old counters are refused; their readers and backfills are removed. Historical evidence retains its original format and measurements.
+
+| Edges (8,192 nodes) | Baseline shaping peak B | Packed peak B | Logical shape reads B, before → after | Merge writes B, before → after |
+| --- | --- | --- | --- | --- |
+| 32,768 | 18,513,920 | 15,319,040 | 54,544,436 → 45,926,452 | 37,339,136 → 29,736,960 |
+| 65,536 | 35,979,264 | 29,638,656 | 124,245,316 → 104,027,460 | 89,112,576 → 70,828,032 |
+| 131,072 | 70,909,952 | 58,277,888 | 282,652,710 → 235,958,310 | 208,519,168 → 165,593,088 |
+
+All three observations reproduced these exact values. Allocated shaping peaks fall 17.26–17.81%, logical shape reads 15.80–16.52%, and merge writes 20.36–20.59%. Retained construction allocation falls 6,950,912/13,307,904/26,021,888 → 6,246,400/11,948,032/23,351,296 bytes. Each deterministic peak ceiling was selected before implementation as the frozen baseline minus 14 bytes per edge; logical reads and writes must also fall at every scale. The maximum is measured across allocation transitions, not estimated by adding independently retained streams.
+
+Across each full 1x/2x/4x invocation, baseline CPU observations were 4.73/4.89/4.79 seconds; packed observations were 4.43/4.76/4.63. Observed RSS maxima were 49,976 → 50,468 KiB, a 492 KiB increase. All candidate runs pass the preselected 5.21-second CPU and 54,072-KiB RSS diagnostic ceilings. Kernel process-accounted filesystem input blocks fall 1,693,576 → 1,509,928, and output blocks 895,616 → 747,776 in each run. These blocks are distinct from logical byte counters; RSS excludes page-cache/cgroup ownership and is not a hard memory bound. Observations were sequential, not randomized, and CPU ranges overlap; no causal latency improvement is claimed.
+
+Both measured executables use Rust 1.96.0, the same lockfile and optimized release profile, and were copied and hashed before timing without overlapping builds. Candidate source is `5165ad4299bb70c97c64af5972b3efec54ca1abb`; executable SHA-256 is `ad3a8d19e86078b43e801cba6b77dcf625d39fffcb7c6a9a5d5e35c26afe4066`. The earlier debug executable and failed freeze-helper launch are explicitly excluded, with failed/superseded evidence retained in the comparison ledger.
+
+Current-format tests cover exact packed bytes, full-width UUIDs and surrogates, every partial-record tail, invalid roles/kinds/markers, unsupported checkpoints before cleanup, canonical parent reuse, corruption, cancellation and crash recovery. The frozen storage suite passed 1,105 tests with two existing ignored tests; its only failure is the known #1192 hardcoded `/tmp` filesystem-class fixture on this host. Workspace Clippy, formatting, `make pre-push-fast` and `make gate-registry-check` passed. `cargo test -p graphforge-api --lib resumable_construction::` passed all five public lifecycle tests; `cargo test -p graphforge-api --test permanent_storage_budgets publishing_contract_` passed all four publishing-path contracts. Exact-head CI is recorded in #1274 before merge.
+
+This paired fixture proves a material construction improvement, not final host capacity. The existing host results below predate #1268/#1274; merged integration will rerun only the admitted S18/S19/S20/S22 ladder on the same host and reserve. No S24/S26 workload or new certification workflow is introduced.
+
 ## Public publishing and correctness
 
 The [current publishing contract](../book/architecture/storage.md#current-publishing-contract) and [#1221 evidence](evidence/publishing-contract-1221.json) cover public construction, ordinary mutation, property replay, compaction, ontology publication, projections, portable clean import and participant writers. All verified permanent Parquet publishers use the shared policy; replay and compaction retain it. Separate lifecycle implementations remain.

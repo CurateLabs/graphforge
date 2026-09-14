@@ -469,8 +469,8 @@ mod lifecycle_budget {
     #[test]
     fn construction_lifecycle_multilevel_allocation_baseline() {
         for scale in [1_u64, 2, 4] {
-            let mut before = None;
-            for version in [8, 9] {
+            {
+                let version = FORMAT_VERSION;
                 let root = TempDir::new().unwrap();
                 crate::open_or_initialize_project(root.path()).unwrap();
                 let budgets = GraphConstructionBudgets {
@@ -479,7 +479,7 @@ mod lifecycle_budget {
                     max_run_records: 16384,
                     ..Default::default()
                 };
-                let mut session = GraphConstructionSession::open_internal_with_format(
+                let mut session = GraphConstructionSession::open_internal_with_allocation(
                     root.path(),
                     root.path(),
                     Uuid::new_v4(),
@@ -489,7 +489,6 @@ mod lifecycle_budget {
                     budgets,
                     crate::filesystem_admission::ProjectLifecycleMode::Durable,
                     None,
-                    version,
                 )
                 .unwrap();
                 for chunk in 0..2 {
@@ -546,28 +545,18 @@ mod lifecycle_budget {
                 let peak = session
                     .evidence()
                     .storage_transient_peak_total_allocated_bytes;
-                if version == 8 {
-                    before = Some((current, peak, shape_peak));
-                } else {
-                    let (old_current, old_peak, old_shape_peak) = before.unwrap();
-                    // Compression can move both variants' maximum into shaping,
-                    // before retirement can reduce it. Keep the strict retention
-                    // benefit, no peak regression against the compressed control,
-                    // and a strict reduction against the source-bound uncompressed
-                    // v8 baseline in construction-supersession.md (#1195).
-                    assert!(current * 2 < old_current);
-                    assert!(peak <= old_peak);
-                    let uncompressed_peak = match scale {
-                        1 => 23_425_024,
-                        2 => 44_494_848,
-                        4 => 86_634_496,
-                        _ => unreachable!("fixed fixture scales"),
-                    };
-                    assert!(peak < uncompressed_peak);
-                    if peak == old_peak {
-                        assert_eq!(peak, shape_peak);
-                        assert_eq!(old_peak, old_shape_peak);
-                    }
+                // Frozen historical source-bound budgets remain evidence; current
+                // execution never recreates retired on-disk formats.
+                let (retained_ceiling, peak_ceiling) = match scale {
+                    1 => (11_407_360, 23_425_024),
+                    2 => (21_958_656, 44_494_848),
+                    4 => (43_061_248, 86_634_496),
+                    _ => unreachable!("fixed fixture scales"),
+                };
+                assert!(current < retained_ceiling);
+                assert!(peak < peak_ceiling);
+                assert!(shape_peak <= peak);
+                {
                     assert_eq!(
                         session.evidence().current_merge_temporary_allocated_bytes,
                         0
@@ -827,6 +816,27 @@ mod lifecycle_budget {
                 4 => 79_560_704,
                 _ => unreachable!(),
             };
+            let retirement_peak = match scale {
+                1 => 18_513_920,
+                2 => 35_979_264,
+                4 => 70_909_952,
+                _ => unreachable!(),
+            };
+            assert!(
+                session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes
+                    <= retirement_peak - 14 * 32768 * scale
+            );
+            let (baseline_reads, baseline_writes) = match scale {
+                1 => (54_544_436, 37_339_136),
+                2 => (124_245_316, 89_112_576),
+                4 => (282_652_710, 208_519_168),
+                _ => unreachable!("fixed fixture scales"),
+            };
+            assert!(session.evidence().shape_application_read_bytes < baseline_reads);
+            assert!(session.evidence().merge_written_bytes < baseline_writes);
+
             let obsolete_identity_bytes = 32 * (8192 + 32768 * scale);
             // The preselected identity-root floor passed; retain the additional
             // measured benefit from deferring the final online carry insertion.
@@ -1105,7 +1115,8 @@ mod lifecycle_budget {
             let root = StableDirectory::open(temporary.path()).unwrap();
             let mut identity = [0_u8; BASE_IDENTITY_WIDTH];
             identity[..16].copy_from_slice(&1_u128.to_be_bytes());
-            identity[24..32].copy_from_slice(&1_u64.to_be_bytes());
+            identity[IDENTITY_SURROGATE_OFFSET..BASE_IDENTITY_WIDTH]
+                .copy_from_slice(&1_u64.to_be_bytes());
             std::fs::write(temporary.path().join("identities.run"), identity).unwrap();
             let mut endpoint = [0_u8; ENDPOINT_WIDTH];
             endpoint[..16].copy_from_slice(&1_u128.to_be_bytes());
@@ -1116,12 +1127,18 @@ mod lifecycle_budget {
             std::fs::write(&path, &malformed).unwrap();
             let mut evidence = GraphConstructionEvidence::default();
             for category in crate::ArtifactCategory::ALL {
-                evidence.storage_current.insert(category, Default::default());
+                evidence
+                    .storage_current
+                    .insert(category, Default::default());
                 evidence
                     .storage_receipt_category_authorities
                     .insert(category, Default::default());
-                evidence.storage_transient_peak_allocated_bytes.insert(category, 0);
-                evidence.storage_receipt_transient_peak_authorities.insert(category, 0);
+                evidence
+                    .storage_transient_peak_allocated_bytes
+                    .insert(category, 0);
+                evidence
+                    .storage_receipt_transient_peak_authorities
+                    .insert(category, 0);
             }
             let error = resolve_endpoint_surrogates(
                 &root,

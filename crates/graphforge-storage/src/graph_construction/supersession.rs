@@ -12,7 +12,7 @@ use super::{
 
 impl GraphConstructionSession {
     pub(super) fn has_encoding_successor(&self) -> bool {
-        self.checkpoint.format_version >= 9 && self.checkpoint.encoding_inventory_sha256.is_some()
+        self.checkpoint.encoding_inventory_sha256.is_some()
     }
 
     pub(super) fn reclaim_superseded_payloads(&mut self) -> Result<(), GfError> {
@@ -24,7 +24,7 @@ impl GraphConstructionSession {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), GfError> {
         super::reject_cancelled(cancelled)?;
-        if self.checkpoint.format_version < 9 || self.checkpoint.shape_authority_sha256.is_none() {
+        if self.checkpoint.shape_authority_sha256.is_none() {
             return Ok(());
         }
         // Retained parent payloads are authenticated through counted CAS reads

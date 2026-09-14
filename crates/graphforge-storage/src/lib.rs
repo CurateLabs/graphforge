@@ -57,6 +57,7 @@ pub use graph_projection::{
 };
 
 mod construction_detail_codec;
+mod construction_record_layout;
 pub mod graph_construction;
 mod graph_construction_encoding;
 pub use graph_construction::{
