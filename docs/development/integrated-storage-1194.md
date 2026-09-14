@@ -245,3 +245,80 @@ The existing [native S20/S22 qualification](evidence/integrated-storage-1194/s20
 At this available-capacity sample, preserving the reserve requires projected demand at or below 558,427,989,401 bytes: another 30,096,125,885 bytes of available capacity or a 5.11% reduction in projected demand would remove this planning deficit. Neither is demonstrated here. The final close gate still requires the existing ladder’s admitted S24/S25 observations and actual S26 evidence for at least one billion live persisted edges, the complete public lifecycle, reconciled identities and resource envelopes. Those rungs were not authorized or executed in this follow-up.
 
 The native S20/S22 qualification is a capacity projection, not S26 execution or publication certification. Final capacity/S26 remains open in #1194/#900/#745: a lower-rung projection does not establish the final execution outcome. #901 is already closed; #1276 tracks this authorized follow-up evidence through required CI and merge.
+
+
+## Lifecycle runtime investigation (#1279)
+
+The [reproducible baseline](evidence/lifecycle-runtime-1279-baseline.json) is
+produced by the native rung reader and the existing projection implementation:
+
+```bash
+PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime \
+  --evidence docs/development/evidence/integrated-storage-1194
+```
+
+Both receipts must pass schema, artifact-hash and recomputed-summary validation,
+and their source, executable, generator, host and measurement-tool identities
+must agree. The report uses the historical S22 disk sample, not current free
+space. S24 projects to 6,975 seconds and passes time and work-rate headroom;
+process RSS growth still refuses admission. S25 (14,031 seconds) and S26
+(28,143 seconds) are diagnostic extrapolations only. Actual adjacent-rung
+observations remain required. The 14,400-second limit and 20% time headroom
+are unchanged.
+
+At S20/S22, respectively, 23.213/101.776 seconds of ingest lie outside the
+recorded construction calls. Another 9.489/35.009 seconds of whole-lifecycle
+wall time lie outside summed phase durations. These residuals include
+unmeasured work and timing precision; they are not isolated CPU costs.
+Construction I/O, physical I/O, process RSS and cgroup memory retain separate
+scopes in the report.
+
+### External baseline attribution
+
+[Host profiling observations](evidence/lifecycle-runtime-1279-profile.json)
+retain executable and raw-artifact hashes. Frozen `710c6c64` executables ran
+the unmodified ordinary S18 profile on OVHC-AGENCY, including exact source and
+imported counts, canonical queries, full verification and clean import. These
+direct diagnostic executions are not BenchExec ladder receipts and do not
+admit any successor. All four diagnostic executions matched source/imported
+query-result hashes.
+
+| Probed baseline scope | Calls | Inclusive wall seconds |
+| --- | ---: | ---: |
+| Seal and prepare | 1 | 43.565 |
+| Fixed-record merge groups | 16 | 11.411 |
+| Parquet row merge groups | 4 | 15.838 |
+| Canonical encoder | 1 | 6.315 |
+| Explicit construction artifact authentication | 68 | 0.221 |
+| Construction open, including recovery | 2 | 0.230 |
+| Encoding inventory authentication | 3 | 0.527 |
+
+The 198 entry/return events pair without unmatched events. Parent scopes
+include children: **do not sum this table**. The seal-and-prepare residual
+after subtracting observed child probes is 9.602 seconds; it includes remaining
+shaping/control work and unprobed children. Authentication inside readers,
+writers and merge groups remains inside those scopes. These observations do
+not assert isolated CPU cost or attribute every lifecycle instruction.
+
+Whole-lifecycle CPU sampling found SHA-256 compression at 15.60% of samples
+inside `gf`, Zstd's double-fast compression routine at 4.62%, and construction
+record encoding at 2.26%. The separate syscall trace observed 7,279 sync calls
+inside import validation (2.802 seconds) and 893 inside commit (0.185 seconds).
+Sync latency overlaps the enclosing commands and differs from kernel CPU time.
+The 1×/2×/4× shaping fixture separately observed 9,590 sync calls, taking 1.109
+seconds under tracing. Tracing changed that fixture's wall time from 6.03 to
+13.14 seconds; traced times are not throughput measurements.
+
+Profiles used `perf record -F 199 -e cpu-clock --call-graph dwarf`, timestamp-only
+`perf probe --no-demangle` entry/return events on the frozen executable, and
+`strace -f -ttt -T -e trace=fsync,fdatasync,execve`. The fixture syscall summary
+also traces reads, writes and cache advice with `strace -f -c -w`. No graph
+arguments were attached to probes. The temporary `gf1279` probes were removed
+after collection. Raw traces remain on the host; checked-in evidence contains
+only sanitized observations and hashes.
+
+No cache drop was used. Sibling compilation overlapped portions of diagnostic
+captures; our build was paused during entry/return capture. These are scoped
+work observations, not a statistical overhead estimate or a controlled
+before/after speedup. The ordinary historical receipts remain the authority
+for admission. Fresh comparable integration still waits for the RSS repair.
