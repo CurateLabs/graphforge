@@ -223,6 +223,17 @@ The [owned-build reclamation ledger](evidence/integrated-storage-1194/owned-buil
 
 The summary retains the pre-cleanup freeze capacity. Final native qualification instead measures actual available capacity after all accepted rung workspaces are reclaimed. Its projected deficit is 30,096,125,885 bytes and spare capacity after the declared reserve is 0 bytes. Neither projection is an S26 execution.
 
+## RSS admission diagnosis (#1278)
+
+The [query RSS diagnosis](evidence/query-rss-1278.md) preserves the unchanged full
+S24 refusal and exercises the public lifecycle plus 72 independently checked
+query observations at S16/S17/S18. Allocation traces confirm that adjacency
+rebuild merge readers consume 1 MiB per concurrently open run, alongside retained
+accumulators and CSR serialization state. The 16/64-reader S20/S22 working-set
+increase is a concrete repair target; it is an extrapolation from the smaller
+traces, not a new S20/S22 measurement or a repaired admission pass. The historical
+RSS refusal and #1278 remain open.
+
 ## Acceptance ledger and remaining capacity
 
 | #901 acceptance criterion | Direct evidence and outcome |
