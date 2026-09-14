@@ -1,0 +1,379 @@
+{
+  "all_construction_counters_identical": true,
+  "binaries": {
+    "baseline": {
+      "gf": "18625f292da44d70c22e7c51190996efed3a1a874f5deafac1eaa264438b9eba",
+      "graphforge-benchmark-certify": "578b64c91590c1d93be1a36c89c3c88374907b38661651287d32a1c50457f369",
+      "graphforge-benchmark-graph500-generator": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551"
+    },
+    "candidate": {
+      "gf": "856f8571bf8ba0b554654475ff30ecf4df9b765c107e538184278fe9bc7fec4e",
+      "graphforge-benchmark-certify": "578b64c91590c1d93be1a36c89c3c88374907b38661651287d32a1c50457f369",
+      "graphforge-benchmark-graph500-generator": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551"
+    }
+  },
+  "claim": "ordinary_s18_correctness_and_diagnostic_timing_only",
+  "commands": [
+    "systemd-run --user --scope --quiet --collect --slice=benchexec --unit=gf1279-{baseline|candidate} -p MemoryMax=4294967296 /usr/bin/time -v -o {label}.time timeout 14400 {frozen-bin}/graphforge-benchmark-certify run benchmarks/profiles/graph500/s18-local.json {label}.json"
+  ],
+  "construction_application_io": {
+    "phases": {
+      "append_merge": {
+        "block_count": 0,
+        "fsync_calls": 0,
+        "object_count": 68,
+        "read_bytes": 0,
+        "read_calls": 0,
+        "write_bytes": 781593496,
+        "write_calls": 2004
+      },
+      "cas_install_read_write": {
+        "block_count": 0,
+        "fsync_calls": 791,
+        "object_count": 0,
+        "read_bytes": 162782947,
+        "read_calls": 2824,
+        "write_bytes": 162625988,
+        "write_calls": 2674
+      },
+      "encode_write_postwrite_authentication": {
+        "block_count": 0,
+        "fsync_calls": 188,
+        "object_count": 0,
+        "read_bytes": 1442843347,
+        "read_calls": 41218,
+        "write_bytes": 368025637,
+        "write_calls": 9780
+      },
+      "fsync_synchronization": {
+        "block_count": 0,
+        "fsync_calls": 2566,
+        "object_count": 0,
+        "read_bytes": 0,
+        "read_calls": 0,
+        "write_bytes": 0,
+        "write_calls": 0
+      },
+      "hydration_verification": {
+        "block_count": 0,
+        "fsync_calls": 16,
+        "object_count": 0,
+        "read_bytes": 172952198,
+        "read_calls": 2657,
+        "write_bytes": 10511291,
+        "write_calls": 164
+      },
+      "publication_preauthentication": {
+        "block_count": 0,
+        "fsync_calls": 0,
+        "object_count": 0,
+        "read_bytes": 27665,
+        "read_calls": 3,
+        "write_bytes": 0,
+        "write_calls": 0
+      },
+      "recovery_reauthentication": {
+        "block_count": 0,
+        "fsync_calls": 0,
+        "object_count": 0,
+        "read_bytes": 3708296467,
+        "read_calls": 6126,
+        "write_bytes": 0,
+        "write_calls": 0
+      },
+      "seal_authentication": {
+        "block_count": 0,
+        "fsync_calls": 0,
+        "object_count": 0,
+        "read_bytes": 0,
+        "read_calls": 0,
+        "write_bytes": 0,
+        "write_calls": 0
+      },
+      "shape_consume_reauthentication": {
+        "block_count": 6120,
+        "fsync_calls": 0,
+        "object_count": 0,
+        "read_bytes": 4024521536,
+        "read_calls": 67878,
+        "write_bytes": 3007963183,
+        "write_calls": 3625
+      }
+    },
+    "totals": {
+      "block_count": 6120,
+      "fsync_calls": 3561,
+      "object_count": 68,
+      "read_bytes": 9511424160,
+      "read_calls": 120706,
+      "write_bytes": 4330719595,
+      "write_calls": 18247
+    }
+  },
+  "environment": {
+    "build_profile": "release opt-level=3 debuginfo=0",
+    "executable_resolution": "PATH begins with corresponding frozen executable directory",
+    "host": "OVHC-AGENCY",
+    "root_filesystem": "ext4",
+    "temporary_files": "native ext4",
+    "toolchain": "rustc 1.96.0",
+    "working_directories": "separate fresh baseline and candidate roots"
+  },
+  "exact_source_imported_results_match_across_runs": true,
+  "issue": 1279,
+  "limitations": [
+    "Single sequential pair, not a statistical speedup claim. Sibling RSS profiling overlapped baseline samples; timings are diagnostic.",
+    "No manual cache dropping or profiler attached to either lifecycle process. Observed competing-process samples do not prove an otherwise idle host.",
+    "GNU time physical I/O blocks, process peak RSS, construction logical I/O and phase wall time have distinct scopes.",
+    "These direct ordinary executions are not BenchExec accepted ladder receipts and do not establish post-repair admission. Shared comparable prefix waits for runtime and RSS repair integration; maximum S22.",
+    "Timeout, cgroup memory limit, generator, ordinary lifecycle and verification are unchanged. No S24-S26 execution."
+  ],
+  "observations": {
+    "baseline": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 2200384239,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 220226656,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 4094541045,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 958487,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 41242886054,
+            "errors": 0
+          }
+        }
+      },
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634600,
+        "filesystem_output_blocks": 14451840,
+        "maximum_rss_kib": 179232,
+        "system_cpu_seconds": 16.44,
+        "user_cpu_seconds": 63.4,
+        "wall_seconds": 88.65
+      },
+      "phase_wall_ms": {
+        "admission": 10,
+        "clean_import": 2361,
+        "export": 1695,
+        "generate": 1614,
+        "ingest": 53042,
+        "query": 9628,
+        "recount": 1656,
+        "reopen": 2789,
+        "reopen_proof": 13242,
+        "verify": 223
+      }
+    },
+    "candidate": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 1927522191,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 206899547,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 4134823721,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 955298,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 35371474273,
+            "errors": 0
+          }
+        }
+      },
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634600,
+        "filesystem_output_blocks": 14451832,
+        "maximum_rss_kib": 178188,
+        "system_cpu_seconds": 16.1,
+        "user_cpu_seconds": 58.05,
+        "wall_seconds": 82.55
+      },
+      "phase_wall_ms": {
+        "admission": 10,
+        "clean_import": 2472,
+        "export": 1675,
+        "generate": 1616,
+        "ingest": 47063,
+        "query": 9472,
+        "recount": 1720,
+        "reopen": 2752,
+        "reopen_proof": 12998,
+        "verify": 254
+      }
+    }
+  },
+  "protocol": {
+    "baseline_source": "710c6c64f4718c0664d08bdd3aafe21de4a29eba",
+    "cache_policy": "no manual cache drop; normal product cache release unchanged",
+    "candidate_source": "26372229c05ad6a97af9a2222d5412b2b5a914a2",
+    "cgroup_memory_max_bytes": 4294967296,
+    "claim": "ordinary S18 diagnostic comparison, not adjacent-rung admission",
+    "competing_build_or_symbolized_diagnostic_samples": {
+      "baseline": {
+        "observed_process_names": [
+          "cargo",
+          "gf-symbolized"
+        ],
+        "sample_count": 20
+      },
+      "candidate": {
+        "observed_process_names": [],
+        "sample_count": 0
+      }
+    },
+    "order": [
+      "baseline",
+      "candidate"
+    ],
+    "profile_sha256": "afe7bd59a9afca076d877580352457710b26d79bc16cd38ae999af864f31cd96",
+    "wall_limit_seconds": 14400
+  },
+  "publication_work": {
+    "cas_install_read_write": {
+      "block_count": 0,
+      "fsync_calls": 791,
+      "object_count": 0,
+      "read_bytes": 162782947,
+      "read_calls": 2824,
+      "write_bytes": 162625988,
+      "write_calls": 2674
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+      "block_count": 0,
+      "fsync_calls": 188,
+      "object_count": 0,
+      "read_bytes": 1442843347,
+      "read_calls": 41218,
+      "write_bytes": 368025637,
+      "write_calls": 9780
+    },
+    "fsync_synchronization": {
+      "block_count": 0,
+      "fsync_calls": 2566,
+      "object_count": 0,
+      "read_bytes": 0,
+      "read_calls": 0,
+      "write_bytes": 0,
+      "write_calls": 0
+    },
+    "hydration_verification": {
+      "block_count": 0,
+      "fsync_calls": 16,
+      "object_count": 0,
+      "read_bytes": 172952198,
+      "read_calls": 2657,
+      "write_bytes": 10511291,
+      "write_calls": 164
+    },
+    "publication_preauthentication": {
+      "block_count": 0,
+      "fsync_calls": 0,
+      "object_count": 0,
+      "read_bytes": 27665,
+      "read_calls": 3,
+      "write_bytes": 0,
+      "write_calls": 0
+    },
+    "semantic_total_operations": 62881
+  },
+  "raw_artifact_sha256": {
+    "baseline.json": "180609758b0212c903e4fe6ca17aa14920616fa91cb5d308907a8e2681d32a03",
+    "baseline.log": "e3b9cd2046cab3d123e094235d5c3488205dc587d3f25dc0df50adf31f24ddf5",
+    "baseline.time": "fde93dec7c76378a900366228c18891913c7b1b23e5a500afbe075015b8e64bc",
+    "candidate.json": "c77baed4581569749057c5cfe9b4a1a54c9f70529ef61415fa4031b434e3f1e0",
+    "candidate.log": "e663f89eb5e2f633595c5dcd256900dd92fee68d321cadf1528d0b24d820885f",
+    "candidate.time": "8eb2c268171381da70d84035274f55dee4d7345225806936a8ae69538beba469",
+    "protocol.json": "42a8da28e5e7aa293a4ef6c8fb367d28844a197d7984e83da64fe3e40e87e5d8",
+    "run.py": "4636289a8fd87759dabd249a702d888f9ea7c21ff254671d31989fffeb793c95",
+    "summarize.py": "59ec0e7f4aa4626aa499eabc51fb436261132b6f350c86d52822100294692285"
+  },
+  "source_imported_edges": 4194304,
+  "source_imported_nodes": 262144
+}

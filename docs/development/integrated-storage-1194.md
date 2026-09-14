@@ -356,3 +356,58 @@ The repair reduces avoidable descriptor work but retains the bounded external
 merge algorithm's additional passes. Do not apply the fixture speedup as a
 multiplier to S25/S26 projections. Until a fresh comparable prefix is accepted,
 the preserved S20/S22 admission results and the RSS refusal remain authoritative.
+
+### Ordinary lifecycle correctness comparison
+
+The [S18 baseline/candidate observations](evidence/lifecycle-runtime-1279-lifecycle.json)
+run all ten ordinary lifecycle phases successfully using frozen release
+executables. Both source and clean-imported projects return exactly 262,144
+nodes and 4,194,304 relationships. All four count/query result hashes agree
+between projects and executables. Reopen, export, full verification and clean
+import pass. Every construction counter, including logical I/O, reader calls,
+publication work, synchronization and storage peaks, is identical.
+
+Baseline/candidate seal wall time is 41.243/35.371 seconds; ingest is
+53.042/47.063 seconds; whole lifecycle is 88.65/82.55 seconds. Whole-process
+user plus system CPU is 79.84/74.15 seconds. These nested observations must not
+be added. This single sequential pair is diagnostic: competing processes
+appeared in 20 one-second baseline samples (19 `gf-symbolized`, one `cargo`),
+and no competing builder or
+symbolized diagnostic appeared in candidate samples. No manual cache drop or
+profiler was attached to either lifecycle process. The unchanged 4-GiB cgroup
+limit and 14,400-second timeout applied to both. These are correctness and
+diagnostic observations, not accepted ladder receipts or a controlled lifecycle
+speedup claim.
+
+Local validation passes the 20 runtime/progressive-admission tests, the 14
+selected-row matching storage tests, and the real fan-in-boundary regression.
+The full storage suite reports 1,108 passed, one failed and two existing ignored
+tests. The failure is the existing `wave9_participant_inventory_rejects_links_and_special_files`
+test tracked by #1192: it explicitly uses `/tmp` (tmpfs on this host), bypassing
+the admitted ext4 `TMPDIR`. The unchanged frozen baseline reproduces the same
+filesystem-admission failure. No assertion or test was disabled. Workspace
+Clippy, formatting, `make pre-push-fast`, and `make gate-registry-check` pass;
+the full pre-push workflow is recorded separately and must not be inferred green
+from these targeted checks.
+
+Reproduction commands (the frozen binary variables resolve to the hashes in
+the linked evidence; `TMPDIR` resolves to admitted ext4 storage):
+
+```bash
+PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime --evidence docs/development/evidence/integrated-storage-1194
+# Run from benchmarks/:
+PYTHONPATH=harness ../.venv/bin/python -m unittest tests.test_lifecycle_runtime tests.test_progressive_qualification -q
+# Run each frozen baseline/candidate storage executable three times, alternating:
+/usr/bin/time -v "$FROZEN_STORAGE_TESTS" --exact graph_construction::tests::lifecycle_budget::consumed_shape_roots_have_bounded_multilevel_peak --nocapture --test-threads=1
+CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release selected_rows
+CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release fixed_merge_work_is_exact_across_production_fan_in_boundaries
+cargo fmt --all -- --check
+cargo clippy --workspace -- -D warnings
+make pre-push-fast
+make pre-push
+make gate-registry-check
+```
+
+The ordinary S18 command and its cgroup/timeout wrapper are retained in the
+lifecycle comparison summary. Profile summaries retain raw-artifact hashes;
+raw files remain on the designated host.
