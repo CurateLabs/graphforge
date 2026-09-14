@@ -863,6 +863,66 @@ mod lifecycle_budget {
         }
     }
 
+    #[test]
+    fn fixed_merge_work_is_exact_across_production_fan_in_boundaries() {
+        // Each input contains one distinct UUID. The expected work is the sum
+        // of records in actual merge groups, not a noisy elapsed-time ceiling.
+        // 272 and 1088 are the accepted S20/S22 construction chunk counts.
+        for (inputs, expected_records, expected_groups) in [
+            (31_u64, 31_u64, 1_u64),
+            (32, 32, 1),
+            (33, 65, 2),
+            (272, 544, 10),
+            (1023, 2046, 33),
+            (1024, 2048, 33),
+            (1025, 3073, 34),
+            (1088, 3264, 37),
+        ] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let session = small_session(root.path());
+            let mut evidence = session.evidence().clone();
+            let mut merge = FixedMergeAccumulator::new("merge-runtime", 32, true);
+            for input in 0..inputs {
+                let name = format!("runtime-input-{input}");
+                write_run(
+                    &session.root,
+                    &name,
+                    &[u128::from(input + 1).to_be_bytes()],
+                    &mut evidence,
+                    None,
+                )
+                .unwrap();
+                merge
+                    .push::<16>(&session.root, name, &mut || false, &mut evidence)
+                    .unwrap();
+                assert!(merge.slot_count() <= online_merge_name_slot_bound(input + 1, 32) as usize);
+            }
+            let output = merge
+                .finish::<16>(&session.root, &mut || false, &mut evidence)
+                .unwrap();
+            let mut file = session.root.open_child_file(OsStr::new(&output)).unwrap();
+            for expected in 1..=inputs {
+                assert_eq!(
+                    read_fixed::<16>(&mut file).unwrap(),
+                    Some(u128::from(expected).to_be_bytes())
+                );
+            }
+            assert_eq!(read_fixed::<16>(&mut file).unwrap(), None);
+            assert_eq!(evidence.merge_read_records, expected_records, "inputs={inputs}");
+            assert_eq!(evidence.merge_written_records, expected_records, "inputs={inputs}");
+            assert_eq!(evidence.merge_written_bytes, expected_records * 16);
+            assert_eq!(evidence.merge_groups, expected_groups, "inputs={inputs}");
+            assert!(evidence.peak_merge_inputs <= 32);
+            println!(
+                "RUNTIME_MERGE {}",
+                serde_json::json!({"inputs":inputs,"records_read":evidence.merge_read_records,
+                    "records_written":evidence.merge_written_records,
+                    "groups":evidence.merge_groups,"passes":evidence.merge_passes})
+            );
+        }
+    }
+
     fn sealed_retirement_fixture(root: &TempDir) -> GraphConstructionSession {
         crate::open_or_initialize_project(root.path()).unwrap();
         let mut session = small_session(root.path());

@@ -245,3 +245,174 @@ The existing [native S20/S22 qualification](evidence/integrated-storage-1194/s20
 At this available-capacity sample, preserving the reserve requires projected demand at or below 558,427,989,401 bytes: another 30,096,125,885 bytes of available capacity or a 5.11% reduction in projected demand would remove this planning deficit. Neither is demonstrated here. The final close gate still requires the existing ladder’s admitted S24/S25 observations and actual S26 evidence for at least one billion live persisted edges, the complete public lifecycle, reconciled identities and resource envelopes. Those rungs were not authorized or executed in this follow-up.
 
 The native S20/S22 qualification is a capacity projection, not S26 execution or publication certification. Final capacity/S26 remains open in #1194/#900/#745: a lower-rung projection does not establish the final execution outcome. #901 is already closed; #1276 tracks this authorized follow-up evidence through required CI and merge.
+
+
+## Lifecycle runtime investigation (#1279)
+
+The [reproducible baseline](evidence/lifecycle-runtime-1279-baseline.json) is
+produced by the native rung reader and the existing projection implementation:
+
+```bash
+PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime \
+  --evidence docs/development/evidence/integrated-storage-1194
+```
+
+Both receipts must pass schema, artifact-hash and recomputed-summary validation,
+and their source, executable, generator, host and measurement-tool identities
+must agree. The report uses the historical S22 disk sample, not current free
+space. S24 projects to 6,975 seconds and passes time and work-rate headroom;
+process RSS growth still refuses admission. S25 (14,031 seconds) and S26
+(28,143 seconds) are diagnostic extrapolations only. Actual adjacent-rung
+observations remain required. The 14,400-second limit and 20% time headroom
+are unchanged.
+
+At S20/S22, respectively, 23.213/101.776 seconds of ingest lie outside the
+recorded construction calls. Another 9.489/35.009 seconds of whole-lifecycle
+wall time lie outside summed phase durations. These residuals include
+unmeasured work and timing precision; they are not isolated CPU costs.
+Construction I/O, physical I/O, process RSS and cgroup memory retain separate
+scopes in the report.
+
+### External baseline attribution
+
+[Host profiling observations](evidence/lifecycle-runtime-1279-profile.json)
+retain executable and raw-artifact hashes. Frozen `710c6c64` executables ran
+the unmodified ordinary S18 profile on OVHC-AGENCY, including exact source and
+imported counts, canonical queries, full verification and clean import. These
+direct diagnostic executions are not BenchExec ladder receipts and do not
+admit any successor. All four diagnostic executions matched source/imported
+query-result hashes.
+
+| Probed baseline scope | Calls | Inclusive wall seconds |
+| --- | ---: | ---: |
+| Seal and prepare | 1 | 43.565 |
+| Fixed-record merge groups | 16 | 11.411 |
+| Parquet row merge groups | 4 | 15.838 |
+| Canonical encoder | 1 | 6.315 |
+| Explicit construction artifact authentication | 68 | 0.221 |
+| Construction open, including recovery | 2 | 0.230 |
+| Encoding inventory authentication | 3 | 0.527 |
+
+The 198 entry/return events pair without unmatched events. Parent scopes
+include children: **do not sum this table**. The seal-and-prepare residual
+after subtracting observed child probes is 9.602 seconds; it includes remaining
+shaping/control work and unprobed children. Authentication inside readers,
+writers and merge groups remains inside those scopes. These observations do
+not assert isolated CPU cost or attribute every lifecycle instruction.
+
+Whole-lifecycle CPU sampling found SHA-256 compression at 15.60% of samples
+inside `gf`, Zstd's double-fast compression routine at 4.62%, and construction
+record encoding at 2.26%. The separate syscall trace observed 7,279 sync calls
+inside import validation (2.802 seconds) and 893 inside commit (0.185 seconds).
+Sync latency overlaps the enclosing commands and differs from kernel CPU time.
+The 1×/2×/4× shaping fixture separately observed 9,590 sync calls, taking 1.109
+seconds under tracing. Tracing changed that fixture's wall time from 6.03 to
+13.14 seconds; traced times are not throughput measurements.
+
+Profiles used `perf record -F 199 -e cpu-clock --call-graph dwarf`, timestamp-only
+`perf probe --no-demangle` entry/return events on the frozen executable, and
+`strace -f -ttt -T -e trace=fsync,fdatasync,execve`. The fixture syscall summary
+also traces reads, writes and cache advice with `strace -f -c -w`. No graph
+arguments were attached to probes. The temporary `gf1279` probes were removed
+after collection. Raw traces remain on the host; checked-in evidence contains
+only sanitized observations and hashes.
+
+No cache drop was used. Sibling compilation overlapped portions of diagnostic
+captures; our build was paused during entry/return capture. These are scoped
+work observations, not a statistical overhead estimate or a controlled
+before/after speedup. The ordinary historical receipts remain the authority
+for admission. Fresh comparable integration still waits for the RSS repair.
+
+### Verified repair: share decoded row sources
+
+The measured Parquet row-merge path retained a `RecordBatch` clone for every
+selected row and constructed one Arrow source descriptor per row per column.
+The repair retains each decoded batch once per output window and stores
+`(source_index, row_index)` selections. A per-cursor batch generation prevents
+confusing successive decoder batches; flushing an output window clears cached
+indices and retained sources. Output row/byte limits and all selected columns
+remain unchanged. No authentication, merge pass, fsync or verification is
+removed, and no public API or storage format changes.
+
+The deterministic regression reduces 4,096 selections from one batch to one
+retained source. Additional tests exercise interleaved inputs, sliced nullable
+strings, decoder refills and output-window resets. The production fan-in test
+measures actual fixed-run merges at 31/32/33 and 1,023/1,024/1,025 inputs, plus
+the S20/S22 chunk counts. Its one-record-per-input model reads/writes 544
+records for 272 inputs and 3,264 for 1,088 inputs: crossing the level boundary
+adds real work. This is a model of that accumulator, not a claim that every
+construction artifact family has identical pass counts.
+
+[Three alternating fixture comparisons](evidence/lifecycle-runtime-1279-comparison.json)
+use frozen optimized binaries with the same Rust toolchain and lockfile. All
+observed compilers were stopped before the six measurements; there was no
+manual cache drop. Median total CPU falls 4.69 → 3.90 seconds (16.84%); median
+wall time falls 6.20 → 5.28 seconds (14.84%). All six 1×/2×/4× observations
+preserve exact counts, logical shape reads, merge writes, merge passes and
+storage peaks. This is representative shaping evidence, not a statistical
+significance claim, whole-lifecycle speedup or higher-rung admission.
+
+The repair reduces avoidable descriptor work but retains the bounded external
+merge algorithm's additional passes. Do not apply the fixture speedup as a
+multiplier to S25/S26 projections. Until a fresh comparable prefix is accepted,
+the preserved S20/S22 admission results and the RSS refusal remain authoritative.
+
+### Ordinary lifecycle correctness comparison
+
+The [S18 baseline/candidate observations](evidence/lifecycle-runtime-1279-lifecycle.json)
+run all ten ordinary lifecycle phases successfully using frozen release
+executables. Both source and clean-imported projects return exactly 262,144
+nodes and 4,194,304 relationships. All four count/query result hashes agree
+between projects and executables. Reopen, export, full verification and clean
+import pass. Every construction counter, including logical I/O, reader calls,
+publication work, synchronization and storage peaks, is identical.
+
+Baseline/candidate seal wall time is 41.243/35.371 seconds; ingest is
+53.042/47.063 seconds; whole lifecycle is 88.65/82.55 seconds. Whole-process
+user plus system CPU is 79.84/74.15 seconds. These nested observations must not
+be added. This single sequential pair is diagnostic: competing processes
+appeared in 20 one-second baseline samples (19 `gf-symbolized`, one `cargo`),
+and no competing builder or
+symbolized diagnostic appeared in candidate samples. No manual cache drop or
+profiler was attached to either lifecycle process. The unchanged 4-GiB cgroup
+limit and 14,400-second timeout applied to both. These are correctness and
+diagnostic observations, not accepted ladder receipts or a controlled lifecycle
+speedup claim.
+
+Local validation passes the 20 runtime/progressive-admission tests, the 14
+selected-row matching storage tests, and the real fan-in-boundary regression.
+The initial full storage suite reports 1,108 passed, one failed and two existing
+ignored tests. The failure is the existing `wave9_participant_inventory_rejects_links_and_special_files`
+test tracked by #1192: it explicitly uses `/tmp` (tmpfs on this host), bypassing
+the admitted ext4 `TMPDIR`. The unchanged frozen baseline reproduces the same
+filesystem-admission failure. Running the full frozen suite with an ext4-backed
+`/tmp` in a private mount namespace passes **1,109 tests, zero failed, two existing
+ignored**. This includes the existing corruption, cancellation, recovery and
+publication regressions. The host mounts and production admission checks are
+unchanged; no assertion or test was disabled. The command, environment and both
+log hashes are retained in the lifecycle summary. Workspace
+Clippy, formatting, `make pre-push-fast`, and `make gate-registry-check` pass;
+the full pre-push workflow is recorded separately and must not be inferred green
+from these targeted checks.
+
+Reproduction commands (the frozen binary variables resolve to the hashes in
+the linked evidence; `TMPDIR` resolves to admitted ext4 storage):
+
+```bash
+PYTHONPATH=benchmarks/harness .venv/bin/python -m graphforge_bench.lifecycle_runtime --evidence docs/development/evidence/integrated-storage-1194
+# Run from benchmarks/:
+PYTHONPATH=harness ../.venv/bin/python -m unittest tests.test_lifecycle_runtime tests.test_progressive_qualification -q
+# Run each frozen baseline/candidate storage executable three times, alternating:
+/usr/bin/time -v "$FROZEN_STORAGE_TESTS" --exact graph_construction::tests::lifecycle_budget::consumed_shape_roots_have_bounded_multilevel_peak --nocapture --test-threads=1
+CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release selected_rows
+CARGO_TARGET_DIR="$ISOLATED_TARGET" cargo test -p graphforge-storage --release fixed_merge_work_is_exact_across_production_fan_in_boundaries
+cargo fmt --all -- --check
+cargo clippy --workspace -- -D warnings
+make pre-push-fast
+make pre-push
+make gate-registry-check
+```
+
+The ordinary S18 command and its cgroup/timeout wrapper are retained in the
+lifecycle comparison summary. Profile summaries retain raw-artifact hashes;
+raw files remain on the designated host.

@@ -779,6 +779,7 @@ struct RowCursor {
     reader: Box<dyn Iterator<Item = Result<RecordBatch, arrow::error::ArrowError>>>,
     batch: Option<RecordBatch>,
     row: usize,
+    batch_number: usize,
 }
 
 impl RowCursor {
@@ -794,6 +795,10 @@ impl RowCursor {
                 .map(Some);
             }
             self.batch = self.reader.next().transpose().map_err(storage)?;
+            self.batch_number = self
+                .batch_number
+                .checked_add(1)
+                .ok_or_else(|| storage("row cursor batch number overflows"))?;
             self.row = 0;
             if self.batch.is_none() {
                 return Ok(None);
@@ -802,21 +807,67 @@ impl RowCursor {
     }
 }
 
+// A decoded batch can supply many selected rows. Retain its Arrow descriptors
+// once per output window, including when heap order interleaves input streams.
+struct SelectedRows {
+    batches: Vec<RecordBatch>,
+    rows: Vec<(usize, usize)>,
+    current_batches: Vec<Option<(usize, usize)>>,
+}
+
+impl SelectedRows {
+    fn new(output_rows: usize, sources: usize) -> Self {
+        Self {
+            batches: Vec::new(),
+            rows: Vec::with_capacity(output_rows),
+            current_batches: vec![None; sources],
+        }
+    }
+
+    fn push(&mut self, source: usize, cursor: &RowCursor, batch: &RecordBatch) {
+        let index = match self.current_batches[source] {
+            Some((number, index)) if number == cursor.batch_number => index,
+            _ => {
+                let index = self.batches.len();
+                self.batches.push(batch.clone());
+                self.current_batches[source] = Some((cursor.batch_number, index));
+                index
+            }
+        };
+        self.rows.push((index, cursor.row));
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.batches.clear();
+        self.current_batches.fill(None);
+    }
+}
+
 fn materialize_selected_rows(
     schema: SchemaRef,
-    selected: &[(RecordBatch, usize)],
+    selected: &SelectedRows,
 ) -> Result<RecordBatch, GfError> {
     let columns = (0..schema.fields().len())
         .map(|column| {
             let data = selected
+                .batches
                 .iter()
-                .map(|(batch, _)| batch.column(column).to_data())
+                .map(|batch| batch.column(column).to_data())
                 .collect::<Vec<_>>();
             let refs = data.iter().collect::<Vec<_>>();
             let mut mutable = MutableArrayData::new(refs, false, selected.len());
-            for (source, (_, row)) in selected.iter().enumerate() {
+            for (source, row) in &selected.rows {
                 mutable.extend(
-                    source,
+                    *source,
                     *row,
                     row.checked_add(1)
                         .ok_or_else(|| storage("selected row bound overflow"))?,
@@ -882,6 +933,7 @@ fn merge_row_group(
                 ),
                 batch: None,
                 row: 0,
+                batch_number: 0,
             });
         }
         Ok(())
@@ -918,7 +970,7 @@ fn merge_row_group(
                 heap.push((Reverse(uuid), Reverse(source)));
             }
         }
-        let mut selected = Vec::with_capacity(output_rows);
+        let mut selected = SelectedRows::new(output_rows, cursors.len());
         let mut selected_bytes = 0_usize;
         let mut previous = None;
         while let Some((Reverse(uuid), Reverse(source))) = heap.pop() {
@@ -964,7 +1016,7 @@ fn merge_row_group(
                 selected.clear();
                 selected_bytes = 0;
             }
-            selected.push((batch.clone(), cursor.row));
+            selected.push(source, cursor, batch);
             selected_bytes = selected_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("merge selected bytes overflow"))?;
@@ -1229,5 +1281,131 @@ impl RowMergeAccumulator {
             self.levels[level + 1].push(name);
             level += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    #[test]
+    fn selected_rows_share_sources_across_interleaving_refill_and_flush() {
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = |values: Vec<Option<&str>>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))]).unwrap()
+        };
+        let mut cursors = [
+            RowCursor {
+                reader: Box::new(std::iter::empty()),
+                batch: None,
+                row: 0,
+                batch_number: 1,
+            },
+            RowCursor {
+                reader: Box::new(std::iter::empty()),
+                batch: None,
+                row: 0,
+                batch_number: 1,
+            },
+        ];
+        // Sliced arrays retain nonzero offsets; nullable variable-width values
+        // must survive source sharing exactly as they did with per-row sources.
+        let first = batch(vec![Some("padding"), Some("a"), None, Some("c")]).slice(1, 3);
+        let second = batch(vec![Some("x"), Some("y")]);
+        let refill = batch(vec![Some("d"), Some("e")]);
+        let mut selected = SelectedRows::new(6, 2);
+        for (source, row) in [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)] {
+            cursors[source].row = row;
+            selected.push(
+                source,
+                &cursors[source],
+                if source == 0 { &first } else { &second },
+            );
+        }
+        assert_eq!(selected.batches.len(), 2);
+        cursors[0].batch_number = 2;
+        cursors[0].row = 0;
+        selected.push(0, &cursors[0], &refill);
+        assert_eq!(selected.batches.len(), 3);
+        let output = materialize_selected_rows(schema.clone(), &selected).unwrap();
+        assert_eq!(
+            output,
+            batch(vec![
+                Some("a"),
+                Some("x"),
+                None,
+                Some("y"),
+                Some("c"),
+                Some("d")
+            ])
+        );
+        selected.clear();
+        assert!(selected.batches.is_empty());
+        cursors[0].row = 1;
+        selected.push(0, &cursors[0], &refill);
+        assert_eq!(selected.batches.len(), 1);
+        assert_eq!(
+            materialize_selected_rows(schema.clone(), &selected).unwrap(),
+            batch(vec![Some("e")])
+        );
+    }
+
+    #[test]
+    fn selected_rows_follow_actual_decoder_refills() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let batch = |ids: &[u128]| {
+            let values = ids.iter().map(|id| id.to_be_bytes()).collect::<Vec<_>>();
+            let array =
+                FixedSizeBinaryArray::try_from_iter(values.iter().map(|id| id.as_slice())).unwrap();
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap()
+        };
+        let first = batch(&[1, 3]);
+        let second = batch(&[5, 7]);
+        let mut cursor = RowCursor {
+            reader: Box::new(vec![Ok(first), Ok(second)].into_iter()),
+            batch: None,
+            row: 0,
+            batch_number: 0,
+        };
+        let mut selected = SelectedRows::new(4, 1);
+        for id in [1_u128, 3, 5, 7] {
+            assert_eq!(cursor.advance().unwrap(), Some(id.to_be_bytes()));
+            selected.push(0, &cursor, cursor.batch.as_ref().unwrap());
+            cursor.row += 1;
+        }
+        assert_eq!(selected.batches.len(), 2);
+        assert_eq!(
+            materialize_selected_rows(schema.clone(), &selected).unwrap(),
+            batch(&[1, 3, 5, 7])
+        );
+        assert_eq!(cursor.advance().unwrap(), None);
+    }
+
+    #[test]
+    fn selected_source_descriptors_scale_with_decoded_batches_not_rows() {
+        let values = Arc::new(StringArray::from(vec![Some("retained"); 4096]));
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut cursor = RowCursor {
+            reader: Box::new(std::iter::empty()),
+            batch: None,
+            row: 0,
+            batch_number: 1,
+        };
+        let mut selected = SelectedRows::new(4096, 1);
+        for row in 0..4096 {
+            cursor.row = row;
+            selected.push(0, &cursor, &batch);
+        }
+        assert_eq!(selected.len(), 4096);
+        assert_eq!(selected.batches.len(), 1);
+        assert_eq!(materialize_selected_rows(schema, &selected).unwrap(), batch);
     }
 }
