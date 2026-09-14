@@ -509,7 +509,9 @@ mod lifecycle_budget {
                 let append = census(session.root.path());
                 session.seal().unwrap();
                 let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-                let shape_peak = session.evidence().storage_transient_peak_total_allocated_bytes;
+                let shape_peak = session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes;
                 assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
                 assert!(session.evidence().merge_passes >= 3);
                 let shaped = census(session.root.path());
@@ -590,6 +592,63 @@ mod lifecycle_budget {
                     })
                 );
             }
+        }
+    }
+    #[test]
+    fn shaping_recovery_refuses_same_inode_payload_corruption() {
+        for completed in [false, true] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let mut session = small_session(root.path());
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "nodes",
+                    &node_property_batch(1, 3),
+                )
+                .unwrap();
+            session
+                .append(
+                    ConstructionChunkKind::Edge,
+                    "edges",
+                    &edge_property_batch(100, 2),
+                )
+                .unwrap();
+            session.seal().unwrap();
+            let path = session.root.path().join("shaped-identities.run");
+            if completed {
+                session.shape_canonical_with_cancellation(|| false).unwrap();
+            } else {
+                assert!(
+                    session
+                        .shape_canonical_with_cancellation(|| path.exists())
+                        .is_err()
+                );
+            }
+            assert!(path.exists());
+            let before = file_identity(&File::open(&path).unwrap()).unwrap();
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(file_identity(&File::open(&path).unwrap()).unwrap(), before);
+            let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            drop(session);
+            let result = GraphConstructionSession::open_with_mode(
+                root.path(),
+                Uuid::from_u128(119_500),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+            );
+            assert!(
+                result.is_err(),
+                "completed={completed}: corrupted payload accepted"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                current
+            );
         }
     }
 }
