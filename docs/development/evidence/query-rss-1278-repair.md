@@ -1,8 +1,10 @@
 # Adjacency merge-reader repair for #1278
 
-The allocation correction is verified. Native S20/S22 process-RSS comparison and full
-S24 admission remain pending. No S24 workload has been executed and #1278 remains
-open. The [pre-repair diagnosis](query-rss-1278.md) and its receipts are preserved.
+The allocation correction and complete native S18/S19/S20/S22 prefix are verified.
+Full S24 admission passes all nine unchanged checks: S20–S22 process RSS grows
+5.8766%, below the 10% gate. No S24 workload has been executed and #1278 remains
+open. The [pre-repair diagnosis](query-rss-1278.md) and its sole RSS refusal are
+preserved. PR #1281 remains blocked by an unrelated retention-test CI failure.
 
 ## Change and identities
 
@@ -101,6 +103,15 @@ was 699,611,693,056 B and the reserve remained 141,258,578,535 B. No gate change
 - Complete optimized storage unit-test executable, with supported `/tmp` and
   parent-only `--test-threads=1`: 1,111 passed, zero failed, two existing ignored
   tests, in 66.58 seconds.
+- The resumed full core Rust coverage run also passed, including all 1,111 storage
+  tests (76.43 seconds), API/CLI integration tests and 118 API BDD scenarios.
+  Its core coverage report was produced. Instrumented native acceptance passed
+  241 Python tests, 277 Node tests, seven additional Node test cases, 126 Node BDD
+  scenarios and the native smoke check. The final coverage ledger refused with
+  `coverage source tree has uncommitted changes`: the new evidence documentation
+  was being authored during validation. No Rust source changed during the run.
+  This attempt is retained as passed execution tests and a failed ledger assembly,
+  not a green complete `make pre-push` or a verified coverage-floor claim.
 - Host/admission unit tests: 23 passed.
 - Workspace Clippy, fast checks and gate-registry checks: passed.
 - Initial full `make pre-push`: failed in storage with 1,109 passed, two failed
@@ -121,12 +132,82 @@ was 699,611,693,056 B and the reserve remained 141,258,578,535 B. No gate change
   avoids changing the child protocol. The failed/aborted attempt logs remain
   separate from subsequent validation results.
 
-## Native host ladder (in progress)
+## Native host ladder and full admission
 
-The unchanged controller has accepted S18 and S19 with native process peaks of
-181,678,080 and 183,021,568 B. Its full S20 projection admitted with every check
-passing. S20/S22 results and full S24 admission remain pending. The cap is S22;
-there is no S24 workload authorization or execution.
+The unchanged controller completed S18 → S19 → S20 → S22 with exit zero, then
+`completed_prefix` independently validated all four rungs and their shared frozen
+identities. Every rung passed construction, reopen, canonical counts, queries,
+export, full verification, clean import and imported-project proof. S22 source
+and imported counts are both 4,194,304 nodes and 67,108,864 edges. No build,
+coverage test or allocation profiler overlapped the native campaign.
+
+| Scale | Historical process peak B | Repaired process peak B | Historical wall seconds | Repaired wall seconds |
+| --- | --- | --- | --- | --- |
+| S18 | 183,107,584 | 181,678,080 | 87.884 | 84.462 |
+| S19 | 189,415,424 | 183,021,568 | 175.969 | 167.728 |
+| S20 | 199,135,232 | 182,755,328 | 359.113 | 339.062 |
+| S22 | 262,049,792 | 193,495,040 | 1,682.601 | 1,510.619 |
+
+The S20–S22 process-RSS increase is 10,739,712 B (5.8766%), compared with the
+historical 62,914,560 B (31.5939%). Repaired query-phase peaks are 182,472,704 →
+193,495,040 B; imported-project proof peaks are 182,755,328 → 187,973,632 B.
+The measurements establish a gate pass, not a constant-RSS claim. The remaining
+growth is not fully allocation-attributed, and RSS includes allocator retention
+and mapped residency beyond live Rust heap. BenchExec's S20/S22 cgroup peaks are
+3,108,929,536 / 12,419,530,752 B, including charged durable-write page cache.
+The unchanged host controller uses a 96-GB BenchExec kill ceiling while retaining
+the 4-GiB product process-VmHWM envelope; these are different measurements and
+limits. Both remain separately recorded in the receipts.
+
+The integrated candidate also contains the separately merged #1279 repair.
+Therefore elapsed-time and total-RSS differences from the historical binary
+are integrated observations; the paired allocation profiles establish the
+specific merge-reader ownership change. The native series contains one prescribed
+observation per rung, with no discarded or repeated rung measurements.
+
+The S20 query phase took 38.371 → 38.520 seconds, and imported proof took
+53.328 → 53.380 seconds. At S22 they took 161.463 → 162.901 and
+219.491 → 218.075 seconds, respectively. Whole-rung physical read/write bytes
+at S22 were 885,782,102,016 / 371,891,003,392 before and
+886,423,552,000 / 372,299,218,944 after. These observations retain the buffer
+tradeoff's measured I/O/runtime evidence; they do not establish an optimal budget
+or a statistically isolated performance change.
+
+Fresh free space was 699,090,202,624 B, with the unchanged 141,258,578,535-B reserve.
+Full S24 projection admits correctness, RSS headroom and plateau, time headroom,
+retained/transient/combined storage headroom, measured I/O capacity and I/O
+headroom. It projects 204,234,752 B process RSS and 6,195 policy wall seconds.
+This is admission to a future workload, not an executed S24 qualification.
+
+The [complete projection](query-rss-1278-repair/s24-projection-replay.json) has
+SHA-256 `61410952e445cf51b0829e0d622c51e7e2cd17640265f9b1085efb7269c9243a`.
+All 23 sanitized native receipt/projection files are retained byte-for-byte in
+`query-rss-1278-repair/`; the JSON ledger records their SHA-256 hashes, full phase
+metrics and identities. Replay of the historical prefix still refuses only RSS.
+
+## CI blocker
+
+The independent retention-lock concern is tracked in
+[#1283](https://github.com/CurateLabs/graphforge/issues/1283).
+
+[CI run 34914305740](https://github.com/CurateLabs/graphforge/actions/runs/34914305740)
+at `aefdbb2644c6df5a850cccece5a1b1cc43cbad44` failed the Bazel storage aggregate:
+1,111 tests passed, one failed and two were ignored. The failing unchanged test,
+`project_retention::tests::work_and_byte_limits_are_fail_closed`, received
+`GF_WRITER_BUSY` instead of `GF_RESOURCE_LIMIT` at its second preview assertion.
+Other completed Rust quality, Python/Node binding and Windows/macOS durability
+lanes passed. The independent read-only review found no actionable RSS-repair
+findings. Neither successful local tests nor host admission override failed CI.
+
+Inspection shows `run_cleanup` acquires a bare writer-lock `File`; a classification
+error returns before its success-path explicit unlock. A duplicated or inherited
+descriptor can retain that kernel lock after the parent closes its handle.
+Concurrent fork inheritance is a plausible trigger for this CI occurrence, but
+the CI log alone does not prove it. A separate deterministic regression should
+retain a duplicate descriptor across each bounded-error return and assert that
+an independent writer can immediately acquire the lock. Preserve genuine writer
+contention behavior. This lifetime concern is outside the adjacency-buffer repair;
+no retry or weakened assertion was used to turn this failure green.
 
 ## Commands
 
@@ -181,3 +262,33 @@ TMPDIR="$NATIVE_TMP" PYTHONPATH=harness .venv/bin/python \
   --generator "$BIN/graphforge-benchmark-graph500-generator" \
   --benchexec-python /usr/bin/python3 --reserved-headroom-bytes 141258578535
 ```
+
+```python
+# Admission replay only, from benchmarks with PYTHONPATH=harness.
+from pathlib import Path
+from graphforge_bench import progressive_host_run as host
+
+root = Path.cwd()
+completed = host.completed_prefix(root, evidence_dir)
+assert [rung["scale"] for rung in completed] == [18, 19, 20, 22]
+capacity = host.measure_host_capacity(work_root, 141258578535)
+projection, digest = host._admit_projection(root, evidence_dir, 24, capacity)
+assert projection["decision"] == "admitted"
+assert all(projection["checks"].values())
+```
+
+The local supported-filesystem test command uses a private mount namespace:
+
+```bash
+sudo -n unshare --mount --propagation private "$NAMESPACE_WRAPPER" \
+  "$DIAG_TARGET/release/deps/graphforge_storage-31ec0b322dbee9b5" \
+  --test-threads=1
+```
+
+The wrapper binds the dedicated ext4 temporary directory at `/tmp` only within
+that namespace, drops privileges back to the operator, and removes inherited
+`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `LLVM_PROFILE_FILE` and
+`RUST_TEST_THREADS`. Its Cargo runner appends `--test-threads=1` only when the
+invoked executable basename starts with `graphforge_storage-`; other binaries
+and child self-spawns retain their normal harness mode. The complete local
+validation command is the same namespace wrapper followed by `make pre-push`.

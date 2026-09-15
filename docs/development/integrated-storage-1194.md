@@ -236,9 +236,11 @@ RSS refusal and #1278 remain open.
 
 The [reader-buffer repair evidence](evidence/query-rss-1278-repair.md) records a
 verified 1-MiB aggregate merge-reader budget, flat live-reader allocation across
-S16/S17/S18, and all 135 successful small comparison commands. A new native
-S18/S19/S20/S22 prefix is in progress with frozen executables containing both
-verified storage repairs; full S24 admission is not yet claimed.
+S16/S17/S18, and all 135 successful small comparison commands. The new native
+S18/S19/S20/S22 prefix passes with frozen executables containing both verified
+storage repairs. S20–S22 process RSS rises 182,755,328 → 193,495,040 B (5.8766%);
+full S24 admission passes all nine unchanged checks. No S24 workload ran. #1278
+remains open, and PR #1281 is blocked by a separate retention-test CI failure.
 
 ## Acceptance ledger and remaining capacity
 
@@ -337,8 +339,9 @@ only sanitized observations and hashes.
 No cache drop was used. Sibling compilation overlapped portions of diagnostic
 captures; our build was paused during entry/return capture. These are scoped
 work observations, not a statistical overhead estimate or a controlled
-before/after speedup. The ordinary historical receipts remain the authority
-for admission. Fresh comparable integration still waits for the RSS repair.
+before/after speedup. These diagnostic captures are not admission evidence.
+The subsequent [integrated native prefix](evidence/query-rss-1278-repair.md)
+contains both repairs and passes full S24 admission without executing S24.
 
 ### Verified repair: share decoded row sources
 

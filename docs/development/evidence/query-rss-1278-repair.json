@@ -1,6 +1,6 @@
 {
   "issue": 1278,
-  "status": "allocation_and_small_comparison_passed_host_validation_running",
+  "status": "allocation_correctness_and_native_s24_admission_passed_ci_retention_test_blocked",
   "host": "OVHC-AGENCY",
   "root_filesystem": "ext4",
   "reserve_bytes": 141258578535,
@@ -11708,5 +11708,1037 @@
     "small/s18-verify-0.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "small/s18-verify-0.stdout": "3b090545ae4d7df893b550100b2ed75e9b0b2935e2c0370a5438effc439ac68b",
     "small/summary.json": "c32fa1669c7cce2ed43ecb972513aa39d598b5ed12e653c5bc99cd9b23184343"
-  }
+  },
+  "independent_review": {
+    "evidence": "23 receipt hashes, native counts and identities, 135 commands, 72 query comparisons, heap totals, admission arithmetic and sanitization checked; no actionable inconsistencies",
+    "rust_change": "no actionable findings"
+  },
+  "native_receipt_sha256": {
+    "s18-benchexec.json": "6115e9f13e919c5ef8bdfea0f8a4c2067cfe24e2b59c2baf293eaa90c485be9e",
+    "s18-graphforge.json": "fe047f6f79fafc70ca407fea17471291e0705952a1d459583cd7c8b7ccd0a51f",
+    "s18-plan.json": "57ce03bf4d56cfffffb460517771b8f0fcb9f68aef2e9279dd094600e021061a",
+    "s18-result.json": "49022a955dacb95064bb3fbdcd32891917c76f44e9f3a274aedad818775bf27b",
+    "s18-rung.json": "addced6cd1030fbda9d27ba79a4bf865e60f45d9c610b5440bd7893494223ae6",
+    "s19-benchexec.json": "6564761b29212da56262b8ecae9b5fce574604cb72589d128b802048d2c09b12",
+    "s19-graphforge.json": "8ccc58bbc0417afceeb9bb5e7801646e6da7dde5af95bcac7cbb4d9e8770c817",
+    "s19-plan.json": "11ac5929b42c569c9db8ff861b1ffeaffd4e92bbaaad13125c8815481d5bc6ad",
+    "s19-result.json": "6dabb1449aa0e0acb45eb0ef3302133c5e73f6d8d034d953b01d8e7eccc4412f",
+    "s19-rung.json": "fd1a5c8daa55a6b934ae69854c1fc08e8a7a295b07199a8f7462ad3529e17338",
+    "s20-benchexec.json": "b088342423ecf7ece50ceaa14fbb9391b4840c931decfce1a71a66b70c80d3aa",
+    "s20-graphforge.json": "64a9ec6526c72fa5a61b2626ebf36886a6e34e0969d4aee091c7b53504bb540d",
+    "s20-plan.json": "f964ec41431897362e1ebbbe57fa67efca87d8ea7825b49dd2fc3391a08f4183",
+    "s20-projection.json": "42f494675f8ce3878343f15c76f5b4db19217e026ec59ff83ddaa96e91076d3a",
+    "s20-result.json": "a45db8f5daa59e9b29fc71b03d8bbe77177b8a266e5a93ab642666dc70c24b3d",
+    "s20-rung.json": "20a234e9627cc3eb0c2cf5dd85ca4cb448f1bfcd257a751ccbbbccdf1cec71e1",
+    "s22-benchexec.json": "f32a4da1d6346043cfcedb6922e7bdf28e22c3203ada30e34488ab96e8e1492a",
+    "s22-graphforge.json": "c3d4bb836906ff5bbc327800404b7925b9a5ca8db697ae424db939d6eed6593a",
+    "s22-plan.json": "0375db7d85f502fcc37417c6d0a4d5c54e02a59be166f51e843bf09e94e7ba71",
+    "s22-projection.json": "249ba6c772f37a007ebb3fbbdc5f1b0b9645ef1710f05b3502f98b3b67194678",
+    "s22-result.json": "5914df53f82b7bbe0a799528e346a42724f23e16eed9f775caa9619976206f51",
+    "s22-rung.json": "26a6c13c1f2f20f5ab19d0fcd0bb011fe8c5f529777736b163948e169c5ba64e",
+    "s24-projection-replay.json": "61410952e445cf51b0829e0d622c51e7e2cd17640265f9b1085efb7269c9243a"
+  },
+  "native_validation": {
+    "capacity": {
+      "free_bytes": 699090202624,
+      "reserved_headroom_bytes": 141258578535
+    },
+    "projection": {
+      "checks": {
+        "correctness": true,
+        "io_reader_publication_capacity_measured": true,
+        "io_reader_publication_headroom": true,
+        "retained_storage_headroom": true,
+        "rss_bounded_or_plateaued": true,
+        "rss_headroom": true,
+        "storage_headroom": true,
+        "time_headroom": true,
+        "transient_storage_headroom": true
+      },
+      "claim": "engineering_evidence_only",
+      "decision": "admitted",
+      "headroom": {
+        "rss_fraction": 0.2,
+        "storage_fraction": 0.20206058961317583,
+        "time_fraction": 0.2
+      },
+      "limits": {
+        "rss_bytes": 4294967296,
+        "volume_bytes": 699090202624,
+        "wall_seconds": 14400
+      },
+      "native_capacity": {
+        "free_bytes": 699090202624,
+        "observed_rates": {
+          "physical_read_bytes_per_second": {
+            "wall_seconds": 1511,
+            "work_units": 886423552000
+          },
+          "physical_write_bytes_per_second": {
+            "wall_seconds": 340,
+            "work_units": 65234501632
+          },
+          "publication_work_per_second": {
+            "wall_seconds": 1511,
+            "work_units": 1033012
+          },
+          "reader_calls_per_second": {
+            "wall_seconds": 340,
+            "work_units": 483957
+          }
+        },
+        "rate_source": "completed_adjacent_rungs",
+        "reserved_headroom_bytes": 141258578535
+      },
+      "projected": {
+        "logical_read_bytes": 657619950908,
+        "logical_write_bytes": 321813039525,
+        "peak_rss_bytes": 204234752,
+        "physical_read_bytes": 3599558377472,
+        "physical_write_bytes": 1600558088192,
+        "publication_work_units": 4146196,
+        "reader_calls": 9352117,
+        "retained_storage_bytes": 71576358912,
+        "storage_peak_bytes": 147108777984,
+        "transient_peak_storage_bytes": 147108777984,
+        "wall_seconds": 6195
+      },
+      "provider_capacity": null,
+      "required_rates": {
+        "physical_read_bytes_per_second": 312461665,
+        "physical_write_bytes_per_second": 138937335,
+        "publication_work_per_second": 360,
+        "reader_calls_per_second": 812
+      },
+      "rss_growth_fraction": 0.05876552064189341,
+      "schema": "graphforge-progressive-qualification-evidence/1",
+      "slopes_observed": {
+        "logical_read_bytes": 123876156174,
+        "logical_write_bytes": 60886852091,
+        "physical_read_bytes": 678283706368,
+        "physical_write_bytes": 307064717312,
+        "publication_work_units": 778296,
+        "reader_calls": 1773632
+      },
+      "source_scales": [
+        20,
+        22
+      ],
+      "target": "S24"
+    },
+    "projection_sha256": "61410952e445cf51b0829e0d622c51e7e2cd17640265f9b1085efb7269c9243a",
+    "rungs": [
+      {
+        "authority": {
+          "cpu_seconds": 75.380631,
+          "peak_rss_bytes": 819924992,
+          "pressure_cpu_seconds": 0.095576,
+          "pressure_io_seconds": 4.143445,
+          "pressure_memory_seconds": 0.0,
+          "read_bytes": 50825854976,
+          "wall_seconds": 84.46230795898009,
+          "write_bytes": 16199081984
+        },
+        "counts": {
+          "imported_edges": 4194304,
+          "imported_nodes": 262144,
+          "source_edges": 4194304,
+          "source_nodes": 262144
+        },
+        "identities": {
+          "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "benchexec_version": "3.35",
+          "certify_sha256": "6ca9df51704c5842c971de232e35ddba3afb29b2fb4e22a8b89b0265cd097847",
+          "commit": "6cbfde81494f864a3a61e4d887138aaaa256c92e",
+          "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+          "generator_executable_sha256": "f0bb6614b2a4119bf3deee381783abc506be91b76abe10da58f5aafd7a73026f",
+          "gf_sha256": "7be606cef7e3fb982edef8b11280914d51f1fa0b6c73cf5a602b2621d6ec439d",
+          "host_profile_id": "local-linux-cgroups-v2",
+          "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+          "producer_sha256": "5ced0a517eb635c9580dee5a4cc24a46611c08e1947e34b2d7f6e8dc3d1f7678",
+          "profile_id": "graph500-s18-local",
+          "profile_sha256": "afe7bd59a9afca076d877580352457710b26d79bc16cd38ae999af864f31cd96"
+        },
+        "metrics": {
+          "logical_read_bytes": 9511424160,
+          "logical_write_bytes": 4330719595,
+          "peak_rss_bytes": 181678080,
+          "physical_read_bytes": 50825854976,
+          "physical_write_bytes": 16199081984,
+          "publication_work_units": 62881,
+          "reader_calls": 120706,
+          "retained_storage_bytes": 1065066496,
+          "transient_peak_storage_bytes": 2293428224,
+          "wall_seconds": 85
+        },
+        "phases": [
+          {
+            "duration_ms": 10,
+            "exit_code": 0,
+            "peak_rss_bytes": 126976,
+            "phase": "admission",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 1603,
+            "exit_code": 0,
+            "peak_rss_bytes": 73072640,
+            "phase": "generate",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 49027,
+            "exit_code": 0,
+            "peak_rss_bytes": 132149248,
+            "phase": "ingest",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 2757,
+            "exit_code": 0,
+            "peak_rss_bytes": 37814272,
+            "phase": "reopen",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 1737,
+            "exit_code": 0,
+            "peak_rss_bytes": 80084992,
+            "phase": "recount",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 9427,
+            "exit_code": 0,
+            "peak_rss_bytes": 180240384,
+            "phase": "query",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 1751,
+            "exit_code": 0,
+            "peak_rss_bytes": 38334464,
+            "phase": "export",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 241,
+            "exit_code": 0,
+            "peak_rss_bytes": 22175744,
+            "phase": "verify",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 2359,
+            "exit_code": 0,
+            "peak_rss_bytes": 35581952,
+            "phase": "clean_import",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 13148,
+            "exit_code": 0,
+            "peak_rss_bytes": 181678080,
+            "phase": "reopen_proof",
+            "status": "passed"
+          }
+        ],
+        "scale": 18
+      },
+      {
+        "authority": {
+          "cpu_seconds": 150.956969,
+          "peak_rss_bytes": 1577807872,
+          "pressure_cpu_seconds": 0.231,
+          "pressure_io_seconds": 9.298667,
+          "pressure_memory_seconds": 0.0,
+          "read_bytes": 102905880576,
+          "wall_seconds": 167.7278447400313,
+          "write_bytes": 32508825600
+        },
+        "counts": {
+          "imported_edges": 8388608,
+          "imported_nodes": 524288,
+          "source_edges": 8388608,
+          "source_nodes": 524288
+        },
+        "identities": {
+          "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "benchexec_version": "3.35",
+          "certify_sha256": "6ca9df51704c5842c971de232e35ddba3afb29b2fb4e22a8b89b0265cd097847",
+          "commit": "6cbfde81494f864a3a61e4d887138aaaa256c92e",
+          "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+          "generator_executable_sha256": "f0bb6614b2a4119bf3deee381783abc506be91b76abe10da58f5aafd7a73026f",
+          "gf_sha256": "7be606cef7e3fb982edef8b11280914d51f1fa0b6c73cf5a602b2621d6ec439d",
+          "host_profile_id": "local-linux-cgroups-v2",
+          "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+          "producer_sha256": "5ced0a517eb635c9580dee5a4cc24a46611c08e1947e34b2d7f6e8dc3d1f7678",
+          "profile_id": "graph500-s19-local",
+          "profile_sha256": "63213dc0c7d6fe95280dbe1149dd7a39bc21a880a9d5f2a98d1f226b4a251d00"
+        },
+        "metrics": {
+          "logical_read_bytes": 19072019733,
+          "logical_write_bytes": 8675804711,
+          "peak_rss_bytes": 183021568,
+          "physical_read_bytes": 102905880576,
+          "physical_write_bytes": 32508825600,
+          "publication_work_units": 126317,
+          "reader_calls": 241788,
+          "retained_storage_bytes": 2159177728,
+          "transient_peak_storage_bytes": 4586790912,
+          "wall_seconds": 168
+        },
+        "phases": [
+          {
+            "duration_ms": 10,
+            "exit_code": 0,
+            "peak_rss_bytes": 118784,
+            "phase": "admission",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 3017,
+            "exit_code": 0,
+            "peak_rss_bytes": 73515008,
+            "phase": "generate",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 96659,
+            "exit_code": 0,
+            "peak_rss_bytes": 135397376,
+            "phase": "ingest",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 5321,
+            "exit_code": 0,
+            "peak_rss_bytes": 38023168,
+            "phase": "reopen",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 3489,
+            "exit_code": 0,
+            "peak_rss_bytes": 81584128,
+            "phase": "recount",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 18729,
+            "exit_code": 0,
+            "peak_rss_bytes": 182886400,
+            "phase": "query",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 3491,
+            "exit_code": 0,
+            "peak_rss_bytes": 38801408,
+            "phase": "export",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 462,
+            "exit_code": 0,
+            "peak_rss_bytes": 23023616,
+            "phase": "verify",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 4767,
+            "exit_code": 0,
+            "peak_rss_bytes": 35278848,
+            "phase": "clean_import",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 26931,
+            "exit_code": 0,
+            "peak_rss_bytes": 183021568,
+            "phase": "reopen_proof",
+            "status": "passed"
+          }
+        ],
+        "scale": 19
+      },
+      {
+        "authority": {
+          "cpu_seconds": 306.724856,
+          "peak_rss_bytes": 3108929536,
+          "pressure_cpu_seconds": 0.478619,
+          "pressure_io_seconds": 19.443979,
+          "pressure_memory_seconds": 0.016602,
+          "read_bytes": 208139845632,
+          "wall_seconds": 339.06159448693506,
+          "write_bytes": 65234501632
+        },
+        "counts": {
+          "imported_edges": 16777216,
+          "imported_nodes": 1048576,
+          "source_edges": 16777216,
+          "source_nodes": 1048576
+        },
+        "identities": {
+          "admitted_projection_sha256": "42f494675f8ce3878343f15c76f5b4db19217e026ec59ff83ddaa96e91076d3a",
+          "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "benchexec_version": "3.35",
+          "certify_sha256": "6ca9df51704c5842c971de232e35ddba3afb29b2fb4e22a8b89b0265cd097847",
+          "commit": "6cbfde81494f864a3a61e4d887138aaaa256c92e",
+          "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+          "generator_executable_sha256": "f0bb6614b2a4119bf3deee381783abc506be91b76abe10da58f5aafd7a73026f",
+          "gf_sha256": "7be606cef7e3fb982edef8b11280914d51f1fa0b6c73cf5a602b2621d6ec439d",
+          "host_profile_id": "local-linux-cgroups-v2",
+          "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+          "producer_sha256": "5ced0a517eb635c9580dee5a4cc24a46611c08e1947e34b2d7f6e8dc3d1f7678",
+          "profile_id": "graph500-s20-provider",
+          "profile_sha256": "922533672e46f4dad2ac96ebd0c4ebdf215ec0214d534bea713b8e4e6cf62700"
+        },
+        "metrics": {
+          "logical_read_bytes": 38239170038,
+          "logical_write_bytes": 17378779070,
+          "peak_rss_bytes": 182755328,
+          "physical_read_bytes": 208139845632,
+          "physical_write_bytes": 65234501632,
+          "publication_work_units": 254716,
+          "reader_calls": 483957,
+          "retained_storage_bytes": 4372508672,
+          "transient_peak_storage_bytes": 9173479424,
+          "wall_seconds": 340
+        },
+        "phases": [
+          {
+            "duration_ms": 10,
+            "exit_code": 0,
+            "peak_rss_bytes": 122880,
+            "phase": "admission",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 6181,
+            "exit_code": 0,
+            "peak_rss_bytes": 73891840,
+            "phase": "generate",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 197749,
+            "exit_code": 0,
+            "peak_rss_bytes": 138027008,
+            "phase": "ingest",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 10378,
+            "exit_code": 0,
+            "peak_rss_bytes": 38752256,
+            "phase": "reopen",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 6597,
+            "exit_code": 0,
+            "peak_rss_bytes": 82907136,
+            "phase": "recount",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 38520,
+            "exit_code": 0,
+            "peak_rss_bytes": 182472704,
+            "phase": "query",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 6711,
+            "exit_code": 0,
+            "peak_rss_bytes": 40013824,
+            "phase": "export",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 893,
+            "exit_code": 0,
+            "peak_rss_bytes": 24252416,
+            "phase": "verify",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 9266,
+            "exit_code": 0,
+            "peak_rss_bytes": 37785600,
+            "phase": "clean_import",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 53380,
+            "exit_code": 0,
+            "peak_rss_bytes": 182755328,
+            "phase": "reopen_proof",
+            "status": "passed"
+          }
+        ],
+        "scale": 20
+      },
+      {
+        "authority": {
+          "cpu_seconds": 1372.484699,
+          "peak_rss_bytes": 12419530752,
+          "pressure_cpu_seconds": 2.071478,
+          "pressure_io_seconds": 84.821226,
+          "pressure_memory_seconds": 0.048496,
+          "read_bytes": 886423552000,
+          "wall_seconds": 1510.6185521489242,
+          "write_bytes": 372299218944
+        },
+        "counts": {
+          "imported_edges": 67108864,
+          "imported_nodes": 4194304,
+          "source_edges": 67108864,
+          "source_nodes": 4194304
+        },
+        "identities": {
+          "admitted_projection_sha256": "249ba6c772f37a007ebb3fbbdc5f1b0b9645ef1710f05b3502f98b3b67194678",
+          "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+          "benchexec_version": "3.35",
+          "certify_sha256": "6ca9df51704c5842c971de232e35ddba3afb29b2fb4e22a8b89b0265cd097847",
+          "commit": "6cbfde81494f864a3a61e4d887138aaaa256c92e",
+          "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+          "generator_executable_sha256": "f0bb6614b2a4119bf3deee381783abc506be91b76abe10da58f5aafd7a73026f",
+          "gf_sha256": "7be606cef7e3fb982edef8b11280914d51f1fa0b6c73cf5a602b2621d6ec439d",
+          "host_profile_id": "local-linux-cgroups-v2",
+          "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+          "producer_sha256": "5ced0a517eb635c9580dee5a4cc24a46611c08e1947e34b2d7f6e8dc3d1f7678",
+          "profile_id": "graph500-s22-provider",
+          "profile_sha256": "57b7401694903b887d57345623581b6e73dd368b589bb8da1db7074b166db0b6"
+        },
+        "metrics": {
+          "logical_read_bytes": 162115326212,
+          "logical_write_bytes": 78265631161,
+          "peak_rss_bytes": 193495040,
+          "physical_read_bytes": 886423552000,
+          "physical_write_bytes": 372299218944,
+          "publication_work_units": 1033012,
+          "reader_calls": 2257589,
+          "retained_storage_bytes": 17813278720,
+          "transient_peak_storage_bytes": 36760539136,
+          "wall_seconds": 1511
+        },
+        "phases": [
+          {
+            "duration_ms": 10,
+            "exit_code": 0,
+            "peak_rss_bytes": 16384,
+            "phase": "admission",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 25479,
+            "exit_code": 0,
+            "peak_rss_bytes": 74686464,
+            "phase": "generate",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 931762,
+            "exit_code": 0,
+            "peak_rss_bytes": 165646336,
+            "phase": "ingest",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 42371,
+            "exit_code": 0,
+            "peak_rss_bytes": 46301184,
+            "phase": "reopen",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 26002,
+            "exit_code": 0,
+            "peak_rss_bytes": 91533312,
+            "phase": "recount",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 162901,
+            "exit_code": 0,
+            "peak_rss_bytes": 193495040,
+            "phase": "query",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 27307,
+            "exit_code": 0,
+            "peak_rss_bytes": 49528832,
+            "phase": "export",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 3867,
+            "exit_code": 0,
+            "peak_rss_bytes": 32813056,
+            "phase": "verify",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 37703,
+            "exit_code": 0,
+            "peak_rss_bytes": 47693824,
+            "phase": "clean_import",
+            "status": "passed"
+          },
+          {
+            "duration_ms": 218075,
+            "exit_code": 0,
+            "peak_rss_bytes": 187973632,
+            "phase": "reopen_proof",
+            "status": "passed"
+          }
+        ],
+        "scale": 22
+      }
+    ],
+    "validated_prefix": [
+      18,
+      19,
+      20,
+      22
+    ]
+  },
+  "validation_attempts": {
+    "ci": {
+      "actual": "GF_WRITER_BUSY",
+      "blocker_issue": 1283,
+      "cause_status": "bare File error-path release verified; fork-inheritance trigger remains hypothesis",
+      "expected": "GF_RESOURCE_LIMIT",
+      "failed": 1,
+      "failed_test": "project_retention::tests::work_and_byte_limits_are_fail_closed",
+      "head": "aefdbb2644c6df5a850cccece5a1b1cc43cbad44",
+      "ignored": 2,
+      "passed": 1111,
+      "result": "failed",
+      "run_id": 34914305740
+    },
+    "log_sha256": {
+      "repair-bench-build.log": "d150d1c02c6a0d6f958b6d2654053c81ed65eea5a161b2c6daa978ef8a172371",
+      "repair-ci-failed.log": "dd1e3b12889809c05778a9c7405e995cf567911a7377ffb1187c5aaa4d94119b",
+      "repair-cli-build.log": "16cfd7d5ddfe276a8922e32ec33fd2bb6b69e66dd7a8a0c527516e61745ac8fa",
+      "repair-filesystem-supported.log": "ff02c4c255f094106f1f0e10f0f23feda5ae099fe33118c0684035c79791e710",
+      "repair-pre-push-global-serial-aborted.log": "a7f75196c970a13ea58c8bb03918ec3bbf66b84a940e9ee25ce371b3c92a6051",
+      "repair-pre-push.log": "7db6a4c0aeae5f4ced74a6badfe7fa6b1a7823605577b82b010015537cb82bd1",
+      "repair-reopen-isolated.log": "c1f927c69198aec1bd1331e277482398fd30e2269c2155f6b6e62629df8dbc2f",
+      "repair-storage-global-serial-hang.log": "3711e8e4f86cfc139a2bc8706547fb3607b424ef1cf6282c3c3d0cdcb0ba761a",
+      "repair-storage-native-serial.log": "dae828a265d403312a17849e2194f5c8fa4f4d508b0cd6d8cc8ebd80a4aea902",
+      "repair-storage-tests.log": "3f417b3bcf8f6a8dcf0af4d8c439b827842900fd40a3093c0ba274ee10da062b",
+      "repair-pre-push-native-serial.log": "d4f3119b2af95f799d0c29d420fa00c120999f55ce5d8225906be6932bbf6aa5"
+    },
+    "resumed_local": {
+      "core_rust_tests": "passed",
+      "core_storage_passed": 1111,
+      "core_storage_failed": 0,
+      "core_storage_ignored": 2,
+      "core_storage_seconds": 76.43,
+      "api_bdd_scenarios_passed": 118,
+      "full_pre_push": "failed_coverage_ledger_dirty_tree",
+      "python_native_tests_passed": 241,
+      "node_native_tests_passed": 277,
+      "node_additional_tests_passed": 7,
+      "node_bdd_scenarios_passed": 126,
+      "native_smoke": "passed",
+      "ledger_error": "coverage source tree has uncommitted changes",
+      "dirty_surface": "evidence documentation only; no Rust source changed during run",
+      "coverage_floor_claim": false
+    }
+  },
+  "historical_native_comparison": [
+    {
+      "scale": 18,
+      "metrics": {
+        "logical_read_bytes": 9511424160,
+        "logical_write_bytes": 4330719595,
+        "peak_rss_bytes": 183107584,
+        "physical_read_bytes": 50825838592,
+        "physical_write_bytes": 16199606272,
+        "publication_work_units": 62881,
+        "reader_calls": 120706,
+        "retained_storage_bytes": 1065082880,
+        "transient_peak_storage_bytes": 2293444608,
+        "wall_seconds": 88
+      },
+      "authority": {
+        "cpu_seconds": 79.439239,
+        "peak_rss_bytes": 819089408,
+        "pressure_cpu_seconds": 0.113011,
+        "pressure_io_seconds": 4.481744,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 50825838592,
+        "wall_seconds": 87.88422734395135,
+        "write_bytes": 16199606272
+      },
+      "phases": [
+        {
+          "phase": "admission",
+          "status": "passed",
+          "duration_ms": 10,
+          "exit_code": 0,
+          "peak_rss_bytes": 114688
+        },
+        {
+          "phase": "generate",
+          "status": "passed",
+          "duration_ms": 1533,
+          "exit_code": 0,
+          "peak_rss_bytes": 73035776
+        },
+        {
+          "phase": "ingest",
+          "status": "passed",
+          "duration_ms": 52199,
+          "exit_code": 0,
+          "peak_rss_bytes": 151633920
+        },
+        {
+          "phase": "reopen",
+          "status": "passed",
+          "duration_ms": 2782,
+          "exit_code": 0,
+          "peak_rss_bytes": 37470208
+        },
+        {
+          "phase": "recount",
+          "status": "passed",
+          "duration_ms": 1752,
+          "exit_code": 0,
+          "peak_rss_bytes": 81809408
+        },
+        {
+          "phase": "query",
+          "status": "passed",
+          "duration_ms": 9585,
+          "exit_code": 0,
+          "peak_rss_bytes": 182816768
+        },
+        {
+          "phase": "export",
+          "status": "passed",
+          "duration_ms": 1738,
+          "exit_code": 0,
+          "peak_rss_bytes": 36532224
+        },
+        {
+          "phase": "verify",
+          "status": "passed",
+          "duration_ms": 232,
+          "exit_code": 0,
+          "peak_rss_bytes": 22675456
+        },
+        {
+          "phase": "clean_import",
+          "status": "passed",
+          "duration_ms": 2340,
+          "exit_code": 0,
+          "peak_rss_bytes": 34693120
+        },
+        {
+          "phase": "reopen_proof",
+          "status": "passed",
+          "duration_ms": 13295,
+          "exit_code": 0,
+          "peak_rss_bytes": 183107584
+        }
+      ]
+    },
+    {
+      "scale": 19,
+      "metrics": {
+        "logical_read_bytes": 19072019733,
+        "logical_write_bytes": 8675804711,
+        "peak_rss_bytes": 189415424,
+        "physical_read_bytes": 102905856000,
+        "physical_write_bytes": 32509587456,
+        "publication_work_units": 126317,
+        "reader_calls": 241788,
+        "retained_storage_bytes": 2159181824,
+        "transient_peak_storage_bytes": 4586803200,
+        "wall_seconds": 176
+      },
+      "authority": {
+        "cpu_seconds": 160.435314,
+        "peak_rss_bytes": 1576611840,
+        "pressure_cpu_seconds": 0.250506,
+        "pressure_io_seconds": 9.319706,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 102905856000,
+        "wall_seconds": 175.96881015296094,
+        "write_bytes": 32509587456
+      },
+      "phases": [
+        {
+          "phase": "admission",
+          "status": "passed",
+          "duration_ms": 10,
+          "exit_code": 0,
+          "peak_rss_bytes": 126976
+        },
+        {
+          "phase": "generate",
+          "status": "passed",
+          "duration_ms": 3157,
+          "exit_code": 0,
+          "peak_rss_bytes": 73580544
+        },
+        {
+          "phase": "ingest",
+          "status": "passed",
+          "duration_ms": 105205,
+          "exit_code": 0,
+          "peak_rss_bytes": 150732800
+        },
+        {
+          "phase": "reopen",
+          "status": "passed",
+          "duration_ms": 5253,
+          "exit_code": 0,
+          "peak_rss_bytes": 37892096
+        },
+        {
+          "phase": "recount",
+          "status": "passed",
+          "duration_ms": 3395,
+          "exit_code": 0,
+          "peak_rss_bytes": 84238336
+        },
+        {
+          "phase": "query",
+          "status": "passed",
+          "duration_ms": 19040,
+          "exit_code": 0,
+          "peak_rss_bytes": 189353984
+        },
+        {
+          "phase": "export",
+          "status": "passed",
+          "duration_ms": 3546,
+          "exit_code": 0,
+          "peak_rss_bytes": 36880384
+        },
+        {
+          "phase": "verify",
+          "status": "passed",
+          "duration_ms": 462,
+          "exit_code": 0,
+          "peak_rss_bytes": 22945792
+        },
+        {
+          "phase": "clean_import",
+          "status": "passed",
+          "duration_ms": 4656,
+          "exit_code": 0,
+          "peak_rss_bytes": 34926592
+        },
+        {
+          "phase": "reopen_proof",
+          "status": "passed",
+          "duration_ms": 26444,
+          "exit_code": 0,
+          "peak_rss_bytes": 189415424
+        }
+      ]
+    },
+    {
+      "scale": 20,
+      "metrics": {
+        "logical_read_bytes": 38239170038,
+        "logical_write_bytes": 17378779070,
+        "peak_rss_bytes": 199135232,
+        "physical_read_bytes": 208139395072,
+        "physical_write_bytes": 65235488768,
+        "publication_work_units": 254716,
+        "reader_calls": 483957,
+        "retained_storage_bytes": 4372508672,
+        "transient_peak_storage_bytes": 9173499904,
+        "wall_seconds": 360
+      },
+      "authority": {
+        "cpu_seconds": 327.439273,
+        "peak_rss_bytes": 3117494272,
+        "pressure_cpu_seconds": 0.506296,
+        "pressure_io_seconds": 19.5096,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 208139395072,
+        "wall_seconds": 359.11280012805946,
+        "write_bytes": 65235488768
+      },
+      "phases": [
+        {
+          "phase": "admission",
+          "status": "passed",
+          "duration_ms": 10,
+          "exit_code": 0,
+          "peak_rss_bytes": 16384
+        },
+        {
+          "phase": "generate",
+          "status": "passed",
+          "duration_ms": 6033,
+          "exit_code": 0,
+          "peak_rss_bytes": 73887744
+        },
+        {
+          "phase": "ingest",
+          "status": "passed",
+          "duration_ms": 217267,
+          "exit_code": 0,
+          "peak_rss_bytes": 154161152
+        },
+        {
+          "phase": "reopen",
+          "status": "passed",
+          "duration_ms": 10688,
+          "exit_code": 0,
+          "peak_rss_bytes": 38596608
+        },
+        {
+          "phase": "recount",
+          "status": "passed",
+          "duration_ms": 6756,
+          "exit_code": 0,
+          "peak_rss_bytes": 86294528
+        },
+        {
+          "phase": "query",
+          "status": "passed",
+          "duration_ms": 38371,
+          "exit_code": 0,
+          "peak_rss_bytes": 199135232
+        },
+        {
+          "phase": "export",
+          "status": "passed",
+          "duration_ms": 6909,
+          "exit_code": 0,
+          "peak_rss_bytes": 38592512
+        },
+        {
+          "phase": "verify",
+          "status": "passed",
+          "duration_ms": 923,
+          "exit_code": 0,
+          "peak_rss_bytes": 24256512
+        },
+        {
+          "phase": "clean_import",
+          "status": "passed",
+          "duration_ms": 9339,
+          "exit_code": 0,
+          "peak_rss_bytes": 33742848
+        },
+        {
+          "phase": "reopen_proof",
+          "status": "passed",
+          "duration_ms": 53328,
+          "exit_code": 0,
+          "peak_rss_bytes": 198631424
+        }
+      ]
+    },
+    {
+      "scale": 22,
+      "metrics": {
+        "logical_read_bytes": 162115326212,
+        "logical_write_bytes": 78265631161,
+        "peak_rss_bytes": 262049792,
+        "physical_read_bytes": 885782102016,
+        "physical_write_bytes": 371891003392,
+        "publication_work_units": 1033012,
+        "reader_calls": 2257589,
+        "retained_storage_bytes": 17813299200,
+        "transient_peak_storage_bytes": 36760567808,
+        "wall_seconds": 1683
+      },
+      "authority": {
+        "cpu_seconds": 1551.140919,
+        "peak_rss_bytes": 12473958400,
+        "pressure_cpu_seconds": 2.31054,
+        "pressure_io_seconds": 86.341356,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 885782102016,
+        "wall_seconds": 1682.6014901789604,
+        "write_bytes": 371891003392
+      },
+      "phases": [
+        {
+          "phase": "admission",
+          "status": "passed",
+          "duration_ms": 10,
+          "exit_code": 0,
+          "peak_rss_bytes": 16384
+        },
+        {
+          "phase": "generate",
+          "status": "passed",
+          "duration_ms": 24787,
+          "exit_code": 0,
+          "peak_rss_bytes": 74805248
+        },
+        {
+          "phase": "ingest",
+          "status": "passed",
+          "duration_ms": 1104101,
+          "exit_code": 0,
+          "peak_rss_bytes": 183689216
+        },
+        {
+          "phase": "reopen",
+          "status": "passed",
+          "duration_ms": 42453,
+          "exit_code": 0,
+          "peak_rss_bytes": 45977600
+        },
+        {
+          "phase": "recount",
+          "status": "passed",
+          "duration_ms": 26099,
+          "exit_code": 0,
+          "peak_rss_bytes": 95772672
+        },
+        {
+          "phase": "query",
+          "status": "passed",
+          "duration_ms": 161463,
+          "exit_code": 0,
+          "peak_rss_bytes": 257937408
+        },
+        {
+          "phase": "export",
+          "status": "passed",
+          "duration_ms": 27688,
+          "exit_code": 0,
+          "peak_rss_bytes": 48926720
+        },
+        {
+          "phase": "verify",
+          "status": "passed",
+          "duration_ms": 3867,
+          "exit_code": 0,
+          "peak_rss_bytes": 34209792
+        },
+        {
+          "phase": "clean_import",
+          "status": "passed",
+          "duration_ms": 37633,
+          "exit_code": 0,
+          "peak_rss_bytes": 51081216
+        },
+        {
+          "phase": "reopen_proof",
+          "status": "passed",
+          "duration_ms": 219491,
+          "exit_code": 0,
+          "peak_rss_bytes": 262049792
+        }
+      ]
+    }
+  ]
 }
