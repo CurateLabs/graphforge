@@ -24,8 +24,12 @@ exemptions or unchanged-tree release certification are required.
 - `expr/spatial_lowering.rs` owns point construction and distance lowering.
 - Both lowering modules reuse existing scalar/temporal adapters. Dispatch and
   public lowering tests remain in the parent expression module.
-- [#1296](https://github.com/CurateLabs/graphforge/issues/1296) tracks the temporal
-  and spatial extraction; its PR records body-equivalence and validation evidence.
+- [#1299](https://github.com/CurateLabs/graphforge/pull/1299) merged the temporal
+  and spatial extraction and closed #1296, with body-equivalence and validation evidence.
+- `temporal/duration.rs` owns duration construction, parsing/rendering, arithmetic,
+  and between operations. Explicit reexports preserve the temporal API paths.
+  [#1297](https://github.com/CurateLabs/graphforge/issues/1297) records the extraction;
+  the parent and new duration module both fit the default bound.
 - [#1293](https://github.com/CurateLabs/graphforge/pull/1293) merged storage
   construction catalog extraction and closed #1292.
 
@@ -37,7 +41,6 @@ Follow live child dependencies and finish queued work before starting more.
 | --- | --- |
 | Relational expressions | Heterogeneous lists; graph/path values; scalar UDFs and builtin dispatch |
 | Relational plan lowering | Scans/property joins; traversal; nested/optional queries; writes |
-| Temporal values | Duration parsing, arithmetic, between operations, and direct tests |
 | IR binding | Patterns/paths; writes; projection/aggregation; expression/property binding |
 | API root | Query/result shaping; hydration/read authority; graph publication; runtime |
 | API domains | Bulk normalization/publication; knowledge ledgers; repository definitions/skills; checkpoint views/diffs; ontology candidates; composite property routing/rebase |
@@ -55,8 +58,8 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1296; recompute before canonical
-closure. A listed file is still pending unless an accepted exemption says otherwise.
+This snapshot records the working tree during #1297; recompute before canonical
+closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
 | --- | ---: |
@@ -80,7 +83,7 @@ closure. A listed file is still pending unless an accepted exemption says otherw
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
 | `crates/graphforge-rel/src/expr.rs` | 8,340 |
 | `crates/graphforge-rel/src/lowerer.rs` | 7,217 |
-| `crates/graphforge-rel/src/temporal.rs` | 3,005 |
+| `crates/graphforge-rel/src/temporal.rs` | 2,040 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
 | `crates/graphforge-storage/src/catalog.rs` | 5,467 |
 | `crates/graphforge-storage/src/graph_construction.rs` | 12,687 |
