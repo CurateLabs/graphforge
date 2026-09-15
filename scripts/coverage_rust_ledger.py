@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -551,7 +552,7 @@ def validate_floors(ledger: dict[str, Any], args: argparse.Namespace) -> None:
         data = ledger.get("surfaces", {}).get(surface)
         validate_total(data, surface)
         percent = data["line_percent"]
-        if floor is not None and float(percent) < floor:
+        if floor is not None and below_floor(data, floor):
             raise LedgerError(
                 f"{surface} Rust coverage below {floor:.2f}% (got {float(percent):.2f}%)"
             )
@@ -569,18 +570,25 @@ def validate_floors(ledger: dict[str, Any], args: argparse.Namespace) -> None:
         )
     for crate, data in sorted(crates.items()):
         validate_total(data, f"crate {crate}")
-        if float(data["line_percent"]) < args.crate_floor:
+        if below_floor(data, args.crate_floor):
             raise LedgerError(
                 f"{crate} Rust coverage below {args.crate_floor:.2f}% "
                 f"(got {float(data['line_percent']):.2f}%)"
             )
     patch = ledger.get("patch")
     validate_total(patch, "patch", allow_zero=True)
-    if float(patch["line_percent"]) < args.patch_floor:
+    if below_floor(patch, args.patch_floor):
         raise LedgerError(
             f"changed Rust coverage below {args.patch_floor:.2f}% "
             f"(got {float(patch['line_percent']):.2f}%)"
         )
+
+
+def below_floor(data: dict[str, Any], floor: float) -> bool:
+    """Compare counts exactly; display rounding must not admit a failing result."""
+    measured = data["measured_lines"]
+    percent = Fraction(data["covered_lines"] * 100, measured) if measured else Fraction(100)
+    return percent < Fraction(str(floor))
 
 
 def validate_total(data: Any, name: str, *, allow_zero: bool = False) -> None:
@@ -602,6 +610,7 @@ def validate_total(data: Any, name: str, *, allow_zero: bool = False) -> None:
         or not math.isfinite(percent)
         or percent < 0
         or percent > 100
+        or percent != (round(covered * 100 / measured, 2) if measured else 100.0)
     ):
         raise LedgerError(f"Rust coverage ledger has malformed {name} totals")
 
