@@ -5337,6 +5337,38 @@ fn certified_spatial_point_and_distance_execute_in_rust() {
     );
 }
 
+#[test]
+fn geographic_distance_is_in_metres_symmetric_and_zero_for_identical_points() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    let result = rows(
+        &gf,
+        "RETURN \
+         distance(point({longitude: 0.0, latitude: 0.0}), \
+                  point({longitude: 1.0, latitude: 0.0})) AS forward, \
+         distance(point({longitude: 1.0, latitude: 0.0}), \
+                  point({longitude: 0.0, latitude: 0.0})) AS reverse, \
+         distance(point({longitude: 1.0, latitude: 0.0}), \
+                  point({longitude: 1.0, latitude: 0.0})) AS identical",
+    );
+    assert_eq!(result.batches.len(), 1);
+    let batch = &result.batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    let distance = |name| {
+        let values = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("distance returns Arrow Float64");
+        assert_eq!(values.null_count(), 0);
+        values.value(0)
+    };
+    // One equatorial degree spans about 111.195 km under the spherical model.
+    assert!((distance("forward") - 111_195.08).abs() < 1.0);
+    assert!((distance("reverse") - distance("forward")).abs() < 1e-9);
+    assert!(distance("identical").abs() < 1e-9);
+}
+
 /// The constant and dynamic encodings have different tag meanings. Both must
 /// survive actual write-back into the persisted scalar layout and a fresh open.
 #[test]

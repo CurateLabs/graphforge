@@ -26,8 +26,8 @@ exemptions or unchanged-tree release certification are required.
   public lowering tests remain in the parent expression module.
 - [#1296](https://github.com/CurateLabs/graphforge/issues/1296) tracks the temporal
   and spatial extraction; its PR records body-equivalence and validation evidence.
-- [#1292](https://github.com/CurateLabs/graphforge/issues/1292) tracks storage
-  construction catalog extraction. Check live issue state before further work.
+- [#1293](https://github.com/CurateLabs/graphforge/pull/1293) merged storage
+  construction catalog extraction and closed #1292.
 
 ## Remaining domain sequence
 
@@ -83,7 +83,7 @@ closure. A listed file is still pending unless an accepted exemption says otherw
 | `crates/graphforge-rel/src/temporal.rs` | 3,005 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
 | `crates/graphforge-storage/src/catalog.rs` | 5,467 |
-| `crates/graphforge-storage/src/graph_construction.rs` | 13,084 |
+| `crates/graphforge-storage/src/graph_construction.rs` | 12,687 |
 | `crates/graphforge-storage/src/graph_object_store.rs` | 6,304 |
 | `crates/graphforge-storage/src/graph_projection.rs` | 3,078 |
 | `crates/graphforge-storage/src/project_checkpoints.rs` | 4,091 |
