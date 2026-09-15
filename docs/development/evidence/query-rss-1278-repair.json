@@ -1,6 +1,6 @@
 {
   "issue": 1278,
-  "status": "allocation_correctness_and_native_s24_admission_passed_ci_retention_test_blocked",
+  "status": "allocation_correctness_and_native_s24_admission_passed_retention_prerequisite_merged",
   "host": "OVHC-AGENCY",
   "root_filesystem": "ext4",
   "reserve_bytes": 141258578535,
@@ -12740,5 +12740,22 @@
         }
       ]
     }
-  ]
+  ],
+  "integration_admission_replay": {
+    "artifact": "query-rss-1278-integration-admission.json",
+    "sha256": "95ec02aed33f57e7b990d350e5f5ec24741495d78beba097ac11fa9d3e4fbf3e"
+  },
+  "retention_prerequisite": {
+    "issue": 1283,
+    "pull_request": 1284,
+    "merge_commit": "233dddd144faca5dde91ee24a2516b15dbff2e71",
+    "validated_head": "61028f0d5e8fd289b2c46bd85946ff59fdaab94e",
+    "ci_run": 34921203058,
+    "required_ci_gate": "passed",
+    "red_regressions_failed": 2,
+    "retention_tests_passed": 15,
+    "recovery_tests_passed": 29,
+    "native_rss_remeasurement": false
+  },
+  "final_integration_validation_authority": "PR #1281 exact-head checks and validation results; historical attempts are retained above"
 }

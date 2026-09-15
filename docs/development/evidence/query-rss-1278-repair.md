@@ -2,9 +2,11 @@
 
 The allocation correction and complete native S18/S19/S20/S22 prefix are verified.
 Full S24 admission passes all nine unchanged checks: S20–S22 process RSS grows
-5.8766%, below the 10% gate. No S24 workload has been executed and #1278 remains
-open. The [pre-repair diagnosis](query-rss-1278.md) and its sole RSS refusal are
-preserved. PR #1281 remains blocked by an unrelated retention-test CI failure.
+5.8766%, below the 10% gate. No S24 workload has been executed. Issue #1278 was
+open when these measurements were collected. The [pre-repair diagnosis](query-rss-1278.md)
+and its sole RSS refusal are preserved. The separate retention-lock defect was
+subsequently fixed and merged in PR #1284; final integration checks and closure
+are tracked by PR #1281.
 
 ## Change and identities
 
@@ -185,10 +187,37 @@ All 23 sanitized native receipt/projection files are retained byte-for-byte in
 `query-rss-1278-repair/`; the JSON ledger records their SHA-256 hashes, full phase
 metrics and identities. Replay of the historical prefix still refuses only RSS.
 
-## CI blocker
+## Guard integration and fresh admission replay
 
-The independent retention-lock concern is tracked in
-[#1283](https://github.com/CurateLabs/graphforge/issues/1283).
+[#1283](https://github.com/CurateLabs/graphforge/issues/1283) was fixed by
+[PR #1284](https://github.com/CurateLabs/graphforge/pull/1284), merged as
+`233dddd144faca5dde91ee24a2516b15dbff2e71` after exact-head CI Gate success.
+Two deterministic duplicate-descriptor regressions failed before the guard and
+passed after it. All 15 retention tests and 29 recovery tests passed locally;
+the normal parallel Bazel storage aggregate, bindings and platform lanes passed
+in [CI run 34921203058](https://github.com/CurateLabs/graphforge/actions/runs/34921203058).
+The guard explicitly unlocks on error exits and preserves fallible success-path
+release, checkpoint ordering, allocation accounting and Windows handle closure.
+
+The existing native receipts still measure `6cbfde…`. The later guard integration
+is validated separately; it was **not natively remeasured**. The original receipt
+files and their hashes remain unchanged. No S24 workload was executed.
+
+After integrating the guard, `completed_prefix` again validated all four preserved
+rungs. A separate full S24 replay used 679,605,125,120 B freshly measured free space
+and the unchanged 141,258,578,535-B reserve. All nine checks passed. Its projection
+SHA-256 is `1bb98716393b34068b6d1c2f9067f409ae9cbbb2fb69fe0e9f318b87aa1f2045`;
+[the separate replay artifact](query-rss-1278-integration-admission.json) preserves
+capacity, projection, identities and the explicit distinction from remeasurement.
+The original admitted projection is retained alongside this later replay.
+
+Final integration validation is recorded in
+[PR #1281](https://github.com/CurateLabs/graphforge/pull/1281), against its actual
+head. All intended documentation is committed before that clean-tree validation;
+results and logs are recorded without changing the validated source tree.
+Earlier failures below remain part of the attempt ledger.
+
+## Historical CI failure
 
 [CI run 34914305740](https://github.com/CurateLabs/graphforge/actions/runs/34914305740)
 at `aefdbb2644c6df5a850cccece5a1b1cc43cbad44` failed the Bazel storage aggregate:
@@ -199,15 +228,15 @@ Other completed Rust quality, Python/Node binding and Windows/macOS durability
 lanes passed. The independent read-only review found no actionable RSS-repair
 findings. Neither successful local tests nor host admission override failed CI.
 
-Inspection shows `run_cleanup` acquires a bare writer-lock `File`; a classification
-error returns before its success-path explicit unlock. A duplicated or inherited
+Inspection of the failing source showed that `run_cleanup` acquired a bare
+writer-lock `File`; a classification error returned before explicit unlock. A duplicated or inherited
 descriptor can retain that kernel lock after the parent closes its handle.
 Concurrent fork inheritance is a plausible trigger for this CI occurrence, but
-the CI log alone does not prove it. A separate deterministic regression should
-retain a duplicate descriptor across each bounded-error return and assert that
-an independent writer can immediately acquire the lock. Preserve genuine writer
-contention behavior. This lifetime concern is outside the adjacency-buffer repair;
-no retry or weakened assertion was used to turn this failure green.
+the CI log alone does not prove it. The separate repair retained a duplicate descriptor across each bounded-error
+return and verified that an independent writer could immediately acquire the lock
+and repeat the public preview. Genuine writer contention behavior remains tested.
+This lifetime concern was fixed outside the adjacency-buffer PR; no retry or
+weakened assertion was used to turn the original failure green.
 
 ## Commands
 

@@ -232,15 +232,18 @@ rebuild merge readers consume 1 MiB per concurrently open run, alongside retaine
 accumulators and CSR serialization state. The 16/64-reader S20/S22 working-set
 increase is a concrete repair target; it is an extrapolation from the smaller
 traces, not a new S20/S22 measurement or a repaired admission pass. The historical
-RSS refusal and #1278 remain open.
+RSS refusal is preserved as the pre-repair evidence for #1278.
 
 The [reader-buffer repair evidence](evidence/query-rss-1278-repair.md) records a
 verified 1-MiB aggregate merge-reader budget, flat live-reader allocation across
 S16/S17/S18, and all 135 successful small comparison commands. The new native
 S18/S19/S20/S22 prefix passes with frozen executables containing both verified
 storage repairs. S20–S22 process RSS rises 182,755,328 → 193,495,040 B (5.8766%);
-full S24 admission passes all nine unchanged checks. No S24 workload ran. #1278
-remains open, and PR #1281 is blocked by a separate retention-test CI failure.
+full S24 admission passes all nine unchanged checks. No S24 workload ran. The
+separate retention-lock defect was fixed and merged in PR #1284. A fresh-capacity
+replay after integration also passes all nine checks against the preserved native
+prefix; it does not relabel those measurements as a new native run. PR #1281
+records final integration validation and the #1278 close gate.
 
 ## Acceptance ledger and remaining capacity
 
