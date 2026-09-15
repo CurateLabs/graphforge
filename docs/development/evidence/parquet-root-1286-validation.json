@@ -1,0 +1,104 @@
+{
+  "analysis_tests": {
+    "attribution": 10,
+    "candidate": 2,
+    "historical_runtime": 3
+  },
+  "bdd_mutations_rejected": 5,
+  "campaigns": {
+    "boundary_lifecycles": 8,
+    "diagnostic_lifecycles": 3,
+    "failed_measurements": 0,
+    "independent_oracles": 232,
+    "ordinary_lifecycles": 18
+  },
+  "coverage": {
+    "core": {
+      "covered_lines": 168132,
+      "line_percent": 91.3,
+      "measured_lines": 184155,
+      "source_files": 339
+    },
+    "node_adapter": {
+      "covered_lines": 5926,
+      "line_percent": 80.92,
+      "measured_lines": 7323,
+      "source_files": 8
+    },
+    "python_adapter": {
+      "covered_lines": 6741,
+      "line_percent": 80.97,
+      "measured_lines": 8325,
+      "source_files": 7
+    },
+    "workspace": {
+      "covered_lines": 304350,
+      "line_percent": 93.7,
+      "measured_lines": 324819,
+      "source_files": 357
+    }
+  },
+  "diagnostic_retained_root_tests": {
+    "passed": 3
+  },
+  "final_checks": {
+    "cargo_fmt": "passed",
+    "gate_registry": "passed",
+    "git_diff_check": "passed",
+    "pre_push_fast": "passed"
+  },
+  "full_pre_push": "failed coverage floors; executed native tests passed",
+  "initial_failure": "direct merge fixture omitted session-initialized allocation categories; corrected, then full storage suite passed",
+  "node_wrapper": {
+    "coverage_percent": 80.32,
+    "failed": 0,
+    "floor": 85,
+    "passed": 277
+  },
+  "production_patch": {
+    "covered_lines": 7,
+    "line_percent": 100.0,
+    "measured_lines": 7,
+    "source_files": 2
+  },
+  "python_wrapper": {
+    "coverage_percent": 96.97,
+    "passed": 110
+  },
+  "raw_sha256": {
+    "analysis-candidate.log": "b70aaee4b98aed3c929b11d2edf077f243b297ed21e6fabbffb70bd38d82b0f9",
+    "analysis-existing.log": "18e17055e0d9ddd2d2f2fe6fb3ed4300de88eab845837a329f901c06f55e6bb9",
+    "analysis-historical-corrected.log": "d5157077907ac9be3faaabd7c7b0b0affbb39f48e7bd4fd5f256803a31b9ded7",
+    "bdd-mutations.log": "792aa9489ccf41d239e6be2b5952c7bb39b87ab21520c3ede703c37e40dc4707",
+    "coverage-ledger.json": "08256fcb47e87219f12f22487f56ac2a8e9326e5392479e1581395b230e81f7e",
+    "facade-test.log": "bb29b392767cc1185e148fe2e967325dd1009ea3d881591dfffa44abdc0d5b7e",
+    "final-gate-registry.log": "48050d5bb60544c041fc9097ae026c0d092c34d2f3eb30c9ab1edcf6c44c9987",
+    "final-pre-push-fast.log": "58dee9e041a0cc38ed24276c67e7714e064552903dc1e319b07e612d40186cf6",
+    "gate-registry.log": "e89482f07c7d8c2bed93d58faf67c840ab590d40b57c17d510aa865e5f2c287e",
+    "pre-push-fast.log": "634d82144550b9a7d82c7806dc966a23b4d6bcfabd02b0f640535edd8d7731dd",
+    "pre-push-summary.json": "b9aafb003b71a65c9894a0c5a5368d67fc574776bdf350942d49dbae4f1f864a",
+    "pre-push.log": "a4578f29ce5b6735b34dee2618ce4090c8c94c37a62bfda695b0b34e64d73167",
+    "retained-diagnostic-tests.log": "64dbce238d9b8bcc15bdc4d24be9b063b99685ef0e8e09df9de4d3bd3d829a42",
+    "row-tests.log": "25db466911b959272f0dd355740ed5e379c02fc365e79615454f992451fcd7d4",
+    "storage-clippy.log": "1cdb6713738d0a03285b9b553b0c194296cbc3831056e0987f78b5b0b22a57d0",
+    "storage-tests.log": "a39c0106a16094843ac1f0fb5c2df1d3c51b09c032123ecc4de298754578a501",
+    "wrapper-node.log": "07862404576759c220435018933ce381a09fd971bf0693fb5d21f2f0890ff0a4",
+    "wrapper-python.log": "4ebe57a6534e21b0fb7a926896a3b3b42d9b015a438d37168a8112d1723affbd"
+  },
+  "source_sha": "888192cbbc9c398e7d8b5d60f3c6b75b298aa2a5",
+  "storage_tests": {
+    "existing_ignored": 2,
+    "failed": 0,
+    "passed": 1120
+  },
+  "unchanged_cli_coverage": {
+    "covered_lines": 2853,
+    "line_percent": 79.34,
+    "measured_lines": 3596,
+    "source_files": 7
+  },
+  "workspace_clippy": "passed: cargo clippy --workspace -- -D warnings (pre-push log)",
+  "workspace_python": {
+    "passed": 241
+  }
+}

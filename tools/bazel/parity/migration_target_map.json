@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 125,
+  "cargo_target_count": 126,
   "targets": [
     {
       "package": "graphforge-api",
@@ -172,6 +172,16 @@
       "bazel_label": "//crates/graphforge-api:fixed_hop_limit",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "ingestion_attribution",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/ingestion_attribution.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:ingestion_attribution",
+      "exception_id": null,
+      "notes": "#1282 production fan-in attribution facade fixture"
     },
     {
       "package": "graphforge-api",

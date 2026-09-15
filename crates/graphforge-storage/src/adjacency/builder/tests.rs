@@ -13,6 +13,78 @@ use graphforge_core::{OntologyMode, TypeId};
 use tempfile::TempDir;
 
 #[test]
+fn merge_readers_share_a_budget_and_preserve_all_records() {
+    for run_count in [1, 16, 63, 64, 65] {
+        let dir = TempDir::new().unwrap();
+        let mut spill = SpillSession::create(&dir.path().join("runs")).unwrap();
+        let mut runs = Vec::new();
+        let mut expected = Vec::new();
+        for run in 0..run_count {
+            // Long enough to refill even the single-reader buffer. Keys
+            // interleave across runs; ties exercise the entire comparator.
+            let entries: Vec<_> = (0..45_000_u64)
+                .map(|row| (row / 3, row % 3, run as u64))
+                .collect();
+            let path = spill.next_run_path("EDGE", Direction::Out);
+            write_keyed_run(&path, &entries, &mut spill).unwrap();
+            runs.push(path);
+            expected.extend(entries);
+        }
+        expected.sort_unstable();
+        {
+            let cursors = open_run_cursors(&runs).unwrap();
+            assert_eq!(cursors.len(), run_count);
+            let allocated: usize = cursors.iter().map(|c| c.file.capacity()).sum();
+            assert!(allocated <= 1_048_576, "{run_count} readers: {allocated}");
+        }
+        // Exercise the compaction boundary as well as the final merge. The
+        // 20-byte header and 24-byte records cross reader buffer boundaries.
+        compact_keyed_runs(
+            &mut runs,
+            64,
+            "EDGE",
+            Direction::Out,
+            &mut spill,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let mut position = 0;
+        merge_keyed_runs(&runs, &mut || Ok(()), &mut |entry| {
+            assert_eq!(Some(&entry), expected.get(position));
+            position += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(position, expected.len());
+    }
+}
+
+#[test]
+fn spill_cursor_decodes_with_no_buffer_and_rejects_truncation() {
+    let dir = TempDir::new().unwrap();
+    let mut spill = SpillSession::create(&dir.path().join("runs")).unwrap();
+    let path = spill.next_run_path("EDGE", Direction::Out);
+    let entries = [(1, 2, 3), (4, 5, 6)];
+    write_keyed_run(&path, &entries, &mut spill).unwrap();
+    for capacity in [0, 1, 23, 24, 25] {
+        let mut cursor = RunCursor::open(&path, capacity).unwrap();
+        for entry in entries {
+            assert_eq!(cursor.current, Some(entry));
+            cursor.pull().unwrap();
+        }
+        assert_eq!(cursor.current, None);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(20 + 24 + 23)
+        .unwrap();
+    let mut cursor = RunCursor::open(&path, 25).unwrap();
+    assert!(cursor.pull().is_err());
+}
+
+#[test]
 fn build_is_deterministic_and_stamps_pre_scan_generation() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path()); // flush -> generation 1

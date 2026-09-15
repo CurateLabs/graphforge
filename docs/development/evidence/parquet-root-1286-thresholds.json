@@ -1,0 +1,120 @@
+{
+  "baseline_summary_sha256": "bbb444524f20c55baf70339a26aad741ac17c90ab3cdab7de58131dda97fb84a",
+  "frozen_unix": 1789484314.1118357,
+  "issue": 1286,
+  "policy": "S17 median saving must strictly exceed frozen threshold; review all resources and controls",
+  "primary_case": "s17",
+  "thresholds": {
+    "s16": {
+      "baseline_envelope": {
+        "ingestion_command_cpu_seconds": {
+          "max": 8.40344,
+          "median": 8.377693999999998,
+          "min": 8.145882
+        },
+        "ingestion_input_bytes": {
+          "max": 2916044800,
+          "median": 2916036608,
+          "min": 2916036608
+        },
+        "ingestion_output_bytes": {
+          "max": 871485440,
+          "median": 871485440,
+          "min": 871485440
+        },
+        "ingestion_wall_seconds": {
+          "max": 9.508975825854577,
+          "median": 9.401911417138763,
+          "min": 9.193699685041793
+        },
+        "measurement_resolution_seconds": 0.01,
+        "minimum_useful_wall_saving_seconds": 0.31527614081278443,
+        "peak_construction_staging_allocated_bytes": {
+          "max": 419774464,
+          "median": 419770368,
+          "min": 419766272
+        },
+        "peak_process_bytes": {
+          "max": 178544640,
+          "median": 177823744,
+          "min": 177696768
+        }
+      },
+      "minimum_saving_seconds": 0.31527614081278443
+    },
+    "s17": {
+      "baseline_envelope": {
+        "ingestion_command_cpu_seconds": {
+          "max": 19.411620000000003,
+          "median": 19.239253,
+          "min": 19.074963000000004
+        },
+        "ingestion_input_bytes": {
+          "max": 6499753984,
+          "median": 6499741696,
+          "min": 6499733504
+        },
+        "ingestion_output_bytes": {
+          "max": 2019512320,
+          "median": 2019512320,
+          "min": 2019512320
+        },
+        "ingestion_wall_seconds": {
+          "max": 21.74376842402853,
+          "median": 21.679509325884283,
+          "min": 21.34541817882564
+        },
+        "measurement_resolution_seconds": 0.01,
+        "minimum_useful_wall_saving_seconds": 0.39835024520289153,
+        "peak_construction_staging_allocated_bytes": {
+          "max": 940236800,
+          "median": 940232704,
+          "min": 940232704
+        },
+        "peak_process_bytes": {
+          "max": 178900992,
+          "median": 178892800,
+          "min": 178503680
+        }
+      },
+      "minimum_saving_seconds": 0.406388363
+    },
+    "s18": {
+      "baseline_envelope": {
+        "ingestion_command_cpu_seconds": {
+          "max": 41.943742,
+          "median": 41.857727999999994,
+          "min": 41.26846
+        },
+        "ingestion_input_bytes": {
+          "max": 13555642368,
+          "median": 13555613696,
+          "min": 13555609600
+        },
+        "ingestion_output_bytes": {
+          "max": 4546826240,
+          "median": 4546826240,
+          "min": 4546826240
+        },
+        "ingestion_wall_seconds": {
+          "max": 46.62831099401228,
+          "median": 46.60430232505314,
+          "min": 46.27742363605648
+        },
+        "measurement_resolution_seconds": 0.01,
+        "minimum_useful_wall_saving_seconds": 0.3508873579557985,
+        "peak_construction_staging_allocated_bytes": {
+          "max": 1880461312,
+          "median": 1880461312,
+          "min": 1880457216
+        },
+        "peak_process_bytes": {
+          "max": 179232768,
+          "median": 179101696,
+          "min": 178614272
+        }
+      },
+      "minimum_saving_seconds": 0.621841171
+    }
+  }
+}
