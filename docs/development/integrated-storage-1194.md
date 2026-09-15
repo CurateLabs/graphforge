@@ -223,6 +223,28 @@ The [owned-build reclamation ledger](evidence/integrated-storage-1194/owned-buil
 
 The summary retains the pre-cleanup freeze capacity. Final native qualification instead measures actual available capacity after all accepted rung workspaces are reclaimed. Its projected deficit is 30,096,125,885 bytes and spare capacity after the declared reserve is 0 bytes. Neither projection is an S26 execution.
 
+## RSS admission diagnosis (#1278)
+
+The [query RSS diagnosis](evidence/query-rss-1278.md) preserves the unchanged full
+S24 refusal and exercises the public lifecycle plus 72 independently checked
+query observations at S16/S17/S18. Allocation traces confirm that adjacency
+rebuild merge readers consume 1 MiB per concurrently open run, alongside retained
+accumulators and CSR serialization state. The 16/64-reader S20/S22 working-set
+increase is a concrete repair target; it is an extrapolation from the smaller
+traces, not a new S20/S22 measurement or a repaired admission pass. The historical
+RSS refusal is preserved as the pre-repair evidence for #1278.
+
+The [reader-buffer repair evidence](evidence/query-rss-1278-repair.md) records a
+verified 1-MiB aggregate merge-reader budget, flat live-reader allocation across
+S16/S17/S18, and all 135 successful small comparison commands. The new native
+S18/S19/S20/S22 prefix passes with frozen executables containing both verified
+storage repairs. S20–S22 process RSS rises 182,755,328 → 193,495,040 B (5.8766%);
+full S24 admission passes all nine unchanged checks. No S24 workload ran. The
+separate retention-lock defect was fixed and merged in PR #1284. A fresh-capacity
+replay after integration also passes all nine checks against the preserved native
+prefix; it does not relabel those measurements as a new native run. PR #1281
+records final integration validation and the #1278 close gate.
+
 ## Acceptance ledger and remaining capacity
 
 | #901 acceptance criterion | Direct evidence and outcome |
@@ -320,8 +342,9 @@ only sanitized observations and hashes.
 No cache drop was used. Sibling compilation overlapped portions of diagnostic
 captures; our build was paused during entry/return capture. These are scoped
 work observations, not a statistical overhead estimate or a controlled
-before/after speedup. The ordinary historical receipts remain the authority
-for admission. Fresh comparable integration still waits for the RSS repair.
+before/after speedup. These diagnostic captures are not admission evidence.
+The subsequent [integrated native prefix](evidence/query-rss-1278-repair.md)
+contains both repairs and passes full S24 admission without executing S24.
 
 ### Verified repair: share decoded row sources
 

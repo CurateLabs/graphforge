@@ -45,6 +45,9 @@ pub const ADJACENCY_SPILL_DIR_NAME: &str = ".spill";
 const SPILL_RUN_MAGIC: &[u8; 8] = b"GFADJRUN";
 const SPILL_RUN_VERSION: u32 = 1;
 const BYTES_PER_KEYED_ENTRY: u64 = 24;
+// One budget per merge, including compaction passes. A per-run MiB made
+// query-time rebuild RSS grow as the number of spill runs approached fan-in.
+const MERGE_READER_BUFFER_BYTES: usize = 1 << 20;
 
 /// Bounded build policy for streamed adjacency construction (#336).
 ///
@@ -605,10 +608,10 @@ struct RunCursor {
 }
 
 impl RunCursor {
-    fn open(path: &Path) -> Result<Self, GfError> {
+    fn open(path: &Path, buffer_bytes: usize) -> Result<Self, GfError> {
         use std::io::Read;
         let file = std::fs::File::open(path).map_err(storage_err)?;
-        let mut file = std::io::BufReader::with_capacity(1 << 20, file);
+        let mut file = std::io::BufReader::with_capacity(buffer_bytes, file);
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic).map_err(storage_err)?;
         if &magic != SPILL_RUN_MAGIC {
@@ -651,6 +654,15 @@ impl RunCursor {
         self.current = Some((key, edge, neighbor));
         Ok(())
     }
+}
+
+fn open_run_cursors(runs: &[PathBuf]) -> Result<Vec<RunCursor>, GfError> {
+    let buffer_bytes = MERGE_READER_BUFFER_BYTES / runs.len().max(1);
+    // Do not round up: even an unusually large caller-selected fan-in must
+    // stay within the budget. BufReader with zero capacity reads directly.
+    runs.iter()
+        .map(|path| RunCursor::open(path, buffer_bytes))
+        .collect()
 }
 
 fn compact_keyed_runs(
@@ -743,10 +755,7 @@ fn merge_keyed_runs(
         return Ok(());
     }
 
-    let mut cursors: Vec<RunCursor> = runs
-        .iter()
-        .map(|p| RunCursor::open(p))
-        .collect::<Result<_, _>>()?;
+    let mut cursors = open_run_cursors(runs)?;
     // Min-heap by (key, edge, neighbor, cursor_index).
     let mut heap: BinaryHeap<Reverse<(u64, u64, u64, usize)>> = BinaryHeap::new();
     for (idx, cursor) in cursors.iter().enumerate() {
