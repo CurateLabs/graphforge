@@ -216,8 +216,8 @@ fn compact_public_construction_reopens_and_round_trips_exact_graph() {
     let control: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
     assert_eq!(
-        control["format_version"], 9,
-        "public new sessions use successor-bound payload reclamation"
+        control["format_version"], 10,
+        "public new sessions use packed current-format records and successor-bound reclamation"
     );
     let mut session = graph
         .resume_graph_construction(session_id, budgets)

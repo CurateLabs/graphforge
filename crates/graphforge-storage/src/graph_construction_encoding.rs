@@ -55,10 +55,12 @@ const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
 const ENCODING_INTENT: &str = "encoding-intent.json";
 const MAX_INVENTORY_BYTES: u64 = 16 << 20;
-const IDENTITY_WIDTH: usize = 32;
+use crate::construction_record_layout::{
+    BASE_IDENTITY_WIDTH as IDENTITY_WIDTH, IDENTITY_SURROGATE_OFFSET, RESOLVED_ENDPOINT_WIDTH,
+    RESOLVED_SURROGATE_OFFSET,
+};
 const NODE_DETAIL_WIDTH: usize = 272;
 const EDGE_DETAIL_WIDTH: usize = 304;
-const RESOLVED_ENDPOINT_WIDTH: usize = 32;
 const COPY_BUFFER_BYTES: usize = crate::GRAPH_CONSTRUCTION_ENCODING_BUFFER_BYTES;
 
 #[cfg(test)]
@@ -542,7 +544,6 @@ pub(crate) fn inventory_authority_sha256(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn encode(
     source: &StableDirectory,
-    mapped_routes: bool,
     detail_codec: DetailCodec,
     shape: &ConstructionShape,
     generation: u64,
@@ -556,6 +557,9 @@ pub(crate) fn encode(
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("canonical_encoding");
     if shape.ontology_mode != ontology_mode {
         return Err(storage(
             "shape ontology mode differs from session authority",
@@ -585,11 +589,10 @@ pub(crate) fn encode(
     cleanup_encoding_temps(&output, budgets)?;
     if let Some(mut existing) = read_inventory(&output)? {
         let authentication = authenticate_inventory(&output, &existing, parent_index)?;
-        if existing
+        if !existing
             .artifacts
             .iter()
             .any(|entry| entry.path == crate::route_component::TABLE_FILE)
-            != mapped_routes
             || existing.generation != generation
             || existing.ontology_mode != shape.ontology_mode
             || existing.semantic_authority_sha256 != shape.semantic_authority_sha256
@@ -645,9 +648,7 @@ pub(crate) fn encode(
         peak_open_writers: 1,
         ..Default::default()
     };
-    let mut routes = mapped_routes
-        .then(|| construction_parent_routes(parent_generation, &mut evidence))
-        .transpose()?;
+    let mut routes = construction_parent_routes(parent_generation, &mut evidence)?;
     let mut artifacts = Vec::new();
     let label_ids = {
         let (catalog_spool, _catalog_guard) = authenticated_source_spool(
@@ -835,7 +836,7 @@ pub(crate) fn encode(
         &mut evidence,
     )?;
 
-    if let Some(routes) = &routes {
+    {
         copy_artifact(
             std::io::Cursor::new(routes.encode(64 * 1024 * 1024)?),
             &output,
@@ -898,13 +899,10 @@ pub(crate) fn encode(
 }
 
 fn encoded_route_component(
-    routes: &mut Option<crate::route_component::RouteTable>,
+    routes: &mut crate::route_component::RouteTable,
     route: &str,
 ) -> Result<String, GfError> {
-    match routes {
-        Some(table) => table.insert(route, 64 * 1024 * 1024, 100_000),
-        None => Ok(route.to_owned()),
-    }
+    routes.insert(route, 64 * 1024 * 1024, 100_000)
 }
 
 fn construction_parent_routes(
@@ -1122,7 +1120,7 @@ fn encode_nodes(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-    route_table: &mut Option<crate::route_component::RouteTable>,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
     if shape.node_rows.is_empty() {
         if !build_v4 {
@@ -1241,7 +1239,11 @@ fn encode_nodes(
                         .get(label)
                         .ok_or_else(|| storage("node label is absent from runtime catalog"))?,
                 };
-                let node_id = u64::from_be_bytes(identity[24..32].try_into().expect("fixed"));
+                let node_id = u64::from_be_bytes(
+                    identity[IDENTITY_SURROGATE_OFFSET..IDENTITY_WIDTH]
+                        .try_into()
+                        .expect("fixed"),
+                );
                 if let Some(v4) = v4.as_mut() {
                     v4.push_pair(Uuid::from_bytes(uuid), node_id, cancelled)?;
                 }
@@ -1321,7 +1323,7 @@ fn encode_node_properties(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-    route_table: &mut Option<crate::route_component::RouteTable>,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.node_rows {
@@ -1485,7 +1487,7 @@ fn encode_edges(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-    route_table: &mut Option<crate::route_component::RouteTable>,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
     if shape.edge_rows.is_empty() {
         return Ok(());
@@ -1562,13 +1564,19 @@ fn encode_edges(
                 out_src.push(detail[16..32].try_into().expect("fixed UUID"));
                 out_dst.push(detail[32..48].try_into().expect("fixed UUID"));
                 out_id.push(u64::from_be_bytes(
-                    identity[24..32].try_into().expect("fixed"),
+                    identity[IDENTITY_SURROGATE_OFFSET..IDENTITY_WIDTH]
+                        .try_into()
+                        .expect("fixed"),
                 ));
                 out_src_id.push(u64::from_be_bytes(
-                    source_endpoint[24..32].try_into().expect("fixed"),
+                    source_endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+                        .try_into()
+                        .expect("fixed"),
                 ));
                 out_dst_id.push(u64::from_be_bytes(
-                    target_endpoint[24..32].try_into().expect("fixed"),
+                    target_endpoint[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+                        .try_into()
+                        .expect("fixed"),
                 ));
                 groups
                     .entry(route.to_owned())
@@ -1730,7 +1738,7 @@ fn encode_edge_properties(
     cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
-    route_table: &mut Option<crate::route_component::RouteTable>,
+    route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
     let mut ordinals = BTreeMap::<String, u64>::new();
     for name in &shape.edge_rows {
@@ -2599,6 +2607,9 @@ pub(crate) fn authenticate_inventory(
     inventory: &GraphConstructionEncoding,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
     if inventory.retained_artifacts.is_empty() {
         if inventory.evidence.retained_index_runs != 0 {
@@ -2641,6 +2652,9 @@ pub(crate) fn authenticate_inventory_payloads(
     inventory: &GraphConstructionEncoding,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
         || inventory.shape_authority_sha256.len() != 64

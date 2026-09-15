@@ -27,6 +27,21 @@ use std::collections::BinaryHeap;
 use std::ffi::OsStr;
 use std::io::{BufReader, BufWriter, Write};
 
+// The ordinary build expands to the original call only. Diagnostic counters
+// measure completed group work without changing checkpoint/receipt formats.
+macro_rules! measured_merge {
+    ($family:expr, $level:expr, $inputs:expr, $evidence:ident, $call:expr) => {{
+        #[cfg(any(test, feature = "test-support"))]
+        let diagnostic = super::diagnostics::Group::start($evidence);
+        let result = $call;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(diagnostic) = diagnostic {
+            diagnostic.finish($family, $level, $inputs, $evidence, result.is_ok());
+        }
+        result
+    }};
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn convert_identity_run(
     root: &StableDirectory,
@@ -548,14 +563,20 @@ impl FixedMergeAccumulator {
                     .ok_or_else(|| storage("fixed merge pass count overflow"))?,
             );
             name = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
-            merge_fixed_group::<N>(
-                root,
-                &inputs,
-                &name,
-                self.reject_duplicates,
-                self.detail_codec,
-                cancelled,
+            measured_merge!(
+                self.prefix,
+                level + 1,
+                inputs.len(),
                 evidence,
+                merge_fixed_group::<N>(
+                    root,
+                    &inputs,
+                    &name,
+                    self.reject_duplicates,
+                    self.detail_codec,
+                    cancelled,
+                    evidence,
+                )
             )?;
             for input in inputs {
                 if input.starts_with("merge-") {
@@ -584,6 +605,8 @@ impl FixedMergeAccumulator {
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<String, GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        super::diagnostics::inputs(self.prefix, self.inputs);
         if self.inputs == 0 {
             return Err(storage("external merge has no input"));
         }
@@ -615,14 +638,20 @@ impl FixedMergeAccumulator {
                         .ok_or_else(|| storage("fixed merge pass count overflow"))?,
                 );
                 let output = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
-                merge_fixed_group::<N>(
-                    root,
-                    &inputs,
-                    &output,
-                    self.reject_duplicates,
-                    self.detail_codec,
-                    cancelled,
+                measured_merge!(
+                    self.prefix,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_fixed_group::<N>(
+                        root,
+                        &inputs,
+                        &output,
+                        self.reject_duplicates,
+                        self.detail_codec,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-") {
@@ -779,6 +808,7 @@ struct RowCursor {
     reader: Box<dyn Iterator<Item = Result<RecordBatch, arrow::error::ArrowError>>>,
     batch: Option<RecordBatch>,
     row: usize,
+    batch_number: usize,
 }
 
 impl RowCursor {
@@ -794,6 +824,10 @@ impl RowCursor {
                 .map(Some);
             }
             self.batch = self.reader.next().transpose().map_err(storage)?;
+            self.batch_number = self
+                .batch_number
+                .checked_add(1)
+                .ok_or_else(|| storage("row cursor batch number overflows"))?;
             self.row = 0;
             if self.batch.is_none() {
                 return Ok(None);
@@ -802,21 +836,67 @@ impl RowCursor {
     }
 }
 
+// A decoded batch can supply many selected rows. Retain its Arrow descriptors
+// once per output window, including when heap order interleaves input streams.
+struct SelectedRows {
+    batches: Vec<RecordBatch>,
+    rows: Vec<(usize, usize)>,
+    current_batches: Vec<Option<(usize, usize)>>,
+}
+
+impl SelectedRows {
+    fn new(output_rows: usize, sources: usize) -> Self {
+        Self {
+            batches: Vec::new(),
+            rows: Vec::with_capacity(output_rows),
+            current_batches: vec![None; sources],
+        }
+    }
+
+    fn push(&mut self, source: usize, cursor: &RowCursor, batch: &RecordBatch) {
+        let index = match self.current_batches[source] {
+            Some((number, index)) if number == cursor.batch_number => index,
+            _ => {
+                let index = self.batches.len();
+                self.batches.push(batch.clone());
+                self.current_batches[source] = Some((cursor.batch_number, index));
+                index
+            }
+        };
+        self.rows.push((index, cursor.row));
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.batches.clear();
+        self.current_batches.fill(None);
+    }
+}
+
 fn materialize_selected_rows(
     schema: SchemaRef,
-    selected: &[(RecordBatch, usize)],
+    selected: &SelectedRows,
 ) -> Result<RecordBatch, GfError> {
     let columns = (0..schema.fields().len())
         .map(|column| {
             let data = selected
+                .batches
                 .iter()
-                .map(|(batch, _)| batch.column(column).to_data())
+                .map(|batch| batch.column(column).to_data())
                 .collect::<Vec<_>>();
             let refs = data.iter().collect::<Vec<_>>();
             let mut mutable = MutableArrayData::new(refs, false, selected.len());
-            for (source, (_, row)) in selected.iter().enumerate() {
+            for (source, row) in &selected.rows {
                 mutable.extend(
-                    source,
+                    *source,
                     *row,
                     row.checked_add(1)
                         .ok_or_else(|| storage("selected row bound overflow"))?,
@@ -882,6 +962,7 @@ fn merge_row_group(
                 ),
                 batch: None,
                 row: 0,
+                batch_number: 0,
             });
         }
         Ok(())
@@ -918,7 +999,7 @@ fn merge_row_group(
                 heap.push((Reverse(uuid), Reverse(source)));
             }
         }
-        let mut selected = Vec::with_capacity(output_rows);
+        let mut selected = SelectedRows::new(output_rows, cursors.len());
         let mut selected_bytes = 0_usize;
         let mut previous = None;
         while let Some((Reverse(uuid), Reverse(source))) = heap.pop() {
@@ -964,7 +1045,7 @@ fn merge_row_group(
                 selected.clear();
                 selected_bytes = 0;
             }
-            selected.push((batch.clone(), cursor.row));
+            selected.push(source, cursor, batch);
             selected_bytes = selected_bytes
                 .checked_add(row_bytes)
                 .ok_or_else(|| storage("merge selected bytes overflow"))?;
@@ -1067,6 +1148,8 @@ fn merge_row_group(
 }
 
 pub(super) struct RowMergeAccumulator {
+    #[cfg(any(test, feature = "test-support"))]
+    diagnostic_family: String,
     fan_in: usize,
     namespace: String,
     levels: Vec<Vec<String>>,
@@ -1077,6 +1160,8 @@ pub(super) struct RowMergeAccumulator {
 impl RowMergeAccumulator {
     pub(super) fn new(fan_in: usize, authority: &str) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
+            diagnostic_family: super::diagnostics::row_family(authority),
             fan_in,
             namespace: sha256(authority.as_bytes())[..16].to_owned(),
             levels: Vec::new(),
@@ -1128,14 +1213,20 @@ impl RowMergeAccumulator {
                 "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                 self.namespace
             );
-            merge_row_group(
-                root,
-                &inputs,
-                &name,
-                output_rows,
-                output_bytes,
-                cancelled,
+            measured_merge!(
+                &self.diagnostic_family,
+                level + 1,
+                inputs.len(),
                 evidence,
+                merge_row_group(
+                    root,
+                    &inputs,
+                    &name,
+                    output_rows,
+                    output_bytes,
+                    cancelled,
+                    evidence,
+                )
             )?;
             for input in inputs {
                 if input.starts_with("merge-rows-") {
@@ -1156,7 +1247,9 @@ impl RowMergeAccumulator {
         _fan_in: usize,
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
-    ) -> Result<ArtifactReceipt, GfError> {
+    ) -> Result<String, GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        super::diagnostics::inputs(&self.diagnostic_family, self.inputs);
         if self.inputs == 0 {
             return Err(storage("row merge has no input"));
         }
@@ -1173,21 +1266,35 @@ impl RowMergeAccumulator {
             }
             let higher_empty = self.levels[level + 1..].iter().all(Vec::is_empty);
             if higher_empty {
-                let receipt = merge_row_group(
-                    root,
-                    &inputs,
-                    output,
-                    output_rows,
-                    output_bytes,
-                    cancelled,
+                reject_cancelled(cancelled)?;
+                // A scheduler-produced root already has the requested sorted,
+                // bounded Parquet layout and a durable writer receipt. Keep its
+                // identity in the completed shape inventory. Accepted source
+                // chunks still need the ordinary materialization below.
+                if inputs.len() == 1 && inputs[0].starts_with("merge-rows-") {
+                    return Ok(inputs.into_iter().next().expect("one row merge root"));
+                }
+                let receipt = measured_merge!(
+                    &self.diagnostic_family,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_row_group(
+                        root,
+                        &inputs,
+                        output,
+                        output_rows,
+                        output_bytes,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {
                         unlink_shape_artifact(root, &input, evidence)?;
                     }
                 }
-                return Ok(receipt);
+                return Ok(receipt.name);
             }
             let name = if inputs.len() == 1 {
                 inputs[0].clone()
@@ -1206,14 +1313,20 @@ impl RowMergeAccumulator {
                     "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                     self.namespace
                 );
-                merge_row_group(
-                    root,
-                    &inputs,
-                    &output_name,
-                    output_rows,
-                    output_bytes,
-                    cancelled,
+                measured_merge!(
+                    &self.diagnostic_family,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_row_group(
+                        root,
+                        &inputs,
+                        &output_name,
+                        output_rows,
+                        output_bytes,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {
@@ -1229,5 +1342,331 @@ impl RowMergeAccumulator {
             self.levels[level + 1].push(name);
             level += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{FixedSizeBinaryArray, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    const FINAL_ROWS: &str = concat!(
+        "shaped-rows-0-",
+        "0000000000000000000000000000000000000000000000000000000000000000.parquet"
+    );
+
+    fn row_merge_fixture(
+        root: &StableDirectory,
+        inputs: u64,
+    ) -> (RowMergeAccumulator, GraphConstructionEvidence) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let mut accumulator = RowMergeAccumulator::new(32, "0-retention-test");
+        let mut evidence = GraphConstructionEvidence::default();
+        // Session admission normally initializes the authoritative allocation
+        // categories before any derived merge artifact can be installed.
+        let category = crate::ArtifactCategory::ConstructionStaging;
+        evidence.storage_current.entry(category).or_default();
+        evidence
+            .storage_receipt_category_authorities
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_transient_peak_allocated_bytes
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_receipt_transient_peak_authorities
+            .entry(category)
+            .or_default();
+        // Reverse submission order independently checks that the final root
+        // retains sorted results, including groups carried across levels.
+        for id in (1..=inputs).rev() {
+            let name = format!("source-{id}.parquet");
+            let values = [u128::from(id).to_be_bytes()];
+            let array =
+                FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_slice()))
+                    .unwrap();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap();
+            let file = std::fs::File::create(root.path().join(&name)).unwrap();
+            let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            accumulator
+                .push(root, name, 64, 1 << 20, &mut || false, &mut evidence)
+                .unwrap();
+        }
+        (accumulator, evidence)
+    }
+
+    fn assert_row_merge_ids(root: &StableDirectory, name: &str, inputs: u64) {
+        let file = root.open_child_file(OsStr::new(name)).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut expected = 1;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let ids = uuid_column(&batch, "node_uuid").unwrap();
+            for row in 0..batch.num_rows() {
+                assert_eq!(
+                    uuid_value(ids, row).unwrap(),
+                    u128::from(expected).to_be_bytes()
+                );
+                expected += 1_u64;
+            }
+        }
+        assert_eq!(expected, inputs + 1);
+    }
+
+    #[test]
+    fn row_merge_retains_exact_completed_root_without_io_or_reinstallation() {
+        for inputs in [32, 1024] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let names = accumulator.levels.iter().flatten().collect::<Vec<_>>();
+            assert_eq!(names.len(), 1);
+            let name = names[0].clone();
+            let receipt = super::super::receipt_for_existing(&root, &name).unwrap();
+            let capability = super::super::shape_receipt_name(&name);
+            let before_payload = std::fs::read(root.path().join(&name)).unwrap();
+            let before_capability = std::fs::read(root.path().join(&capability)).unwrap();
+            let before_evidence = evidence.clone();
+            let before_names = root.child_names().unwrap();
+            let output = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || false,
+                    &mut evidence,
+                )
+                .unwrap();
+            assert_eq!(output, name);
+            assert_eq!(evidence, before_evidence);
+            assert_eq!(root.child_names().unwrap(), before_names);
+            assert_eq!(
+                super::super::receipt_for_existing(&root, &output).unwrap(),
+                receipt
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(&output)).unwrap(),
+                before_payload
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(capability)).unwrap(),
+                before_capability
+            );
+            assert_eq!(sha256(&before_payload), receipt.sha256);
+            assert_row_merge_ids(&root, &output, inputs);
+        }
+    }
+
+    #[test]
+    fn row_merge_work_is_exact_across_production_fan_in_boundaries() {
+        for (inputs, rows, groups) in [
+            (1, 1, 1),
+            (31, 31, 1),
+            (32, 32, 1),
+            (33, 65, 2),
+            (1023, 2046, 33),
+            (1024, 2048, 33),
+            (1025, 3073, 34),
+        ] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let output = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || false,
+                    &mut evidence,
+                )
+                .unwrap();
+            assert_eq!(evidence.merge_read_records, rows, "inputs={inputs}");
+            assert_eq!(evidence.merge_written_records, rows, "inputs={inputs}");
+            assert_eq!(evidence.merge_groups, groups, "inputs={inputs}");
+            assert!(evidence.parquet_read_bytes > 0);
+            assert!(evidence.parquet_write_bytes > 0);
+            assert!(evidence.peak_merge_inputs <= 32);
+            assert_eq!(
+                output.starts_with("merge-rows-"),
+                matches!(inputs, 32 | 1024)
+            );
+            assert_row_merge_ids(&root, &output, inputs);
+            if inputs == 1 {
+                assert_eq!(output, FINAL_ROWS);
+                assert!(root.path().join("source-1.parquet").exists());
+                let source = root
+                    .open_child_file(OsStr::new("source-1.parquet"))
+                    .unwrap();
+                let output = root.open_child_file(OsStr::new(&output)).unwrap();
+                assert_ne!(
+                    file_identity(&source).unwrap(),
+                    file_identity(&output).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_merge_empty_and_cancelled_finalization_preserve_artifacts_and_evidence() {
+        for inputs in [0, 1, 32] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let before = evidence.clone();
+            let names = root.child_names().unwrap();
+            let error = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || true,
+                    &mut evidence,
+                )
+                .unwrap_err();
+            let expected = if inputs == 0 {
+                "no input"
+            } else {
+                "construction cancelled"
+            };
+            assert!(error.to_string().contains(expected));
+            assert_eq!(evidence, before);
+            assert_eq!(root.child_names().unwrap(), names);
+        }
+    }
+
+    #[test]
+    fn selected_rows_share_sources_across_interleaving_refill_and_flush() {
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = |values: Vec<Option<&str>>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(values))]).unwrap()
+        };
+        let mut cursors = [
+            RowCursor {
+                reader: Box::new(std::iter::empty()),
+                batch: None,
+                row: 0,
+                batch_number: 1,
+            },
+            RowCursor {
+                reader: Box::new(std::iter::empty()),
+                batch: None,
+                row: 0,
+                batch_number: 1,
+            },
+        ];
+        // Sliced arrays retain nonzero offsets; nullable variable-width values
+        // must survive source sharing exactly as they did with per-row sources.
+        let first = batch(vec![Some("padding"), Some("a"), None, Some("c")]).slice(1, 3);
+        let second = batch(vec![Some("x"), Some("y")]);
+        let refill = batch(vec![Some("d"), Some("e")]);
+        let mut selected = SelectedRows::new(6, 2);
+        for (source, row) in [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2)] {
+            cursors[source].row = row;
+            selected.push(
+                source,
+                &cursors[source],
+                if source == 0 { &first } else { &second },
+            );
+        }
+        assert_eq!(selected.batches.len(), 2);
+        cursors[0].batch_number = 2;
+        cursors[0].row = 0;
+        selected.push(0, &cursors[0], &refill);
+        assert_eq!(selected.batches.len(), 3);
+        let output = materialize_selected_rows(schema.clone(), &selected).unwrap();
+        assert_eq!(
+            output,
+            batch(vec![
+                Some("a"),
+                Some("x"),
+                None,
+                Some("y"),
+                Some("c"),
+                Some("d")
+            ])
+        );
+        selected.clear();
+        assert!(selected.batches.is_empty());
+        cursors[0].row = 1;
+        selected.push(0, &cursors[0], &refill);
+        assert_eq!(selected.batches.len(), 1);
+        assert_eq!(
+            materialize_selected_rows(schema.clone(), &selected).unwrap(),
+            batch(vec![Some("e")])
+        );
+    }
+
+    #[test]
+    fn selected_rows_follow_actual_decoder_refills() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let batch = |ids: &[u128]| {
+            let values = ids.iter().map(|id| id.to_be_bytes()).collect::<Vec<_>>();
+            let array =
+                FixedSizeBinaryArray::try_from_iter(values.iter().map(|id| id.as_slice())).unwrap();
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap()
+        };
+        let first = batch(&[1, 3]);
+        let second = batch(&[5, 7]);
+        let mut cursor = RowCursor {
+            reader: Box::new(vec![Ok(first), Ok(second)].into_iter()),
+            batch: None,
+            row: 0,
+            batch_number: 0,
+        };
+        let mut selected = SelectedRows::new(4, 1);
+        for id in [1_u128, 3, 5, 7] {
+            assert_eq!(cursor.advance().unwrap(), Some(id.to_be_bytes()));
+            selected.push(0, &cursor, cursor.batch.as_ref().unwrap());
+            cursor.row += 1;
+        }
+        assert_eq!(selected.batches.len(), 2);
+        assert_eq!(
+            materialize_selected_rows(schema.clone(), &selected).unwrap(),
+            batch(&[1, 3, 5, 7])
+        );
+        assert_eq!(cursor.advance().unwrap(), None);
+    }
+
+    #[test]
+    fn selected_source_descriptors_scale_with_decoded_batches_not_rows() {
+        let values = Arc::new(StringArray::from(vec![Some("retained"); 4096]));
+        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![values]).unwrap();
+        let mut cursor = RowCursor {
+            reader: Box::new(std::iter::empty()),
+            batch: None,
+            row: 0,
+            batch_number: 1,
+        };
+        let mut selected = SelectedRows::new(4096, 1);
+        for row in 0..4096 {
+            cursor.row = row;
+            selected.push(0, &cursor, &batch);
+        }
+        assert_eq!(selected.len(), 4096);
+        assert_eq!(selected.batches.len(), 1);
+        assert_eq!(materialize_selected_rows(schema, &selected).unwrap(), batch);
     }
 }

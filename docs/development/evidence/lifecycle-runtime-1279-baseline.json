@@ -1,0 +1,483 @@
+{
+  "claim": "historical_runtime_diagnosis_only",
+  "diagnostic_extrapolations": {
+    "S24": {
+      "logical_read_bytes": 657619950908,
+      "logical_write_bytes": 321813039525,
+      "physical_read_bytes": 3596352929792,
+      "physical_write_bytes": 1598513061888,
+      "publication_work_units": 4146196,
+      "reader_calls": 9352117,
+      "retained_storage_bytes": 71576461312,
+      "transient_peak_storage_bytes": 147108839424,
+      "wall_seconds": 6975
+    },
+    "S25": {
+      "logical_read_bytes": 1318292783836,
+      "logical_write_bytes": 646542917344,
+      "physical_read_bytes": 7210447366827,
+      "physical_write_bytes": 3234009139883,
+      "publication_work_units": 8297108,
+      "reader_calls": 18811488,
+      "retained_storage_bytes": 143260677462,
+      "transient_peak_storage_bytes": 294239868246,
+      "wall_seconds": 14031
+    },
+    "S26": {
+      "logical_read_bytes": 2639638449692,
+      "logical_write_bytes": 1296002672981,
+      "physical_read_bytes": 14438636240896,
+      "physical_write_bytes": 6505001295872,
+      "publication_work_units": 16598932,
+      "reader_calls": 37730229,
+      "retained_storage_bytes": 286629109760,
+      "transient_peak_storage_bytes": 588501925888,
+      "wall_seconds": 28143
+    }
+  },
+  "historical_s24_admission": {
+    "checks": {
+      "correctness": true,
+      "io_reader_publication_capacity_measured": true,
+      "io_reader_publication_headroom": true,
+      "retained_storage_headroom": true,
+      "rss_bounded_or_plateaued": false,
+      "rss_headroom": true,
+      "storage_headroom": true,
+      "time_headroom": true,
+      "transient_storage_headroom": true
+    },
+    "claim": "engineering_evidence_only",
+    "decision": "refused",
+    "headroom": {
+      "rss_fraction": 0.2,
+      "storage_fraction": 0.20188791896366037,
+      "time_fraction": 0.2
+    },
+    "limits": {
+      "rss_bytes": 4294967296,
+      "volume_bytes": 699688120320,
+      "wall_seconds": 14400
+    },
+    "native_capacity": {
+      "free_bytes": 699688120320,
+      "observed_rates": {
+        "physical_read_bytes_per_second": {
+          "wall_seconds": 1683,
+          "work_units": 885782102016
+        },
+        "physical_write_bytes_per_second": {
+          "wall_seconds": 360,
+          "work_units": 65235488768
+        },
+        "publication_work_per_second": {
+          "wall_seconds": 1683,
+          "work_units": 1033012
+        },
+        "reader_calls_per_second": {
+          "wall_seconds": 1683,
+          "work_units": 2257589
+        }
+      },
+      "rate_source": "completed_adjacent_rungs",
+      "reserved_headroom_bytes": 141258578535
+    },
+    "projected": {
+      "logical_read_bytes": 657619950908,
+      "logical_write_bytes": 321813039525,
+      "peak_rss_bytes": 324964352,
+      "physical_read_bytes": 3596352929792,
+      "physical_write_bytes": 1598513061888,
+      "publication_work_units": 4146196,
+      "reader_calls": 9352117,
+      "retained_storage_bytes": 71576461312,
+      "storage_peak_bytes": 147108839424,
+      "transient_peak_storage_bytes": 147108839424,
+      "wall_seconds": 6975
+    },
+    "provider_capacity": null,
+    "required_rates": {
+      "physical_read_bytes_per_second": 312183415,
+      "physical_write_bytes_per_second": 138759815,
+      "publication_work_per_second": 360,
+      "reader_calls_per_second": 812
+    },
+    "rss_growth_fraction": 0.3159388691198552,
+    "schema": "graphforge-progressive-qualification-evidence/1",
+    "slopes_observed": {
+      "logical_read_bytes": 123876156174,
+      "logical_write_bytes": 60886852091,
+      "physical_read_bytes": 677642706944,
+      "physical_write_bytes": 306655514624,
+      "publication_work_units": 778296,
+      "reader_calls": 1773632
+    },
+    "source_scales": [
+      20,
+      22
+    ],
+    "target": "S24"
+  },
+  "issue": 1279,
+  "measurement_notes": [
+    "Public seal includes shaping and canonical encoding; it is not isolated authentication.",
+    "Construction-call wall times are nested inside ingest, which is inside lifecycle wall.",
+    "Remainders include uninstrumented work and timing precision; they are not CPU costs.",
+    "BenchExec peak memory includes cgroup/page cache; process RSS is reported separately.",
+    "Logical I/O and physical I/O are different observations and must not be added.",
+    "Capacity is the historical S22 plan sample, not current host free space.",
+    "S25/S26 extrapolations are diagnostic, not adjacent-rung admission."
+  ],
+  "rungs": {
+    "S20": {
+      "construction_application_io": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 272,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 3126373984,
+            "write_calls": 8016
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 3360,
+            "object_count": 0,
+            "read_bytes": 679174824,
+            "read_calls": 11925,
+            "write_bytes": 678496326,
+            "write_calls": 11289
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 627,
+            "object_count": 0,
+            "read_bytes": 5799281099,
+            "read_calls": 163539,
+            "write_bytes": 1500026997,
+            "write_calls": 41664
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 10545,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 16,
+            "object_count": 0,
+            "read_bytes": 719735541,
+            "read_calls": 11103,
+            "write_bytes": 42037964,
+            "write_calls": 645
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 95647,
+            "read_calls": 3,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 14944903690,
+            "read_calls": 25703,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 24453,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 16095979237,
+            "read_calls": 271684,
+            "write_bytes": 12031843799,
+            "write_calls": 14949
+          }
+        },
+        "totals": {
+          "block_count": 24453,
+          "fsync_calls": 14548,
+          "object_count": 272,
+          "read_bytes": 38239170038,
+          "read_calls": 483957,
+          "write_bytes": 17378779070,
+          "write_calls": 76563
+        }
+      },
+      "construction_calls": {
+        "append": {
+          "calls": 272,
+          "elapsed_ns": 16411405487,
+          "errors": 0
+        },
+        "begin": {
+          "calls": 1,
+          "elapsed_ns": 946758,
+          "errors": 0
+        },
+        "publish": {
+          "calls": 1,
+          "elapsed_ns": 7857277782,
+          "errors": 0
+        },
+        "resume": {
+          "calls": 1,
+          "elapsed_ns": 821903508,
+          "errors": 0
+        },
+        "seal": {
+          "calls": 1,
+          "elapsed_ns": 168962114157,
+          "errors": 0
+        }
+      },
+      "identities": {
+        "admitted_projection_sha256": "2b0e6c896416a1ec298a2998bdc0fc6c42748cfbe91e9bb587629d27a4f78240",
+        "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+        "benchexec_version": "3.35",
+        "certify_sha256": "578b64c91590c1d93be1a36c89c3c88374907b38661651287d32a1c50457f369",
+        "commit": "710c6c64f4718c0664d08bdd3aafe21de4a29eba",
+        "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+        "generator_executable_sha256": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551",
+        "gf_sha256": "18625f292da44d70c22e7c51190996efed3a1a874f5deafac1eaa264438b9eba",
+        "host_profile_id": "local-linux-cgroups-v2",
+        "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+        "producer_sha256": "5ca3af64ae7a0a45221cdafdcabce2bfa700975e19f1ccb9557269cecef92bf1",
+        "profile_id": "graph500-s20-provider",
+        "profile_sha256": "922533672e46f4dad2ac96ebd0c4ebdf215ec0214d534bea713b8e4e6cf62700"
+      },
+      "ingest_outside_construction_calls_ns": 23213352308,
+      "lifecycle_outside_phase_wall_seconds": 9.488800128059438,
+      "metrics": {
+        "logical_read_bytes": 38239170038,
+        "logical_write_bytes": 17378779070,
+        "peak_rss_bytes": 199135232,
+        "physical_read_bytes": 208139395072,
+        "physical_write_bytes": 65235488768,
+        "publication_work_units": 254716,
+        "reader_calls": 483957,
+        "retained_storage_bytes": 4372508672,
+        "transient_peak_storage_bytes": 9173499904,
+        "wall_seconds": 360
+      },
+      "phase_wall_ms": {
+        "admission": 10,
+        "clean_import": 9339,
+        "export": 6909,
+        "generate": 6033,
+        "ingest": 217267,
+        "query": 38371,
+        "recount": 6756,
+        "reopen": 10688,
+        "reopen_proof": 53328,
+        "verify": 923
+      },
+      "process_peak_rss_bytes": 199135232,
+      "whole_lifecycle_benchexec": {
+        "cpu_seconds": 327.439273,
+        "peak_rss_bytes": 3117494272,
+        "pressure_cpu_seconds": 0.506296,
+        "pressure_io_seconds": 19.5096,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 208139395072,
+        "wall_seconds": 359.11280012805946,
+        "write_bytes": 65235488768
+      }
+    },
+    "S22": {
+      "construction_application_io": {
+        "phases": {
+          "append_merge": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 1088,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 12505495936,
+            "write_calls": 32064
+          },
+          "cas_install_read_write": {
+            "block_count": 0,
+            "fsync_calls": 13341,
+            "object_count": 0,
+            "read_bytes": 2799486209,
+            "read_calls": 49173,
+            "write_bytes": 2796149993,
+            "write_calls": 46160
+          },
+          "encode_write_postwrite_authentication": {
+            "block_count": 0,
+            "fsync_calls": 2388,
+            "object_count": 0,
+            "read_bytes": 23278760707,
+            "read_calls": 652669,
+            "write_bytes": 6081760278,
+            "write_calls": 173475
+          },
+          "fsync_synchronization": {
+            "block_count": 0,
+            "fsync_calls": 47818,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "hydration_verification": {
+            "block_count": 0,
+            "fsync_calls": 19,
+            "object_count": 0,
+            "read_bytes": 2960596381,
+            "read_calls": 45397,
+            "write_bytes": 168145111,
+            "write_calls": 2568
+          },
+          "publication_preauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 367883,
+            "read_calls": 4,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "recovery_reauthentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 60106116855,
+            "read_calls": 103245,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "seal_authentication": {
+            "block_count": 0,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 0,
+            "read_calls": 0,
+            "write_bytes": 0,
+            "write_calls": 0
+          },
+          "shape_consume_reauthentication": {
+            "block_count": 107913,
+            "fsync_calls": 0,
+            "object_count": 0,
+            "read_bytes": 72969998177,
+            "read_calls": 1407101,
+            "write_bytes": 56714079843,
+            "write_calls": 73789
+          }
+        },
+        "totals": {
+          "block_count": 107913,
+          "fsync_calls": 63566,
+          "object_count": 1088,
+          "read_bytes": 162115326212,
+          "read_calls": 2257589,
+          "write_bytes": 78265631161,
+          "write_calls": 328056
+        }
+      },
+      "construction_calls": {
+        "append": {
+          "calls": 1088,
+          "elapsed_ns": 67591799851,
+          "errors": 0
+        },
+        "begin": {
+          "calls": 1,
+          "elapsed_ns": 933007,
+          "errors": 0
+        },
+        "publish": {
+          "calls": 1,
+          "elapsed_ns": 31407244081,
+          "errors": 0
+        },
+        "resume": {
+          "calls": 1,
+          "elapsed_ns": 3405282507,
+          "errors": 0
+        },
+        "seal": {
+          "calls": 1,
+          "elapsed_ns": 899920034556,
+          "errors": 0
+        }
+      },
+      "identities": {
+        "admitted_projection_sha256": "58c41a376ad8bd9f2788de4aef89058e1fba23cb60e9ed6e6d18429d693e5bc5",
+        "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+        "benchexec_version": "3.35",
+        "certify_sha256": "578b64c91590c1d93be1a36c89c3c88374907b38661651287d32a1c50457f369",
+        "commit": "710c6c64f4718c0664d08bdd3aafe21de4a29eba",
+        "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+        "generator_executable_sha256": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551",
+        "gf_sha256": "18625f292da44d70c22e7c51190996efed3a1a874f5deafac1eaa264438b9eba",
+        "host_profile_id": "local-linux-cgroups-v2",
+        "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+        "producer_sha256": "5ca3af64ae7a0a45221cdafdcabce2bfa700975e19f1ccb9557269cecef92bf1",
+        "profile_id": "graph500-s22-provider",
+        "profile_sha256": "57b7401694903b887d57345623581b6e73dd368b589bb8da1db7074b166db0b6"
+      },
+      "ingest_outside_construction_calls_ns": 101775705998,
+      "lifecycle_outside_phase_wall_seconds": 35.00949017896028,
+      "metrics": {
+        "logical_read_bytes": 162115326212,
+        "logical_write_bytes": 78265631161,
+        "peak_rss_bytes": 262049792,
+        "physical_read_bytes": 885782102016,
+        "physical_write_bytes": 371891003392,
+        "publication_work_units": 1033012,
+        "reader_calls": 2257589,
+        "retained_storage_bytes": 17813299200,
+        "transient_peak_storage_bytes": 36760567808,
+        "wall_seconds": 1683
+      },
+      "phase_wall_ms": {
+        "admission": 10,
+        "clean_import": 37633,
+        "export": 27688,
+        "generate": 24787,
+        "ingest": 1104101,
+        "query": 161463,
+        "recount": 26099,
+        "reopen": 42453,
+        "reopen_proof": 219491,
+        "verify": 3867
+      },
+      "process_peak_rss_bytes": 262049792,
+      "whole_lifecycle_benchexec": {
+        "cpu_seconds": 1551.140919,
+        "peak_rss_bytes": 12473958400,
+        "pressure_cpu_seconds": 2.31054,
+        "pressure_io_seconds": 86.341356,
+        "pressure_memory_seconds": 0.0,
+        "read_bytes": 885782102016,
+        "wall_seconds": 1682.6014901789604,
+        "write_bytes": 371891003392
+      }
+    }
+  }
+}

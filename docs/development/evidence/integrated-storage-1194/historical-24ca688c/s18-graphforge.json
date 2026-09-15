@@ -1,0 +1,1266 @@
+{
+  "failed_phase": null,
+  "phases": [
+    {
+      "duration_ms": 10,
+      "exit_code": 0,
+      "peak_rss_bytes": 114688,
+      "phase": "admission",
+      "status": "passed"
+    },
+    {
+      "duration_ms": 1633,
+      "exit_code": 0,
+      "peak_rss_bytes": 73129984,
+      "phase": "generate",
+      "status": "passed"
+    },
+    {
+      "duration_ms": 56944,
+      "exit_code": 0,
+      "peak_rss_bytes": 150233088,
+      "phase": "ingest",
+      "receipts": [
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "begun"
+        },
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "registered"
+        },
+        {
+          "contract": "graphforge-import-session/1",
+          "outcome": "registered"
+        },
+        {
+          "bytes_accepted": 205584915,
+          "construction": {
+            "accepted_chunks": 68,
+            "application_io": {
+              "phases": {
+                "append_merge": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 68,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 907422616,
+                  "write_calls": 2132
+                },
+                "cas_install_read_write": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "encode_write_postwrite_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 188,
+                  "object_count": 0,
+                  "read_bytes": 1581779667,
+                  "read_calls": 41350,
+                  "write_bytes": 368025637,
+                  "write_calls": 9805
+                },
+                "fsync_synchronization": {
+                  "block_count": 0,
+                  "fsync_calls": 2679,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "hydration_verification": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "publication_preauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "recovery_reauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 4148411273,
+                  "read_calls": 4094,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "seal_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "shape_consume_reauthentication": {
+                  "block_count": 7185,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 4806759233,
+                  "read_calls": 68692,
+                  "write_bytes": 3668566063,
+                  "write_calls": 4280
+                }
+              },
+              "totals": {
+                "block_count": 7185,
+                "fsync_calls": 2867,
+                "object_count": 68,
+                "read_bytes": 10536950173,
+                "read_calls": 114136,
+                "write_bytes": 4944014316,
+                "write_calls": 16217
+              }
+            },
+            "cache_release_operations": 10771,
+            "cache_release_unsupported_operations": 0,
+            "cache_released_bytes": 18455842290,
+            "configured_batch_rows": 65536,
+            "construction_staging": {
+              "allocated_bytes": 162582528,
+              "logical_bytes": 162440730,
+              "logical_references": 84,
+              "physical_logical_bytes": 162440730,
+              "physical_objects": 84
+            },
+            "construction_staging_transient_peak_allocated_bytes": 2561527808,
+            "fsync_operations": 872,
+            "immutable_artifacts": 268,
+            "input_batches": 68,
+            "input_rows": 4456448,
+            "peak_batch_bytes": 3670536,
+            "peak_batch_rows": 65536,
+            "peak_cache_release_window_bytes": 67108864,
+            "publication_committed": false,
+            "publication_work": {
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "contract": "graphforge-publication-work/1",
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 188,
+                "object_count": 0,
+                "read_bytes": 1581779667,
+                "read_calls": 41350,
+                "write_bytes": 368025637,
+                "write_calls": 9805
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 2679,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "semantic_total_operations": 54022
+            },
+            "transient_peak_allocated_bytes": 2561527808,
+            "write_bytes": 907422616,
+            "write_operations": 2132
+          },
+          "contract": "graphforge-import-session/1",
+          "operation_timings": {
+            "append": {
+              "calls": 68,
+              "elapsed_ns": 4226577176,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 1,
+              "elapsed_ns": 940518,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 1,
+              "elapsed_ns": 44331662036,
+              "errors": 0
+            }
+          },
+          "outcome": "validated",
+          "rows_accepted": 4456448,
+          "rows_rejected": 0
+        },
+        {
+          "construction": {
+            "accepted_chunks": 68,
+            "application_io": {
+              "phases": {
+                "append_merge": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 68,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 907422616,
+                  "write_calls": 2132
+                },
+                "cas_install_read_write": {
+                  "block_count": 0,
+                  "fsync_calls": 791,
+                  "object_count": 0,
+                  "read_bytes": 162782947,
+                  "read_calls": 2824,
+                  "write_bytes": 162625988,
+                  "write_calls": 2674
+                },
+                "encode_write_postwrite_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 188,
+                  "object_count": 0,
+                  "read_bytes": 1581779667,
+                  "read_calls": 41350,
+                  "write_bytes": 368025637,
+                  "write_calls": 9805
+                },
+                "fsync_synchronization": {
+                  "block_count": 0,
+                  "fsync_calls": 2691,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "hydration_verification": {
+                  "block_count": 0,
+                  "fsync_calls": 16,
+                  "object_count": 0,
+                  "read_bytes": 172952198,
+                  "read_calls": 2657,
+                  "write_bytes": 10511291,
+                  "write_calls": 164
+                },
+                "publication_preauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 27665,
+                  "read_calls": 3,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "recovery_reauthentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 4635761939,
+                  "read_calls": 6953,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "seal_authentication": {
+                  "block_count": 0,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 0,
+                  "read_calls": 0,
+                  "write_bytes": 0,
+                  "write_calls": 0
+                },
+                "shape_consume_reauthentication": {
+                  "block_count": 7185,
+                  "fsync_calls": 0,
+                  "object_count": 0,
+                  "read_bytes": 4806759233,
+                  "read_calls": 68692,
+                  "write_bytes": 3668566063,
+                  "write_calls": 4280
+                }
+              },
+              "totals": {
+                "block_count": 7185,
+                "fsync_calls": 3686,
+                "object_count": 68,
+                "read_bytes": 11360063649,
+                "read_calls": 122479,
+                "write_bytes": 5117151595,
+                "write_calls": 19055
+              }
+            },
+            "cache_release_operations": 11014,
+            "cache_release_unsupported_operations": 0,
+            "cache_released_bytes": 18943164480,
+            "configured_batch_rows": 65536,
+            "construction_staging": {
+              "allocated_bytes": 162582528,
+              "logical_bytes": 162440730,
+              "logical_references": 84,
+              "physical_logical_bytes": 162440730,
+              "physical_objects": 84
+            },
+            "construction_staging_transient_peak_allocated_bytes": 2561527808,
+            "fsync_operations": 872,
+            "immutable_artifacts": 268,
+            "input_batches": 68,
+            "input_rows": 4456448,
+            "peak_batch_bytes": 3670536,
+            "peak_batch_rows": 65536,
+            "peak_cache_release_window_bytes": 67108864,
+            "publication_committed": true,
+            "publication_work": {
+              "cas_install_read_write": {
+                "block_count": 0,
+                "fsync_calls": 791,
+                "object_count": 0,
+                "read_bytes": 162782947,
+                "read_calls": 2824,
+                "write_bytes": 162625988,
+                "write_calls": 2674
+              },
+              "contract": "graphforge-publication-work/1",
+              "encode_write_postwrite_authentication": {
+                "block_count": 0,
+                "fsync_calls": 188,
+                "object_count": 0,
+                "read_bytes": 1581779667,
+                "read_calls": 41350,
+                "write_bytes": 368025637,
+                "write_calls": 9805
+              },
+              "fsync_synchronization": {
+                "block_count": 0,
+                "fsync_calls": 2691,
+                "object_count": 0,
+                "read_bytes": 0,
+                "read_calls": 0,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "hydration_verification": {
+                "block_count": 0,
+                "fsync_calls": 16,
+                "object_count": 0,
+                "read_bytes": 172952198,
+                "read_calls": 2657,
+                "write_bytes": 10511291,
+                "write_calls": 164
+              },
+              "publication_preauthentication": {
+                "block_count": 0,
+                "fsync_calls": 0,
+                "object_count": 0,
+                "read_bytes": 27665,
+                "read_calls": 3,
+                "write_bytes": 0,
+                "write_calls": 0
+              },
+              "semantic_total_operations": 63163
+            },
+            "transient_peak_allocated_bytes": 2561527808,
+            "write_bytes": 907422616,
+            "write_operations": 2132
+          },
+          "contract": "graphforge-import-session/1",
+          "operation_timings": {
+            "append": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "begin": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            },
+            "publish": {
+              "calls": 1,
+              "elapsed_ns": 2492120075,
+              "errors": 0
+            },
+            "resume": {
+              "calls": 1,
+              "elapsed_ns": 256419162,
+              "errors": 0
+            },
+            "seal": {
+              "calls": 0,
+              "elapsed_ns": 0,
+              "errors": 0
+            }
+          },
+          "outcome": "committed"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 3479,
+      "exit_code": 0,
+      "peak_rss_bytes": 37408768,
+      "phase": "reopen",
+      "receipts": [
+        {
+          "aborted_journals": 0,
+          "deferred": null,
+          "elapsed_ms": 0,
+          "kind": "project_open",
+          "preserved_unknown_entries": 0,
+          "removed_generations": 0,
+          "repaired_journals": 0,
+          "selected_generation_class": "committed_current",
+          "work_detected": false
+        },
+        {
+          "contract": "graphforge-storage-attribution-command/1",
+          "reopen_agrees": true,
+          "storage": {
+            "allocated_physical_bytes": 162734080,
+            "categories": {
+              "adjacency": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "catalog_and_manifests": {
+                "allocated_bytes": 163840,
+                "logical_bytes": 32887,
+                "logical_references": 40,
+                "physical_logical_bytes": 32887,
+                "physical_objects": 40
+              },
+              "clean_imported_project": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "construction_staging": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "other": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "portable_package": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "properties": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "topology_edges": {
+                "allocated_bytes": 66846720,
+                "logical_bytes": 66737485,
+                "logical_references": 64,
+                "physical_logical_bytes": 66737485,
+                "physical_objects": 64
+              },
+              "topology_nodes": {
+                "allocated_bytes": 1048576,
+                "logical_bytes": 1040395,
+                "logical_references": 4,
+                "physical_logical_bytes": 1040395,
+                "physical_objects": 4
+              },
+              "uuid_and_surrogates": {
+                "allocated_bytes": 94674944,
+                "logical_bytes": 94660150,
+                "logical_references": 12,
+                "physical_logical_bytes": 94660150,
+                "physical_objects": 9
+              }
+            },
+            "contract": "graphforge-storage-attribution/1",
+            "logical_bytes": 162470917,
+            "logical_references": 120,
+            "physical_objects": 117,
+            "retained_logical_eof_bytes": 162470917
+          }
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 2159,
+      "exit_code": 0,
+      "peak_rss_bytes": 79835136,
+      "phase": "recount",
+      "receipts": [
+        {
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [],
+            "peak_rss_bytes": 0,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 0,
+            "sorts": []
+          },
+          "result_sha256": "3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f",
+          "rows": 1,
+          "scalar_u64": 262144
+        },
+        {
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 0,
+                "candidates_generated": 0,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 0,
+                "identity_peak_buffer_bytes": 0,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 0,
+                "identity_reader_calls": 0,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 0,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 0,
+                "projected_columns": 0,
+                "projected_rows": 0,
+                "rows_emitted": 1
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 77656064,
+                "before_bytes": 76435456,
+                "operator": "edge_count",
+                "ordinal": 0,
+                "peak_bytes": 77656064
+              }
+            ],
+            "peak_rss_bytes": 77656064,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 77656064,
+            "sorts": []
+          },
+          "result_sha256": "2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486",
+          "rows": 1,
+          "scalar_u64": 4194304
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 9961,
+      "exit_code": 0,
+      "peak_rss_bytes": 182546432,
+      "phase": "query",
+      "receipts": [
+        {
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 46,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 68928,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 26,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 126226432,
+                "before_bytes": 76132352,
+                "operator": "ordered_one_hop",
+                "ordinal": 0,
+                "peak_bytes": 126226432
+              }
+            ],
+            "peak_rss_bytes": 126226432,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 126226432,
+            "sorts": []
+          },
+          "result_sha256": "b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 4,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 65728,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 1,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 142749696,
+                "before_bytes": 76939264,
+                "operator": "ordered_two_hop",
+                "ordinal": 0,
+                "peak_bytes": 142749696
+              }
+            ],
+            "peak_rss_bytes": 142749696,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 142749696,
+            "sorts": []
+          },
+          "result_sha256": "3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60",
+          "rows": 1000,
+          "scalar_u64": null
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 2092,
+      "exit_code": 0,
+      "peak_rss_bytes": 36511744,
+      "phase": "export",
+      "receipts": [
+        {
+          "allocation_allocated_bytes": 162566144,
+          "allocation_logical_bytes": 162560000,
+          "allocation_physical_objects": 1,
+          "contract": "graphforge-portable-export/2",
+          "entry_count": 93,
+          "package_digest": "sha256:3438c6d1e9c08b88e6f63dba910407351656b61ed5f03afaceeb6eea2dcb31a4",
+          "payload_bytes": 162442253,
+          "representation": "bundle",
+          "selection_fingerprint": "sha256:f4a36ab6da276270a93abe1ebb43e26820d78f528c32cd4cd2dbaf3c65a75423",
+          "transport_digest": "sha256:6d6093393e44a1af87ee2e6dc086606210649d8cf7ae53c2e2e7951bc506c5b0"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 242,
+      "exit_code": 0,
+      "peak_rss_bytes": 22069248,
+      "phase": "verify",
+      "receipts": [
+        {
+          "compatibility": "supported",
+          "contract": "graphforge-portable-verify/2",
+          "entry_count": 93,
+          "integrity": "verified",
+          "package_digest": "sha256:3438c6d1e9c08b88e6f63dba910407351656b61ed5f03afaceeb6eea2dcb31a4",
+          "payload_bytes": 162488855,
+          "representation": "bundle",
+          "transport_digest": "sha256:6d6093393e44a1af87ee2e6dc086606210649d8cf7ae53c2e2e7951bc506c5b0"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 2654,
+      "exit_code": 0,
+      "peak_rss_bytes": 33447936,
+      "phase": "clean_import",
+      "receipts": [
+        {
+          "contract": "graphforge-portable-import/2",
+          "idempotent_replay": false,
+          "package_digest": "sha256:3438c6d1e9c08b88e6f63dba910407351656b61ed5f03afaceeb6eea2dcb31a4",
+          "transient_peak_allocated_bytes": 325971968,
+          "transport_digest": "sha256:6d6093393e44a1af87ee2e6dc086606210649d8cf7ae53c2e2e7951bc506c5b0"
+        }
+      ],
+      "status": "passed"
+    },
+    {
+      "duration_ms": 14452,
+      "exit_code": 0,
+      "peak_rss_bytes": 182611968,
+      "phase": "reopen_proof",
+      "receipts": [
+        {
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [],
+            "peak_rss_bytes": 0,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 0,
+            "sorts": []
+          },
+          "result_sha256": "3943ce07cba5fc8b1b779daf479b68f69c81d1b0427e0ac49c8433fe53b17e8f",
+          "rows": 1,
+          "scalar_u64": 262144
+        },
+        {
+          "batches": 1,
+          "bytes": 917,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 0,
+                "candidates_generated": 0,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 0,
+                "identity_peak_buffer_bytes": 0,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 0,
+                "identity_reader_calls": 0,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 0,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 0,
+                "projected_columns": 0,
+                "projected_rows": 0,
+                "rows_emitted": 1
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 77635584,
+                "before_bytes": 76693504,
+                "operator": "edge_count",
+                "ordinal": 0,
+                "peak_bytes": 77635584
+              }
+            ],
+            "peak_rss_bytes": 77635584,
+            "returned_batch_bytes": 104,
+            "rss_after_release_bytes": 77635584,
+            "sorts": []
+          },
+          "result_sha256": "2cb98d6493038230f3d574b16c2cbe283c07e43471b8764f6dfb59bea0aca486",
+          "rows": 1,
+          "scalar_u64": 4194304
+        },
+        {
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 46,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 68928,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 26,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 125800448,
+                "before_bytes": 75776000,
+                "operator": "ordered_one_hop",
+                "ordinal": 0,
+                "peak_bytes": 125800448
+              }
+            ],
+            "peak_rss_bytes": 125800448,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 125800448,
+            "sorts": []
+          },
+          "result_sha256": "b73a4441b8a7358838773819082202e4055f965637f36d4e1b43d3c2b9635c28",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "batches": 1,
+          "bytes": 16890,
+          "complete": true,
+          "contract": "graphforge-result-sink/2",
+          "format": "Parquet",
+          "query_evidence": {
+            "contract": "graphforge-query-evidence/1",
+            "execution_batch_rows": 8192,
+            "hops": [
+              {
+                "adjacency_rows_examined": 4,
+                "candidates_generated": 1000,
+                "edge_full_reads": 0,
+                "edge_logical_rows_scanned": 0,
+                "edge_projected_columns": 0,
+                "edge_reader_calls": 0,
+                "edge_rows_returned": 0,
+                "identity_logical_bytes": 65536,
+                "identity_peak_buffer_bytes": 65728,
+                "identity_per_record_seeks": 0,
+                "identity_ranges_selected": 1,
+                "identity_reader_calls": 1,
+                "identity_revalidation_bytes": 0,
+                "identity_revalidation_calls": 11,
+                "input_batches": 0,
+                "input_rows": 0,
+                "node_full_reads": 0,
+                "node_logical_rows_scanned": 0,
+                "node_projected_columns": 0,
+                "node_reader_calls": 0,
+                "node_rows_returned": 0,
+                "ordinal": 0,
+                "projected_chunks": 1,
+                "projected_columns": 1,
+                "projected_rows": 1,
+                "rows_emitted": 1000
+              }
+            ],
+            "max_in_flight_reads": 0,
+            "memory_reserved_after": 0,
+            "memory_reserved_before": 0,
+            "operator_rss": [
+              {
+                "after_bytes": 142819328,
+                "before_bytes": 77090816,
+                "operator": "ordered_two_hop",
+                "ordinal": 0,
+                "peak_bytes": 142819328
+              }
+            ],
+            "peak_rss_bytes": 142819328,
+            "returned_batch_bytes": 16112,
+            "rss_after_release_bytes": 142819328,
+            "sorts": []
+          },
+          "result_sha256": "3541076a1d4b4914fa1686264d88f0595f95fa45d10578dec497b3936be8bd60",
+          "rows": 1000,
+          "scalar_u64": null
+        },
+        {
+          "contract": "graphforge-storage-attribution-command/1",
+          "reopen_agrees": true,
+          "storage": {
+            "allocated_physical_bytes": 162729984,
+            "categories": {
+              "adjacency": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "catalog_and_manifests": {
+                "allocated_bytes": 163840,
+                "logical_bytes": 32887,
+                "logical_references": 40,
+                "physical_logical_bytes": 32887,
+                "physical_objects": 40
+              },
+              "clean_imported_project": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "construction_staging": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "other": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "portable_package": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "properties": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              },
+              "topology_edges": {
+                "allocated_bytes": 66846720,
+                "logical_bytes": 66737485,
+                "logical_references": 64,
+                "physical_logical_bytes": 66737485,
+                "physical_objects": 64
+              },
+              "topology_nodes": {
+                "allocated_bytes": 1048576,
+                "logical_bytes": 1040395,
+                "logical_references": 4,
+                "physical_logical_bytes": 1040395,
+                "physical_objects": 4
+              },
+              "uuid_and_surrogates": {
+                "allocated_bytes": 94670848,
+                "logical_bytes": 94660150,
+                "logical_references": 12,
+                "physical_logical_bytes": 94660150,
+                "physical_objects": 9
+              }
+            },
+            "contract": "graphforge-storage-attribution/1",
+            "logical_bytes": 162470917,
+            "logical_references": 120,
+            "physical_objects": 117,
+            "retained_logical_eof_bytes": 162470917
+          }
+        },
+        {
+          "contract": "graphforge-lifecycle-storage/2",
+          "retained_owners": {
+            "generated-inputs": {
+              "totals": {
+                "allocated_bytes": 205594624,
+                "logical_bytes": 205584915,
+                "logical_references": 2,
+                "physical_logical_bytes": 205584915,
+                "physical_objects": 2
+              }
+            },
+            "imported-project-admission_lock": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 1,
+                "physical_logical_bytes": 0,
+                "physical_objects": 1
+              }
+            },
+            "imported-project-construction": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              }
+            },
+            "imported-project-import": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 0,
+                "physical_logical_bytes": 0,
+                "physical_objects": 0
+              }
+            },
+            "imported-project-locks": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 3,
+                "physical_logical_bytes": 0,
+                "physical_objects": 3
+              }
+            },
+            "imported-project-published": {
+              "totals": {
+                "allocated_bytes": 163364864,
+                "logical_bytes": 162629401,
+                "logical_references": 273,
+                "physical_logical_bytes": 162629401,
+                "physical_objects": 273
+              }
+            },
+            "imported-project-transactions": {
+              "totals": {
+                "allocated_bytes": 4096,
+                "logical_bytes": 628,
+                "logical_references": 1,
+                "physical_logical_bytes": 628,
+                "physical_objects": 1
+              }
+            },
+            "portable-package": {
+              "totals": {
+                "allocated_bytes": 162566144,
+                "logical_bytes": 162560000,
+                "logical_references": 1,
+                "physical_logical_bytes": 162560000,
+                "physical_objects": 1
+              }
+            },
+            "query-results": {
+              "totals": {
+                "allocated_bytes": 98304,
+                "logical_bytes": 71228,
+                "logical_references": 8,
+                "physical_logical_bytes": 71228,
+                "physical_objects": 8
+              }
+            },
+            "source-project-admission_lock": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 1,
+                "physical_logical_bytes": 0,
+                "physical_objects": 1
+              }
+            },
+            "source-project-construction": {
+              "totals": {
+                "allocated_bytes": 164478976,
+                "logical_bytes": 162870632,
+                "logical_references": 503,
+                "physical_logical_bytes": 162870632,
+                "physical_objects": 503
+              }
+            },
+            "source-project-import": {
+              "totals": {
+                "allocated_bytes": 205602816,
+                "logical_bytes": 205589045,
+                "logical_references": 3,
+                "physical_logical_bytes": 205589045,
+                "physical_objects": 3
+              }
+            },
+            "source-project-locks": {
+              "totals": {
+                "allocated_bytes": 0,
+                "logical_bytes": 0,
+                "logical_references": 3,
+                "physical_logical_bytes": 0,
+                "physical_objects": 3
+              }
+            },
+            "source-project-published": {
+              "totals": {
+                "allocated_bytes": 163368960,
+                "logical_bytes": 162629401,
+                "logical_references": 273,
+                "physical_logical_bytes": 162629401,
+                "physical_objects": 273
+              }
+            },
+            "source-project-transactions": {
+              "totals": {
+                "allocated_bytes": 4096,
+                "logical_bytes": 628,
+                "logical_references": 1,
+                "physical_logical_bytes": 628,
+                "physical_objects": 1
+              }
+            }
+          },
+          "retained_storage_bytes": 1065082880,
+          "source_project_current_allocated_bytes": 163368960,
+          "transient_peak_storage_bytes": 2974519296
+        }
+      ],
+      "status": "passed"
+    }
+  ],
+  "profile_id": "graph500-s18-local",
+  "schema": "graphforge-public-certification/1",
+  "status": "passed"
+}
