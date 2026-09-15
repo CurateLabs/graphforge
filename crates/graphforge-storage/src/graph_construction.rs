@@ -6,6 +6,8 @@
 //! the next sequence. `CURRENT` is never touched by this module's staging or
 //! sealing path. A generation-last publisher consumes the sealed inventory.
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod diagnostics;
 mod shaping_merge;
 mod supersession;
 #[cfg(test)]
@@ -3068,6 +3070,9 @@ impl GraphConstructionSession {
     }
 
     fn seal_inner(&mut self, authenticate_artifacts: bool) -> Result<(), GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _diagnostic_scope =
+            crate::graph_construction::diagnostics::Scope::start("seal_authentication");
         self.revalidate_authority()?;
         self.recover_intent()?;
         if self.checkpoint.state != GraphConstructionState::Staging {
@@ -3155,6 +3160,8 @@ impl GraphConstructionSession {
         mut cancelled: impl FnMut() -> bool,
         authenticate_completed_outputs: bool,
     ) -> Result<ConstructionShape, GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _diagnostic_scope = crate::graph_construction::diagnostics::Scope::start("shaping");
         self.revalidate_authority()?;
         if self.checkpoint.state != GraphConstructionState::Sealed
             || self.checkpoint.publication_state != Some(ConstructionPublicationState::Sealed)
@@ -7131,6 +7138,9 @@ fn authenticate_artifact(
     receipt: &ArtifactReceipt,
     codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("artifact_authentication");
     validate_artifact_name(receipt)?;
     let file = root
         .open_child_file(OsStr::new(&receipt.name))

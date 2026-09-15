@@ -557,6 +557,9 @@ pub(crate) fn encode(
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("canonical_encoding");
     if shape.ontology_mode != ontology_mode {
         return Err(storage(
             "shape ontology mode differs from session authority",
@@ -2604,6 +2607,9 @@ pub(crate) fn authenticate_inventory(
     inventory: &GraphConstructionEncoding,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
     if inventory.retained_artifacts.is_empty() {
         if inventory.evidence.retained_index_runs != 0 {
@@ -2646,6 +2652,9 @@ pub(crate) fn authenticate_inventory_payloads(
     inventory: &GraphConstructionEncoding,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
         || inventory.shape_authority_sha256.len() != 64
