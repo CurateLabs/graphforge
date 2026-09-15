@@ -35,7 +35,7 @@ exemptions or unchanged-tree release certification are required.
   the parent and new duration module both fit the default bound.
 - [#1293](https://github.com/CurateLabs/graphforge/pull/1293) merged storage
   construction catalog extraction and closed #1292.
-- [#1298](https://github.com/CurateLabs/graphforge/issues/1298) completes the API
+- [#1303](https://github.com/CurateLabs/graphforge/pull/1303) merged the API
   root decomposition in one batch: `query_execution`, `result_shaping`,
   `workspace_hydration`, `graph_publication`, and `runtime_ownership`. Direct tests
   follow those owners; public query integration tests remain at the facade layer.
@@ -90,7 +90,7 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
 | `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
 | `crates/graphforge-exec/src/algorithm_analyze.rs` | 7,161 |
-| `crates/graphforge-exec/src/algorithm_cluster.rs` | 4,457 |
+| `crates/graphforge-exec/src/algorithm_cluster.rs` | 4,487 |
 | `crates/graphforge-exec/src/algorithm_paths.rs` | 3,402 |
 | `crates/graphforge-exec/src/algorithm_rank.rs` | 10,408 |
 | `crates/graphforge-exec/src/lib.rs` | 8,533 |
@@ -99,7 +99,6 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-ir/src/binder.rs` | 9,579 |
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
 | `crates/graphforge-rel/src/lowerer.rs` | 7,217 |
-| `crates/graphforge-rel/src/temporal.rs` | 2,040 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
 | `crates/graphforge-storage/src/catalog.rs` | 5,467 |
 | `crates/graphforge-storage/src/graph_construction.rs` | 12,687 |
