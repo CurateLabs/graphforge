@@ -621,6 +621,211 @@ mod lifecycle_budget {
         session
     }
 
+    fn retained_row_roots_fixture(root: &TempDir) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        // Two independently retained exact-schema roots and no edge family.
+        for input in 0..32 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("properties-{input}"),
+                    &node_property_batch(input + 1, 1),
+                )
+                .unwrap();
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("plain-{input}"),
+                    &node_batch(input + 33, 1),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        session
+    }
+
+    fn assert_retained_row_roots(session: &mut GraphConstructionSession) -> Vec<ArtifactReceipt> {
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.node_count, 64);
+        assert_eq!(shape.edge_count, 0);
+        assert_eq!(shape.node_rows.len(), 2);
+        assert!(shape.edge_rows.is_empty());
+        let mut ids = Vec::new();
+        let mut receipts = Vec::new();
+        for name in &shape.node_rows {
+            assert!(name.starts_with("merge-rows-"), "{name}");
+            receipts.push(receipt_for_existing(&session.root, name).unwrap());
+            let reader = ParquetRecordBatchReaderBuilder::try_new(
+                session.root.open_child_file(OsStr::new(name)).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let mut previous = None;
+            for batch in reader {
+                let batch = batch.unwrap();
+                let values = uuid_column(&batch, "node_uuid").unwrap();
+                for row in 0..batch.num_rows() {
+                    let value = uuid_value(values, row).unwrap();
+                    assert!(previous.is_none_or(|prior| prior < value));
+                    previous = Some(value);
+                    ids.push(value);
+                }
+            }
+        }
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (1_u128..=64).map(u128::to_be_bytes).collect::<Vec<_>>()
+        );
+        receipts
+    }
+
+    #[test]
+    fn retained_row_roots_crash_child() {
+        let Ok(path) = std::env::var("GF_RETAINED_ROW_ROOTS_CRASH_ROOT") else {
+            return;
+        };
+        small_session(Path::new(&path))
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+    }
+
+    #[test]
+    fn retained_row_roots_recover_crashes_and_reopen_without_reinstallation() {
+        for failpoint in [
+            "shape.row_merge.after_install",
+            "shape.after_complete_inventory",
+            "shape.after_evidence_checkpoint",
+        ] {
+            let root = TempDir::new().unwrap();
+            drop(retained_row_roots_fixture(&root));
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::lifecycle_budget::retained_row_roots_crash_child")
+                .arg("--nocapture")
+                .env("GF_RETAINED_ROW_ROOTS_CRASH_ROOT", root.path())
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut session = small_session(root.path());
+            let receipts = assert_retained_row_roots(&mut session);
+            let retained = session.evidence().storage_current.clone();
+            let allocations = session
+                .evidence()
+                .storage_active_identity_allocated_bytes
+                .clone();
+            let groups = session.evidence().merge_groups;
+            drop(session);
+            for _ in 0..2 {
+                let mut session = small_session(root.path());
+                assert_eq!(assert_retained_row_roots(&mut session), receipts);
+                assert_eq!(session.evidence().storage_current, retained);
+                // Transition history is live-only. The durable identity union
+                // must survive repeated recovery without installation/removal.
+                assert_eq!(
+                    session.evidence().storage_active_identity_allocated_bytes,
+                    allocations
+                );
+                assert_eq!(session.evidence().merge_groups, groups);
+            }
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            assert_eq!(
+                resumed.evidence().current_merge_temporary_allocated_bytes,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn retained_row_roots_cancellation_recovers_and_corruption_fails_closed() {
+        // A completed root is authoritative both in an interrupted shape and
+        // after it has become the final inventory entry.
+        for complete in [false, true] {
+            for damage in ["none", "payload", "replacement", "extra-link"] {
+                let root = TempDir::new().unwrap();
+                let mut session = retained_row_roots_fixture(&root);
+                let directory = session.root.path().to_path_buf();
+                let name = if complete {
+                    assert_retained_row_roots(&mut session)[0].name.clone()
+                } else {
+                    let error = session
+                        .shape_canonical_with_cancellation(|| {
+                            std::fs::read_dir(&directory).unwrap().any(|entry| {
+                                let name = entry.unwrap().file_name();
+                                let name = name.to_string_lossy();
+                                name.starts_with("merge-rows-") && name.ends_with(".parquet")
+                            })
+                        })
+                        .unwrap_err();
+                    assert!(error.to_string().contains("construction cancelled"));
+                    session
+                        .root
+                        .child_names()
+                        .unwrap()
+                        .into_iter()
+                        .filter_map(|name| name.into_string().ok())
+                        .find(|name| name.starts_with("merge-rows-") && name.ends_with(".parquet"))
+                        .unwrap()
+                };
+                let path = directory.join(name);
+                let mut bytes = std::fs::read(&path).unwrap();
+                let held = root.path().join("held-root.parquet");
+                match damage {
+                    "payload" => {
+                        bytes[0] ^= 1;
+                        std::fs::write(&path, &bytes).unwrap();
+                    }
+                    "replacement" => {
+                        std::fs::rename(&path, &held).unwrap();
+                        std::fs::write(&path, &bytes).unwrap();
+                    }
+                    "extra-link" => std::fs::hard_link(&path, held).unwrap(),
+                    _ => {}
+                }
+                let controls = shaping_recovery_controls(&directory);
+                let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+                drop(session);
+                if damage == "none" {
+                    let mut resumed = small_session(root.path());
+                    assert_retained_row_roots(&mut resumed);
+                    complete_small(&mut resumed);
+                    assert_eq!(
+                        resumed.evidence().current_merge_temporary_allocated_bytes,
+                        0
+                    );
+                    continue;
+                }
+                for _ in 0..2 {
+                    assert!(
+                        GraphConstructionSession::open_with_mode(
+                            root.path(),
+                            Uuid::from_u128(119_500),
+                            0,
+                            graphforge_core::OntologyMode::Exploratory,
+                            GraphConstructionBudgets::default(),
+                        )
+                        .is_err(),
+                        "complete={complete}, damage={damage}"
+                    );
+                    assert_eq!(shaping_recovery_controls(&directory), controls);
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert_eq!(
+                        std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                        current
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn shaping_recovery_refuses_same_inode_payload_corruption() {
         for completed in [false, true] {
@@ -909,8 +1114,14 @@ mod lifecycle_budget {
                 );
             }
             assert_eq!(read_fixed::<16>(&mut file).unwrap(), None);
-            assert_eq!(evidence.merge_read_records, expected_records, "inputs={inputs}");
-            assert_eq!(evidence.merge_written_records, expected_records, "inputs={inputs}");
+            assert_eq!(
+                evidence.merge_read_records, expected_records,
+                "inputs={inputs}"
+            );
+            assert_eq!(
+                evidence.merge_written_records, expected_records,
+                "inputs={inputs}"
+            );
             assert_eq!(evidence.merge_written_bytes, expected_records * 16);
             assert_eq!(evidence.merge_groups, expected_groups, "inputs={inputs}");
             assert!(evidence.peak_merge_inputs <= 32);
