@@ -81,7 +81,7 @@ class IngestionAttributionTests(unittest.TestCase):
     def test_measurement_report_rejects_missing_reordered_and_tampered_commands(self):
         profile_path = ROOT / "profiles/graph500/s18-local.json"
         profile = json.loads(profile_path.read_text())
-        selection = [{"name": "s16", "repetition": 0}]
+        selection = [{"name": "s16", "repetition": 0, "nodes": 65536, "edges": 1048576}]
         labels = expected_commands(selection, profile, False)
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -122,7 +122,15 @@ class IngestionAttributionTests(unittest.TestCase):
                 "suite": "scaling",
                 "instrumented": False,
                 "selection": selection,
-                "completed_cases": [{"case": "s16-r0"}],
+                "completed_cases": [
+                    {
+                        "case": "s16-r0",
+                        "nodes": 65536,
+                        "edges": 1048576,
+                        "independent_oracles": 8,
+                        "full_lifecycle": True,
+                    }
+                ],
                 "selection_sha256": REPORT.digest(directory / "selection.json"),
                 "source_manifest_sha256": REPORT.digest(directory / "source-manifest.json"),
                 "profile_sha256": REPORT.digest(profile_path),
@@ -135,6 +143,24 @@ class IngestionAttributionTests(unittest.TestCase):
                 return REPORT.summarize(directory)
 
             self.assertEqual(len(check(summary)["commands"]), 21)
+            complete = summary["completed_cases"][0]
+            invalid_completions = [[], [complete, complete]]
+            for field in complete:
+                invalid_completions.append([{k: v for k, v in complete.items() if k != field}])
+            for field, value in (
+                ("full_lifecycle", False),
+                ("full_lifecycle", 1),
+                ("independent_oracles", 0),
+                ("nodes", -1),
+                ("edges", -1),
+            ):
+                invalid_completions.append([{**complete, field: value}])
+            for completed_cases in invalid_completions:
+                with (
+                    self.subTest(completed_cases=completed_cases),
+                    self.assertRaisesRegex(ValueError, "completion evidence"),
+                ):
+                    check({**summary, "completed_cases": completed_cases})
             for changed in (observations[:-1], list(reversed(observations))):
                 with self.assertRaisesRegex(ValueError, "planned commands"):
                     check({**summary, "observations": changed})

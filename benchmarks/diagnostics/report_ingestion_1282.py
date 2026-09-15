@@ -23,10 +23,23 @@ def digest(path):
 
 def summarize(directory):
     summary = json.loads((directory / "summary.json").read_text())
-    selected = {f"{case['name']}-r{case['repetition']}" for case in summary["selection"]}
-    completed = {case["case"] for case in summary.get("completed_cases", [])}
-    if summary.get("status") != "passed" or completed != selected:
-        raise ValueError("campaign is unfinished or does not match its preselection")
+    if summary.get("status") != "passed":
+        raise ValueError("campaign is unfinished")
+    expected_completions = [
+        {
+            "case": f"{case['name']}-r{case['repetition']}",
+            "nodes": case["nodes"],
+            "edges": case["edges"],
+            "independent_oracles": 8,
+            "full_lifecycle": True,
+        }
+        for case in summary["selection"]
+    ]
+    completed = summary.get("completed_cases", [])
+    if completed != expected_completions or any(
+        case["full_lifecycle"] is not True for case in completed
+    ):
+        raise ValueError("incomplete or mismatched lifecycle/oracle completion evidence")
     if digest(directory / "selection.json") != summary["selection_sha256"]:
         raise ValueError("preselection digest mismatch")
     profile_path = Path(__file__).resolve().parents[1] / "profiles/graph500/s18-local.json"
