@@ -28,6 +28,20 @@ PROFILE = ROOT / "benchmarks/profiles/graph500/s18-local.json"
 BOUNDARIES = [(n, n) for n in (31, 32, 33, 1023, 1024, 1025)] + [(16, 256), (64, 1024)]
 
 
+def host_activity():
+    """Include this study's frozen executable names in the existing census."""
+    active = {entry["pid"]: entry for entry in active_campaigns()}
+    for proc in Path("/proc").iterdir():
+        if proc.name.isdigit():
+            try:
+                name = (proc / "comm").read_text().strip()
+                if name in {"gf-ordinary", "gf-diagnostic", "boundary-test"}:
+                    active[int(proc.name)] = {"pid": int(proc.name), "name": name}
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                pass
+    return list(active.values())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gf", type=Path, required=True)
@@ -179,7 +193,7 @@ stop_tree(int(sys.argv[1]))
         subprocess.run(["sudo", "-n", "/usr/bin/python3", "-c", cleanup, str(pid)], check=True)
 
     def run(label, command, phase, case, extra_env=None):
-        competitors = active_campaigns()
+        competitors = host_activity()
         if competitors:
             raise RuntimeError(f"host busy before {label}: {competitors}")
         if shutil.disk_usage(args.output).free <= RESERVE:
@@ -297,9 +311,7 @@ stop_tree(int(sys.argv[1]))
                         except (FileNotFoundError, ProcessLookupError, PermissionError):
                             pass
                     if int(time.monotonic() - start) > len(entry.get("host_activity", [])):
-                        activity = [
-                            item for item in active_campaigns() if item["pid"] not in targets
-                        ]
+                        activity = [item for item in host_activity() if item["pid"] not in targets]
                         entry.setdefault("host_activity", []).append(activity)
                         if activity:
                             failure = "concurrent_campaign"

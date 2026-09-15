@@ -12,6 +12,7 @@ from graphforge_bench.ingestion_attribution import (
     expected_commands,
     merge_summary,
     scope_summary,
+    sync_summary,
     validate_boundary_families,
 )
 
@@ -68,6 +69,10 @@ def summarize(directory):
             for k, v in observation.items()
             if k not in {"host_activity_before", "host_activity"}
         }
+        if "strace_sha256" in observation:
+            command["sync_latency"] = sync_summary(
+                (directory / f"{label}.strace").read_text().splitlines()
+            )
         stdout = (directory / f"{label}.stdout").read_text()
         if stdout.startswith("{"):
             receipt = json.loads(stdout)
@@ -91,6 +96,9 @@ def summarize(directory):
                     if isinstance(v, int)
                     and (k.startswith(("merge_", "parquet_")) or k == "input_rows")
                 }
+                command["construction_peak_bytes"] = fixture["evidence"][
+                    "storage_transient_peak_total_allocated_bytes"
+                ]
         lines = (directory / f"{label}.stderr").read_text().splitlines()
         if any(line.startswith("INGEST_DIAGNOSTIC ") for line in lines):
             command["scopes"] = scope_summary(lines)
@@ -145,11 +153,17 @@ def summarize(directory):
                 "ingestion_input_bytes": 0,
                 "ingestion_output_bytes": 0,
                 "peak_process_bytes": 0,
+                "peak_construction_staging_allocated_bytes": 0,
+                "construction_calls_seconds": {},
             },
         )
         case["whole_command_wall_seconds"] += observation["wall_seconds"]
         case["peak_process_bytes"] = max(
             case["peak_process_bytes"], observation["sampled_process_peak_bytes"]
+        )
+        case["peak_construction_staging_allocated_bytes"] = max(
+            case["peak_construction_staging_allocated_bytes"],
+            command.get("construction_peak_bytes", 0),
         )
         if observation["phase"] == "ingest":
             case["ingestion_wall_seconds"] += (
@@ -162,6 +176,17 @@ def summarize(directory):
             )
             case["ingestion_input_bytes"] += observation["wait4_input_bytes"]
             case["ingestion_output_bytes"] += observation["wait4_output_bytes"]
+            for name, call in command.get("construction_call_timings", {}).items():
+                calls = case["construction_calls_seconds"]
+                calls[name] = calls.get(name, 0) + call["elapsed_ns"] / 1e9
+    for case in cases.values():
+        if case["construction_calls_seconds"]:
+            residual = case["ingestion_wall_seconds"] - sum(
+                case["construction_calls_seconds"].values()
+            )
+            if residual < 0:
+                raise ValueError("construction durations exceed enclosing ingestion commands")
+            case["ingestion_outside_construction_calls_seconds"] = residual
     result["cases"] = cases
     result["baseline_envelopes"] = {}
     for name in sorted({case["case"] for case in cases.values()}):
@@ -171,6 +196,7 @@ def summarize(directory):
             "ingestion_wall_seconds",
             "ingestion_command_cpu_seconds",
             "peak_process_bytes",
+            "peak_construction_staging_allocated_bytes",
             "ingestion_input_bytes",
             "ingestion_output_bytes",
         ):

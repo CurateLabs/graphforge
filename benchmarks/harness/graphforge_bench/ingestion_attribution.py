@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from graphforge_bench.lifecycle_runtime import summarize
@@ -232,6 +234,58 @@ def scope_summary(lines: list[str]) -> dict[str, Any]:
         entry["inclusive_wall_ns"] += inclusive
         entry["outside_observed_children_ns"] += inclusive - interval_union_ns(children)
     return result
+
+
+def sync_summary(lines: list[str]) -> dict[str, Any]:
+    """Parse timestamped sync-only strace, including interleaved unfinished calls."""
+    pending = {}
+    intervals = []
+    latencies = []
+    operations: dict[str, int] = {}
+    failed = 0
+    for line in lines:
+        header = re.match(r"\s*(\d+)\s+(\d+\.\d+)\s+(.*)", line)
+        if not header:
+            if "fsync" in line or "fdatasync" in line:
+                raise ValueError("invalid sync trace header")
+            continue
+        pid, timestamp, body = header.groups()
+        start = int(Decimal(timestamp) * 1_000_000_000)
+        beginning = re.match(r"(fsync|fdatasync)\(", body)
+        resumed = re.match(r"<\.\.\. (fsync|fdatasync) resumed>", body)
+        if beginning:
+            operation = beginning[1]
+            if pid in pending:
+                raise ValueError("unfinished sync overwritten")
+            if "<unfinished ...>" in body:
+                pending[pid] = (operation, start)
+                continue
+        elif resumed:
+            if pid not in pending:
+                raise ValueError("resumed sync has no beginning")
+            operation, start = pending.pop(pid)
+            if resumed[1] != operation:
+                raise ValueError("resumed sync operation mismatch")
+        else:
+            continue
+        complete = re.search(r"=\s+(-?\d+).*<(\d+\.\d+)>$", body)
+        if not complete:
+            raise ValueError("sync call lacks result or latency")
+        latency = int(Decimal(complete[2]) * 1_000_000_000)
+        failed += int(complete[1] != "0")
+        operations[operation] = operations.get(operation, 0) + 1
+        latencies.append(latency)
+        intervals.append((start, start + latency))
+    if pending or not latencies:
+        raise ValueError("incomplete or empty sync trace")
+    return {
+        "calls": len(latencies),
+        "operations": operations,
+        "failed_calls": failed,
+        "summed_thread_latency_ns": sum(latencies),
+        "elapsed_interval_union_ns": interval_union_ns(intervals),
+        "maximum_call_latency_ns": max(latencies),
+    }
 
 
 def main() -> None:
