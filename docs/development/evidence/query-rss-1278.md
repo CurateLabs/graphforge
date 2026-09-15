@@ -113,7 +113,7 @@ and repeated-query command observations, their correctness results, identities,
 profile summaries, and hashes of local raw evidence. All 72 repeated query
 observations matched the independent input oracle and source/imported results.
 
-| Fixture | Edges | Maximum query VmHWM B | Peak live heap B (profiled two-hop) | Peak live cursor buffers B |
+| Fixture | Edges | Maximum repeated-query VmHWM B | Peak live heap B (profiled two-hop) | Peak live cursor buffers B |
 | --- | --- | --- | --- | --- |
 | S16 | 1,048,576 | 176,492,544 | 103,545,207 | 1,048,576 |
 | S17 | 2,097,152 | 176,668,672 | 104,306,760 | 2,097,152 |

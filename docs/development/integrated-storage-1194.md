@@ -234,6 +234,12 @@ increase is a concrete repair target; it is an extrapolation from the smaller
 traces, not a new S20/S22 measurement or a repaired admission pass. The historical
 RSS refusal and #1278 remain open.
 
+The [reader-buffer repair evidence](evidence/query-rss-1278-repair.md) records a
+verified 1-MiB aggregate merge-reader budget, flat live-reader allocation across
+S16/S17/S18, and all 135 successful small comparison commands. A new native
+S18/S19/S20/S22 prefix is in progress with frozen executables containing both
+verified storage repairs; full S24 admission is not yet claimed.
+
 ## Acceptance ledger and remaining capacity
 
 | #901 acceptance criterion | Direct evidence and outcome |
