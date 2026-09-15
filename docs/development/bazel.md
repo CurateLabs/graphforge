@@ -58,12 +58,17 @@ or enable a competing remote cache. Local `cargo` remains fine for edit/build.
 ## Everyday local commands
 
 `make pre-push-fast` requires `bazelisk` and runs the Cargo/Bazel drift check.
-`make bazel-test` wraps the authoritative suite below.
+`make bazel-test` wraps the authoritative suite below. Local and CI execution
+use `--config=correctness`: optimized Rust compilation across the runtime
+dependency graph, with debug assertions and overflow checks explicitly enabled.
+This keeps production-sized correctness fixtures within their existing timeouts
+without reducing fixtures or disabling runtime checks. CI additionally uses
+`--config=ci` to enforce the committed dependency lock.
 
 ```bash
 # Authoritative CI-equivalent Rust test graph
 make bazel-test
-# equivalent: bazelisk test //:ci_rust_tests
+# equivalent: bazelisk test --config=correctness //:ci_rust_tests
 
 # Libraries, CLI, resources, release bins
 bazelisk build //:first_party_libs //:cli_bins //:resource_inputs //:release_bins
@@ -269,7 +274,7 @@ Short form:
 ### Pull requests
 
 1. Classifier: Rust changes enable `bazel=true` so `Bazel Bootstrap` runs.
-2. Authoritative Rust tests: `bazelisk test //:ci_rust_tests`.
+2. Authoritative Rust tests: `bazelisk test --config=correctness //:ci_rust_tests`.
 3. Also builds first-party libs, CLI, resources, release bins, binding smokes.
 4. Fail-closed: drift, ledger, release-platform inventory, cache policy, strict
    perf `evaluate` against the checked-in sample.

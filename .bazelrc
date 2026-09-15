@@ -12,3 +12,8 @@ test --test_output=errors
 
 # CI must not silently update MODULE.bazel.lock.
 common:ci --lockfile_mode=error
+
+# Production-sized correctness fixtures need optimized runtime dependencies, but
+# must retain Rust's debug assertions and checked arithmetic.
+build:correctness --compilation_mode=opt
+build:correctness --@rules_rust//rust/settings:extra_rustc_flags=-Cdebug-assertions=yes,-Coverflow-checks=yes
