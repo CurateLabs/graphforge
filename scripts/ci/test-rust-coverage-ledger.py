@@ -225,6 +225,48 @@ mod external_tests;
         }
         ledger_module.validate_floors(valid_ledger, args)
 
+        # Whole-ledger boundary checks exercise every enforcement path. Values one
+        # line below each floor round up to the floor for display purposes.
+        cases = [
+            ("surfaces", "core", "core_floor", 95),
+            ("surfaces", "python_adapter", "python_floor", 80),
+            ("surfaces", "node_adapter", "node_floor", 80),
+            ("crates", "graphforge-core", "crate_floor", 80),
+            (None, "patch", "patch_floor", 90),
+        ]
+        for section, name, argument, floor in cases:
+            boundary_args = SimpleNamespace(**vars(args))
+            setattr(boundary_args, argument, floor)
+            for delta in (-1, 0, 1):
+                boundary = json.loads(json.dumps(valid_ledger))
+                target = boundary[section][name] if section else boundary[name]
+                covered = floor * 1000 + delta
+                target.update(
+                    covered_lines=covered,
+                    measured_lines=100000,
+                    line_percent=round(covered / 1000, 2),
+                )
+                if delta < 0:
+                    expect_error(
+                        "coverage below",
+                        lambda boundary=boundary, boundary_args=boundary_args: (
+                            ledger_module.validate_floors(boundary, boundary_args)
+                        ),
+                    )
+                else:
+                    ledger_module.validate_floors(boundary, boundary_args)
+            inconsistent = json.loads(json.dumps(valid_ledger))
+            target = inconsistent[section][name] if section else inconsistent[name]
+            target.update(covered_lines=0, measured_lines=100, line_percent=100.0)
+            expect_error(
+                "malformed",
+                lambda inconsistent=inconsistent: ledger_module.validate_floors(inconsistent, args),
+            )
+
+        empty_patch = json.loads(json.dumps(valid_ledger))
+        empty_patch["patch"].update(covered_lines=0, measured_lines=0, line_percent=100.0)
+        ledger_module.validate_floors(empty_patch, args)
+
         mutated = json.loads(json.dumps(valid_ledger))
         mutated["patch_base_sha"] = "0" * 40
         expect_error(
@@ -233,7 +275,9 @@ mod external_tests;
         )
 
         mutated = json.loads(json.dumps(valid_ledger))
-        mutated["surfaces"]["python_adapter"]["line_percent"] = 79.99
+        mutated["surfaces"]["python_adapter"].update(
+            covered_lines=7999, measured_lines=10000, line_percent=79.99
+        )
         expect_error(
             "python_adapter Rust coverage below",
             lambda: ledger_module.validate_floors(mutated, args),
@@ -256,14 +300,16 @@ mod external_tests;
         expect_error("malformed core", lambda: ledger_module.validate_floors(mutated, args))
 
         mutated = json.loads(json.dumps(valid_ledger))
-        mutated["crates"]["graphforge-core"]["line_percent"] = 79.99
+        mutated["crates"]["graphforge-core"].update(
+            covered_lines=7999, measured_lines=10000, line_percent=79.99
+        )
         expect_error(
             "graphforge-core Rust coverage below",
             lambda: ledger_module.validate_floors(mutated, args),
         )
 
         mutated = json.loads(json.dumps(valid_ledger))
-        mutated["patch"]["line_percent"] = 89.99
+        mutated["patch"].update(covered_lines=8999, measured_lines=10000, line_percent=89.99)
         expect_error(
             "changed Rust coverage below", lambda: ledger_module.validate_floors(mutated, args)
         )
