@@ -72,7 +72,9 @@ binary. That initial build was detected by equal hashes and absent diagnostic
 symbols before profiling; it supplies no instrumented observations.
 [Build identities and retained build-log hashes](ingestion-attribution-1282-builds.json)
 include the corrected diagnostic executable. Its native source inputs equal
-the ordinary build; only the test-support feature differs.
+the ordinary build; only the test-support feature differs. The later logger
+borrowing fix changes neither the frozen measurements nor their identities;
+its source is separately validated before PR submission.
 
 ## What each measure means
 
@@ -283,6 +285,24 @@ particular caller. Its parent stacks are incomplete (4,895 samples have no
 unwound frames; none has a symbolized application caller). This limits inclusive
 ownership claims. The capture and its decoding artifacts remain retained.
 
+A separately preselected [65,528-byte stack capture](ingestion-attribution-1282-perf-wide.json)
+also passes the full lifecycle. Its [decoded sample inventory](ingestion-attribution-1282-cpu-wide.json)
+contains 7,892 dominant-command samples, including 4,832 without unwound frames
+and only 10 with a symbolized application caller. Larger stacks therefore do
+not resolve the unwinding limitation. The leaf observations reproduce the same
+hotspots: hashing 11.67%, BTreeMap insertion 6.06%, compact-byte validation
+4.92%, and detail reading 4.59%. Publication has useful partial caller coverage
+(129/296 samples), but no inclusive CPU phase percentages are claimed.
+
+The first CPU capture takes 52.999 s ingestion (**15.67% above** the ordinary
+S18 median); the larger-stack capture takes 52.971 s (**15.61% above**). Profiling includes collection/writing overhead; its process CPU and
+block-I/O totals must not replace the ordinary baseline. Both captures and all
+decoding hashes remain available. No further profile settings were selected to
+obtain a favorable result. The completed study contains **47 full lifecycles**
+and **376 independent source/imported result checks**, including this diagnostic
+correction. All three ordinary repetitions for every comparable case remain
+unchanged.
+
 ## Ranked recommendations for later experiments
 
 1. **Investigate adopting an already-complete Parquet root.** The strongest
@@ -367,3 +387,33 @@ The private suite commands specify `--suite scaling`, `boundary`, `diagnostic`,
 Each invocation requires a fresh output directory and the existing 96-GB cgroup.
 Executables and generator arguments resolve to the recorded hashes. Raw
 commands retain their full invocation; published paths use placeholders.
+
+### Completed focused validation
+
+- Analysis: 30 tests passed with the documented unittest command. They cover
+  accepted-prefix integrity, missing/tampered/unfinished observations, missing
+  required profiles, CPU sample inventory agreement, exact family work and
+  overlapping timing intervals.
+- Native facade: the standalone boundary integration test passed; every
+  selected ordinary/diagnostic lifecycle also passed its eight independent
+  source/imported count and ordered-query checks.
+- [Storage regression evidence](ingestion-attribution-1282-storage-validation.json):
+  the same release test executable passed 1,114 tests with diagnostic output
+  enabled and disabled, with the same two existing ignored helper/manual tests.
+  All 35 named construction failure/recovery tests in the evidence passed.
+- Feature-enabled library lint: `cargo clippy --locked --release -p graphforge-storage
+  --lib --features test-support,test-failpoints -- -D warnings` passed. The
+  optional all-targets probe additionally exposed 227 lint findings on unchanged
+  test lines; its one new logger borrowing finding was fixed and revalidated.
+- Durable tests ran on the admitted ext4-root host. Tests that hardcode `/tmp`
+  used a private mount namespace binding an ext4 temporary directory there,
+  with storage tests serialized. No filesystem admission rule was relaxed.
+
+### Full-gate run and final verification
+
+The first `make pre-push` run passed core Rust tests, Python native acceptance
+(including 241 tests) and Node acceptance (including 126 BDD scenarios), then
+refused to publish its coverage ledger because report edits were uncommitted.
+That failed run is retained. Final verification runs from a clean checkout;
+its result is recorded in the PR. Measurements retain their original frozen
+binaries and identities independently of validation builds.

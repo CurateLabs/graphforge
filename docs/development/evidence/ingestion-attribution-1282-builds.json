@@ -11,6 +11,7 @@
     "source_tree": "39dce3af827220f0054221c8d57fbe92fa027187"
   },
   "disposition": {
+    "initial_boundary_build": "compile failed: array supplied where an iterator was required; corrected with .into_iter() before the successful frozen build; no workload ran",
     "initial_diagnostic_build": "superseded before instrumented measurements; identical to ordinary binary because CLI-only feature selection did not enable the normal storage dependency",
     "native_inputs": "git diff 5fd6e59f 1ae0cdcc -- crates Cargo.toml Cargo.lock rust-toolchain.toml is empty"
   },

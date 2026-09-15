@@ -85,5 +85,23 @@
   "commands": {
     "diagnostic": "sudo -n unshare --mount --propagation private validation-namespace.sh env CARGO_TARGET_DIR=<isolated-target> CARGO_PROFILE_RELEASE_DEBUG=1 GRAPHFORGE_INGEST_DIAGNOSTICS=1282 cargo test --locked --release -p graphforge-storage --lib --features test-support,test-failpoints -- --nocapture",
     "ordinary": "sudo -n unshare --mount --propagation private validation-namespace.sh env -u GRAPHFORGE_INGEST_DIAGNOSTICS <same-frozen-storage-test-executable> --nocapture --test-threads=1"
+  },
+  "post_borrow_fix": {
+    "source_commit": "aceb85e4803eb4c4abff29ab63ff1a6365b67133",
+    "diagnostics_source_sha256": "fef6278a5d5af7524f2ea5ef30c48ddad428d0c15ab4d80017373d652eb02473",
+    "clippy": {
+      "command": "env CARGO_TARGET_DIR=<isolated-target> CARGO_PROFILE_RELEASE_DEBUG=1 CARGO_BUILD_JOBS=4 cargo clippy --locked --release -p graphforge-storage --lib --features test-support,test-failpoints -- -D warnings",
+      "exit_code": 0,
+      "log_sha256": "cf80562ec742e30a735bc966823e709b98638bbc1d43ac544ed2811db99a7034"
+    },
+    "test": {
+      "command": "sudo -n unshare --mount --propagation private validation-namespace.sh env CARGO_TARGET_DIR=<isolated-target> CARGO_PROFILE_RELEASE_DEBUG=1 GRAPHFORGE_INGEST_DIAGNOSTICS=1282 cargo test --locked --release -p graphforge-storage --lib --features test-support,test-failpoints graph_construction::diagnostics::tests::diagnostic_row_family_contains_only_kind_and_ordinal -- --exact --nocapture",
+      "exit_code": 0,
+      "passed": 1,
+      "failed": 0,
+      "filtered": 1115,
+      "log_sha256": "cc7a49a6e1b9c51d970f3e347709fd66922cb0d1567cf3c8a129188bc039ac5a",
+      "executable_sha256": "b83ea24f71c54e88055dc676551e504f9840296292d85ab1243511d6c4b31ae6"
+    }
   }
 }
