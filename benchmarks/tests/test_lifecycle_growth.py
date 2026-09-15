@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -70,6 +71,39 @@ def observations():
 
 
 class LifecycleGrowthTests(unittest.TestCase):
+    @staticmethod
+    def with_peaks(peaks):
+        changed = observations()
+        for observation, peak in zip(changed, peaks, strict=True):
+            observation["receipt"]["transient_peak_storage_bytes"] = peak
+            for ratio in observation["ratios"]["transient_peak_storage_bytes"].values():
+                ratio[0] = peak
+        return changed
+
+    def test_maximum_of_affine_operations_can_change_adjacent_derivative(self):
+        work = [1, 2, 4]
+        peaks = [max(120000 + 5000 * w, 80000 * w) for w in work]
+        self.assertEqual(peaks, [125000, 160000, 320000])
+        with self.assertRaisesRegex(ValueError, "adjacent normalized slopes"):
+            GROWTH.positive_slopes("counterexample", peaks, work)
+        GROWTH.validate_growth(self.with_peaks(peaks))
+
+    def test_real_lower_peaks_from_failed_1271_run(self):
+        path = Path(__file__).parent / "fixtures/lifecycle-peak-crossover-1272.json"
+        recorded = json.loads(path.read_text())["observations"]
+        self.assertEqual(
+            [o["receipt"]["transient_peak_storage_bytes"] for o in recorded],
+            [1093632, 1343488, 2449408],
+        )
+        GROWTH.validate_growth(recorded)
+
+    def test_adjacent_peak_envelope_is_stricter_than_old_normalized_ceiling(self):
+        peaks = [60000, 120000, 300000]
+        GROWTH.normalized_ceiling("old ceiling", peaks, [1, 2, 4])
+        GROWTH.positive_slopes("old derivatives", peaks, [1, 2, 4])
+        with self.assertRaisesRegex(ValueError, "adjacent normalized peak"):
+            GROWTH.validate_growth(self.with_peaks(peaks))
+
     def test_declared_linear_and_fixed_policies(self):
         GROWTH.validate_growth(observations())
 

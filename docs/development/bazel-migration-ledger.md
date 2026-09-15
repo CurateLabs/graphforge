@@ -79,6 +79,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `existential_subquery` | `integration-test` | `crates/graphforge-api/tests/existential_subquery.rs` | `//crates/graphforge-api:existential_subquery` | `mapped` | #8 |
 | `graphforge-api` | `facade_methods` | `integration-test` | `crates/graphforge-api/tests/facade_methods.rs` | `//crates/graphforge-api:facade_methods` | `mapped` | #8 |
 | `graphforge-api` | `fixed_hop_limit` | `integration-test` | `crates/graphforge-api/tests/fixed_hop_limit.rs` | `//crates/graphforge-api:fixed_hop_limit` | `mapped` | #8 |
+| `graphforge-api` | `ingestion_attribution` | `integration-test` | `crates/graphforge-api/tests/ingestion_attribution.rs` | `//crates/graphforge-api:ingestion_attribution` | `mapped` | #1282 production fan-in attribution facade fixture |
 | `graphforge-api` | `graph_internal_metadata` | `integration-test` | `crates/graphforge-api/tests/graph_internal_metadata.rs` | `//crates/graphforge-api:graph_internal_metadata` | `mapped` | #8 |
 | `graphforge-api` | `inference_provenance` | `integration-test` | `crates/graphforge-api/tests/inference_provenance.rs` | `//crates/graphforge-api:inference_provenance` | `mapped` | #8 |
 | `graphforge-api` | `knowledge_isolation` | `integration-test` | `crates/graphforge-api/tests/knowledge_isolation.rs` | `//crates/graphforge-api:knowledge_isolation` | `mapped` | #8 |

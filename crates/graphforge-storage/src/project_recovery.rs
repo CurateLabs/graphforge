@@ -493,8 +493,7 @@ pub fn remove_durable_project_root(container_root: impl AsRef<Path>) -> Result<(
     )?;
     admission.revalidate_identity()?;
     let writer_lock = acquire_recovery_lock(admission.root())?;
-    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
-    drop(writer_lock);
+    writer_lock.release()?;
     admission.revalidate_identity()?;
     admission.remove_project_root()
 }
@@ -511,7 +510,10 @@ fn recover_project_transactions_admitted_with_allocation(
     let root = selected.container_root().to_owned();
     let writer_lock = acquire_recovery_lock(&root)?;
     if let Some(allocation) = allocation {
-        allocation.replace_file_at(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE), &writer_lock)?;
+        allocation.replace_file_at(
+            &root.join(LOCKS_DIR).join(WRITER_LOCK_FILE),
+            writer_lock.file(),
+        )?;
     }
 
     // A writer may have published between the read-side resolution and lock
@@ -549,12 +551,40 @@ fn recover_project_transactions_admitted_with_allocation(
     // observe the issue #275 signature (writer free, checkpoints still held).
     // Matches MutationLocks::Drop order in project_checkpoints.
     drop(checkpoint_roots);
-    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
-    drop(writer_lock);
+    writer_lock.release()?;
     Ok(report)
 }
 
-pub(crate) fn acquire_recovery_lock(root: &Path) -> Result<File, GfError> {
+/// Explicitly unlock before closing: a forked child or duplicate may still own
+/// the same open-file description when this operation returns an error.
+#[derive(Debug)]
+pub(crate) struct RecoveryWriterLock {
+    file: File,
+    locked: bool,
+}
+
+impl RecoveryWriterLock {
+    pub(crate) fn file(&self) -> &File {
+        &self.file
+    }
+
+    pub(crate) fn release(mut self) -> Result<(), GfError> {
+        crate::file_lock::unlock(&self.file).map_err(storage_io)?;
+        self.locked = false;
+        // Consuming self also closes the handle before project-root removal.
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryWriterLock {
+    fn drop(&mut self) {
+        if self.locked {
+            let _ = crate::file_lock::unlock(&self.file);
+        }
+    }
+}
+
+pub(crate) fn acquire_recovery_lock(root: &Path) -> Result<RecoveryWriterLock, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
@@ -564,7 +594,10 @@ pub(crate) fn acquire_recovery_lock(root: &Path) -> Result<File, GfError> {
             "phase=RECOVERY committed=false cause=live_writer_owns_kernel_lock",
         ));
     }
-    Ok(writer_lock)
+    Ok(RecoveryWriterLock {
+        file: writer_lock,
+        locked: true,
+    })
 }
 
 fn recover_journals(

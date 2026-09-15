@@ -183,6 +183,21 @@ def positive_slopes(name: str, values: list[int], work: list[int]) -> None:
         raise ValueError(f"{name}: adjacent normalized slopes differ by more than factor2")
 
 
+def peak_envelope(name: str, values: list[int], work: list[int]) -> None:
+    """Bound the aggregate maximum for this fixed 1x/2x/4x fixture.
+
+    Each affine operation cost a+b*w with nonnegative fixed overhead has
+    nonincreasing cost/work; the maximum across operations preserves that bound.
+    Its winning operation can change, so adjacent derivatives need not match.
+    This fixture envelope is not a universal rule across merge thresholds.
+    """
+    if any(b <= a for a, b in itertools.pairwise(values)):
+        raise ValueError(f"{name}: data growth is flat or decreasing")
+    for i in (0, 1):
+        if values[i + 1] * work[i] > values[i] * work[i + 1]:
+            raise ValueError(f"{name}: adjacent normalized peak increases")
+
+
 def normalized_ceiling(
     name: str, values: list[int], work: list[int], *, nondecreasing: bool = True
 ) -> None:
@@ -200,7 +215,8 @@ def validate_growth(observations: list[dict[str, object]]) -> None:
     Allocated owner bytes may plateau due to per-file allocation quanta. They
     retain the existing quantized normalized ceiling, not an EOF upper bound.
     Fixed empty locks and absent owners are checked separately. Complete current
-    and peak must actually grow, using the same adjacent slope bound as EOF.
+    and peak must actually grow. Retained bytes use the EOF slope bound; the
+    aggregate peak uses the stricter adjacent normalized allocation envelope.
     """
     if [o["scale"] for o in observations] != [6, 7, 8]:
         raise ValueError("growth requires exactly scale6/7/8")
@@ -275,7 +291,10 @@ def validate_growth(observations: list[dict[str, object]]) -> None:
     for field in ("retained_storage_bytes", "transient_peak_storage_bytes"):
         values = [o["receipt"][field] for o in observations]
         normalized_ceiling(field, values, work)
-        positive_slopes(field, values, work)
+        if field == "transient_peak_storage_bytes":
+            peak_envelope(field, values, work)
+        else:
+            positive_slopes(field, values, work)
 
 
 def validate_operation_timings(evidence: dict[str, object]) -> None:

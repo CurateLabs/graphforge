@@ -148,3 +148,19 @@ physical identity deduplication prevents counting hard-link aliases twice.
 The encoding census includes its JSON controls, unlike the payload ledger.
 The permanent public project, export and import are separate owners in the
 existing full-lifecycle ladder and are not included in the table above.
+
+## Completed Parquet merge roots (#1286)
+
+When a schema group's merge scheduler finishes with one intermediate Parquet
+root, that existing sorted artifact becomes the shape's inventory entry. Its
+name, writer receipt, physical identity, digest and allocation ownership remain
+unchanged. Finishing does not rewrite, rename, reinstall or unlink that root.
+A single original accepted chunk still goes through bounded materialization;
+multiple remaining inputs still merge.
+
+The existing complete-inventory/checkpoint boundary owns the retained root until
+its encoder successor is authenticated. Incomplete shaping cleanup, cancellation,
+corruption refusal and successor-based retirement use the same receipt authority.
+There is no new format version or synchronization protocol. Production-fan-in
+boundary tests assert exact work and retained artifact identity; timing comparisons
+are separate evidence, never test assertions.

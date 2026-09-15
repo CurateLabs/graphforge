@@ -1,0 +1,3017 @@
+{
+  "analysis_script_sha256": "ada5b33c7164ed7670bd98a9d9ccda0b5c5411f008f8a6d977ae984b4dc4bdd8",
+  "claim": "diagnostic_CPU_samples_not_wall_time",
+  "commands": {
+    "s18-r0-ingest-0": {
+      "artifacts": {
+        "s18-r0-ingest-0.cpu-leaf": "cd7e2c141f7c5e28b0070a54f816609f7550c23d332d84d74dfad1d32057483b",
+        "s18-r0-ingest-0.cpu-leaf.command.json": "c756549103e4843c2422be5e70a4a5b9129425c2f794db8843ae7bb53e331728",
+        "s18-r0-ingest-0.cpu-leaf.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "s18-r0-ingest-0.cpu-stack": "013e49acc93b714ee503a6ba48c8e7bf3d0e8a84b18c53ddfdb4f74c24b70ee0",
+        "s18-r0-ingest-0.cpu-stack.command.json": "e16e7b342e5730aa5eaf9b70244fe70eb6b76876952dc1c57dda1e24e8849b2d",
+        "s18-r0-ingest-0.cpu-stack.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "excluded_wrapper_samples": 0,
+      "inclusive_anchor_rules": {
+        "authentication": "::authenticate_",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "input_normalization": "::normalize_bulk_",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "publication": "::publish_canonical",
+        "recovery": "::recover_"
+      },
+      "inclusive_anchor_samples": {
+        "authentication": 0,
+        "canonical_encoding": 0,
+        "fixed_merge": 0,
+        "input_normalization": 0,
+        "parquet_merge": 0,
+        "publication": 0,
+        "recovery": 0
+      },
+      "input_perf_sha256": "31326d535e5f44b9cf446071c5899db01655bc2d730acee609b5ed85f77ec4b2",
+      "leaf_samples": [
+        {
+          "object": "ld-linux-x86-64.so.2",
+          "percent": 50.0,
+          "samples": 1,
+          "symbol": "[unknown]"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 50.0,
+          "samples": 1,
+          "symbol": "__inode_attach_wb"
+        }
+      ],
+      "note": "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks undercount them.",
+      "sample_count": 2,
+      "samples_with_symbolized_application_caller": 0,
+      "samples_without_unwound_frames": 0,
+      "unknown_leaf_samples": 1
+    },
+    "s18-r0-ingest-1": {
+      "artifacts": {
+        "s18-r0-ingest-1.cpu-leaf": "be34c23b0c208785413b42abc6e2c9bf41f957999693c33a1f577f62f4de74c7",
+        "s18-r0-ingest-1.cpu-leaf.command.json": "79f4eec75045e83ff913611ca9dcc85807c426e6cd97691f409c855d7debf635",
+        "s18-r0-ingest-1.cpu-leaf.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "s18-r0-ingest-1.cpu-stack": "e9f325e756734b6c75d14140a62c49b4dce1e5d1bd56ab91e8969fe43d41b778",
+        "s18-r0-ingest-1.cpu-stack.command.json": "f0aee739b9b9e40affefbfdd997acaf23f0da5bf30bcdbcf9f0613ba9b8c44c6",
+        "s18-r0-ingest-1.cpu-stack.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "excluded_wrapper_samples": 0,
+      "inclusive_anchor_rules": {
+        "authentication": "::authenticate_",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "input_normalization": "::normalize_bulk_",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "publication": "::publish_canonical",
+        "recovery": "::recover_"
+      },
+      "inclusive_anchor_samples": {
+        "authentication": 0,
+        "canonical_encoding": 0,
+        "fixed_merge": 0,
+        "input_normalization": 0,
+        "parquet_merge": 0,
+        "publication": 0,
+        "recovery": 0
+      },
+      "input_perf_sha256": "4cc9b336c3e8ca358bf31c263722dd65a027099cdf46b7a5edd8ba9d46f5e9f6",
+      "leaf_samples": [
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "from_kuid_munged"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "_raw_spin_unlock_irq"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "__refill_objects_node"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "isolate_migratepages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "get_pfnblock_bit"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 16.666666666666668,
+          "samples": 1,
+          "symbol": "_raw_spin_unlock_irqrestore"
+        }
+      ],
+      "note": "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks undercount them.",
+      "sample_count": 6,
+      "samples_with_symbolized_application_caller": 6,
+      "samples_without_unwound_frames": 0,
+      "unknown_leaf_samples": 0
+    },
+    "s18-r0-ingest-2": {
+      "artifacts": {
+        "s18-r0-ingest-2.cpu-leaf": "1923eb77dfafddfa18c849abe9d133c31bac5383ebaf3f082dbedd86ba2e05ee",
+        "s18-r0-ingest-2.cpu-leaf.command.json": "239ddc00a861192ad3b873d385a5c60c1b1a9dc33aa85ca3a8b6d010ca468c5a",
+        "s18-r0-ingest-2.cpu-leaf.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "s18-r0-ingest-2.cpu-stack": "8550c30ab25c6ef626426a795885eb1889b021706d157a8b679bfb9b25e6b2d2",
+        "s18-r0-ingest-2.cpu-stack.command.json": "b77b292e2fb377d342f531e49b497166a3093441be8c2c0fecf13f618a804db2",
+        "s18-r0-ingest-2.cpu-stack.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "excluded_wrapper_samples": 0,
+      "inclusive_anchor_rules": {
+        "authentication": "::authenticate_",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "input_normalization": "::normalize_bulk_",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "publication": "::publish_canonical",
+        "recovery": "::recover_"
+      },
+      "inclusive_anchor_samples": {
+        "authentication": 0,
+        "canonical_encoding": 0,
+        "fixed_merge": 0,
+        "input_normalization": 0,
+        "parquet_merge": 0,
+        "publication": 0,
+        "recovery": 0
+      },
+      "input_perf_sha256": "a2648d7f4d8174c11c49f314547d3f3bcb702fd94629e458a0361565a19a9469",
+      "leaf_samples": [
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 20.54794520547945,
+          "samples": 15,
+          "symbol": "_raw_spin_unlock_irqrestore"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 8.219178082191782,
+          "samples": 6,
+          "symbol": "pageblock_skip_persistent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 8.219178082191782,
+          "samples": 6,
+          "symbol": "isolate_migratepages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 8.219178082191782,
+          "samples": 6,
+          "symbol": "rep_movs_alternative"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 6.8493150684931505,
+          "samples": 5,
+          "symbol": "isolate_migratepages_block"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 6.8493150684931505,
+          "samples": 5,
+          "symbol": "get_pfnblock_bit"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 4.109589041095891,
+          "samples": 3,
+          "symbol": "fast_find_migrateblock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.73972602739726,
+          "samples": 2,
+          "symbol": "free_unref_folios"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.73972602739726,
+          "samples": 2,
+          "symbol": "kernel_init_pages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.73972602739726,
+          "samples": 2,
+          "symbol": "isolate_freepages_block"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.73972602739726,
+          "samples": 2,
+          "symbol": "_raw_spin_unlock_irq"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.73972602739726,
+          "samples": 2,
+          "symbol": "_copy_to_iter"
+        },
+        {
+          "object": "ld-linux-x86-64.so.2",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "[unknown]"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "page_vma_mapped_walk"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "__es_remove_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "__nr_to_section"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "__mem_cgroup_uncharge_folios"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "shrink_many"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "fscrypt_mergeable_bio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "ext4_es_lookup_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "node_page_state"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "folio_mapping"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "set_pfnblock_bit"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "mpage_map_and_submit_buffers"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "ext4_has_free_clusters"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "mod_memcg_state"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "__rcu_read_lock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "__rcu_read_unlock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.36986301369863,
+          "samples": 1,
+          "symbol": "mark_buffer_dirty"
+        }
+      ],
+      "note": "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks undercount them.",
+      "sample_count": 73,
+      "samples_with_symbolized_application_caller": 72,
+      "samples_without_unwound_frames": 0,
+      "unknown_leaf_samples": 1
+    },
+    "s18-r0-ingest-3": {
+      "artifacts": {
+        "s18-r0-ingest-3.cpu-leaf": "cc2c7c0e0378193003b927c751b857dafb2262279d0a6c29748fcfb3e53ba25d",
+        "s18-r0-ingest-3.cpu-leaf.command.json": "e4d5fd2a83f05056db3cb244974f1b5a20a10025781d46bcb9d5454baab0e1ec",
+        "s18-r0-ingest-3.cpu-leaf.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "s18-r0-ingest-3.cpu-stack": "93f07448fa9a67242f75eed9a271b911fdff959c24d3d88e93579e24e7dfda22",
+        "s18-r0-ingest-3.cpu-stack.command.json": "3ed1c24206241c943aad203a19b85be8ae33854d05ca3ad3c4fa1bacc8a42c35",
+        "s18-r0-ingest-3.cpu-stack.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "excluded_wrapper_samples": 0,
+      "inclusive_anchor_rules": {
+        "authentication": "::authenticate_",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "input_normalization": "::normalize_bulk_",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "publication": "::publish_canonical",
+        "recovery": "::recover_"
+      },
+      "inclusive_anchor_samples": {
+        "authentication": 0,
+        "canonical_encoding": 19,
+        "fixed_merge": 128,
+        "input_normalization": 186,
+        "parquet_merge": 33,
+        "publication": 0,
+        "recovery": 0
+      },
+      "input_perf_sha256": "7f4a0372aebff7a0c802592112f66931e3e4e188dad696af61b2aa5031ad58f8",
+      "leaf_samples": [
+        {
+          "object": "libc.so.6",
+          "percent": 21.85354691075515,
+          "samples": 1719,
+          "symbol": "[unknown]"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 11.479786422578185,
+          "samples": 903,
+          "symbol": "sha2::sha256::x86_sha::compress"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 6.470887363335876,
+          "samples": 509,
+          "symbol": "alloc::collections::btree::map::BTreeMap<K,V,A>::insert"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 4.754640223747775,
+          "samples": 374,
+          "symbol": "graphforge_storage::graph_construction::run_record_bytes"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 4.7165013984235955,
+          "samples": 371,
+          "symbol": "graphforge_storage::construction_detail_codec::DetailCodec::read"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 2.364607170099161,
+          "samples": 186,
+          "symbol": "graphforge_api::bulk_construction::<impl graphforge_api::GraphForge>::normalize_bulk_edges"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 2.1739130434782608,
+          "samples": 171,
+          "symbol": "alloc::collections::binary_heap::BinaryHeap<T,A>::pop"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.161200101703534,
+          "samples": 170,
+          "symbol": "rep_movs_alternative"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.9577930333079074,
+          "samples": 154,
+          "symbol": "kernel_init_pages"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.8815153826595474,
+          "samples": 148,
+          "symbol": "alloc::collections::binary_heap::BinaryHeap<T,A>::push"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.7289600813628274,
+          "samples": 136,
+          "symbol": "_raw_spin_unlock_irq"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.627256547165014,
+          "samples": 128,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::merge_fixed_group"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.4238494787693872,
+          "samples": 112,
+          "symbol": "graphforge_storage::graph_construction::read_fixed"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.2967200610221206,
+          "samples": 102,
+          "symbol": "core::slice::sort::unstable::quicksort::quicksort"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.0933129926264937,
+          "samples": 86,
+          "symbol": "graphforge_storage::graph_construction::write_run"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 1.0933129926264937,
+          "samples": 86,
+          "symbol": "graphforge_storage::graph_construction_encoding::FixedReader<_>::next"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.9534706331045004,
+          "samples": 75,
+          "symbol": "ZSTD_compressBlock_fast"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.9407576913297737,
+          "samples": 74,
+          "symbol": "_raw_spin_unlock_irqrestore"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.9026188660055937,
+          "samples": 71,
+          "symbol": "parquet::util::interner::Interner<S>::intern"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.8644800406814137,
+          "samples": 68,
+          "symbol": "core::str::converts::from_utf8"
+        },
+        {
+          "object": "libc.so.6",
+          "percent": 0.8263412153572337,
+          "samples": 65,
+          "symbol": "cfree"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.6483600305110603,
+          "samples": 51,
+          "symbol": "arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray::slice"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.5847953216374269,
+          "samples": 46,
+          "symbol": "graphforge_api::bulk_construction::validate_edge_identity"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.5339435545385202,
+          "samples": 42,
+          "symbol": "parquet::arrow::arrow_writer::write_leaf"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.4958047292143402,
+          "samples": 39,
+          "symbol": "graphforge_storage::graph_construction::read_run_record"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.4830917874396135,
+          "samples": 38,
+          "symbol": "arrow_data::data::ArrayDataBuilder::buffers"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.4576659038901602,
+          "samples": 36,
+          "symbol": "arrow_data::data::ArrayData::get_slice_memory_size"
+        },
+        {
+          "object": "libc.so.6",
+          "percent": 0.4449529621154335,
+          "samples": 35,
+          "symbol": "malloc"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.4449529621154335,
+          "samples": 35,
+          "symbol": "<std::io::buffered::bufreader::BufReader<R> as std::io::Read>::read"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.41952707856598015,
+          "samples": 33,
+          "symbol": "<arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray as arrow_array::array::Array>::to_data"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.41952707856598015,
+          "samples": 33,
+          "symbol": "<arrow_array::array::byte_array::GenericByteArray<T> as arrow_array::array::Array>::slice"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.41952707856598015,
+          "samples": 33,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::merge_row_group::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.41952707856598015,
+          "samples": 33,
+          "symbol": "graphforge_storage::graph_construction::validate_staged_details"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.38138825324180015,
+          "samples": 30,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::copy_authenticated_run_with_codec::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.38138825324180015,
+          "samples": 30,
+          "symbol": "<arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray as arrow_array::array::Array>::slice"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.3559623696923468,
+          "samples": 28,
+          "symbol": "<uuid::Uuid as uuid::external::serde_support::UuidDeserialize>::from_slice"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.3559623696923468,
+          "samples": 28,
+          "symbol": "arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray::value"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.34324942791762014,
+          "samples": 27,
+          "symbol": "arrow_data::data::ArrayDataBuilder::build"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.34324942791762014,
+          "samples": 27,
+          "symbol": "core::ptr::drop_in_place<arrow_schema::datatype::DataType>"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.3305364861428935,
+          "samples": 26,
+          "symbol": "core::ptr::drop_in_place<arrow_data::data::ArrayData>"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.3305364861428935,
+          "samples": 26,
+          "symbol": "ZSTD_encodeSequences_bmi2"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.3178235443681668,
+          "samples": 25,
+          "symbol": "alloc::sync::Arc<T,A>::drop_slow"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.30511060259344014,
+          "samples": 24,
+          "symbol": "graphforge_storage::graph_construction::extract_runs"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.30511060259344014,
+          "samples": 24,
+          "symbol": "parquet::column::writer::compare_greater"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.2796847190439868,
+          "samples": 22,
+          "symbol": "core::slice::sort::shared::smallsort::small_sort_general"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.2796847190439868,
+          "samples": 22,
+          "symbol": "<arrow_schema::datatype::DataType as core::clone::Clone>::clone"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.2669717772692601,
+          "samples": 21,
+          "symbol": "alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.2669717772692601,
+          "samples": 21,
+          "symbol": "srso_safe_ret"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.2669717772692601,
+          "samples": 21,
+          "symbol": "graphforge_storage::graph_construction::account_merge_read_bytes"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.25425883549453343,
+          "samples": 20,
+          "symbol": "core::ptr::drop_in_place<arrow_array::array::byte_array::GenericByteArray<arrow_array::types::GenericBinaryType<i32>>>"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.24154589371980675,
+          "samples": 19,
+          "symbol": "arrow_array::array::fixed_size_binary_array::<impl core::convert::From<arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray> for arrow_data::data::ArrayData>::from"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.2288329519450801,
+          "samples": 18,
+          "symbol": "graphforge_storage::graph_construction_encoding::encode_edges::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "graphforge_core::identifier::is_graph_identifier"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "parquet::column::writer::encoder::ColumnValueEncoderImpl<T>::write_slice"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "<bytes::bytes::Bytes as core::convert::From<alloc::vec::Vec<u8>>>::from"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::convert_identity_run::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "graphforge_storage::graph_construction::uuid_column"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "arrow_buffer::buffer::immutable::Buffer::slice_with_length"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.21612001017035343,
+          "samples": 17,
+          "symbol": "find_lock_entries"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.20340706839562675,
+          "samples": 16,
+          "symbol": "<parquet::encodings::encoding::PlainEncoder<T> as parquet::encodings::encoding::Encoder<T>>::put"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.20340706839562675,
+          "samples": 16,
+          "symbol": "bytes::bytes::promotable_even_drop"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::RowCursor::advance"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "arrow_buffer::buffer::scalar::ScalarBuffer<T>::new"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "arrow_array::array::byte_array::<impl core::convert::From<arrow_array::array::byte_array::GenericByteArray<T>> for arrow_data::data::ArrayData>::from"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "graphforge_storage::graph_construction::assign_surrogates"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "graphforge_storage::graph_construction::resolve_endpoint_surrogates"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.19069412662090007,
+          "samples": 15,
+          "symbol": "graphforge_storage::graph_construction_encoding::next_kind"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.1779811848461734,
+          "samples": 14,
+          "symbol": "alloc::collections::btree::map::IntoIter<K,V,A>::dying_next"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.1779811848461734,
+          "samples": 14,
+          "symbol": "graphforge_storage::graph_construction::account_merge_write_bytes"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.1779811848461734,
+          "samples": 14,
+          "symbol": "arrow_data::transform::MutableArrayData::extend"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.16526824307144675,
+          "samples": 13,
+          "symbol": "graphforge_api::bulk_construction::explicit_uuid_at"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.16526824307144675,
+          "samples": 13,
+          "symbol": "__rustc::__rdl_alloc"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.16526824307144675,
+          "samples": 13,
+          "symbol": "core::ptr::drop_in_place<arrow_array::array::fixed_size_binary_array::FixedSizeBinaryArray>"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.15255530129672007,
+          "samples": 12,
+          "symbol": "free_unref_folios"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.15255530129672007,
+          "samples": 12,
+          "symbol": "_copy_to_iter"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.15255530129672007,
+          "samples": 12,
+          "symbol": "__rmqueue_pcplist"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "nvme_pci_setup_data_prp"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "arrow_data::data::layout"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "arrow_data::data::ArrayData::typed_buffer"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "arrow_data::transform::build_extend_null_bits::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "arrow_data::data::ArrayDataBuilder::nulls"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "__rustc::__rust_no_alloc_shim_is_unstable_v2"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "<arrow_array::array::byte_array::GenericByteArray<T> as arrow_array::array::Array>::to_data"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "core::hash::BuildHasher::hash_one"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "hashbrown::raw::RawTable<T,A>::reserve_rehash"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.12712941774726672,
+          "samples": 10,
+          "symbol": "<core::iter::adapters::copied::Copied<I> as core::iter::traits::iterator::Iterator>::try_fold"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "ext4_da_get_block_prep"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "ext4_es_insert_delayed_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "filemap_read"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "bio_add_page"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "get_mem_cgroup_from_mm"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "xa_load"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.11441647597254005,
+          "samples": 9,
+          "symbol": "filemap_get_read_batch"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "__memcg_slab_post_alloc_hook"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "link_path_walk"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "__memcg_slab_free_hook"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "kmem_cache_free"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "graphforge_storage::graph_construction::write_fixed_run"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "ext4_mpage_readpages.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "rmqueue_pcplist"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "parquet::arrow::buffer::offset_buffer::OffsetBuffer<I>::extend_from_dictionary"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "get_page_from_freelist"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "xas_find"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "__es_insert_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "__rcu_read_unlock"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "graphforge_storage::uuid_membership::add_v4_mapping_commitment"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.10170353419781338,
+          "samples": 8,
+          "symbol": "HIST_count_parallel_wksp"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "graphforge_api::bulk_construction::candidate_uuids"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "graphforge_api::bulk_construction::canonical_import_uuid_array"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "<parquet::arrow::arrow_writer::byte_array::ByteArrayEncoder as parquet::column::writer::encoder::ColumnValueEncoder>::write_gather"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "ahash::random_state::RandomState::hash_one"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "generic_fillattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "ext4_es_lookup_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "__mem_cgroup_charge"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "rmqueue.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "kmem_cache_alloc_noprof"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "xas_load"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "graphforge_storage::graph_construction::build_runtime_catalog"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.0889905924230867,
+          "samples": 7,
+          "symbol": "graphforge_value::catalog::RuntimeCatalogData::intern_relation_type_at"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "try_charge_memcg"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "ext4_da_map_blocks.constprop.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "filemap_add_folio"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "arrow_data::transform::fixed_binary::build_extend::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "__rustc::__rust_alloc"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.07627765064836003,
+          "samples": 6,
+          "symbol": "ZSTD_seqToCodes"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "charge_memcg"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "__rcu_read_lock"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "__rustc::__rust_dealloc"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "do_syscall_64"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "<alloc::collections::btree::map::BTreeMap<K,V,A> as core::ops::drop::Drop>::drop"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "ext4_insert_delayed_blocks"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "mpage_process_page_bufs"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "folio_mapping"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "__remove_mapping"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "copy_page_to_iter"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "__alloc_frozen_pages_noprof"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "arrow_data::data::ArrayDataBuilder::build_unchecked"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "alloc_buffer_head"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "alloc_pages_mpol"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "ext4_bio_write_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "__refill_objects_node"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "parquet::arrow::arrow_writer::levels::LevelInfoBuilder::write"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "graphforge_value::catalog::RuntimeCatalogData::contains_relation_type"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.06356470887363336,
+          "samples": 5,
+          "symbol": "parquet::encodings::rle::RleEncoder::put"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "folios_put_refs"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "arrow_select::take::take_bytes"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "arrow_array::builder::fixed_size_binary_builder::FixedSizeBinaryBuilder::append_value"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::fold"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "__dquot_alloc_space"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "bio_split_io_at"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "filemap_release_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "__es_remove_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "_raw_spin_lock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "uncharge_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "post_alloc_hook"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "mapping_evict_folio"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "arrow_data::transform::variable_size::build_extend::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "<alloc::sync::Arc<dyn arrow_array::array::Array> as arrow_array::array::Array>::to_data"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "<T as core::any::Any>::type_id"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "page_cache_ra_unbounded"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "page_cache_ra_order"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "percpu_counter_add_batch"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "mapping_try_invalidate"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "__filemap_add_folio"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "graphforge_storage::uuid_membership::encode_construction_index_inner::{{closure}}"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.05085176709890669,
+          "samples": 4,
+          "symbol": "parquet::encodings::rle::RleEncoder::flush_bit_packed_run"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "graphforge_api::bulk_construction::normalize_properties"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "strncpy_from_user"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "folio_clear_dirty_for_io"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "__jbd2_journal_file_buffer"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "may_lookup"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "<core::iter::adapters::fuse::Fuse<I> as core::iter::adapters::fuse::FuseImpl<I>>::try_fold"
+        },
+        {
+          "object": "libc.so.6",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "statx"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "cp_statx"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "<parquet::arrow::arrow_writer::byte_array::ByteArrayEncoder as parquet::column::writer::encoder::ColumnValueEncoder>::flush_data_page"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "fdget_pos"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "ext4_da_do_write_end.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "ext4_da_reserve_space"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "sha2::sha256::compress256"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "remove_mapping"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "arrow_data::transform::utils::extend_offsets"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "<alloc::sync::Arc<dyn arrow_array::array::Array> as arrow_array::array::Array>::slice"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "xas_start"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "ext4_block_write_begin"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "dma_direct_map_phys"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "graphforge_storage::graph_construction::shaping_merge::SelectedRows::push"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "bh_get_inode_and_lblk_num"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "nvme_pci_prp_save_mapping"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "apparmor_inode_getattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "dma_map_phys"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "<core::hash::sip::Hasher<S> as core::hash::Hasher>::write"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.03813882532418002,
+          "samples": 3,
+          "symbol": "HUF_buildCTable_wksp"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "memset_orig"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "graphforge_api::bulk_construction::uuid_at"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "graphforge_api::bulk_construction::<impl graphforge_api::GraphForge>::normalize_import_edge_chunk"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "wbc_account_cgroup_owner"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "sbitmap_find_bit"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "do_statx_fd"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "_raw_spin_unlock"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "<graphforge_filesystem::FileCacheReleasingReader as std::io::Read>::read"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "parquet::encodings::rle::RleDecoder::get_batch"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "terminate_walk"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "<alloc::collections::btree::map::BTreeMap<K,V,A> as core::clone::Clone>::clone::clone_subtree"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "__folio_batch_add_and_move"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "ext4_getattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "bdev_count_inflight_rw.part.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "xas_find_marked"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "blk_map_iter_next"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "mpage_map_and_submit_buffers"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "bio_add_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "folio_alloc_noprof"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "vfs_statx"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "getname_flags"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "block_commit_write"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "filemap_get_pages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "inode_permission"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "filemap_get_folios_tag"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "obj_cgroup_charge_account"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "policy_nodemask"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "mod_memcg_state"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "graphforge_value::catalog::RuntimeCatalogData::intern_label_at"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "graphforge_storage::uuid_membership::StreamingV4Artifact::push"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.025425883549453344,
+          "samples": 2,
+          "symbol": "HUF_compress1X_usingCTable_internal_bmi2"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "memcpy_orig"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "folio_remove_rmap_ptes"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "serde_core::ser::SerializeMap::serialize_entry"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "lock_vma_under_rcu"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "alloc_anon_folio"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<core::ffi::c_str::CStr>::from_bytes_with_nul"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "check_heap_object"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "core::slice::sort::shared::pivot::median3_rec"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__radix_tree_lookup"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "half_md4_transform.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "lookup_fast"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "common_perm"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "jbd2_journal_dirty_metadata"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "security_inode_rename"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mpage_release_unused_pages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "drop_buffers.constprop.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_sync_file"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "filp_flush"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_find_dest_de"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__filemap_get_folio_mpol"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "serde_json::ser::format_escaped_str"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "balance_dirty_pages_ratelimited_flags"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "blk_should_throtl"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_construction::uuid_value"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "std::sys::fs::unix::try_statx"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "kmem_cache_alloc_lru_noprof"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "core::ptr::drop_in_place<parquet::arrow::arrow_writer::levels::ArrayLevels>"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "jbd2_journal_grab_journal_head"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "common_perm_cond"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "core::slice::sort::unstable::ipnsort"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_writepages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "folio_alloc_buffers"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "try_to_free_buffers"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "os_xsave"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__check_object_size"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<alloc::vec::into_iter::IntoIter<T,A> as core::iter::traits::iterator::Iterator>::try_fold"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ixgbe_poll"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_sb_block_valid"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "path_openat"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "parquet::parquet_thrift::ThriftCompactOutputProtocol<W>::write_byte"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__ext4fs_dirhash"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_construction::logical_batch_digest"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "crc32c_x86_3way"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__ext4_mark_inode_dirty"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_fill_raw_inode"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bio_associate_blkg_from_css"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_api::bulk_construction::candidate_endpoint_uuids"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "nvme_queue_rqs"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bio_to_wbt_flags.part.0.isra.0"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bytes::bytes::shared_drop"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_mb_mark_diskspace_used"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_raw_write_lock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "step_into_slowpath"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "std::io::default_read_to_end"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__submit_bio_noacct"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "xas_nomem"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "lruvec_stat_mod_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "folio_add_lru"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "handle_pte_fault"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__handle_mm_fault"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "shmem_mapping"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mark_buffer_dirty"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_group_desc_csum"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "rb_insert_color"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "path_put"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_match"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_release_file"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "dput.part.0"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<alloc::vec::Vec<T,A> as core::clone::Clone>::clone"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "hash_name"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_find_first_bit"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "raid1_read_request"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_mb_mark_context"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "jbd2_journal_try_to_free_buffers"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "crc32c_arch"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_has_free_clusters"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "path_lookupat"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bio_alloc_clone"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_raw_read_unlock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_claim_free_clusters"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "expr_call_ops_eval"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_da_write_end"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "lru_add_drain_cpu"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "fscrypt_mergeable_bio_bh"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "save_fpregs_to_fpstate"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "dx_probe"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__ext4_get_inode_loc"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "inode_update_time"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "apparmor_inode_create"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_es_can_be_merged.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__bio_add_page"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "sched_balance_update_blocked_averages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mpage_map_and_submit_extent"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_filesystem::validate_stable_child_file"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "strcmp"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "up_read"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_get_reserved_space"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "xas_move_index"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__next_zones_zonelist"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__netif_receive_skb_core.constprop.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "blk_rq_dma_map_iter_next"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "folio_mark_accessed"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "free_frozen_page_commit.isra.0"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "submit_bio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_raw_spin_lock_irq"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_raw_read_lock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__legitimize_path"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__get_user_1"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "crc32c"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "_raw_spin_trylock"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "blk_cgroup_congested"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__mem_cgroup_uncharge_folios"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "radix_tree_node_rcu_free"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "free_tail_page_prepare"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_construction::artifact_stem"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<serde_json::read::SliceRead as serde_json::read::Read>::parse_str"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::uuid_membership::identity_codec::encoded"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__raw_spin_lock_irqsave"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mempool_alloc_slab"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::uuid_membership::describe_and_install_construction_run"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::uuid_membership::block_layout"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "generic_perform_write"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::uuid_membership::V4OrdinalConstructionWriter::push_ordinal_inner"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<graphforge_storage::graph_construction_encoding::ResolvedOwner as core::clone::Clone>::clone"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_construction_encoding::encode_nodes"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mpage_prepare_extent_to_map"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ktime_get"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ZSTD_compressBlock_internal"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_construction_encoding::edge_batch"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "parquet::column::writer::GenericColumnWriter<E>::close"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "ext4_file_write_iter"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "fsnotify_grab_connector"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "FSE_buildCTable_wksp"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "node_dirty_ok"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "mod_zone_page_state"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "parquet::column::writer::GenericColumnWriter<E>::add_data_page"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<parquet::column::writer::encoder::ColumnValueEncoderImpl<T> as parquet::column::writer::encoder::ColumnValueEncoder>::flush_data_page"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "filemap_alloc_folio_noprof"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "<parquet::file::serialized_reader::SerializedPageReader<R> as parquet::column::page::PageReader>::get_next_page"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "std::io::default_read_exact"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bvec_try_merge_page"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "page_counter_uncharge"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "security_file_permission"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "__d_lookup_rcu"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.012712941774726672,
+          "samples": 1,
+          "symbol": "bio_integrity_prep"
+        }
+      ],
+      "note": "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks undercount them.",
+      "sample_count": 7866,
+      "samples_with_symbolized_application_caller": 0,
+      "samples_without_unwound_frames": 4895,
+      "unknown_leaf_samples": 1719
+    },
+    "s18-r0-ingest-4": {
+      "artifacts": {
+        "s18-r0-ingest-4.cpu-leaf": "764f56cf897e881ea4e0c92f5475e635f24e28b3bb438f3eb4bca436a97e4a0d",
+        "s18-r0-ingest-4.cpu-leaf.command.json": "ec9ace1552f90d6739e352789dd71dda5730383becdadc57e44499704bad78d4",
+        "s18-r0-ingest-4.cpu-leaf.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "s18-r0-ingest-4.cpu-stack": "89e4dcfed39a38f34cce743eb3f71d004846d4ee84921419582cac76cad789b3",
+        "s18-r0-ingest-4.cpu-stack.command.json": "3b11ed75cc8e05763420eadba3903cfebc1656cb2f81a104bbefe86cb1459f42",
+        "s18-r0-ingest-4.cpu-stack.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "excluded_wrapper_samples": 0,
+      "inclusive_anchor_rules": {
+        "authentication": "::authenticate_",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "input_normalization": "::normalize_bulk_",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "publication": "::publish_canonical",
+        "recovery": "::recover_"
+      },
+      "inclusive_anchor_samples": {
+        "authentication": 27,
+        "canonical_encoding": 0,
+        "fixed_merge": 0,
+        "input_normalization": 0,
+        "parquet_merge": 0,
+        "publication": 8,
+        "recovery": 0
+      },
+      "input_perf_sha256": "e9b2f6fa8a56b218d15a2faff2fd24c4e9e87204c57ac432bb42d0faf0516198",
+      "leaf_samples": [
+        {
+          "object": "gf-ordinary",
+          "percent": 58.032786885245905,
+          "samples": 177,
+          "symbol": "sha2::sha256::x86_sha::compress"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 7.540983606557377,
+          "samples": 23,
+          "symbol": "rep_movs_alternative"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 5.573770491803279,
+          "samples": 17,
+          "symbol": "kernel_init_pages"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 2.622950819672131,
+          "samples": 8,
+          "symbol": "_raw_spin_unlock_irq"
+        },
+        {
+          "object": "libc.so.6",
+          "percent": 1.9672131147540983,
+          "samples": 6,
+          "symbol": "[unknown]"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.3114754098360655,
+          "samples": 4,
+          "symbol": "link_path_walk"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 1.3114754098360655,
+          "samples": 4,
+          "symbol": "terminate_walk"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "_raw_spin_unlock_irqrestore"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "vfs_getattr_nosec"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "common_perm_cond"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "__dquot_alloc_space"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "__memcg_slab_free_hook"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "do_syscall_64"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "blk_map_iter_next"
+        },
+        {
+          "object": "libc.so.6",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "statx"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "_copy_to_iter"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.6557377049180327,
+          "samples": 2,
+          "symbol": "graphforge_storage::ordinal_identity_v4::admit_forward_artifact"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "hash_name"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "xa_load"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "<core::ffi::c_str::CStr>::from_bytes_with_nul"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "apparmor_inode_getattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__next_zones_zonelist"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "filemap_read"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "try_charge_memcg"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "mapping_try_invalidate"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "fsnotify"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "fdget_raw"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "serde_json::de::from_trait"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "kmem_cache_alloc_noprof"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "free_unref_folios"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "get_page_from_freelist"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "security_inode_getattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "ext4_es_lookup_extent"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "inode_permission"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "path_init"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "may_lookup"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__x64_sys_statx"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "strncpy_from_user"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "filemap_get_read_batch"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__get_user_1"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__filemap_add_folio"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "do_dentry_open"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "bio_associate_blkg_from_css"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__bio_clone"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "apparmor_file_lock"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "unicode_normalization::decompose::Decompositions<I>::push_back"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "vfs_read"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "up_read"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "obj_cgroup_charge_account"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "copy_page_to_iter"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "srso_safe_ret"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "ima_file_check"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "core::str::converts::from_utf8"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "__kmalloc_noprof"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "kernel_fpu_end"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_manifest::validate_node"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "ext4_getattr"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "x64_sys_call"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "memset_orig"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "blk_mq_submit_bio"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "graphforge_storage::graph_files::validate_wire_component"
+        },
+        {
+          "object": "[kernel.kallsyms]",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "_copy_to_user"
+        },
+        {
+          "object": "gf-ordinary",
+          "percent": 0.32786885245901637,
+          "samples": 1,
+          "symbol": "graphforge_storage::ordinal_identity_v4::admit_ordinal_artifact"
+        }
+      ],
+      "note": "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks undercount them.",
+      "sample_count": 305,
+      "samples_with_symbolized_application_caller": 113,
+      "samples_without_unwound_frames": 0,
+      "unknown_leaf_samples": 6
+    }
+  },
+  "input_summary_sha256": "8a491319d805b2bea98c87b06adb5aa7a56506f29982d842b86f0ec45c0af6f9",
+  "issue": 1282,
+  "profiler": {
+    "sha256": "94b3ed36eeedf585d88fedd326fb616f662223193dddbf6d48d2df1cced69009",
+    "version": "perf version 7.0.14"
+  }
+}
