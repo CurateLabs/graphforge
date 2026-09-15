@@ -28,7 +28,9 @@ const NODE_LOOKUP_RECORD_BYTES: u64 = 24;
 const IDENTITY_RECORD_BYTES: u64 = 25;
 const NODE_LOOKUP_RECORD_WIDTH: usize = 24;
 const IDENTITY_RECORD_WIDTH: usize = identity_codec::WIDTH;
-const CONSTRUCTION_IDENTITY_WIDTH: usize = 32;
+use crate::construction_record_layout::{
+    BASE_IDENTITY_WIDTH as CONSTRUCTION_IDENTITY_WIDTH, IDENTITY_SURROGATE_OFFSET,
+};
 const BULK_IO_BYTES: usize = 1 << 20;
 // Persistent authenticated authority for UUID-to-surrogate resolution. Keeping
 // it in the immutable topology generation is what lets writer reopen avoid
@@ -3480,18 +3482,21 @@ fn encode_construction_index_inner(
                     &input_block[source_offset..source_offset + CONSTRUCTION_IDENTITY_WIDTH];
                 let mut packed = [0_u8; IDENTITY_RECORD_WIDTH];
                 packed[..17].copy_from_slice(&record[..17]);
-                packed[17..].copy_from_slice(&record[24..32]);
+                packed[17..].copy_from_slice(
+                    &record[IDENTITY_SURROGATE_OFFSET..CONSTRUCTION_IDENTITY_WIDTH],
+                );
                 let uuid: [u8; 16] = record[..16].try_into().expect("fixed UUID");
-                if previous_uuid.is_some_and(|prior| prior >= uuid)
-                    || record[17..24].iter().any(|byte| *byte != 0)
-                {
+                if previous_uuid.is_some_and(|prior| prior >= uuid) || record[17] != 0 {
                     return Err(storage_err("construction identity stream is not canonical"));
                 }
                 previous_uuid = Some(uuid);
                 match record[16] {
                     0 => {
-                        let surrogate =
-                            u64::from_be_bytes(record[24..32].try_into().expect("fixed"));
+                        let surrogate = u64::from_be_bytes(
+                            record[IDENTITY_SURROGATE_OFFSET..CONSTRUCTION_IDENTITY_WIDTH]
+                                .try_into()
+                                .expect("fixed"),
+                        );
                         if surrogate == 0 || surrogate <= previous_surrogate {
                             return Err(storage_err(
                                 "construction node surrogate stream is not increasing",
@@ -11469,6 +11474,83 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn packed_construction_index_preserves_full_width_surrogates_and_refuses_invalid_records() {
+        let uuid = Uuid::from_u128(u128::MAX);
+        let surrogate = u64::MAX;
+        let mut golden = uuid.as_bytes().to_vec();
+        golden.extend_from_slice(&[0, 0]);
+        golden.extend_from_slice(&surrogate.to_be_bytes());
+        assert_eq!(golden.len(), 26);
+        let mut cases = vec![(golden.clone(), true)];
+        for length in 1..26 {
+            cases.push((golden[..length].to_vec(), false));
+        }
+        for (offset, value) in [(16, 2), (17, 1), (17, 255)] {
+            let mut invalid = golden.clone();
+            invalid[offset] = value;
+            cases.push((invalid, false));
+        }
+        let mut zero = golden.clone();
+        zero[18..26].fill(0);
+        cases.push((zero, false));
+        for (bytes, valid) in cases {
+            let source_dir = tempfile::tempdir().unwrap();
+            let encoded_dir = tempfile::tempdir().unwrap();
+            fs::write(source_dir.path().join("identities.run"), &bytes).unwrap();
+            let source = graphforge_filesystem::StableDirectory::open(source_dir.path()).unwrap();
+            let encoded = graphforge_filesystem::StableDirectory::open(encoded_dir.path()).unwrap();
+            let result = encode_construction_index(
+                &source,
+                "identities.run",
+                &hex_sha256(&bytes),
+                &encoded,
+                1,
+                0,
+                None,
+                1,
+                0,
+                &mut || false,
+                None,
+            );
+            if valid {
+                let result = result.unwrap();
+                let identity = result
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.name.ends_with(".uuidx"))
+                    .unwrap();
+                let mut expected = uuid.as_bytes().to_vec();
+                expected.push(0);
+                expected.extend_from_slice(&surrogate.to_be_bytes());
+                assert_eq!(expected.len(), 25);
+                assert_eq!(
+                    fs::read(
+                        encoded_dir
+                            .path()
+                            .join("graph/topology/uuid-membership")
+                            .join(&identity.name)
+                    )
+                    .unwrap(),
+                    expected
+                );
+                let mut index =
+                    UuidMembershipIndex::open_at_generation(&encoded_dir.path().join("graph"), 1)
+                        .unwrap();
+                assert_eq!(
+                    index.lookup_node_surrogates(&[uuid]).unwrap().0,
+                    vec![Some(surrogate)]
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(
+                    fs::read(source_dir.path().join("identities.run")).unwrap(),
+                    bytes
+                );
+            }
+        }
+    }
+
+    #[test]
     fn construction_encoder_io_geometry_is_block_bounded() {
         for records in [32_768_u64, 65_536, 131_072] {
             let source_dir = tempfile::tempdir().unwrap();
@@ -11480,7 +11562,7 @@ pub(crate) mod tests {
             for value in 1..=records {
                 input.write_all(&u128::from(value).to_be_bytes()).unwrap();
                 input.write_all(&[0]).unwrap();
-                input.write_all(&[0; 7]).unwrap();
+                input.write_all(&[0]).unwrap();
                 input.write_all(&value.to_be_bytes()).unwrap();
             }
             input.flush().unwrap();

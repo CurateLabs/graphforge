@@ -383,8 +383,7 @@ pub fn inspect_project_reachability_with_mode(
     }
 
     drop(checkpoint_roots);
-    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
-    drop(writer_lock);
+    writer_lock.release()?;
 
     Ok(ProjectReachabilityReport {
         selected_generation_uuid: selected.generation_uuid(),
@@ -467,6 +466,17 @@ fn run_cleanup(
     dry_run: bool,
     mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectCleanupReport, GfError> {
+    run_cleanup_with_lock_observer(root, policy, limits, dry_run, mode, |_| {})
+}
+
+fn run_cleanup_with_lock_observer(
+    root: &Path,
+    policy: ProjectRetentionPolicy,
+    limits: ProjectRetentionLimits,
+    dry_run: bool,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+    observe_lock: impl FnOnce(&std::fs::File),
+) -> Result<ProjectCleanupReport, GfError> {
     let started = Instant::now();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
@@ -486,6 +496,7 @@ fn run_cleanup(
         .transpose()?
         .flatten();
     let writer_lock = acquire_recovery_lock(root)?;
+    observe_lock(writer_lock.file());
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
     let classification = classify_cleanup_candidates(
@@ -553,8 +564,7 @@ fn run_cleanup(
     let remaining_bytes = remaining_project_bytes(root, limits)?;
 
     drop(checkpoint_roots);
-    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
-    drop(writer_lock);
+    writer_lock.release()?;
 
     Ok(ProjectCleanupReport {
         dry_run,
@@ -1199,6 +1209,68 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), "GF_WRITER_BUSY");
+    }
+
+    fn assert_bounded_error_releases_duplicated_writer_lock(
+        bound: ProjectRetentionLimits,
+        expected_limit: &str,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        open_or_initialize_project(root.path()).unwrap();
+        for _ in 0..5 {
+            publish_one(root.path());
+        }
+        let before = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let mut retained_descriptor = None;
+        let error = run_cleanup_with_lock_observer(
+            root.path(),
+            policy(0),
+            bound,
+            true,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            |file| retained_descriptor = Some(file.try_clone().unwrap()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
+        assert!(error.to_string().contains(expected_limit));
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            before
+        );
+
+        // A duplicate models an inherited open-file description without a
+        // timing-dependent fork. Keep it live while an independent writer opens.
+        let retained_descriptor = retained_descriptor.unwrap();
+        let next_writer = acquire_recovery_lock(root.path());
+        assert!(
+            next_writer.is_ok(),
+            "writer remains locked after {expected_limit}: {next_writer:?}"
+        );
+        drop(next_writer);
+        let repeated_error = preview_project_cleanup(root.path(), policy(0), bound).unwrap_err();
+        assert_eq!(repeated_error.code(), "GF_RESOURCE_LIMIT");
+        assert!(repeated_error.to_string().contains(expected_limit));
+        drop(retained_descriptor);
+    }
+
+    #[test]
+    fn entry_limit_error_releases_duplicated_writer_lock() {
+        assert_bounded_error_releases_duplicated_writer_lock(
+            limits(1, u64::MAX, 64, 8),
+            "max_entries",
+        );
+    }
+
+    #[test]
+    fn byte_limit_error_releases_duplicated_writer_lock() {
+        assert_bounded_error_releases_duplicated_writer_lock(
+            limits(10_000, 1, 64, 8),
+            "max_bytes_scanned",
+        );
     }
 
     #[test]

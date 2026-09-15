@@ -26,16 +26,16 @@
     ]
   },
   "metrics": {
-    "logical_read_bytes": 45635825144,
-    "logical_write_bytes": 20524507070,
-    "peak_rss_bytes": 200232960,
-    "physical_read_bytes": 222907678720,
-    "physical_write_bytes": 74677432320,
-    "publication_work_units": 255934,
-    "reader_calls": 491135,
-    "retained_storage_bytes": 4372516864,
-    "transient_peak_storage_bytes": 11897737216,
-    "wall_seconds": 385
+    "logical_read_bytes": 38239170038,
+    "logical_write_bytes": 17378779070,
+    "peak_rss_bytes": 199135232,
+    "physical_read_bytes": 208139395072,
+    "physical_write_bytes": 65235488768,
+    "publication_work_units": 254716,
+    "reader_calls": 483957,
+    "retained_storage_bytes": 4372508672,
+    "transient_peak_storage_bytes": 9173499904,
+    "wall_seconds": 360
   },
   "phases": [
     "admission",
@@ -63,8 +63,8 @@
             "object_count": 272,
             "read_bytes": 0,
             "read_calls": 0,
-            "write_bytes": 3629690464,
-            "write_calls": 8528
+            "write_bytes": 3126373984,
+            "write_calls": 8016
           },
           "cas_install_read_write": {
             "block_count": 0,
@@ -79,14 +79,14 @@
             "block_count": 0,
             "fsync_calls": 627,
             "object_count": 0,
-            "read_bytes": 6355026379,
-            "read_calls": 164070,
+            "read_bytes": 5799281099,
+            "read_calls": 163539,
             "write_bytes": 1500026997,
-            "write_calls": 41765
+            "write_calls": 41664
           },
           "fsync_synchronization": {
             "block_count": 0,
-            "fsync_calls": 11131,
+            "fsync_calls": 10545,
             "object_count": 0,
             "read_bytes": 0,
             "read_calls": 0,
@@ -115,8 +115,8 @@
             "block_count": 0,
             "fsync_calls": 0,
             "object_count": 0,
-            "read_bytes": 18654765578,
-            "read_calls": 29017,
+            "read_bytes": 14944903690,
+            "read_calls": 25703,
             "write_bytes": 0,
             "write_calls": 0
           },
@@ -130,23 +130,23 @@
             "write_calls": 0
           },
           "shape_consume_reauthentication": {
-            "block_count": 28731,
+            "block_count": 24453,
             "fsync_calls": 0,
             "object_count": 0,
-            "read_bytes": 19227027175,
-            "read_calls": 275017,
-            "write_bytes": 14674255319,
-            "write_calls": 17698
+            "read_bytes": 16095979237,
+            "read_calls": 271684,
+            "write_bytes": 12031843799,
+            "write_calls": 14949
           }
         },
         "totals": {
-          "block_count": 28731,
-          "fsync_calls": 15134,
+          "block_count": 24453,
+          "fsync_calls": 14548,
           "object_count": 272,
-          "read_bytes": 45635825144,
-          "read_calls": 491135,
-          "write_bytes": 20524507070,
-          "write_calls": 79925
+          "read_bytes": 38239170038,
+          "read_calls": 483957,
+          "write_bytes": 17378779070,
+          "write_calls": 76563
         }
       },
       "staging": {
@@ -156,8 +156,8 @@
         "physical_logical_bytes": 677697400,
         "physical_objects": 288
       },
-      "staging_transient_peak_allocated_bytes": 10246037504,
-      "transient_peak_allocated_bytes": 10246037504
+      "staging_transient_peak_allocated_bytes": 7521841152,
+      "transient_peak_allocated_bytes": 7521841152
     },
     "counts": {
       "imported_edges": 16777216,
@@ -340,19 +340,19 @@
         },
         "source-project-construction": {
           "totals": {
-            "allocated_bytes": 685801472,
-            "logical_bytes": 679305946,
-            "logical_references": 1919,
-            "physical_logical_bytes": 679305946,
-            "physical_objects": 1919
+            "allocated_bytes": 685793280,
+            "logical_bytes": 679305387,
+            "logical_references": 1917,
+            "physical_logical_bytes": 679305387,
+            "physical_objects": 1917
           }
         },
         "source-project-import": {
           "totals": {
             "allocated_bytes": 822353920,
-            "logical_bytes": 822341855,
+            "logical_bytes": 822341853,
             "logical_references": 3,
-            "physical_logical_bytes": 822341855,
+            "physical_logical_bytes": 822341853,
             "physical_objects": 3
           }
         },
@@ -384,9 +384,9 @@
           }
         }
       },
-      "retained_storage_bytes": 4372516864,
+      "retained_storage_bytes": 4372508672,
       "source_project_current_allocated_bytes": 681910272,
-      "transient_peak_storage_bytes": 11897737216
+      "transient_peak_storage_bytes": 9173499904
     },
     "portable_package": {
       "allocation_allocated_bytes": 678088704,
@@ -478,13 +478,13 @@
   "storage_components": {
     "imported_allocated_physical_bytes": 679284736,
     "imported_retained_logical_eof_bytes": 677819718,
-    "logical_read_bytes": 45635825144,
-    "logical_write_bytes": 20524507070,
-    "publication_work_units": 255934,
-    "reader_calls": 491135,
+    "logical_read_bytes": 38239170038,
+    "logical_write_bytes": 17378779070,
+    "publication_work_units": 254716,
+    "reader_calls": 483957,
     "source_allocated_physical_bytes": 679284736,
     "source_project_current_allocated_bytes": 681910272,
     "source_retained_logical_eof_bytes": 677819718,
-    "transient_peak_allocated_bytes": 10246037504
+    "transient_peak_allocated_bytes": 7521841152
   }
 }

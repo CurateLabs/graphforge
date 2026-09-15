@@ -1,0 +1,64 @@
+{
+  "baseline": {
+    "artifacts": {
+      "gf-ordinary": "ebb762fd735382b03928eea0ede2104b763b406cece6e5cd01ca022e99bbdea1"
+    },
+    "features": "default",
+    "profile": "release; debug=1; locked; jobs=4",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+    "source_commit": "b0df2b851b6ef1edccad997f4c0f0e73b1c0da66",
+    "source_tree": "7a60347c8ff54a0efff0d07f04295c63e354639f"
+  },
+  "candidate": {
+    "artifacts": {
+      "boundary-test": "151a2fe9f303762c0dea892422ed0ff8a908ac0bb8068a7e9a2e9e5152d1a5f9",
+      "gf-diagnostic": "9b4fba48be6e546fcc9f07e42eb1154cb27b323f33bce562b9a0d538d0f38bf6",
+      "gf-ordinary": "373089288a6b74073660180953b666004b788b56788c86652e152966927e276d"
+    },
+    "features": {
+      "boundary-test": "API test-support/test-failpoints dev dependencies",
+      "gf-diagnostic": "graphforge-storage/test-support",
+      "gf-ordinary": "default"
+    },
+    "profile": "release; debug=1; locked; jobs=4",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+    "source_commit": "888192cbbc9c398e7d8b5d60f3c6b75b298aa2a5",
+    "source_tree": "13fafd77de3eba508d8fd23e1f3bac76663d6a67"
+  },
+  "experiment": {
+    "baseline_diagnostics": "Preserved validated #1282 instrumented observations; independently identified historical comparison, no fresh baseline profiling claim.",
+    "baseline_source": "b0df2b851b6ef1edccad997f4c0f0e73b1c0da66",
+    "cache_policy": "Fresh projects; natural caches; no cache changes",
+    "execution_order": [
+      "baseline-scaling: r0(S16,S17,S18), r1(S16,S17,S18), r2(S16,S17,S18)",
+      "freeze baseline-derived thresholds",
+      "candidate-scaling: r0(S16,S17,S18), r1(S16,S17,S18), r2(S16,S17,S18)",
+      "candidate-diagnostic: S16,S17,S18 once each",
+      "candidate-boundary-diagnostic: 31/31,32/32,33/33,1023/1023,1024/1024,1025/1025,16/256,64/1024 once each"
+    ],
+    "fixture": "Graph500 S16/S17/S18; seed13907095936298285200; edgefactor16; batch65536; fan-in32",
+    "generator_sha256": "f0bb6614b2a4119bf3deee381783abc506be91b76abe10da58f5aafd7a73026f",
+    "historical_threshold_seconds": {
+      "s16": 0.122031175,
+      "s17": 0.406388363,
+      "s18": 0.621841171
+    },
+    "issue": 1286,
+    "limits": {
+      "case_timeout_seconds": 14400,
+      "cgroup_bytes": 96000000000,
+      "max_scale": 18,
+      "process_rss_bytes": 4294967296,
+      "reserve_bytes": 141258578535
+    },
+    "primary_case": "S17",
+    "reused_collector": "benchmarks/diagnostics/ingestion_1282.py; each suite separately freezes cases and command order before execution",
+    "stopping": "First measurement failure stops campaign; retain all observations. No overlapping builds or campaigns."
+  },
+  "issue": 1286,
+  "raw_sha256": {
+    "baseline-bin/build-identity.json": "ac9cb218fac3d1a302b12d9572573602ad5a503698fe43796615077437218fb5",
+    "candidate-bin/build-identity.json": "62f5931305b6b838c61727ae6b5d820bab2509c34f3cf4f0664835aea0b4bb47",
+    "experiment-plan.json": "32e9615ea33fe88442d0fbc1b407b2f772592d94ab8313736b2ce5c6c07fddce"
+  }
+}

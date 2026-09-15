@@ -1,29 +1,25 @@
-//! Bounded private detail records. Version six retains its padded wire layout.
+//! Bounded compact private detail records for the current construction format.
 use std::io::{self, Read};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DetailCodec {
-    Legacy,
     Compact,
 }
 
 impl DetailCodec {
     pub(crate) fn from_version(version: u32) -> io::Result<Self> {
         match version {
-            6 => Ok(Self::Legacy),
-            7..=9 => Ok(Self::Compact),
+            crate::construction_record_layout::FORMAT_VERSION => Ok(Self::Compact),
             _ => Err(invalid("unsupported construction detail version")),
         }
     }
 
     pub(crate) fn validate_size(self, width: usize, rows: u64, bytes: u64) -> io::Result<()> {
+        let Self::Compact = self;
         if !matches!(width, 272 | 304) {
             return Err(invalid("invalid construction detail record domain"));
         }
-        let minimum_width = match self {
-            Self::Legacy => width,
-            Self::Compact => width - 254,
-        };
+        let minimum_width = width - 254;
         let minimum = rows
             .checked_mul(minimum_width as u64)
             .ok_or_else(|| invalid("detail byte bound overflow"))?;
@@ -37,6 +33,7 @@ impl DetailCodec {
     }
 
     pub(crate) fn bytes<const N: usize>(self, record: &[u8; N]) -> io::Result<&[u8]> {
+        let Self::Compact = self;
         let prefix = prefix::<N>()?;
         let length = usize::from(record[prefix]);
         if length == 0 || record[prefix + 1 + length..].iter().any(|byte| *byte != 0) {
@@ -44,10 +41,7 @@ impl DetailCodec {
         }
         std::str::from_utf8(&record[prefix + 1..prefix + 1 + length])
             .map_err(|_| invalid("construction detail name is not UTF-8"))?;
-        Ok(match self {
-            Self::Legacy => record,
-            Self::Compact => &record[..prefix + 1 + length],
-        })
+        Ok(&record[..prefix + 1 + length])
     }
 
     /// Return a bounded padded in-memory record, preserving existing consumers.
@@ -70,10 +64,7 @@ impl DetailCodec {
         if length == 0 {
             return Err(invalid("empty construction detail name"));
         }
-        let end = match self {
-            Self::Legacy => N,
-            Self::Compact => prefix + 1 + length,
-        };
+        let end = prefix + 1 + length;
         reader.read_exact(&mut record[prefix + 1..end])?;
         self.bytes(&record)?;
         Ok(Some(record))
@@ -107,8 +98,8 @@ mod tests {
         let mut golden = record[..prefix + 1].to_vec();
         golden.extend_from_slice(name.as_bytes());
         assert_eq!(DetailCodec::Compact.bytes(&record).unwrap(), golden);
-        assert_eq!(DetailCodec::Legacy.bytes(&record).unwrap(), record);
-        for codec in [DetailCodec::Legacy, DetailCodec::Compact] {
+        {
+            let codec = DetailCodec::Compact;
             let bytes = codec.bytes(&record).unwrap();
             assert_eq!(codec.read::<N>(&mut &*bytes).unwrap(), Some(record));
             for length in 1..bytes.len() {
@@ -134,7 +125,8 @@ mod tests {
     #[test]
     fn detail_codec_streaming_partitions_and_invalid_order() {
         for width in [272, 304] {
-            for codec in [DetailCodec::Legacy, DetailCodec::Compact] {
+            {
+                let codec = DetailCodec::Compact;
                 let prefix = width - 256;
                 let mut records = Vec::new();
                 for id in 1..=3_u8 {
@@ -142,9 +134,7 @@ mod tests {
                     record[15] = id;
                     record[prefix] = 4;
                     record[prefix + 1..prefix + 5].copy_from_slice("éé".as_bytes());
-                    if codec == DetailCodec::Compact {
-                        record.truncate(prefix + 5);
-                    }
+                    record.truncate(prefix + 5);
                     records.push(record);
                 }
                 let wire = records.concat();
@@ -193,14 +183,14 @@ mod tests {
         assert!(DetailCodec::Compact.bytes(&record).is_err());
         record[49] = b'a';
         record[303] = 1;
-        assert!(DetailCodec::Legacy.bytes(&record).is_err());
         assert!(DetailCodec::Compact.bytes(&record).is_err());
-        assert_eq!(DetailCodec::from_version(6).unwrap(), DetailCodec::Legacy);
-        assert_eq!(DetailCodec::from_version(7).unwrap(), DetailCodec::Compact);
-        assert!(DetailCodec::from_version(5).is_err());
-        assert_eq!(DetailCodec::from_version(8).unwrap(), DetailCodec::Compact);
-        assert_eq!(DetailCodec::from_version(9).unwrap(), DetailCodec::Compact);
-        assert!(DetailCodec::from_version(10).is_err());
+        assert_eq!(
+            DetailCodec::from_version(crate::construction_record_layout::FORMAT_VERSION).unwrap(),
+            DetailCodec::Compact
+        );
+        for version in [0, 5, 6, 7, 8, 9, 11] {
+            assert!(DetailCodec::from_version(version).is_err());
+        }
     }
 }
 
@@ -240,10 +230,7 @@ impl DetailValidator {
                 if length == 0 {
                     return Err(invalid("empty construction detail name"));
                 }
-                match self.codec {
-                    DetailCodec::Legacy => self.width,
-                    DetailCodec::Compact => prefix + 1 + length,
-                }
+                prefix + 1 + length
             };
             let count = (target - self.filled).min(bytes.len());
             self.record[self.filled..self.filled + count].copy_from_slice(&bytes[..count]);
