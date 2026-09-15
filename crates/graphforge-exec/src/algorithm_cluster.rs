@@ -1012,11 +1012,20 @@ fn louvain_communities(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
 ) -> Result<Vec<usize>, AlgorithmError> {
+    louvain_communities_with_progress(graph, control, |_| {})
+}
+
+fn louvain_communities_with_progress(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+    progress: impl FnMut(usize),
+) -> Result<Vec<usize>, AlgorithmError> {
     match select_louvain_path(control, graph.node_ids().len(), graph.edge_entry_count()) {
         LouvainExecutionPath::SerialLocalMoves => {}
     }
     let node_count = graph.node_ids().len();
-    let (mut weights, mut members) = normalized_communities(graph, control)?;
+    let (mut weights, mut members) =
+        normalized_communities_with_progress(graph, control, progress)?;
 
     loop {
         let assignment = local_moves(&weights, control)?;
@@ -1604,6 +1613,14 @@ fn normalized_communities(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
 ) -> Result<(WeightedAdjacency, CommunityMembers), AlgorithmError> {
+    normalized_communities_with_progress(graph, control, |_| {})
+}
+
+fn normalized_communities_with_progress(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+    mut progress: impl FnMut(usize),
+) -> Result<(WeightedAdjacency, CommunityMembers), AlgorithmError> {
     let node_count = graph.node_ids().len();
     let mut indices = HashMap::with_capacity(node_count);
     let mut work = 0_usize;
@@ -1622,6 +1639,9 @@ fn normalized_communities(
                 .ok_or_else(|| execution("adjacency references an unselected node"))?;
             if source != target {
                 edges.insert((source.min(target), source.max(target)));
+            }
+            if observed.is_multiple_of(16_384) {
+                progress(observed);
             }
         }
     }
@@ -4383,26 +4403,36 @@ mod tests {
         let cancellation = AlgorithmCancellation::default();
         let cancel = cancellation.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let mut registry = AlgorithmRegistry::default();
-            register_cluster_algorithms(&mut registry).unwrap();
-            started_tx.send(()).unwrap();
+            let control = AlgorithmControl::new(AlgorithmLimits::default(), cancellation);
+            let mut rendezvous = Some((started_tx, resume_rx));
             result_tx
-                .send(registry.execute(
-                    Algorithm::Cluster(ClusterAlgorithm::Louvain),
+                .send(louvain_communities_with_progress(
                     &graph,
-                    &AlgorithmControl::new(AlgorithmLimits::default(), cancellation),
+                    &control,
+                    |observed| {
+                        if let Some((started, resume)) = rendezvous.take() {
+                            started.send(observed).unwrap();
+                            resume.recv().unwrap();
+                        }
+                    },
                 ))
                 .unwrap();
         });
-        started_rx.recv().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Pause after real adjacency work, immediately before the next existing
+        // cancellation checkpoint. No scheduler-speed assumption is needed.
+        assert_eq!(started_rx.recv().unwrap(), 16_384);
         assert!(
-            result_rx.try_recv().is_err(),
+            matches!(
+                result_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ),
             "execution finished before cancellation"
         );
         cancel.cancel();
+        resume_tx.send(()).unwrap();
         assert_eq!(result_rx.recv().unwrap(), Err(AlgorithmError::Cancelled));
         worker.join().unwrap();
     }
