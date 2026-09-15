@@ -46,6 +46,12 @@ exemptions or unchanged-tree release certification are required.
   `expr/list_values/tests.rs`; both reuse the existing scalar and value codecs.
   [#1300](https://github.com/CurateLabs/graphforge/issues/1300) records this
   extraction. Expression dispatch and graph-shape compatibility remain in the parent.
+- The same #1300 batch completes the expression root: `expr/graph_values.rs`
+  owns whole graph values, graph metadata, and neutral path hydration descriptors;
+  `expr/scalar_execution.rs` owns scalar builtin dispatch and execution UDFs.
+  Public hydration and row-marker inspection paths remain explicit reexports.
+  Cross-domain lowering tests and shared fixtures live in `expr/tests.rs` under
+  the unchanged `expr::tests` module path. Every new file and the root fit 3,000 lines.
 
 ## Remaining domain sequence
 
@@ -53,7 +59,6 @@ Follow live child dependencies and finish queued work before starting more.
 
 | Area | Remaining ownership extractions |
 | --- | --- |
-| Relational expressions | Graph/path values; scalar UDFs and builtin dispatch |
 | Relational plan lowering | Scans/property joins; traversal; nested/optional queries; writes |
 | IR binding | Patterns/paths; writes; projection/aggregation; expression/property binding |
 | API domains | Bulk normalization/publication; knowledge ledgers; repository definitions/skills; checkpoint views/diffs; ontology candidates; composite property routing/rebase |
@@ -93,7 +98,6 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-filesystem/src/lib.rs` | 5,488 |
 | `crates/graphforge-ir/src/binder.rs` | 9,579 |
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
-| `crates/graphforge-rel/src/expr.rs` | 6,454 |
 | `crates/graphforge-rel/src/lowerer.rs` | 7,217 |
 | `crates/graphforge-rel/src/temporal.rs` | 2,040 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
