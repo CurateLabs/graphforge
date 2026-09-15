@@ -1,0 +1,11 @@
+{
+  "artifacts": {
+    "coverage-first-evidence.json": "67bd25dd9d4e838f0ea64219f4f1427ef9b913dbac98556565e1530386343962",
+    "perf-wide-planned-command.json": "197adf797c6a18c81faf03bf61ee0780abb6d018fc6c3699252fb3a2b2aaadee",
+    "pre-push-fast-final.log": "11782b447c5f48206409fc9e14a14d5b03b949debf70a8a74671c8f31b8bc1cf",
+    "pre-push-first-summary.json": "d3a46d28e9a8c49ba7e8820553aab114962572dc92d818e41dd17c7e96f29b6e",
+    "pre-push.log": "b842aec3e7d01fc862b540c3c62145e2faf7e6d3abdf5d36f5d8a6e6616d5cff"
+  },
+  "command": "sudo -n unshare --mount --propagation private <validation-namespace> env GRAPHFORGE_INGEST_DIAGNOSTICS=1282 make pre-push",
+  "outcome": "failed at coverage ledger: uncommitted report edits; native test and acceptance stages passed"
+}

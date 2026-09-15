@@ -27,6 +27,21 @@ use std::collections::BinaryHeap;
 use std::ffi::OsStr;
 use std::io::{BufReader, BufWriter, Write};
 
+// The ordinary build expands to the original call only. Diagnostic counters
+// measure completed group work without changing checkpoint/receipt formats.
+macro_rules! measured_merge {
+    ($family:expr, $level:expr, $inputs:expr, $evidence:ident, $call:expr) => {{
+        #[cfg(any(test, feature = "test-support"))]
+        let diagnostic = super::diagnostics::Group::start($evidence);
+        let result = $call;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(diagnostic) = diagnostic {
+            diagnostic.finish($family, $level, $inputs, $evidence, result.is_ok());
+        }
+        result
+    }};
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn convert_identity_run(
     root: &StableDirectory,
@@ -548,14 +563,20 @@ impl FixedMergeAccumulator {
                     .ok_or_else(|| storage("fixed merge pass count overflow"))?,
             );
             name = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
-            merge_fixed_group::<N>(
-                root,
-                &inputs,
-                &name,
-                self.reject_duplicates,
-                self.detail_codec,
-                cancelled,
+            measured_merge!(
+                self.prefix,
+                level + 1,
+                inputs.len(),
                 evidence,
+                merge_fixed_group::<N>(
+                    root,
+                    &inputs,
+                    &name,
+                    self.reject_duplicates,
+                    self.detail_codec,
+                    cancelled,
+                    evidence,
+                )
             )?;
             for input in inputs {
                 if input.starts_with("merge-") {
@@ -584,6 +605,8 @@ impl FixedMergeAccumulator {
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<String, GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        super::diagnostics::inputs(self.prefix, self.inputs);
         if self.inputs == 0 {
             return Err(storage("external merge has no input"));
         }
@@ -615,14 +638,20 @@ impl FixedMergeAccumulator {
                         .ok_or_else(|| storage("fixed merge pass count overflow"))?,
                 );
                 let output = format!("{}-l{level:03}-g{group:08}.run", self.prefix);
-                merge_fixed_group::<N>(
-                    root,
-                    &inputs,
-                    &output,
-                    self.reject_duplicates,
-                    self.detail_codec,
-                    cancelled,
+                measured_merge!(
+                    self.prefix,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_fixed_group::<N>(
+                        root,
+                        &inputs,
+                        &output,
+                        self.reject_duplicates,
+                        self.detail_codec,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-") {
@@ -1119,6 +1148,8 @@ fn merge_row_group(
 }
 
 pub(super) struct RowMergeAccumulator {
+    #[cfg(any(test, feature = "test-support"))]
+    diagnostic_family: String,
     fan_in: usize,
     namespace: String,
     levels: Vec<Vec<String>>,
@@ -1129,6 +1160,8 @@ pub(super) struct RowMergeAccumulator {
 impl RowMergeAccumulator {
     pub(super) fn new(fan_in: usize, authority: &str) -> Self {
         Self {
+            #[cfg(any(test, feature = "test-support"))]
+            diagnostic_family: super::diagnostics::row_family(authority),
             fan_in,
             namespace: sha256(authority.as_bytes())[..16].to_owned(),
             levels: Vec::new(),
@@ -1180,14 +1213,20 @@ impl RowMergeAccumulator {
                 "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                 self.namespace
             );
-            merge_row_group(
-                root,
-                &inputs,
-                &name,
-                output_rows,
-                output_bytes,
-                cancelled,
+            measured_merge!(
+                &self.diagnostic_family,
+                level + 1,
+                inputs.len(),
                 evidence,
+                merge_row_group(
+                    root,
+                    &inputs,
+                    &name,
+                    output_rows,
+                    output_bytes,
+                    cancelled,
+                    evidence,
+                )
             )?;
             for input in inputs {
                 if input.starts_with("merge-rows-") {
@@ -1209,6 +1248,8 @@ impl RowMergeAccumulator {
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<ArtifactReceipt, GfError> {
+        #[cfg(any(test, feature = "test-support"))]
+        super::diagnostics::inputs(&self.diagnostic_family, self.inputs);
         if self.inputs == 0 {
             return Err(storage("row merge has no input"));
         }
@@ -1225,14 +1266,20 @@ impl RowMergeAccumulator {
             }
             let higher_empty = self.levels[level + 1..].iter().all(Vec::is_empty);
             if higher_empty {
-                let receipt = merge_row_group(
-                    root,
-                    &inputs,
-                    output,
-                    output_rows,
-                    output_bytes,
-                    cancelled,
+                let receipt = measured_merge!(
+                    &self.diagnostic_family,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_row_group(
+                        root,
+                        &inputs,
+                        output,
+                        output_rows,
+                        output_bytes,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {
@@ -1258,14 +1305,20 @@ impl RowMergeAccumulator {
                     "merge-rows-{}-l{level:03}-g{group:020}.parquet",
                     self.namespace
                 );
-                merge_row_group(
-                    root,
-                    &inputs,
-                    &output_name,
-                    output_rows,
-                    output_bytes,
-                    cancelled,
+                measured_merge!(
+                    &self.diagnostic_family,
+                    level + 1,
+                    inputs.len(),
                     evidence,
+                    merge_row_group(
+                        root,
+                        &inputs,
+                        &output_name,
+                        output_rows,
+                        output_bytes,
+                        cancelled,
+                        evidence,
+                    )
                 )?;
                 for input in inputs {
                     if input.starts_with("merge-rows-") {

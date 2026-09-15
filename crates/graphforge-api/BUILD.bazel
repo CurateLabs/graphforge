@@ -437,6 +437,13 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "ingestion_attribution",
+    srcs = ["tests/ingestion_attribution.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "release_load_construction",
     srcs = ["tests/release_load_construction.rs"],
     crate = ":graphforge_api",
@@ -574,6 +581,7 @@ test_suite(
         ":provider_session",
         ":public_facade_remaining_conformance",
         ":public_lifecycle_conformance",
+        ":ingestion_attribution",
         ":release_load_construction",
         ":resumable_construction_surface",
         ":ontology_adoption_retry",
