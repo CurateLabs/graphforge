@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "source_commit": "1ae0cdcc9c486d55ac8b101f93ef1574a3a2c893",
+  "executable_sha256": "f0446ec2edbf4f185b95deb169e6719c84ddf3ca1deb033c6b214604cfedf451",
+  "inventory_sha256": "c4169927744f98359ce307a37857b95f3a6a2532bc99a6930d40c0dad6a57322",
+  "inventory_count": 1116,
+  "feature_set": [
+    "test-support",
+    "test-failpoints"
+  ],
+  "runs": {
+    "diagnostic": {
+      "log_sha256": "10696605b950a5014f57921bd4e414a7ccaca741578ea30fc9611311331e75d4",
+      "result": "ok. 1114 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 70.20s",
+      "ignored": [
+        [
+          "adjacency::tests::ignored_arrow_boundary_simulation_via_tiny_flush_threshold",
+          ", manual/scale: exercises many spill runs; run explicitly for #336 evidence"
+        ],
+        [
+          "project_checkpoints::tests::checkpoint_failpoint_helper",
+          ", subprocess failpoint helper"
+        ]
+      ],
+      "diagnostic_event_count": 6922,
+      "all_inventory_tests_observed": true,
+      "test_start_count_including_crash_subprocesses": 1169
+    },
+    "ordinary": {
+      "log_sha256": "17a8c4187b29771558a3ea7089725c63be75724772a76e591ff1c50bb914a015",
+      "result": "ok. 1114 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 65.42s",
+      "ignored": [
+        [
+          "adjacency::tests::ignored_arrow_boundary_simulation_via_tiny_flush_threshold",
+          ", manual/scale: exercises many spill runs; run explicitly for #336 evidence"
+        ],
+        [
+          "project_checkpoints::tests::checkpoint_failpoint_helper",
+          ", subprocess failpoint helper"
+        ]
+      ],
+      "diagnostic_event_count": 0,
+      "all_inventory_tests_observed": true,
+      "test_start_count_including_crash_subprocesses": 1169
+    }
+  },
+  "construction_failure_coverage": [
+    "graph_construction::tests::batch_partition_and_resume_produce_identical_canonical_data_fingerprints",
+    "graph_construction::tests::cancellation_recovers_private_intent_without_accepting_a_chunk",
+    "graph_construction::tests::canonical_encoder_cancellation_recovers_and_corruption_fails_closed",
+    "graph_construction::tests::canonical_publication_cancels_at_named_immediate_pre_current_boundary",
+    "graph_construction::tests::compact_details::detail_codec_crash_child",
+    "graph_construction::tests::compact_details::detail_codec_current_format_cancel_corrupt_copy_and_retry",
+    "graph_construction::tests::compact_details::detail_codec_current_format_crash_replay_preserves_authority",
+    "graph_construction::tests::compact_details::detail_codec_current_format_resumes_cross_multiple_merge_levels",
+    "graph_construction::tests::compact_details::mapped_encoding_current_format_resumes_with_explicit_layout_authority",
+    "graph_construction::tests::construction_checkpoint_rejects_ontology_mode_change_on_resume",
+    "graph_construction::tests::construction_ordinal_cancellation_cleans_owned_outputs_and_retries",
+    "graph_construction::tests::construction_ordinal_parent_corruption_fails_before_publication",
+    "graph_construction::tests::crash_subprocess_helper",
+    "graph_construction::tests::interrupted_immediate_seal_reauthenticates_before_resume_consumption",
+    "graph_construction::tests::lifecycle_budget::consumed_shape_roots_cancellation_reconstructs_exact_properties",
+    "graph_construction::tests::lifecycle_budget::consumed_shape_roots_preserve_successor_corruption_refusal",
+    "graph_construction::tests::lifecycle_budget::consumed_shape_roots_returned_failures_recover_exact_properties",
+    "graph_construction::tests::lifecycle_budget::shaping_recovery_counts_surviving_payload_reads_and_retries",
+    "graph_construction::tests::lifecycle_budget::shaping_recovery_refuses_replaced_or_linked_survivors",
+    "graph_construction::tests::lifecycle_budget::shaping_recovery_refuses_same_inode_payload_corruption",
+    "graph_construction::tests::lifecycle_budget::supersession_all_published_replay_paths_refuse_corrupt_public_payload",
+    "graph_construction::tests::lifecycle_budget::supersession_cancellation_during_authentication_and_removal_is_recoverable",
+    "graph_construction::tests::lifecycle_budget::supersession_corrupt_successors_and_replaced_predecessors_fail_closed",
+    "graph_construction::tests::lifecycle_budget::supersession_crash_child",
+    "graph_construction::tests::lifecycle_budget::supersession_crashes_reconcile_removed_allocations_and_replay",
+    "graph_construction::tests::parent_phase_observations_survive_staging_sealed_and_shaped_resumes",
+    "graph_construction::tests::publication_crash_after_current_finalizes_same_target_on_reopen",
+    "graph_construction::tests::publication_reopen_recovers_each_durable_crash_boundary",
+    "graph_construction::tests::publication_reopen_rejects_corrupt_or_mismatched_authority",
+    "graph_construction::tests::shape_inventory_and_evidence_commit_recover_without_double_counting",
+    "graph_construction::tests::shaped_writer_capability_resume_adopts_only_the_exact_receipt",
+    "graph_construction::tests::shaping_cancellation_is_recovered_on_reopen",
+    "graph_construction::tests::subprocess_crashes_recover_each_durable_boundary",
+    "graph_construction::tests::unsupported_or_incomplete_checkpoint_is_refused_before_recovery_mutation",
+    "graph_construction::tests::uuid_encoding_crashes_recover_every_durable_boundary"
+  ],
+  "namespace": "ext4 process-root TMPDIR; serial test execution",
+  "commands": {
+    "diagnostic": "sudo -n unshare --mount --propagation private validation-namespace.sh env CARGO_TARGET_DIR=<isolated-target> CARGO_PROFILE_RELEASE_DEBUG=1 GRAPHFORGE_INGEST_DIAGNOSTICS=1282 cargo test --locked --release -p graphforge-storage --lib --features test-support,test-failpoints -- --nocapture",
+    "ordinary": "sudo -n unshare --mount --propagation private validation-namespace.sh env -u GRAPHFORGE_INGEST_DIAGNOSTICS <same-frozen-storage-test-executable> --nocapture --test-threads=1"
+  }
+}

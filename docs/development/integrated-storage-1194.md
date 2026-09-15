@@ -439,3 +439,20 @@ make gate-registry-check
 The ordinary S18 command and its cgroup/timeout wrapper are retained in the
 lifecycle comparison summary. Profile summaries retain raw-artifact hashes;
 raw files remain on the designated host.
+
+## Remaining ingestion attribution (#1282)
+
+The [post-repair study](evidence/ingestion-attribution-1282.md) reconciles the
+completed integrated prefix and measures fixed S16/S17/S18 lifecycles plus
+production fan-in boundaries with three ordinary repetitions each. Integrated
+S20/S22 ingestion shares are 58.32% / 61.68%; these combined-source observations
+do not isolate the earlier shaping repair's benefit.
+
+Per-family diagnostics identify an avoidable-work candidate at exact Parquet
+fan-in powers: S17 rewrites its single completed edge-row root, adding
+2,097,152 rows in each direction and 2.098 seconds in the measured call. The
+study ranks a bounded root-adoption investigation, then compact-record
+conversion work, with deterministic correctness and failure/recovery oracles.
+It implements no optimization and recommends retaining authentication,
+synchronization and concurrency policy. Machine-readable observations retain
+all selected runs, identities, raw-artifact hashes and baseline benefit floors.

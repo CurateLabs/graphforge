@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from graphforge_bench.ingestion_attribution import (
     analyze,
+    cpu_summary,
     expected_commands,
     interval_union_ns,
     merge_summary,
@@ -27,6 +28,36 @@ SPEC.loader.exec_module(REPORT)
 
 
 class IngestionAttributionTests(unittest.TestCase):
+    def test_cpu_samples_disclose_missing_callers_and_keep_leaves_disjoint(self):
+        leaves = [
+            "gf-ordinary 10/10 1.000: cpu-clock: ab sha2::compress (/private/gf-ordinary)",
+            "worker 10/11 1.100: cpu-clock: cd [unknown] ([unknown])",
+            "runuser 9/9 1.200: cpu-clock: ef wrapper (/private/runuser)",
+        ]
+        stacks = [
+            "gf-ordinary 10/10 1.000: cpu-clock:",
+            " ab sha2::compress (/private/gf-ordinary)",
+            " cd graphforge_storage::shaping_merge::merge_fixed_group (/private/gf-ordinary)",
+            "worker 10/11 1.100: cpu-clock:",
+        ]
+        result = cpu_summary(leaves, stacks)
+        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(result["excluded_wrapper_samples"], 1)
+        self.assertEqual(result["unknown_leaf_samples"], 1)
+        self.assertEqual(result["samples_without_unwound_frames"], 1)
+        self.assertEqual(result["samples_with_symbolized_application_caller"], 1)
+        self.assertEqual(result["inclusive_anchor_samples"]["fixed_merge"], 1)
+        self.assertEqual(sum(item["percent"] for item in result["leaf_samples"]), 100)
+        self.assertNotIn("/private", json.dumps(result))
+        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
+            cpu_summary(leaves, stacks[:-1])
+        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
+            cpu_summary(leaves, [*stacks, "gf-ordinary 10/10 1.300: cpu-clock:"])
+        with self.assertRaisesRegex(ValueError, "inventory mismatch"):
+            cpu_summary(leaves[2:], stacks)
+        with self.assertRaisesRegex(ValueError, "duplicate CPU leaf"):
+            cpu_summary(leaves + leaves[:1], stacks)
+
     def test_sync_latency_keeps_overlapping_threads_separate_from_wall(self):
         report = sync_summary(
             [
@@ -111,6 +142,9 @@ class IngestionAttributionTests(unittest.TestCase):
                 check({**summary, "status": "running"})
             with self.assertRaisesRegex(ValueError, "missing required merge"):
                 check({**summary, "custom_counters_enabled": True})
+            for suite in ("perf", "sync"):
+                with self.assertRaisesRegex(ValueError, "missing required profile"):
+                    check({**summary, "suite": suite})
             (directory / f"{labels[0]}.stdout").write_text("tampered")
             with self.assertRaisesRegex(ValueError, "raw artifact digest mismatch"):
                 check(summary)

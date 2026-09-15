@@ -47,6 +47,15 @@ def summarize(directory):
         if key not in {"observations", "host_activity", "rustc"}
     }
     result["rustc"] = summary["rustc"]
+    source_manifest = json.loads((directory / "source-manifest.json").read_text())
+    native_inputs = {
+        path: sha
+        for path, sha in source_manifest.items()
+        if path.endswith((".rs", ".toml", ".lock"))
+    }
+    result["native_source_inputs_sha256"] = hashlib.sha256(
+        json.dumps(native_inputs, sort_keys=True).encode()
+    ).hexdigest()
     result["summary_sha256"] = digest(directory / "summary.json")
     result["commands"] = []
     cases = {}
@@ -60,6 +69,13 @@ def summarize(directory):
             key = "command_sha256" if suffix == "command.json" else suffix + "_sha256"
             if observation[key] != digest(directory / f"{label}.{suffix}"):
                 raise ValueError(f"raw artifact digest mismatch: {label} {suffix}")
+        required_profile = {"perf": "perf.data", "sync": "strace"}.get(summary["suite"])
+        if (
+            required_profile
+            and observation["phase"] == "ingest"
+            and required_profile + "_sha256" not in observation
+        ):
+            raise ValueError("missing required profile artifact")
         for suffix in ("perf.data", "strace"):
             if suffix + "_sha256" in observation:
                 if observation[suffix + "_sha256"] != digest(directory / f"{label}.{suffix}"):

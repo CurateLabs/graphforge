@@ -30,7 +30,7 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         emit(
-            json!({"event":"scope", "scope":self.name, "start_ns":self.started_ns,
+            &json!({"event":"scope", "scope":self.name, "start_ns":self.started_ns,
             "end_ns":clock_ns()}),
         );
     }
@@ -57,7 +57,7 @@ pub(super) fn row_family(authority: &str) -> String {
     })
 }
 
-fn emit(value: serde_json::Value) {
+fn emit(value: &serde_json::Value) {
     // Diagnostic output cannot turn an otherwise successful publication into an
     // error. The collector requires complete successful events independently.
     let _ = writeln!(std::io::stderr().lock(), "INGEST_DIAGNOSTIC {value}");
@@ -65,7 +65,7 @@ fn emit(value: serde_json::Value) {
 
 pub(super) fn inputs(family: &str, count: u64) {
     if enabled() {
-        emit(json!({"event":"inputs", "family":family, "runs":count}));
+        emit(&json!({"event":"inputs", "family":family, "runs":count}));
     }
 }
 
@@ -106,7 +106,7 @@ impl Group {
     ) {
         let after = counters(e);
         let delta = std::array::from_fn::<_, 7, _>(|i| after[i].checked_sub(self.before[i]));
-        emit(json!({"event":"group", "family":family, "level":level,
+        emit(&json!({"event":"group", "family":family, "level":level,
             "inputs":inputs, "success":success,
             "inclusive_wall_ns":self.started.elapsed().as_nanos(),
             "start_ns":self.start_ns, "end_ns":clock_ns(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from decimal import Decimal
 import hashlib
 import json
@@ -106,6 +107,16 @@ def merge_summary(lines: list[str]) -> dict[str, Any]:
                 raise ValueError("diagnostic differs from production fan-in")
             entry["groups"] += 1
             entry["max_scheduler_level"] = max(entry["max_scheduler_level"], event["level"])
+            levels = entry.setdefault("groups_by_scheduler_level", {})
+            level = str(event["level"])
+            levels[level] = levels.get(level, 0) + 1
+            arities = entry.setdefault("groups_by_input_count", {})
+            arity = str(event["inputs"])
+            arities[arity] = arities.get(arity, 0) + 1
+            if event["inputs"] == 1:
+                unary = entry.setdefault("single_input_groups", dict.fromkeys(COUNTERS, 0))
+                for key in COUNTERS:
+                    unary[key] += event[key]
             for key in COUNTERS:
                 entry[key] += event[key]
         else:
@@ -220,6 +231,15 @@ def scope_summary(lines: list[str]) -> dict[str, Any]:
     groups = [event for event in events if event["event"] == "group"]
     result = {}
     for scope in scopes:
+        if scope["scope"] not in {
+            "shaping",
+            "canonical_encoding",
+            "seal_authentication",
+            "artifact_authentication",
+            "inventory_authentication",
+            "inventory_payload_authentication",
+        }:
+            raise ValueError("unknown or unsanitized diagnostic scope")
         start, end = scope["start_ns"], scope["end_ns"]
         children = [
             (child["start_ns"], child["end_ns"])
@@ -285,6 +305,91 @@ def sync_summary(lines: list[str]) -> dict[str, Any]:
         "summed_thread_latency_ns": sum(latencies),
         "elapsed_interval_union_ns": interval_union_ns(intervals),
         "maximum_call_latency_ns": max(latencies),
+    }
+
+
+def cpu_summary(leaf_lines: list[str], stack_lines: list[str]) -> dict[str, Any]:
+    """Count workload leaf samples and separately disclose parent-stack coverage."""
+    header = re.compile(r"\s*(.*?)\s+(\d+)/(\d+)\s+(\d+\.\d+):\s+cpu-clock:\s*(.*)")
+    frame = re.compile(r"\s*[0-9a-f]+\s+(.*?)\s+\((.*)\)\s*$")
+    leaves = {}
+    workload_pids = set()
+    for line in leaf_lines:
+        match = header.fullmatch(line)
+        if not match:
+            raise ValueError("invalid CPU leaf sample")
+        comm, pid, tid, timestamp, rest = match.groups()
+        item = frame.fullmatch(rest)
+        if not item:
+            raise ValueError("CPU sample lacks a leaf")
+        key = (pid, tid, timestamp)
+        if key in leaves:
+            raise ValueError("duplicate CPU leaf sample")
+        leaves[key] = item.groups()
+        if comm == "gf-ordinary":
+            workload_pids.add(pid)
+    stacks = {}
+    key = None
+    for line in stack_lines:
+        if not line.strip():
+            continue
+        match = header.fullmatch(line)
+        if match:
+            comm, pid, tid, timestamp, _ = match.groups()
+            if comm == "gf-ordinary":
+                workload_pids.add(pid)
+            key = (pid, tid, timestamp)
+            if key in stacks:
+                raise ValueError("duplicate CPU stack sample")
+            stacks[key] = []
+        else:
+            item = frame.fullmatch(line)
+            if key is None or not item:
+                raise ValueError("invalid CPU stack frame")
+            stacks[key].append(item.groups())
+    selected = {key: leaf for key, leaf in leaves.items() if key[0] in workload_pids}
+    if set(selected) != {key for key in stacks if key[0] in workload_pids}:
+        raise ValueError("CPU stack/leaf sample inventory mismatch")
+    anchors = {
+        "fixed_merge": "shaping_merge::merge_fixed_group",
+        "parquet_merge": "shaping_merge::merge_row_group",
+        "canonical_encoding": "graph_construction_encoding::encode",
+        "input_normalization": "::normalize_bulk_",
+        "authentication": "::authenticate_",
+        "recovery": "::recover_",
+        "publication": "::publish_canonical",
+    }
+    counts: Counter[tuple[str, str]] = Counter()
+    inclusive: Counter[str] = Counter()
+    no_frames = app_callers = unknown = 0
+    for key, (symbol, dso) in selected.items():
+        if "/" in symbol or "\n" in symbol:
+            raise ValueError("unsanitized CPU symbol")
+        counts[(Path(dso).name, symbol)] += 1
+        unknown += int(symbol == "[unknown]")
+        frames = stacks[key]
+        no_frames += int(not frames)
+        app_callers += int(any("graphforge_" in item[0] for item in frames[1:]))
+        symbols = [symbol, *(item[0] for item in frames)]
+        for name, anchor in anchors.items():
+            inclusive[name] += int(any(anchor in item for item in symbols))
+    total = len(selected)
+    return {
+        "sample_count": total,
+        "unknown_leaf_samples": unknown,
+        "samples_without_unwound_frames": no_frames,
+        "samples_with_symbolized_application_caller": app_callers,
+        "excluded_wrapper_samples": len(leaves) - total,
+        "inclusive_anchor_rules": anchors,
+        "inclusive_anchor_samples": dict(inclusive),
+        "leaf_samples": [
+            {"object": dso, "symbol": symbol, "samples": count, "percent": 100 * count / total}
+            for (dso, symbol), count in counts.most_common()
+        ],
+        "note": (
+            "Leaf rows are disjoint. Inclusive anchors overlap and incomplete stacks "
+            "undercount them."
+        ),
     }
 
 

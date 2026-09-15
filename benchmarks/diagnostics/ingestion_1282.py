@@ -8,17 +8,21 @@ Raw commands, traces, receipts and query outputs stay in a private output root.
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import pwd
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 from graphforge_bench.ingestion_attribution import expected_commands
+import pyarrow
 from pyarrow import parquet
 from rss_1278 import active_campaigns, digest, input_oracle
 
@@ -42,12 +46,24 @@ def host_activity():
     return list(active.values())
 
 
+def descendant_of(pid, parent):
+    """Resolve new profiler children born after the sampling-tree snapshot."""
+    try:
+        while pid > 1 and pid != parent:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            pid = int(fields[1])
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return False
+    return pid == parent
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gf", type=Path, required=True)
     parser.add_argument("--generator", type=Path, required=True)
     parser.add_argument("--boundary-test", type=Path)
     parser.add_argument("--instrument", action="store_true")
+    parser.add_argument("--perf-stack-bytes", type=int, choices=(8192, 65528), default=8192)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--suite", choices=["scaling", "boundary", "diagnostic", "perf", "sync"], required=True
@@ -104,6 +120,9 @@ def main():
         "profile_sha256": digest(PROFILE),
         "cargo_lock_sha256": digest(ROOT / "Cargo.lock"),
         "rustc": subprocess.check_output(["rustc", "-Vv"], cwd=ROOT, text=True),
+        "python": sys.version,
+        "pyarrow": pyarrow.__version__,
+        "kernel_release": platform.release(),
         "cpu_affinity": cpus,
         "reserve_bytes": RESERVE,
         "process_rss_limit_bytes": 4 * 1024**3,
@@ -114,6 +133,14 @@ def main():
         "cache_policy": "Fresh projects; natural cache state; no system-wide cache changes.",
         "io_wait_available": Path("/proc/sys/kernel/task_delayacct").read_text().strip() == "1",
     }
+    if profiling:
+        profiler = "perf" if args.suite == "perf" else "strace"
+        summary["profiler"] = {
+            "version": subprocess.check_output([profiler, "--version"], text=True).strip(),
+            "sha256": digest(shutil.which(profiler)),
+        }
+        if args.suite == "perf":
+            summary["profiler"]["dwarf_stack_bytes"] = args.perf_stack_bytes
     build_identity_path = args.gf.parent / "build-identity.json"
     build = json.loads(build_identity_path.read_text())
     if build["artifacts"].get(args.gf.name) != summary["gf_sha256"]:
@@ -172,7 +199,8 @@ def main():
 
     def terminate(pid):
         if args.suite != "perf":
-            os.killpg(pid, signal.SIGKILL)
+            with suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
             return
         # Stop parents before discovering children so sudo's optional PTY/session
         # cannot leave privileged descendants running after a collector failure.
@@ -220,7 +248,7 @@ stop_tree(int(sys.argv[1]))
                     "-e",
                     "cpu-clock",
                     "--call-graph",
-                    "dwarf",
+                    f"dwarf,{args.perf_stack_bytes}",
                     "-o",
                     str(args.output / f"{label}.perf.data"),
                     "--",
@@ -311,7 +339,12 @@ stop_tree(int(sys.argv[1]))
                         except (FileNotFoundError, ProcessLookupError, PermissionError):
                             pass
                     if int(time.monotonic() - start) > len(entry.get("host_activity", [])):
-                        activity = [item for item in host_activity() if item["pid"] not in targets]
+                        activity = [
+                            item
+                            for item in host_activity()
+                            if item["pid"] not in targets
+                            and not descendant_of(item["pid"], process.pid)
+                        ]
                         entry.setdefault("host_activity", []).append(activity)
                         if activity:
                             failure = "concurrent_campaign"
