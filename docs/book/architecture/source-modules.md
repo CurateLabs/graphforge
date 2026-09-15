@@ -53,6 +53,15 @@ exemptions or unchanged-tree release certification are required.
   Cross-domain lowering tests and shared fixtures live in `expr/tests.rs` under
   the unchanged `expr::tests` module path. Every new file and the root fit 3,000 lines.
 
+- [#1301](https://github.com/CurateLabs/graphforge/issues/1301) groups portable
+  storage ownership: `graph_projection/logical_fingerprint.rs` owns canonical
+  logical encoding; `project_portable_v2/materialization.rs` and
+  `semantic_validation.rs` own extraction and semantic checks; export's
+  `planning.rs` and `transport.rs` own manifest planning and transport writing.
+  The parents retain projection materialization, canonical transport authentication,
+  export orchestration, final verification, leases, and platform admission.
+  All moved tests retain their assertions; native workflow selectors stay in place.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
@@ -68,15 +77,15 @@ Follow live child dependencies and finish queued work before starting more.
 | UUID membership | Probing/snapshots; construction encoding; ordinal writers/publication; topology deltas; compaction; rebuild/maintenance |
 | Construction | Intake/receipts; shape validation/surrogates; encoding/publication; recovery/cleanup; bounded control; I/O evidence |
 | Property storage | Replay topology/properties; property codecs/staging; authenticated inventories; projected reads/budgets; newest-snapshot merges |
-| Catalog/bindings/projection | Filtered readers; property readers; table providers; semantic migration; canonical fingerprint encoding |
-| Storage lifecycle | CAS manifest/materialization/install/GC; publication staging/control; checkpoint registry/revert; portable planning/transport/materialization/validation |
+| Catalog/bindings/projection | Filtered readers; property readers; table providers; semantic migration |
+| Storage lifecycle | CAS manifest/materialization/install/GC; publication staging/control; checkpoint registry/revert |
 | Filesystem | Cache release; platform capabilities; Windows CAS sealing |
 | Knowledge core | Algorithm-run and confidence ledgers |
 | Bindings | Conversions, domain methods/tasks/types, lifecycle/construction; preserve registration and signatures |
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1300; recompute before canonical
+This snapshot records the working tree during #1301; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
@@ -103,11 +112,8 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-storage/src/catalog.rs` | 5,467 |
 | `crates/graphforge-storage/src/graph_construction.rs` | 12,687 |
 | `crates/graphforge-storage/src/graph_object_store.rs` | 6,304 |
-| `crates/graphforge-storage/src/graph_projection.rs` | 3,078 |
 | `crates/graphforge-storage/src/project_checkpoints.rs` | 4,091 |
 | `crates/graphforge-storage/src/project_generation.rs` | 3,014 |
-| `crates/graphforge-storage/src/project_portable_v2.rs` | 3,483 |
-| `crates/graphforge-storage/src/project_portable_v2_export.rs` | 4,434 |
 | `crates/graphforge-storage/src/project_publication.rs` | 4,805 |
 | `crates/graphforge-storage/src/property_overlay.rs` | 6,677 |
 | `crates/graphforge-storage/src/semantic_bindings.rs` | 4,043 |
