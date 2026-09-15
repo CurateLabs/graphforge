@@ -707,6 +707,7 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 
 #[cfg(test)]
 mod tests {
+    mod semantic_refusals;
     use super::planning::exact_identity;
     use super::transport::open_planned_source;
     use super::*;
@@ -883,11 +884,18 @@ mod tests {
     }
 
     fn graph_generation_with_bridge() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        graph_generation_with_bridge_activation(false)
+    }
+
+    fn graph_generation_with_bridge_activation(
+        with_overrides: bool,
+    ) -> (tempfile::TempDir, ResolvedProjectGeneration) {
         use graphforge_ontology::{
-            ActivationMode, AuthoredModule, BridgeAssertion, BridgeDocument, BridgePredicate,
-            BridgeProvenance, BridgeSetId, CompositionLimits, EntityTypeDef,
-            InventoryCompileRequest, MappingMethod, OntologyDoc, OntologyModuleId, QualifiedSymbol,
-            SymbolKind, bridge_document_digest, compile_inventory, module_document_digest,
+            ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeAssertion,
+            BridgeDocument, BridgePredicate, BridgeProvenance, BridgeSetId, CompositionLimits,
+            EntityTypeDef, InventoryCompileRequest, MappingMethod, OntologyDoc, OntologyModuleId,
+            QualifiedSymbol, SymbolKind, bridge_document_digest, compile_inventory,
+            module_document_digest,
         };
 
         let module = |ontology_id: &str| {
@@ -950,10 +958,31 @@ mod tests {
             authored_version: bridge.authored_version.clone(),
             canonical_digest: bridge_document_digest(&bridge).unwrap(),
         };
+        let activation = if with_overrides {
+            vec![
+                ActivationRecord {
+                    scope: ActivationScope::Module,
+                    subject: source.id.display_ref(),
+                    mode: ActivationMode::Advisory,
+                },
+                ActivationRecord {
+                    scope: ActivationScope::Module,
+                    subject: target.id.display_ref(),
+                    mode: ActivationMode::Strict,
+                },
+                ActivationRecord {
+                    scope: ActivationScope::Bridge,
+                    subject: bridge_id.display_ref(),
+                    mode: ActivationMode::Advisory,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
         let compiled = compile_inventory(InventoryCompileRequest {
             modules: &[source, target],
             bridges: &[bridge_id],
-            activation: &[],
+            activation: &activation,
             profile_default: ActivationMode::Strict,
             limits: CompositionLimits::default(),
             cancelled: None,
@@ -1819,6 +1848,102 @@ mod tests {
             entry.identity == exact && entry.reason == crate::PortableV2SelectionReason::Requested
         }));
         assert!(projected.estimated_payload_bytes > 0);
+    }
+
+    #[test]
+    fn selected_composition_exports_preserve_and_filter_activation_overrides() {
+        let (_project, generation) = graph_generation_with_bridge_activation(true);
+        let limits = PortableV2ExportLimits::default();
+        let complete = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        let identity = |suffix: &str| {
+            complete
+                .projected
+                .iter()
+                .find(|entry| entry.identity.id.ends_with(suffix))
+                .unwrap()
+                .identity
+                .clone()
+        };
+        let source = identity("/ontology/source");
+        let target = identity("/ontology/target");
+        let bridge = identity("/bridge/person");
+        for root in [&bridge, &source] {
+            let selection = preview_portable_v2_selection(
+                &generation,
+                &PortableV2SelectionRequest {
+                    profile: PortableV2SelectionProfile::OntologyComposition(vec![root.clone()]),
+                    strict: true,
+                },
+                limits,
+            )
+            .unwrap();
+            let plan = plan_selected_portable_v2(&generation, &selection, limits).unwrap();
+            let outputs = tempfile::tempdir().unwrap();
+            let mut controls = Vec::new();
+            for (name, representation) in [
+                ("expanded", PortableV2Output::Expanded),
+                ("bundle.gfb", PortableV2Output::Bundle),
+            ] {
+                let destination = outputs.path().join(name);
+                export_complete_portable_v2(
+                    &plan,
+                    &destination,
+                    representation,
+                    limits,
+                    &AtomicBool::new(false),
+                    |_| {},
+                )
+                .unwrap();
+                let report =
+                    verify_portable_v2(&destination, PortableV2Mode::Full, limits, None).unwrap();
+                let control = report.ontology_composition.unwrap();
+                assert_eq!(control.activation_profile.profile_default, "strict");
+                let overrides = control
+                    .activation_profile
+                    .overrides
+                    .iter()
+                    .map(|value| (value.scope.as_str(), &value.subject, value.mode.as_str()))
+                    .collect::<Vec<_>>();
+                if root == &bridge {
+                    assert_eq!(
+                        overrides,
+                        vec![
+                            ("bridge", &bridge, "advisory"),
+                            ("module", &source, "advisory"),
+                            ("module", &target, "strict")
+                        ]
+                    );
+                    assert_eq!(control.bridge_sets.len(), 1);
+                    assert_eq!(
+                        control
+                            .modules
+                            .iter()
+                            .map(|module| (module.ontology_id.as_str(), module.profile.as_str()))
+                            .collect::<Vec<_>>(),
+                        vec![
+                            (source.id.as_str(), "advisory"),
+                            (target.id.as_str(), "strict")
+                        ]
+                    );
+                } else {
+                    assert_eq!(overrides, vec![("module", &source, "advisory")]);
+                    assert!(control.bridge_sets.is_empty());
+                    assert_eq!(control.modules.len(), 1);
+                    assert_eq!(control.modules[0].ontology_id, source.id);
+                    assert_eq!(control.modules[0].profile, "advisory");
+                }
+                controls.push(control);
+            }
+            assert_eq!(controls[0], controls[1]);
+        }
     }
 
     #[test]
