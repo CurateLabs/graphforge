@@ -1,0 +1,83 @@
+{
+  "checks": {
+    "correctness": true,
+    "io_reader_publication_capacity_measured": true,
+    "io_reader_publication_headroom": true,
+    "retained_storage_headroom": true,
+    "rss_bounded_or_plateaued": true,
+    "rss_headroom": true,
+    "storage_headroom": true,
+    "time_headroom": true,
+    "transient_storage_headroom": true
+  },
+  "claim": "engineering_evidence_only",
+  "decision": "admitted",
+  "headroom": {
+    "rss_fraction": 0.2,
+    "storage_fraction": 0.2020582195095913,
+    "time_fraction": 0.2
+  },
+  "limits": {
+    "rss_bytes": 4294967296,
+    "volume_bytes": 699098402816,
+    "wall_seconds": 14400
+  },
+  "native_capacity": {
+    "free_bytes": 699098402816,
+    "observed_rates": {
+      "physical_read_bytes_per_second": {
+        "wall_seconds": 340,
+        "work_units": 208139845632
+      },
+      "physical_write_bytes_per_second": {
+        "wall_seconds": 340,
+        "work_units": 65234501632
+      },
+      "publication_work_per_second": {
+        "wall_seconds": 340,
+        "work_units": 254716
+      },
+      "reader_calls_per_second": {
+        "wall_seconds": 340,
+        "work_units": 483957
+      }
+    },
+    "rate_source": "completed_adjacent_rungs",
+    "reserved_headroom_bytes": 141258578535
+  },
+  "projected": {
+    "logical_read_bytes": 153242071868,
+    "logical_write_bytes": 69596625224,
+    "peak_rss_bytes": 182755328,
+    "physical_read_bytes": 839543635968,
+    "physical_write_bytes": 261588557824,
+    "publication_work_units": 1025110,
+    "reader_calls": 1936971,
+    "retained_storage_bytes": 17652494336,
+    "storage_peak_bytes": 36693917696,
+    "transient_peak_storage_bytes": 36693917696,
+    "wall_seconds": 1372
+  },
+  "provider_capacity": null,
+  "required_rates": {
+    "physical_read_bytes_per_second": 72877052,
+    "physical_write_bytes_per_second": 22707341,
+    "publication_work_per_second": 89,
+    "reader_calls_per_second": 169
+  },
+  "rss_growth_fraction": -0.0014546919410066469,
+  "schema": "graphforge-progressive-qualification-evidence/1",
+  "slopes_observed": {
+    "logical_read_bytes": 19167150305,
+    "logical_write_bytes": 8702974359,
+    "physical_read_bytes": 105233965056,
+    "physical_write_bytes": 32725676032,
+    "publication_work_units": 128399,
+    "reader_calls": 242169
+  },
+  "source_scales": [
+    19,
+    20
+  ],
+  "target": "S22"
+}

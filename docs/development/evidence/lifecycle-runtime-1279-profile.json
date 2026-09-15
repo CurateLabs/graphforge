@@ -1,0 +1,583 @@
+{
+  "binaries": {
+    "gf": "18625f292da44d70c22e7c51190996efed3a1a874f5deafac1eaa264438b9eba",
+    "graphforge-benchmark-certify": "578b64c91590c1d93be1a36c89c3c88374907b38661651287d32a1c50457f369",
+    "graphforge-benchmark-graph500-generator": "4829806c4666d1c21e2afd680fec3c8749588be713e493233e81b77eb2bcf551"
+  },
+  "claim": "diagnostic_only_not_ladder_admission",
+  "fixture_binary": {
+    "binary_bytes": 191403656,
+    "binary_sha256": "ad3a8d19e86078b43e801cba6b77dcf625d39fffcb7c6a9a5d5e35c26afe4066",
+    "cargo_lock_sha256": "d80355162144c38a02b5df9787cc1d81e7a0299dc385bde1f342d0bdb06e4ba1",
+    "commit": "5165ad4299bb70c97c64af5972b3efec54ca1abb",
+    "measurement": "consumed_shape_roots_have_bounded_multilevel_peak, scales 1/2/4 in each invocation; frozen final candidate",
+    "profile": {
+      "debug_assertions": false,
+      "debuginfo": 0,
+      "opt_level": "3",
+      "overflow_checks": false,
+      "test": true
+    },
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "tree": "1f6a214cc674ac4b989452df914bf8fbf4f7cacf"
+  },
+  "host": "OVHC-AGENCY",
+  "issue": 1279,
+  "limitations": [
+    "S18 diagnostics execute the ordinary unmodified profile directly; they are not BenchExec-authorized ladder receipts and do not authorize a successor.",
+    "No cache dropping, timeout increase, durability bypass, query change or verification reduction was used.",
+    "Runs are sequential observations, not randomized samples or a statistical overhead estimate.",
+    "Sibling compilation overlapped parts of diagnostic captures; this task paused its own compilation during entry/return capture. Do not infer hardware-independent throughput or a before/after speedup.",
+    "External probes record elapsed intervals, not isolated CPU cost. Exclusive time subtracts only observed nested probes; unprobed work remains included.",
+    "strace syscall latency is nested inside command time; tracing substantially perturbs execution.",
+    "Raw trace/profile files remain on the host and may contain command paths; only sanitized summaries and hashes are checked in."
+  ],
+  "observations": {
+    "baseline": {
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 1509928,
+        "filesystem_output_blocks": 747776,
+        "maximum_rss_kib": 49280,
+        "system_cpu_seconds": 1.23,
+        "user_cpu_seconds": 3.43,
+        "wall_seconds": 6.03
+      },
+      "work": [
+        {
+          "edges": 32768,
+          "merge_passes": 4,
+          "merge_writes": 29736960,
+          "nodes": 8192,
+          "peak": 15319040,
+          "scale": 1,
+          "shape_reads": 45926452
+        },
+        {
+          "edges": 65536,
+          "merge_passes": 5,
+          "merge_writes": 70828032,
+          "nodes": 8192,
+          "peak": 29638656,
+          "scale": 2,
+          "shape_reads": 104027460
+        },
+        {
+          "edges": 131072,
+          "merge_passes": 6,
+          "merge_writes": 165593088,
+          "nodes": 8192,
+          "peak": 58277888,
+          "scale": 4,
+          "shape_reads": 235958310
+        }
+      ]
+    },
+    "lifecycle-baseline": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 2032523003,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 219943057,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 4316749417,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 926787,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 43865209394,
+            "errors": 0
+          }
+        }
+      },
+      "exact_source_imported_results_match": true,
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634608,
+        "filesystem_output_blocks": 14451832,
+        "maximum_rss_kib": 177904,
+        "system_cpu_seconds": 18.2,
+        "user_cpu_seconds": 66.45,
+        "wall_seconds": 93.46000000000001
+      },
+      "phases_ms": {
+        "admission": 10,
+        "clean_import": 2404,
+        "export": 1759,
+        "generate": 1645,
+        "ingest": 56014,
+        "query": 10182,
+        "recount": 1756,
+        "reopen": 2846,
+        "reopen_proof": 14130,
+        "verify": 236
+      }
+    },
+    "lifecycle-perf": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 1963816068,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 223623635,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 4290300452,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 967537,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 42088148760,
+            "errors": 0
+          }
+        }
+      },
+      "exact_source_imported_results_match": true,
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634600,
+        "filesystem_output_blocks": 14451832,
+        "maximum_rss_kib": 178780,
+        "system_cpu_seconds": 16.82,
+        "user_cpu_seconds": 64.7,
+        "wall_seconds": 90.05
+      },
+      "phases_ms": {
+        "admission": 10,
+        "clean_import": 2368,
+        "export": 1737,
+        "generate": 1628,
+        "ingest": 54117,
+        "query": 9606,
+        "recount": 1698,
+        "reopen": 2747,
+        "reopen_proof": 13512,
+        "verify": 231
+      }
+    },
+    "lifecycle-probes": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 2101809678,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 229168988,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 4436305357,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 1258243,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 43565363086,
+            "errors": 0
+          }
+        }
+      },
+      "exact_source_imported_results_match": true,
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634600,
+        "filesystem_output_blocks": 14451832,
+        "maximum_rss_kib": 180236,
+        "system_cpu_seconds": 21.69,
+        "user_cpu_seconds": 66.04,
+        "wall_seconds": 94.2
+      },
+      "phases_ms": {
+        "admission": 27,
+        "clean_import": 2521,
+        "export": 1805,
+        "generate": 1650,
+        "ingest": 56287,
+        "query": 9992,
+        "recount": 1850,
+        "reopen": 2957,
+        "reopen_proof": 14355,
+        "verify": 264
+      }
+    },
+    "lifecycle-sync": {
+      "construction_calls_by_receipt": {
+        "committed": {
+          "append": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 1,
+            "elapsed_ns": 4629068175,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 1,
+            "elapsed_ns": 549553423,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          }
+        },
+        "validated": {
+          "append": {
+            "calls": 68,
+            "elapsed_ns": 6983778060,
+            "errors": 0
+          },
+          "begin": {
+            "calls": 1,
+            "elapsed_ns": 7015049,
+            "errors": 0
+          },
+          "publish": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "resume": {
+            "calls": 0,
+            "elapsed_ns": 0,
+            "errors": 0
+          },
+          "seal": {
+            "calls": 1,
+            "elapsed_ns": 48387159429,
+            "errors": 0
+          }
+        }
+      },
+      "exact_source_imported_results_match": true,
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 49634608,
+        "filesystem_output_blocks": 14453856,
+        "maximum_rss_kib": 177564,
+        "system_cpu_seconds": 65.58,
+        "user_cpu_seconds": 73.01,
+        "wall_seconds": 144.48
+      },
+      "phases_ms": {
+        "admission": 11,
+        "clean_import": 5436,
+        "export": 3504,
+        "generate": 2205,
+        "ingest": 67793,
+        "query": 14051,
+        "recount": 5869,
+        "reopen": 8129,
+        "reopen_proof": 26693,
+        "verify": 239
+      }
+    },
+    "shape-perf": {
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 1509928,
+        "filesystem_output_blocks": 747776,
+        "maximum_rss_kib": 49968,
+        "system_cpu_seconds": 1.28,
+        "user_cpu_seconds": 3.47,
+        "wall_seconds": 6.17
+      },
+      "work": [
+        {
+          "edges": 32768,
+          "merge_passes": 4,
+          "merge_writes": 29736960,
+          "nodes": 8192,
+          "peak": 15319040,
+          "scale": 1,
+          "shape_reads": 45926452
+        },
+        {
+          "edges": 65536,
+          "merge_passes": 5,
+          "merge_writes": 70828032,
+          "nodes": 8192,
+          "peak": 29638656,
+          "scale": 2,
+          "shape_reads": 104027460
+        },
+        {
+          "edges": 131072,
+          "merge_passes": 6,
+          "merge_writes": 165593088,
+          "nodes": 8192,
+          "peak": 58277888,
+          "scale": 4,
+          "shape_reads": 235958310
+        }
+      ]
+    },
+    "shape-strace": {
+      "gnu_time": {
+        "exit_status": 0,
+        "filesystem_input_blocks": 1509928,
+        "filesystem_output_blocks": 747784,
+        "maximum_rss_kib": 50176,
+        "system_cpu_seconds": 7.06,
+        "user_cpu_seconds": 4.6,
+        "wall_seconds": 13.14
+      },
+      "work": [
+        {
+          "edges": 32768,
+          "merge_passes": 4,
+          "merge_writes": 29736960,
+          "nodes": 8192,
+          "peak": 15319040,
+          "scale": 1,
+          "shape_reads": 45926452
+        },
+        {
+          "edges": 65536,
+          "merge_passes": 5,
+          "merge_writes": 70828032,
+          "nodes": 8192,
+          "peak": 29638656,
+          "scale": 2,
+          "shape_reads": 104027460
+        },
+        {
+          "edges": 131072,
+          "merge_passes": 6,
+          "merge_writes": 165593088,
+          "nodes": 8192,
+          "peak": 58277888,
+          "scale": 4,
+          "shape_reads": 235958310
+        }
+      ]
+    }
+  },
+  "paired_probes": {
+    "events": 198,
+    "note": "Exclusive subtracts only observed nested probes in the same thread; unprobed children remain included. Categories are not CPU measurements.",
+    "scopes": {
+      "authenticate_artifact": {
+        "calls": 68,
+        "exclusive_ns": 221482076,
+        "inclusive_ns": 221482076
+      },
+      "authenticate_inventory": {
+        "calls": 3,
+        "exclusive_ns": 526971930,
+        "inclusive_ns": 526971930
+      },
+      "encode": {
+        "calls": 1,
+        "exclusive_ns": 6314996946,
+        "inclusive_ns": 6314996946
+      },
+      "fixed_merge": {
+        "calls": 16,
+        "exclusive_ns": 11411365931,
+        "inclusive_ns": 11411365931
+      },
+      "open_construction": {
+        "calls": 2,
+        "exclusive_ns": 52126468,
+        "inclusive_ns": 230344389
+      },
+      "prepare": {
+        "calls": 1,
+        "exclusive_ns": 15393607,
+        "inclusive_ns": 192938558
+      },
+      "recovery_shape": {
+        "calls": 2,
+        "exclusive_ns": 1842281,
+        "inclusive_ns": 1842281
+      },
+      "row_merge": {
+        "calls": 4,
+        "exclusive_ns": 15838083166,
+        "inclusive_ns": 15838083166
+      },
+      "seal_control": {
+        "calls": 1,
+        "exclusive_ns": 3815182,
+        "inclusive_ns": 3815182
+      },
+      "seal_prepare": {
+        "calls": 1,
+        "exclusive_ns": 9601761995,
+        "inclusive_ns": 43564556635
+      }
+    },
+    "unpaired_events": 0
+  },
+  "raw_artifact_sha256": {
+    "baseline.log": "dee597bc51fd4b6ab80faf510089b766815b2f04b0578a9bb10edda831d58e25",
+    "baseline.time": "9c276131ca4cae668feed97b424e0b80bf8a7c153aa89bc76c102dae6c56339e",
+    "lifecycle-baseline.json": "fc9172cb9fb63c92f7f2a9b8caf69206942d04367a5b1931740615cd644d47a8",
+    "lifecycle-baseline.time": "90f88307d78099931f7e03a753080db52a09359cbe71f93e48e324db8755b9bc",
+    "lifecycle-perf-report.txt": "b609d47203c281d46c62e2c55aa8d378585c855a335650ad2cadb7225b763dc9",
+    "lifecycle-perf.data": "908064957fb898e2de37a03d811443f4341ecdeff364e9aca12f1ef2a8589841",
+    "lifecycle-perf.json": "b99268af0cd5d43eaf18dfb85b32175166da760e17c24bbf6fcd5e186f286edf",
+    "lifecycle-perf.time": "4f08c591e5034967a1abb1fedc71dc6228cd87360c152c5dd6d815f098e8b8ed",
+    "lifecycle-probes-events.txt": "782fb91ff98c36b2dfb6eb72db088e0943447b86e86f5c87f93187c7e0f7f345",
+    "lifecycle-probes.data": "1852024fa96d27f87327d8cb476ab94efdfc5b4186df4c5d455afaae3b43c109",
+    "lifecycle-probes.json": "8b31cdb4e67b5ebbd2b47859f26debba4e4c31739dc8f442a77df5861037b70d",
+    "lifecycle-probes.time": "87dbcc80b2f7bfda50e52154682a2807d7abf73a499a043e1beba733815c2f16",
+    "lifecycle-sync.json": "5e5f79b9ed4ad8a88bc5453ba23f0186b22febcf7dab5f5a27e9a0f3870838a0",
+    "lifecycle-sync.time": "68ce260694a63a25dcdb5bac0596afe4bdf30c3abc7ad7a6867830549e978be1",
+    "lifecycle-sync.trace": "45940a0b5510c175f73991519bc353e5a7b8f8c2e766ed972d1c394127a4f206",
+    "probe-manifest.json": "f49071c68b3be9cc7799b682111864e04c7217fc459e4df985b15c90332bdafc",
+    "setup-probes.py": "c68f2e9eed36afd906db85989f771c5aeb00f1a6dcd4a206223c313dcb62ada1",
+    "shape-perf-report.txt": "11eafdf52c6ed6346c809aa8b14f3d8af8d19881deea39c416b4f990f7739a7e",
+    "shape-perf.data": "70924c1c7e432d7e9b0c1e91aca96556b196468e9378129f0282d2058f951a11",
+    "shape-perf.time": "bba4a1a9d4e41c6f4aa268738afe94364e6fba929a0ac264c25edec6675af159",
+    "shape-strace-summary.txt": "464012d9aa391f18d4e1757cad6729e23e9046f06a9abbb5009d532cb7e1bed1",
+    "shape-strace.time": "f4fc8c8c1573d919e51b5bbfb67a7fa963798a8979e148801ee8fa5aaf29f8c7",
+    "summarize-probes.py": "e566a64a8d02739f202f4b7f5cc3dd1f37eeb4d4690e712bfe652ea833297085"
+  },
+  "root_filesystem": "ext4",
+  "source_commit": "710c6c64f4718c0664d08bdd3aafe21de4a29eba",
+  "synchronization_trace": {
+    "generate": {
+      "calls": 5,
+      "elapsed_seconds": 0.17781500000000003,
+      "errors": 0
+    },
+    "import_commit": {
+      "calls": 893,
+      "elapsed_seconds": 0.18452500000000127,
+      "errors": 0
+    },
+    "import_validate": {
+      "calls": 7279,
+      "elapsed_seconds": 2.8016619999999994,
+      "errors": 0
+    },
+    "other_cli_or_runner": {
+      "calls": 9940,
+      "elapsed_seconds": 0.7529700000000463,
+      "errors": 0
+    }
+  }
+}

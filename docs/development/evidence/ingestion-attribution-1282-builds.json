@@ -1,0 +1,44 @@
+{
+  "diagnostic": {
+    "artifacts": {
+      "gf-diagnostic": "2a8679f705582ebddfa1ce37b0e29487eae0d1888e290e9c5ba23864501136e0"
+    },
+    "features": "graphforge-storage/test-support; explicit CLI and storage package selection",
+    "native_sources_equal_ordinary": true,
+    "profile": "release with debug=1; locked dependencies; jobs=4",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+    "source_commit": "1ae0cdcc9c486d55ac8b101f93ef1574a3a2c893",
+    "source_tree": "39dce3af827220f0054221c8d57fbe92fa027187"
+  },
+  "disposition": {
+    "initial_boundary_build": "compile failed: array supplied where an iterator was required; corrected with .into_iter() before the successful frozen build; no workload ran",
+    "initial_diagnostic_build": "superseded before instrumented measurements; identical to ordinary binary because CLI-only feature selection did not enable the normal storage dependency",
+    "native_inputs": "git diff 5fd6e59f 1ae0cdcc -- crates Cargo.toml Cargo.lock rust-toolchain.toml is empty"
+  },
+  "ordinary_and_boundary": {
+    "artifacts": {
+      "boundary-test": "985cd8fad34c21a20107cbdac55c2f1b0094d0a8b961f126dd30e8a54afb697c",
+      "gf-ordinary": "bcb2b5c2d6be4068822592ce6f5e1efb9d1b7b608675a132473db8b0841e9075"
+    },
+    "boundary_features": "API dev dependencies including storage test-support/test-failpoints",
+    "ordinary_features": "default",
+    "profile": "release with debug=1; locked dependencies; jobs=4",
+    "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+    "source_commit": "5fd6e59fe912719ccf147f90625e994a14a914d6",
+    "source_tree": "948e1d2113061b4d55111f8eb1a184e44998d04a"
+  },
+  "raw_build_artifacts": {
+    "boundary-test-fixed.log": "70268f0fe223b567603d3af4aa79a2bb7738ce6cbdb79ae7f0ac507c5feb2f7c",
+    "boundary-test.log": "203e481838ca703ee6d12032dc357d673e7ccde99efd0fdf537a627d37aa86d3",
+    "build-diagnostic-final.log": "1d80bbbc420b6aa688e653f0835662f89fa57dd4380cf2e64e777489cc74acbc",
+    "build-diagnostic-v2.log": "3d038c43b306b902f72b6f60b4651f78fb9938c5a265d65ad2e48858c4e51297",
+    "build-diagnostic.log": "13795da1a21ad7906460e57ad61e023d54ebe2f1efcf6661050de04dd22b1434",
+    "build-identity.json": "c0acab3dcf28d7ba8bdf6accdbbf550947d771b61ec348d0282c12c7fa9497b9",
+    "build-ordinary.log": "cda153a7945866dc3b48f56e73a5829642f632535a8e3bd5578cb5f40be379b8"
+  },
+  "superseded_cli_only_build": {
+    "executable_sha256": "bcb2b5c2d6be4068822592ce6f5e1efb9d1b7b608675a132473db8b0841e9075",
+    "observed_features": "default only; no diagnostic events or symbol",
+    "requested_features": "graphforge-storage/test-support"
+  }
+}

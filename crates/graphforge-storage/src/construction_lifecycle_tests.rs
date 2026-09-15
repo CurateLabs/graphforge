@@ -49,6 +49,9 @@ mod lifecycle_budget {
     #[test]
     fn supersession_crashes_reconcile_removed_allocations_and_replay() {
         for boundary in [
+            "shape.after_identity_retirement",
+            "shape.after_endpoint_retirement",
+            "shape.after_derived_unlink",
             "supersession.shape_authenticated",
             "supersession.encoded_authenticated",
             "supersession.before_unlink",
@@ -95,6 +98,7 @@ mod lifecycle_budget {
                 .evidence()
                 .storage_transient_peak_total_allocated_bytes;
             drop(recovered);
+            assert_retirement_publication(root.path());
             let mut replay = small_session(root.path());
             complete_small(&mut replay);
             assert_eq!(replay.evidence().storage_current, current);
@@ -465,8 +469,8 @@ mod lifecycle_budget {
     #[test]
     fn construction_lifecycle_multilevel_allocation_baseline() {
         for scale in [1_u64, 2, 4] {
-            let mut before = None;
-            for version in [8, 9] {
+            {
+                let version = FORMAT_VERSION;
                 let root = TempDir::new().unwrap();
                 crate::open_or_initialize_project(root.path()).unwrap();
                 let budgets = GraphConstructionBudgets {
@@ -475,7 +479,7 @@ mod lifecycle_budget {
                     max_run_records: 16384,
                     ..Default::default()
                 };
-                let mut session = GraphConstructionSession::open_internal_with_format(
+                let mut session = GraphConstructionSession::open_internal_with_allocation(
                     root.path(),
                     root.path(),
                     Uuid::new_v4(),
@@ -485,7 +489,6 @@ mod lifecycle_budget {
                     budgets,
                     crate::filesystem_admission::ProjectLifecycleMode::Durable,
                     None,
-                    version,
                 )
                 .unwrap();
                 for chunk in 0..2 {
@@ -509,7 +512,9 @@ mod lifecycle_budget {
                 let append = census(session.root.path());
                 session.seal().unwrap();
                 let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-                let shape_peak = session.evidence().storage_transient_peak_total_allocated_bytes;
+                let shape_peak = session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes;
                 assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
                 assert!(session.evidence().merge_passes >= 3);
                 let shaped = census(session.root.path());
@@ -540,28 +545,18 @@ mod lifecycle_budget {
                 let peak = session
                     .evidence()
                     .storage_transient_peak_total_allocated_bytes;
-                if version == 8 {
-                    before = Some((current, peak, shape_peak));
-                } else {
-                    let (old_current, old_peak, old_shape_peak) = before.unwrap();
-                    // Compression can move both variants' maximum into shaping,
-                    // before retirement can reduce it. Keep the strict retention
-                    // benefit, no peak regression against the compressed control,
-                    // and a strict reduction against the source-bound uncompressed
-                    // v8 baseline in construction-supersession.md (#1195).
-                    assert!(current * 2 < old_current);
-                    assert!(peak <= old_peak);
-                    let uncompressed_peak = match scale {
-                        1 => 23_425_024,
-                        2 => 44_494_848,
-                        4 => 86_634_496,
-                        _ => unreachable!("fixed fixture scales"),
-                    };
-                    assert!(peak < uncompressed_peak);
-                    if peak == old_peak {
-                        assert_eq!(peak, shape_peak);
-                        assert_eq!(old_peak, old_shape_peak);
-                    }
+                // Frozen historical source-bound budgets remain evidence; current
+                // execution never recreates retired on-disk formats.
+                let (retained_ceiling, peak_ceiling) = match scale {
+                    1 => (11_407_360, 23_425_024),
+                    2 => (21_958_656, 44_494_848),
+                    4 => (43_061_248, 86_634_496),
+                    _ => unreachable!("fixed fixture scales"),
+                };
+                assert!(current < retained_ceiling);
+                assert!(peak < peak_ceiling);
+                assert!(shape_peak <= peak);
+                {
                     assert_eq!(
                         session.evidence().current_merge_temporary_allocated_bytes,
                         0
@@ -590,6 +585,849 @@ mod lifecycle_budget {
                     })
                 );
             }
+        }
+    }
+    fn shaping_recovery_controls(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let name = entry.file_name().into_string().unwrap();
+                (name, entry.path())
+            })
+            .filter(|(name, path)| name.ends_with(".json") && path.is_file())
+            .map(|(name, path)| (name, std::fs::read(path).unwrap()))
+            .collect()
+    }
+
+    fn shaping_recovery_fixture(root: &TempDir) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Edge,
+                "edges",
+                &edge_property_batch(100, 2),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        session
+    }
+
+    fn retained_row_roots_fixture(root: &TempDir) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        // Two independently retained exact-schema roots and no edge family.
+        for input in 0..32 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("properties-{input}"),
+                    &node_property_batch(input + 1, 1),
+                )
+                .unwrap();
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("plain-{input}"),
+                    &node_batch(input + 33, 1),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+        session
+    }
+
+    fn assert_retained_row_roots(session: &mut GraphConstructionSession) -> Vec<ArtifactReceipt> {
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.node_count, 64);
+        assert_eq!(shape.edge_count, 0);
+        assert_eq!(shape.node_rows.len(), 2);
+        assert!(shape.edge_rows.is_empty());
+        let mut ids = Vec::new();
+        let mut receipts = Vec::new();
+        for name in &shape.node_rows {
+            assert!(name.starts_with("merge-rows-"), "{name}");
+            receipts.push(receipt_for_existing(&session.root, name).unwrap());
+            let reader = ParquetRecordBatchReaderBuilder::try_new(
+                session.root.open_child_file(OsStr::new(name)).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            let mut previous = None;
+            for batch in reader {
+                let batch = batch.unwrap();
+                let values = uuid_column(&batch, "node_uuid").unwrap();
+                for row in 0..batch.num_rows() {
+                    let value = uuid_value(values, row).unwrap();
+                    assert!(previous.is_none_or(|prior| prior < value));
+                    previous = Some(value);
+                    ids.push(value);
+                }
+            }
+        }
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (1_u128..=64).map(u128::to_be_bytes).collect::<Vec<_>>()
+        );
+        receipts
+    }
+
+    #[test]
+    fn retained_row_roots_crash_child() {
+        let Ok(path) = std::env::var("GF_RETAINED_ROW_ROOTS_CRASH_ROOT") else {
+            return;
+        };
+        small_session(Path::new(&path))
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+    }
+
+    #[test]
+    fn retained_row_roots_recover_crashes_and_reopen_without_reinstallation() {
+        for failpoint in [
+            "shape.row_merge.after_install",
+            "shape.after_complete_inventory",
+            "shape.after_evidence_checkpoint",
+        ] {
+            let root = TempDir::new().unwrap();
+            drop(retained_row_roots_fixture(&root));
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::lifecycle_budget::retained_row_roots_crash_child")
+                .arg("--nocapture")
+                .env("GF_RETAINED_ROW_ROOTS_CRASH_ROOT", root.path())
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let mut session = small_session(root.path());
+            let receipts = assert_retained_row_roots(&mut session);
+            let retained = session.evidence().storage_current.clone();
+            let allocations = session
+                .evidence()
+                .storage_active_identity_allocated_bytes
+                .clone();
+            let groups = session.evidence().merge_groups;
+            drop(session);
+            for _ in 0..2 {
+                let mut session = small_session(root.path());
+                assert_eq!(assert_retained_row_roots(&mut session), receipts);
+                assert_eq!(session.evidence().storage_current, retained);
+                // Transition history is live-only. The durable identity union
+                // must survive repeated recovery without installation/removal.
+                assert_eq!(
+                    session.evidence().storage_active_identity_allocated_bytes,
+                    allocations
+                );
+                assert_eq!(session.evidence().merge_groups, groups);
+            }
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            assert_eq!(
+                resumed.evidence().current_merge_temporary_allocated_bytes,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn retained_row_roots_cancellation_recovers_and_corruption_fails_closed() {
+        // A completed root is authoritative both in an interrupted shape and
+        // after it has become the final inventory entry.
+        for complete in [false, true] {
+            for damage in ["none", "payload", "replacement", "extra-link"] {
+                let root = TempDir::new().unwrap();
+                let mut session = retained_row_roots_fixture(&root);
+                let directory = session.root.path().to_path_buf();
+                let name = if complete {
+                    assert_retained_row_roots(&mut session)[0].name.clone()
+                } else {
+                    let error = session
+                        .shape_canonical_with_cancellation(|| {
+                            std::fs::read_dir(&directory).unwrap().any(|entry| {
+                                let name = entry.unwrap().file_name();
+                                let name = name.to_string_lossy();
+                                name.starts_with("merge-rows-") && name.ends_with(".parquet")
+                            })
+                        })
+                        .unwrap_err();
+                    assert!(error.to_string().contains("construction cancelled"));
+                    session
+                        .root
+                        .child_names()
+                        .unwrap()
+                        .into_iter()
+                        .filter_map(|name| name.into_string().ok())
+                        .find(|name| name.starts_with("merge-rows-") && name.ends_with(".parquet"))
+                        .unwrap()
+                };
+                let path = directory.join(name);
+                let mut bytes = std::fs::read(&path).unwrap();
+                let held = root.path().join("held-root.parquet");
+                match damage {
+                    "payload" => {
+                        bytes[0] ^= 1;
+                        std::fs::write(&path, &bytes).unwrap();
+                    }
+                    "replacement" => {
+                        std::fs::rename(&path, &held).unwrap();
+                        std::fs::write(&path, &bytes).unwrap();
+                    }
+                    "extra-link" => std::fs::hard_link(&path, held).unwrap(),
+                    _ => {}
+                }
+                let controls = shaping_recovery_controls(&directory);
+                let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+                drop(session);
+                if damage == "none" {
+                    let mut resumed = small_session(root.path());
+                    assert_retained_row_roots(&mut resumed);
+                    complete_small(&mut resumed);
+                    assert_eq!(
+                        resumed.evidence().current_merge_temporary_allocated_bytes,
+                        0
+                    );
+                    continue;
+                }
+                for _ in 0..2 {
+                    assert!(
+                        GraphConstructionSession::open_with_mode(
+                            root.path(),
+                            Uuid::from_u128(119_500),
+                            0,
+                            graphforge_core::OntologyMode::Exploratory,
+                            GraphConstructionBudgets::default(),
+                        )
+                        .is_err(),
+                        "complete={complete}, damage={damage}"
+                    );
+                    assert_eq!(shaping_recovery_controls(&directory), controls);
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert_eq!(
+                        std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                        current
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shaping_recovery_refuses_same_inode_payload_corruption() {
+        for completed in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = shaping_recovery_fixture(&root);
+            let path = session.root.path().join("shaped-identities.run");
+            if completed {
+                session.shape_canonical_with_cancellation(|| false).unwrap();
+            } else {
+                assert!(
+                    session
+                        .shape_canonical_with_cancellation(|| path.exists())
+                        .is_err()
+                );
+            }
+            assert!(path.exists());
+            let before = file_identity(&File::open(&path).unwrap()).unwrap();
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(file_identity(&File::open(&path).unwrap()).unwrap(), before);
+            let current = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let session_path = session.root.path().to_path_buf();
+            let before_recovery = shaping_recovery_controls(&session_path);
+            drop(session);
+            let result = GraphConstructionSession::open_with_mode(
+                root.path(),
+                Uuid::from_u128(119_500),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                GraphConstructionBudgets::default(),
+            );
+            assert!(
+                result.is_err(),
+                "completed={completed}: corrupted payload accepted"
+            );
+            assert_eq!(shaping_recovery_controls(&session_path), before_recovery);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                current
+            );
+        }
+    }
+    #[test]
+    fn shaping_recovery_counts_surviving_payload_reads_and_retries() {
+        let root = TempDir::new().unwrap();
+        let session = shaping_recovery_fixture(&root);
+        let initial = session.evidence().clone();
+        drop(session);
+        // An uninterrupted reopen measures the same unchanged parent authority.
+        let mut session = small_session(root.path());
+        let baseline = session.evidence().clone();
+        let parent_bytes =
+            baseline.recovery_application_read_bytes - initial.recovery_application_read_bytes;
+        let parent_operations = baseline.recovery_application_read_operations
+            - initial.recovery_application_read_operations;
+        let path = session.root.path().join("shaped-identities.run");
+        assert!(
+            session
+                .shape_canonical_with_cancellation(|| path.exists())
+                .is_err()
+        );
+        let mut expected_bytes = parent_bytes;
+        let mut expected_operations = parent_operations;
+        for name in session.root.child_names().unwrap() {
+            let Some(name) = name.to_str() else { continue };
+            if !name.starts_with("shape-receipt-") {
+                continue;
+            }
+            let mut file = session.root.open_child_file(OsStr::new(name)).unwrap();
+            let receipt: ArtifactReceipt = decode_bounded(&mut file).unwrap();
+            // Both control passes read receipts even when their payload is not
+            // a derived shape artifact owned by this cleanup.
+            expected_bytes += 2 * file.metadata().unwrap().len();
+            expected_operations += 2;
+            if !is_shape_artifact_name(&receipt.name) {
+                continue;
+            }
+            if session.root.path().join(&receipt.name).exists() {
+                expected_bytes += receipt.bytes;
+                expected_operations += receipt.bytes.div_ceil(BLOCK_BYTES as u64);
+            }
+        }
+        assert!(expected_bytes > 0);
+        drop(session);
+        let mut resumed = small_session(root.path());
+        assert_eq!(
+            resumed.evidence().recovery_application_read_bytes
+                - baseline.recovery_application_read_bytes,
+            expected_bytes
+        );
+        assert_eq!(
+            resumed.evidence().recovery_application_read_operations
+                - baseline.recovery_application_read_operations,
+            expected_operations
+        );
+        complete_small(&mut resumed);
+        let selected = crate::resolve_project_generation(root.path()).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+        let edges = crate::read_edges_from_inventory(
+            &inventory,
+            "*",
+            graphforge_core::OntologyMode::Exploratory,
+        )
+        .unwrap();
+        assert_eq!(edges.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        drop(resumed);
+        complete_small(&mut small_session(root.path()));
+    }
+    #[test]
+    fn shaping_recovery_refuses_replaced_or_linked_survivors() {
+        for extra_link in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = shaping_recovery_fixture(&root);
+            let path = session.root.path().join("shaped-identities.run");
+            assert!(
+                session
+                    .shape_canonical_with_cancellation(|| path.exists())
+                    .is_err()
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let held = root.path().join("held-original.run");
+            if extra_link {
+                std::fs::hard_link(&path, &held).unwrap();
+            } else {
+                std::fs::rename(&path, &held).unwrap();
+                std::fs::write(&path, &bytes).unwrap();
+            }
+            let session_path = session.root.path().to_path_buf();
+            let before = shaping_recovery_controls(&session_path);
+            drop(session);
+            assert!(
+                GraphConstructionSession::open_with_mode(
+                    root.path(),
+                    Uuid::from_u128(119_500),
+                    0,
+                    graphforge_core::OntologyMode::Exploratory,
+                    GraphConstructionBudgets::default()
+                )
+                .is_err()
+            );
+            assert_eq!(shaping_recovery_controls(&session_path), before);
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(std::fs::read(held).unwrap(), bytes);
+        }
+    }
+    #[test]
+    fn consumed_shape_roots_have_bounded_multilevel_peak() {
+        for scale in [1_u64, 2, 4] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let budgets = GraphConstructionBudgets {
+                merge_fan_in: 2,
+                max_batch_rows: 4096,
+                max_run_records: 16384,
+                ..Default::default()
+            };
+            let mut session = GraphConstructionSession::open_with_mode(
+                root.path(),
+                Uuid::from_u128(126_800 + u128::from(scale)),
+                0,
+                graphforge_core::OntologyMode::Exploratory,
+                budgets,
+            )
+            .unwrap();
+            for chunk in 0..2 {
+                session
+                    .append(
+                        ConstructionChunkKind::Node,
+                        &format!("nodes-{chunk}"),
+                        &node_batch(1 + chunk * 4096, 4096),
+                    )
+                    .unwrap();
+            }
+            for chunk in 0..8 * scale {
+                session
+                    .append(
+                        ConstructionChunkKind::Edge,
+                        &format!("edges-{chunk}"),
+                        &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096),
+                    )
+                    .unwrap();
+            }
+            session.seal().unwrap();
+            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
+            assert!(session.evidence().merge_passes >= 3);
+            let baseline_peak = match scale {
+                1 => 20_873_216,
+                2 => 40_435_712,
+                4 => 79_560_704,
+                _ => unreachable!(),
+            };
+            let retirement_peak = match scale {
+                1 => 18_513_920,
+                2 => 35_979_264,
+                4 => 70_909_952,
+                _ => unreachable!(),
+            };
+            assert!(
+                session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes
+                    <= retirement_peak - 14 * 32768 * scale
+            );
+            let (baseline_reads, baseline_writes) = match scale {
+                1 => (54_544_436, 37_339_136),
+                2 => (124_245_316, 89_112_576),
+                4 => (282_652_710, 208_519_168),
+                _ => unreachable!("fixed fixture scales"),
+            };
+            assert!(session.evidence().shape_application_read_bytes < baseline_reads);
+            assert!(session.evidence().merge_written_bytes < baseline_writes);
+
+            let obsolete_identity_bytes = 32 * (8192 + 32768 * scale);
+            // The preselected identity-root floor passed; retain the additional
+            // measured benefit from deferring the final online carry insertion.
+            let measured_carry_saving = 32 * 32768 * scale;
+            assert!(
+                session
+                    .evidence()
+                    .storage_transient_peak_total_allocated_bytes
+                    <= baseline_peak - obsolete_identity_bytes - measured_carry_saving
+            );
+
+            println!(
+                "CONSUMED_ROOTS {}",
+                serde_json::json!({
+                    "scale":scale,"nodes":shape.node_count,"edges":shape.edge_count,
+                    "peak":session.evidence().storage_transient_peak_total_allocated_bytes,
+                    "retained":session.evidence().storage_current,
+                    "shape_reads":session.evidence().shape_application_read_bytes,
+                    "merge_writes":session.evidence().merge_written_bytes,
+                    "merge_passes":session.evidence().merge_passes,
+                    "census":census(session.root.path()),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_merge_work_is_exact_across_production_fan_in_boundaries() {
+        // Each input contains one distinct UUID. The expected work is the sum
+        // of records in actual merge groups, not a noisy elapsed-time ceiling.
+        // 272 and 1088 are the accepted S20/S22 construction chunk counts.
+        for (inputs, expected_records, expected_groups) in [
+            (31_u64, 31_u64, 1_u64),
+            (32, 32, 1),
+            (33, 65, 2),
+            (272, 544, 10),
+            (1023, 2046, 33),
+            (1024, 2048, 33),
+            (1025, 3073, 34),
+            (1088, 3264, 37),
+        ] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let session = small_session(root.path());
+            let mut evidence = session.evidence().clone();
+            let mut merge = FixedMergeAccumulator::new("merge-runtime", 32, true);
+            for input in 0..inputs {
+                let name = format!("runtime-input-{input}");
+                write_run(
+                    &session.root,
+                    &name,
+                    &[u128::from(input + 1).to_be_bytes()],
+                    &mut evidence,
+                    None,
+                )
+                .unwrap();
+                merge
+                    .push::<16>(&session.root, name, &mut || false, &mut evidence)
+                    .unwrap();
+                assert!(merge.slot_count() <= online_merge_name_slot_bound(input + 1, 32) as usize);
+            }
+            let output = merge
+                .finish::<16>(&session.root, &mut || false, &mut evidence)
+                .unwrap();
+            let mut file = session.root.open_child_file(OsStr::new(&output)).unwrap();
+            for expected in 1..=inputs {
+                assert_eq!(
+                    read_fixed::<16>(&mut file).unwrap(),
+                    Some(u128::from(expected).to_be_bytes())
+                );
+            }
+            assert_eq!(read_fixed::<16>(&mut file).unwrap(), None);
+            assert_eq!(
+                evidence.merge_read_records, expected_records,
+                "inputs={inputs}"
+            );
+            assert_eq!(
+                evidence.merge_written_records, expected_records,
+                "inputs={inputs}"
+            );
+            assert_eq!(evidence.merge_written_bytes, expected_records * 16);
+            assert_eq!(evidence.merge_groups, expected_groups, "inputs={inputs}");
+            assert!(evidence.peak_merge_inputs <= 32);
+            println!(
+                "RUNTIME_MERGE {}",
+                serde_json::json!({"inputs":inputs,"records_read":evidence.merge_read_records,
+                    "records_written":evidence.merge_written_records,
+                    "groups":evidence.merge_groups,"passes":evidence.merge_passes})
+            );
+        }
+    }
+
+    fn sealed_retirement_fixture(root: &TempDir) -> GraphConstructionSession {
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        session
+            .append(
+                ConstructionChunkKind::Edge,
+                "edges",
+                &edge_property_batch(100, 2),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        session
+    }
+
+    fn assert_retirement_publication(root: &Path) {
+        let selected = crate::resolve_project_generation(root).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+        let batches = crate::read_edges_from_inventory(
+            &inventory,
+            "*",
+            graphforge_core::OntologyMode::Exploratory,
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        for batch in batches {
+            let ids = |name: &str| {
+                let array = batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                assert_eq!(array.null_count(), 0);
+                array
+            };
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    u128::from_be_bytes(ids("edge_uuid").value(row).try_into().unwrap()),
+                    u128::from_be_bytes(ids("src_uuid").value(row).try_into().unwrap()),
+                    u128::from_be_bytes(ids("dst_uuid").value(row).try_into().unwrap()),
+                ));
+            }
+        }
+        actual.sort_unstable();
+        assert_eq!(actual, [(100, 1, 2), (101, 2, 3)]);
+        let mut properties = Vec::new();
+        let routes = inventory
+            .routes(crate::PropertyRouteKind::Edge)
+            .collect::<Vec<_>>();
+        assert_eq!(routes.len(), 1);
+        for batch in
+            crate::read_edge_properties_from_inventory(root, &inventory, routes[0]).unwrap()
+        {
+            let ids = batch
+                .column_by_name("edge_uuid")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            let weights = batch
+                .column_by_name("weight")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(ids.null_count(), 0);
+            assert_eq!(weights.null_count(), 0);
+            for row in 0..batch.num_rows() {
+                properties.push((
+                    u128::from_be_bytes(ids.value(row).try_into().unwrap()),
+                    weights.value(row),
+                ));
+            }
+        }
+        properties.sort_unstable();
+        assert_eq!(properties, [(100, 20), (101, 21)]);
+    }
+
+    #[test]
+    fn consumed_shape_roots_returned_failures_recover_exact_properties() {
+        for boundary in [
+            "shape.before_identity_retirement",
+            "shape.after_identity_retirement",
+            "shape.before_endpoint_retirement",
+            "shape.after_endpoint_retirement",
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            inject_shape_publication_failure(boundary);
+            let error = session.prepare_canonical_encoding(1).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected shape publication failure")
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            for sequence in 0..2 {
+                let receipt = session.read_receipt(sequence).unwrap();
+                assert!(session.root.path().join(receipt.parquet.name).exists());
+            }
+            // A live incomplete shape must refuse reuse until reopen reconciles it.
+            let before_retry = session.evidence().clone();
+            assert!(
+                session
+                    .prepare_canonical_encoding(1)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("incomplete construction shape was not recovered")
+            );
+            assert_eq!(session.evidence(), &before_retry);
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            drop(session);
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            assert_eq!(
+                resumed.evidence().current_merge_temporary_allocated_bytes,
+                0
+            );
+            drop(resumed);
+            assert_retirement_publication(root.path());
+        }
+    }
+
+    #[test]
+    fn consumed_shape_roots_cancellation_reconstructs_exact_properties() {
+        for endpoint_boundary in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            let directory = session.root.path().to_path_buf();
+            let mut observed_boundary = false;
+            let result = session.shape_canonical_with_cancellation(|| {
+                if !directory.join("shaped-identities.run").exists() {
+                    return false;
+                }
+                let names = std::fs::read_dir(&directory)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().into_string().unwrap())
+                    .collect::<Vec<_>>();
+                let obsolete_exists = names.iter().any(|name| {
+                    name.ends_with(".run")
+                        && if endpoint_boundary {
+                            name.starts_with("merge-endpoint")
+                        } else {
+                            name.starts_with("merge-identities")
+                                || name.starts_with("merge-unified")
+                        }
+                });
+                let successor_exists = !endpoint_boundary
+                    || names
+                        .iter()
+                        .any(|name| name.starts_with("merge-resolved") && name.ends_with(".run"));
+                observed_boundary = !obsolete_exists && successor_exists;
+                observed_boundary
+            });
+            assert!(observed_boundary);
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("construction cancelled")
+            );
+            drop(session);
+            let mut resumed = small_session(root.path());
+            complete_small(&mut resumed);
+            drop(resumed);
+            assert_retirement_publication(root.path());
+        }
+    }
+
+    #[test]
+    fn consumed_shape_root_removal_refuses_replaced_and_linked_files() {
+        for extra_link in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            inject_shape_publication_failure("shape.before_identity_retirement");
+            assert!(session.prepare_canonical_encoding(1).is_err());
+            let name = session
+                .root
+                .child_names()
+                .unwrap()
+                .into_iter()
+                .filter_map(|s| s.into_string().ok())
+                .find(|n| n.starts_with("merge-identities") && n.ends_with(".run"))
+                .unwrap();
+            let path = session.root.path().join(&name);
+            let held = root.path().join("held-original.run");
+            if extra_link {
+                std::fs::hard_link(&path, &held).unwrap();
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                std::fs::rename(&path, &held).unwrap();
+                std::fs::write(&path, bytes).unwrap();
+            }
+            let before = session.evidence().clone();
+            assert!(
+                unlink_shape_artifact(&session.root, &name, &mut session.checkpoint.evidence)
+                    .is_err()
+            );
+            assert!(path.exists());
+            assert_eq!(session.evidence(), &before);
+        }
+    }
+
+    #[test]
+    fn consumed_shape_roots_preserve_successor_corruption_refusal() {
+        for boundary in [
+            "shape.after_identity_retirement",
+            "shape.after_endpoint_retirement",
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut session = sealed_retirement_fixture(&root);
+            inject_shape_publication_failure(boundary);
+            assert!(session.prepare_canonical_encoding(1).is_err());
+            let path = session.root.path().join("shaped-identities.run");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[0] ^= 1;
+            std::fs::write(path, bytes).unwrap();
+            drop(session);
+            assert!(
+                GraphConstructionSession::open_with_mode(
+                    root.path(),
+                    Uuid::from_u128(119_500),
+                    0,
+                    graphforge_core::OntologyMode::Exploratory,
+                    GraphConstructionBudgets::default()
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn consumed_endpoint_lookahead_refuses_a_partial_record_before_retirement() {
+        for window_rows in [1, 2] {
+            let temporary = TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let mut identity = [0_u8; BASE_IDENTITY_WIDTH];
+            identity[..16].copy_from_slice(&1_u128.to_be_bytes());
+            identity[IDENTITY_SURROGATE_OFFSET..BASE_IDENTITY_WIDTH]
+                .copy_from_slice(&1_u64.to_be_bytes());
+            std::fs::write(temporary.path().join("identities.run"), identity).unwrap();
+            let mut endpoint = [0_u8; ENDPOINT_WIDTH];
+            endpoint[..16].copy_from_slice(&1_u128.to_be_bytes());
+            endpoint[16..32].copy_from_slice(&100_u128.to_be_bytes());
+            let mut malformed = endpoint.to_vec();
+            malformed.push(0xff);
+            let path = temporary.path().join("endpoints.run");
+            std::fs::write(&path, &malformed).unwrap();
+            let mut evidence = GraphConstructionEvidence::default();
+            for category in crate::ArtifactCategory::ALL {
+                evidence
+                    .storage_current
+                    .insert(category, Default::default());
+                evidence
+                    .storage_receipt_category_authorities
+                    .insert(category, Default::default());
+                evidence
+                    .storage_transient_peak_allocated_bytes
+                    .insert(category, 0);
+                evidence
+                    .storage_receipt_transient_peak_authorities
+                    .insert(category, 0);
+            }
+            let error = resolve_endpoint_surrogates(
+                &root,
+                "identities.run",
+                Some("endpoints.run"),
+                None,
+                window_rows,
+                2,
+                &mut || false,
+                &mut evidence,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("truncated fixed-width construction run")
+            );
+            assert_eq!(std::fs::read(path).unwrap(), malformed);
         }
     }
 }

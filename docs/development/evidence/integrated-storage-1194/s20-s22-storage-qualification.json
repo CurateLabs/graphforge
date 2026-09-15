@@ -1,13 +1,13 @@
 {
   "projection": {
     "decision": "refuse",
-    "headroom_bytes": 0,
+    "headroom_bytes": 111162452650,
     "projected_canonical_edge_bytes": 20213858304,
     "projected_canonical_node_bytes": 268435456,
-    "projected_lifecycle_peak_bytes": 762866827264,
+    "projected_lifecycle_peak_bytes": 588524115286,
     "rate": {
       "denominator_count": 50331648,
-      "numerator_bytes": 35759382528
+      "numerator_bytes": 27587067904
     },
     "reserved_headroom_bytes": 141258578535,
     "source_rungs": [
@@ -15,7 +15,7 @@
       "S22"
     ],
     "target": "S26",
-    "volume_bytes": 633354096640
+    "volume_bytes": 699686567936
   },
   "rungs": [
     {
@@ -81,20 +81,20 @@
           "transient_peak_allocated_bytes": 835584
         },
         {
-          "allocated_bytes": 685801472,
+          "allocated_bytes": 685793280,
           "category": "source-project-construction",
-          "current_retained_bytes": 685801472,
-          "logical_bytes": 679305946,
-          "logical_references": 1919,
-          "physical_objects": 1919,
+          "current_retained_bytes": 685793280,
+          "logical_bytes": 679305387,
+          "logical_references": 1917,
+          "physical_objects": 1917,
           "source": "lifecycle_owner_snapshot",
-          "transient_peak_allocated_bytes": 685801472
+          "transient_peak_allocated_bytes": 685793280
         },
         {
           "allocated_bytes": 822353920,
           "category": "source-project-import",
           "current_retained_bytes": 822353920,
-          "logical_bytes": 822341855,
+          "logical_bytes": 822341853,
           "logical_references": 3,
           "physical_objects": 3,
           "source": "lifecycle_owner_snapshot",
@@ -238,7 +238,7 @@
           "logical_references": 288,
           "physical_objects": 288,
           "source": "construction_receipts",
-          "transient_peak_allocated_bytes": 10246037504
+          "transient_peak_allocated_bytes": 7521841152
         },
         {
           "allocated_bytes": 678088704,
@@ -273,8 +273,8 @@
           "phase": "append_merge",
           "read_bytes": 0,
           "read_calls": 0,
-          "write_bytes": 3629690464,
-          "write_calls": 8528
+          "write_bytes": 3126373984,
+          "write_calls": 8016
         },
         {
           "applicable": false,
@@ -289,14 +289,14 @@
         },
         {
           "applicable": true,
-          "block_count": 28731,
+          "block_count": 24453,
           "fsync_calls": 0,
           "object_count": 0,
           "phase": "shape_consume_reauthentication",
-          "read_bytes": 19227027175,
-          "read_calls": 275017,
-          "write_bytes": 14674255319,
-          "write_calls": 17698
+          "read_bytes": 16095979237,
+          "read_calls": 271684,
+          "write_bytes": 12031843799,
+          "write_calls": 14949
         },
         {
           "applicable": true,
@@ -304,10 +304,10 @@
           "fsync_calls": 627,
           "object_count": 0,
           "phase": "encode_write_postwrite_authentication",
-          "read_bytes": 6355026379,
-          "read_calls": 164070,
+          "read_bytes": 5799281099,
+          "read_calls": 163539,
           "write_bytes": 1500026997,
-          "write_calls": 41765
+          "write_calls": 41664
         },
         {
           "applicable": true,
@@ -345,7 +345,7 @@
         {
           "applicable": true,
           "block_count": 0,
-          "fsync_calls": 11131,
+          "fsync_calls": 10545,
           "object_count": 0,
           "phase": "fsync_synchronization",
           "read_bytes": 0,
@@ -359,8 +359,8 @@
           "fsync_calls": 0,
           "object_count": 0,
           "phase": "recovery_reauthentication",
-          "read_bytes": 18654765578,
-          "read_calls": 29017,
+          "read_bytes": 14944903690,
+          "read_calls": 25703,
           "write_bytes": 0,
           "write_calls": 0
         }
@@ -380,25 +380,25 @@
         },
         "full_lifecycle_peak_bytes_per_live_edge": {
           "denominator_count": 16777216,
-          "numerator_bytes": 11897737216
+          "numerator_bytes": 9173499904
         }
       },
       "scale": 20,
       "source_project_current_allocated_bytes": 681910272,
       "totals": {
-        "allocated_bytes": 7087640576,
-        "current_retained_bytes": 4372516864,
-        "logical_bytes": 7070560427,
-        "phase_block_count": 28731,
-        "phase_fsync_calls": 15134,
+        "allocated_bytes": 7087632384,
+        "current_retained_bytes": 4372508672,
+        "logical_bytes": 7070559866,
+        "phase_block_count": 24453,
+        "phase_fsync_calls": 14548,
         "phase_object_count": 272,
-        "phase_read_bytes": 45635825144,
-        "phase_read_calls": 491135,
-        "phase_write_bytes": 20524507070,
-        "phase_write_calls": 79925,
-        "transient_peak_allocated_bytes": 11897737216
+        "phase_read_bytes": 38239170038,
+        "phase_read_calls": 483957,
+        "phase_write_bytes": 17378779070,
+        "phase_write_calls": 76563,
+        "transient_peak_allocated_bytes": 9173499904
       },
-      "workspace_current_allocated_bytes": 4372516864
+      "workspace_current_allocated_bytes": 4372508672
     },
     {
       "artifacts": [
@@ -433,14 +433,14 @@
           "transient_peak_allocated_bytes": 0
         },
         {
-          "allocated_bytes": 1514541056,
+          "allocated_bytes": 1514545152,
           "category": "uuid_surrogate_indexes",
-          "current_retained_bytes": 1514541056,
+          "current_retained_bytes": 1514545152,
           "logical_bytes": 1514517330,
           "logical_references": 12,
           "physical_objects": 9,
           "source": "storage_owned_snapshot",
-          "transient_peak_allocated_bytes": 1514541056
+          "transient_peak_allocated_bytes": 1514545152
         },
         {
           "allocated_bytes": 0,
@@ -466,9 +466,9 @@
           "allocated_bytes": 2823782400,
           "category": "source-project-construction",
           "current_retained_bytes": 2823782400,
-          "logical_bytes": 2798775908,
-          "logical_references": 7583,
-          "physical_objects": 7583,
+          "logical_bytes": 2798775355,
+          "logical_references": 7581,
+          "physical_objects": 7581,
           "source": "lifecycle_owner_snapshot",
           "transient_peak_allocated_bytes": 2823782400
         },
@@ -513,14 +513,14 @@
           "transient_peak_allocated_bytes": 0
         },
         {
-          "allocated_bytes": 2808385536,
+          "allocated_bytes": 2808389632,
           "category": "source-project-published",
-          "current_retained_bytes": 2808385536,
+          "current_retained_bytes": 2808389632,
           "logical_bytes": 2796153411,
           "logical_references": 4443,
           "physical_objects": 4443,
           "source": "lifecycle_owner_snapshot",
-          "transient_peak_allocated_bytes": 2808385536
+          "transient_peak_allocated_bytes": 2808389632
         },
         {
           "allocated_bytes": 0,
@@ -613,14 +613,14 @@
           "transient_peak_allocated_bytes": 2793910272
         },
         {
-          "allocated_bytes": 2794696704,
+          "allocated_bytes": 2794704896,
           "category": "construction_staging_spill",
-          "current_retained_bytes": 2794696704,
+          "current_retained_bytes": 2794704896,
           "logical_bytes": 2792451093,
           "logical_references": 1104,
           "physical_objects": 1104,
           "source": "construction_receipts",
-          "transient_peak_allocated_bytes": 41050935296
+          "transient_peak_allocated_bytes": 30154256384
         },
         {
           "allocated_bytes": 2793910272,
@@ -655,8 +655,8 @@
           "phase": "append_merge",
           "read_bytes": 0,
           "read_calls": 0,
-          "write_bytes": 14518761856,
-          "write_calls": 34112
+          "write_bytes": 12505495936,
+          "write_calls": 32064
         },
         {
           "applicable": false,
@@ -671,14 +671,14 @@
         },
         {
           "applicable": true,
-          "block_count": 127633,
+          "block_count": 107913,
           "fsync_calls": 0,
           "object_count": 0,
           "phase": "shape_consume_reauthentication",
-          "read_bytes": 86861533025,
-          "read_calls": 1421617,
-          "write_bytes": 68651069027,
-          "write_calls": 87238
+          "read_bytes": 72969998177,
+          "read_calls": 1407101,
+          "write_bytes": 56714079843,
+          "write_calls": 73789
         },
         {
           "applicable": true,
@@ -686,10 +686,10 @@
           "fsync_calls": 2388,
           "object_count": 0,
           "phase": "encode_write_postwrite_authentication",
-          "read_bytes": 25501741827,
-          "read_calls": 654795,
+          "read_bytes": 23278760707,
+          "read_calls": 652669,
           "write_bytes": 6081760278,
-          "write_calls": 173882
+          "write_calls": 173475
         },
         {
           "applicable": true,
@@ -727,7 +727,7 @@
         {
           "applicable": true,
           "block_count": 0,
-          "fsync_calls": 51301,
+          "fsync_calls": 47818,
           "object_count": 0,
           "phase": "fsync_synchronization",
           "read_bytes": 0,
@@ -741,8 +741,8 @@
           "fsync_calls": 0,
           "object_count": 0,
           "phase": "recovery_reauthentication",
-          "read_bytes": 74945564407,
-          "read_calls": 116501,
+          "read_bytes": 60106116855,
+          "read_calls": 103245,
           "write_bytes": 0,
           "write_calls": 0
         }
@@ -750,7 +750,7 @@
       "ratios": {
         "authoritative_project_bytes_per_live_edge": {
           "denominator_count": 67108864,
-          "numerator_bytes": 2808385536
+          "numerator_bytes": 2808389632
         },
         "canonical_edge_bytes_per_live_edge": {
           "denominator_count": 67108864,
@@ -762,25 +762,25 @@
         },
         "full_lifecycle_peak_bytes_per_live_edge": {
           "denominator_count": 67108864,
-          "numerator_bytes": 47657119744
+          "numerator_bytes": 36760567808
         }
       },
       "scale": 22,
-      "source_project_current_allocated_bytes": 2808385536,
+      "source_project_current_allocated_bytes": 2808389632,
       "totals": {
-        "allocated_bytes": 28993941504,
-        "current_retained_bytes": 17813295104,
-        "logical_bytes": 28935747280,
-        "phase_block_count": 127633,
-        "phase_fsync_calls": 67049,
+        "allocated_bytes": 28993957888,
+        "current_retained_bytes": 17813299200,
+        "logical_bytes": 28935746727,
+        "phase_block_count": 107913,
+        "phase_fsync_calls": 63566,
         "phase_object_count": 1088,
-        "phase_read_bytes": 193069289732,
-        "phase_read_calls": 2287487,
-        "phase_write_bytes": 92215886265,
-        "phase_write_calls": 343960,
-        "transient_peak_allocated_bytes": 47657119744
+        "phase_read_bytes": 162115326212,
+        "phase_read_calls": 2257589,
+        "phase_write_bytes": 78265631161,
+        "phase_write_calls": 328056,
+        "transient_peak_allocated_bytes": 36760567808
       },
-      "workspace_current_allocated_bytes": 17813295104
+      "workspace_current_allocated_bytes": 17813299200
     }
   ],
   "schema": "graphforge-g500-ladder-qualification/4"
