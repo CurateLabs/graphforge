@@ -2565,22 +2565,40 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wave9_participant_inventory_rejects_links_and_special_files() {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{FileTypeExt, symlink};
         use std::os::unix::net::UnixListener;
 
+        // Exercise a project path longer than Unix socket pathname limits while
+        // respecting the caller's admitted native-volume temporary directory.
+        let parent = tempfile::tempdir().unwrap();
+        let long_parent = parent.path().join("participant-inventory-".repeat(8));
+        fs::create_dir(&long_parent).unwrap();
         for kind in ["link", "socket"] {
-            let root = tempfile::Builder::new()
-                .prefix("gf")
-                .tempdir_in("/tmp")
-                .unwrap();
+            let root = tempfile::tempdir_in(&long_parent).unwrap();
             let resolved = open_or_initialize_project(root.path()).unwrap();
             let participants = resolved.participants_root();
             let hostile = participants.join(format!("hostile-{kind}"));
-            if kind == "link" {
+            // Only the private alias lives in /tmp; the socket inode and the
+            // admitted project remain on the configured native volume.
+            let alias_root = tempfile::Builder::new()
+                .prefix("gf")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let _listener = if kind == "link" {
                 symlink(root.path().join(CURRENT_FILE), &hostile).unwrap();
+                None
             } else {
-                let _listener = UnixListener::bind(&hostile).unwrap();
-            }
+                let alias = alias_root.path().join("p");
+                symlink(&participants, &alias).unwrap();
+                let listener = UnixListener::bind(alias.join("hostile-socket")).unwrap();
+                assert!(
+                    fs::symlink_metadata(&hostile)
+                        .unwrap()
+                        .file_type()
+                        .is_socket()
+                );
+                Some(listener)
+            };
             assert_code(
                 resolved
                     .validate_complete_participant_inventory()
