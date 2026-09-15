@@ -99,9 +99,10 @@ def summarize(directory):
         boundary_ingest = summary["suite"] == "boundary" and observation["phase"] == "ingest"
         if boundary_ingest and "boundary" not in command:
             raise ValueError("missing boundary ingestion timing receipt")
-        requires_merge = (summary["suite"] == "diagnostic" and label.endswith("-ingest-3")) or (
-            summary["instrumented"] and boundary_ingest
-        )
+        requires_merge = (
+            (summary["suite"] == "diagnostic" or summary.get("custom_counters_enabled"))
+            and label.endswith("-ingest-3")
+        ) or (summary["instrumented"] and boundary_ingest)
         if requires_merge:
             families = command.get("merge_families", {})
             required = {
@@ -120,6 +121,16 @@ def summarize(directory):
             if boundary_ingest:
                 validate_boundary_families(
                     command["boundary"]["nodes"], command["boundary"]["edges"], families
+                )
+            else:
+                selected_case = next(
+                    case
+                    for case in summary["selection"]
+                    if case["name"] == observation["case"]
+                    and case["repetition"] == observation["repetition"]
+                )
+                validate_boundary_families(
+                    selected_case["nodes"], selected_case["edges"], families, 65536
                 )
         result["commands"].append(command)
         tag = f"{observation['case']}-r{observation['repetition']}"

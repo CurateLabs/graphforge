@@ -77,6 +77,7 @@ def main():
         "claim": "diagnostic_only_not_admission",
         "suite": args.suite,
         "instrumented": diagnostic,
+        "custom_counters_enabled": args.instrument or args.suite == "diagnostic",
         "source_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
@@ -99,6 +100,14 @@ def main():
         "cache_policy": "Fresh projects; natural cache state; no system-wide cache changes.",
         "io_wait_available": Path("/proc/sys/kernel/task_delayacct").read_text().strip() == "1",
     }
+    build_identity_path = args.gf.parent / "build-identity.json"
+    build = json.loads(build_identity_path.read_text())
+    if build["artifacts"].get(args.gf.name) != summary["gf_sha256"]:
+        raise RuntimeError("frozen executable disagrees with build identity")
+    summary["collector_commit"] = summary["source_commit"]
+    summary["source_commit"] = build["source_commit"]
+    summary["source_tree"] = build["source_tree"]
+    summary["build_identity_sha256"] = digest(build_identity_path)
     if boundary:
         if not args.boundary_test:
             parser.error("boundary suite requires --boundary-test")
@@ -147,6 +156,28 @@ def main():
     if args.instrument or args.suite == "diagnostic":
         env["GRAPHFORGE_INGEST_DIAGNOSTICS"] = "1282"
 
+    def terminate(pid):
+        if args.suite != "perf":
+            os.killpg(pid, signal.SIGKILL)
+            return
+        # Stop parents before discovering children so sudo's optional PTY/session
+        # cannot leave privileged descendants running after a collector failure.
+        cleanup = """
+import os, signal, sys
+from pathlib import Path
+def stop_tree(pid):
+    try:
+        os.kill(pid, signal.SIGSTOP)
+        children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
+        for child in children:
+            stop_tree(int(child))
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, FileNotFoundError):
+        pass
+stop_tree(int(sys.argv[1]))
+"""
+        subprocess.run(["sudo", "-n", "/usr/bin/python3", "-c", cleanup, str(pid)], check=True)
+
     def run(label, command, phase, case, extra_env=None):
         competitors = active_campaigns()
         if competitors:
@@ -156,7 +187,15 @@ def main():
         actual = ["taskset", "-c", cpus, *map(str, command)]
         if profiling and phase == "ingest":
             if args.suite == "perf":
-                workload = ["runuser", "-u", pwd.getpwuid(os.getuid()).pw_name, "--", *actual]
+                workload = [
+                    "runuser",
+                    "-u",
+                    pwd.getpwuid(os.getuid()).pw_name,
+                    "--",
+                    "env",
+                    f"TMPDIR={env['TMPDIR']}",
+                    *actual,
+                ]
                 actual = [
                     "sudo",
                     "-n",
@@ -214,63 +253,73 @@ def main():
                 stderr=err,
                 start_new_session=True,
             )
-            while True:
-                targets = [process.pid]
-                for target in targets:
-                    try:
-                        children = (
-                            Path(f"/proc/{target}/task/{target}/children").read_text().split()
-                        )
-                        targets.extend(
-                            int(child) for child in children if int(child) not in targets
-                        )
-                        if (
-                            Path(f"/proc/{target}/exe").resolve(strict=True)
-                            != Path(command[0]).resolve()
-                        ):
-                            continue
-                        target_cgroup = (
-                            Path(f"/proc/{target}/cgroup").read_text().strip().removeprefix("0::")
-                        )
-                        if target_cgroup != membership:
-                            failure = "workload_left_resource_cgroup"
-                        status = Path(f"/proc/{target}/status").read_text()
-                        sample = {"elapsed_seconds": time.monotonic() - start}
-                        for line in status.splitlines():
-                            key, _, value = line.partition(":")
-                            if key in {"VmHWM", "VmRSS"}:
-                                sample[key] = int(value.split()[0]) * 1024
-                        if summary["io_wait_available"]:
-                            stat = (
-                                Path(f"/proc/{target}/stat").read_text().rsplit(")", 1)[1].split()
+            try:
+                while True:
+                    targets = [process.pid]
+                    for target in targets:
+                        try:
+                            children = (
+                                Path(f"/proc/{target}/task/{target}/children").read_text().split()
                             )
-                            sample["io_delay_ticks"] = int(stat[39])
-                        samples.append(sample)
-                        if sample.get("VmRSS", 0) > 4 * 1024**3:
-                            failure = "process_rss_limit"
-                    except (FileNotFoundError, ProcessLookupError):
-                        pass
-                if int(time.monotonic() - start) > len(entry.get("host_activity", [])):
-                    activity = [item for item in active_campaigns() if item["pid"] not in targets]
-                    entry.setdefault("host_activity", []).append(activity)
-                    if activity:
-                        failure = "concurrent_campaign"
-                if shutil.disk_usage(args.output).free <= RESERVE:
-                    failure = "disk_reserve"
-                if time.monotonic() - case_start > 14400:
-                    failure = "timeout"
-                if failure:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except PermissionError:
-                        subprocess.run(
-                            ["sudo", "-n", "kill", "-KILL", "--", f"-{process.pid}"], check=True
-                        )
-                pid, status, usage = os.wait4(process.pid, os.WNOHANG)
-                if pid:
-                    process.returncode = os.waitstatus_to_exitcode(status)
-                    break
-                time.sleep(0.01)
+                            targets.extend(
+                                int(child) for child in children if int(child) not in targets
+                            )
+                            if (
+                                Path(f"/proc/{target}/exe").resolve(strict=True)
+                                != Path(command[0]).resolve()
+                            ):
+                                continue
+                            target_cgroup = (
+                                Path(f"/proc/{target}/cgroup")
+                                .read_text()
+                                .strip()
+                                .removeprefix("0::")
+                            )
+                            if target_cgroup != membership:
+                                failure = "workload_left_resource_cgroup"
+                            status = Path(f"/proc/{target}/status").read_text()
+                            sample = {"elapsed_seconds": time.monotonic() - start}
+                            for line in status.splitlines():
+                                key, _, value = line.partition(":")
+                                if key in {"VmHWM", "VmRSS"}:
+                                    sample[key] = int(value.split()[0]) * 1024
+                            if summary["io_wait_available"]:
+                                stat = (
+                                    Path(f"/proc/{target}/stat")
+                                    .read_text()
+                                    .rsplit(")", 1)[1]
+                                    .split()
+                                )
+                                sample["io_delay_ticks"] = int(stat[39])
+                            samples.append(sample)
+                            if sample.get("VmRSS", 0) > 4 * 1024**3:
+                                failure = "process_rss_limit"
+                        except (FileNotFoundError, ProcessLookupError, PermissionError):
+                            pass
+                    if int(time.monotonic() - start) > len(entry.get("host_activity", [])):
+                        activity = [
+                            item for item in active_campaigns() if item["pid"] not in targets
+                        ]
+                        entry.setdefault("host_activity", []).append(activity)
+                        if activity:
+                            failure = "concurrent_campaign"
+                    if shutil.disk_usage(args.output).free <= RESERVE:
+                        failure = "disk_reserve"
+                    if time.monotonic() - case_start > 14400:
+                        failure = "timeout"
+                    if failure:
+                        terminate(process.pid)
+                    pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+                    if pid:
+                        process.returncode = os.waitstatus_to_exitcode(status)
+                        break
+                    time.sleep(0.01)
+            except BaseException as error:
+                terminate(process.pid)
+                os.wait4(process.pid, 0)
+                entry["collector_error"] = type(error).__name__
+                save()
+                raise
         entry.update(
             exit_code=process.returncode,
             failure=failure,

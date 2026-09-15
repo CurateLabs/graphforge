@@ -133,10 +133,23 @@ def expected_commands(
     return labels
 
 
-def validate_boundary_families(nodes: int, edges: int, families: dict[str, Any]) -> None:
+def validate_boundary_families(
+    nodes: int, edges: int, families: dict[str, Any], batch_rows: int = 1
+) -> None:
     # Hand-derived production fan-in-32 work for one-record input runs. Detail
     # labels are exactly four UTF-8 bytes; compact wire widths are 16+1+4 and 48+1+4.
+    if nodes % batch_rows or edges % batch_rows:
+        raise ValueError("fixture requires full fixed-size batches")
+    nodes //= batch_rows
+    edges //= batch_rows
     work = {
+        1: 0,
+        2: 2,
+        4: 4,
+        17: 17,
+        34: 68,
+        68: 136,
+        128: 256,
         16: 16,
         31: 31,
         32: 32,
@@ -162,7 +175,8 @@ def validate_boundary_families(nodes: int, edges: int, families: dict[str, Any])
         "merge-endpoints": (edges, 2 * work[edges], 33),
         "merge-resolved": (2 * edges, work[2 * edges], 25),
     }
-    for family, (runs, rows, width) in expected.items():
+    for family, (runs, run_rows, width) in expected.items():
+        rows = run_rows * batch_rows
         entry = families[family]
         if (
             entry["input_runs"],
@@ -174,7 +188,7 @@ def validate_boundary_families(nodes: int, edges: int, families: dict[str, Any])
             raise ValueError(f"fixed family work oracle mismatch: {family}")
     for kind, count in (("node-rows-", nodes), ("edge-rows-", edges)):
         entries = [entry for family, entry in families.items() if family.startswith(kind)]
-        rows = work[count] + (count if count in {32, 1024} else 0)
+        rows = (work[count] + (count if count in {1, 32, 1024} else 0)) * batch_rows
         if len(entries) != 1 or any(
             (entry["input_runs"], entry["rows_read"], entry["rows_written"]) != (count, rows, rows)
             for entry in entries
