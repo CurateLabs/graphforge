@@ -1300,7 +1300,7 @@ jobs:
         shell: bash
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          bazelisk test --config=ci //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
+          bazelisk test --config=ci --config=correctness //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
           bazelisk build --config=ci \
             //:bazel_smoke \
             //:first_party_libs \
