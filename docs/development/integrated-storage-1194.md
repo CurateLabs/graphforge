@@ -456,3 +456,18 @@ conversion work, with deterministic correctness and failure/recovery oracles.
 It implements no optimization and recommends retaining authentication,
 synchronization and concurrency policy. Machine-readable observations retain
 all selected runs, identities, raw-artifact hashes and baseline benefit floors.
+
+## Completed Parquet root retention (#1286)
+
+The [bounded repair and comparison](evidence/parquet-root-retention-1286.md) retain
+a scheduler-produced single Parquet root with its existing receipt and allocation
+ownership. Production fan-in boundaries prove that exactly the redundant unary
+merge disappears; necessary original-source and multiple-input work remains.
+
+Three fresh ordinary repetitions per S16/S17/S18 baseline and candidate show an
+S17 median ingestion reduction from 21.680 to 19.461 seconds (10.23%), exceeding
+the pre-frozen 0.406-second floor. S16/S18 remain within their thresholds.
+Separate diagnostics confirm the removed rows, bytes and sync calls; resource
+maxima remain within the unchanged limits. The report preserves all observations
+and discloses the full pre-push coverage failures alongside passing correctness
+tests and complete coverage of the changed production lines.
