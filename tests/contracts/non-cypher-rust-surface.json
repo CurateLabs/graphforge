@@ -857,7 +857,7 @@
           "symbol": "parameterized_stream_and_parquet_surfaces_are_exact"
         },
         {
-          "path": "crates/graphforge-api/src/lib.rs",
+          "path": "crates/graphforge-api/src/graph_publication/tests.rs",
           "symbol": "clear_resets_in_memory_state_after_partial_filesystem_failure"
         },
         {
