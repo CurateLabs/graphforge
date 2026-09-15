@@ -1363,6 +1363,22 @@ mod tests {
         )]));
         let mut accumulator = RowMergeAccumulator::new(32, "0-retention-test");
         let mut evidence = GraphConstructionEvidence::default();
+        // Session admission normally initializes the authoritative allocation
+        // categories before any derived merge artifact can be installed.
+        let category = crate::ArtifactCategory::ConstructionStaging;
+        evidence.storage_current.entry(category).or_default();
+        evidence
+            .storage_receipt_category_authorities
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_transient_peak_allocated_bytes
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_receipt_transient_peak_authorities
+            .entry(category)
+            .or_default();
         // Reverse submission order independently checks that the final root
         // retains sorted results, including groups carried across levels.
         for id in (1..=inputs).rev() {
