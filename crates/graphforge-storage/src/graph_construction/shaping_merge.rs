@@ -1247,7 +1247,7 @@ impl RowMergeAccumulator {
         _fan_in: usize,
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
-    ) -> Result<ArtifactReceipt, GfError> {
+    ) -> Result<String, GfError> {
         #[cfg(any(test, feature = "test-support"))]
         super::diagnostics::inputs(&self.diagnostic_family, self.inputs);
         if self.inputs == 0 {
@@ -1266,6 +1266,14 @@ impl RowMergeAccumulator {
             }
             let higher_empty = self.levels[level + 1..].iter().all(Vec::is_empty);
             if higher_empty {
+                reject_cancelled(cancelled)?;
+                // A scheduler-produced root already has the requested sorted,
+                // bounded Parquet layout and a durable writer receipt. Keep its
+                // identity in the completed shape inventory. Accepted source
+                // chunks still need the ordinary materialization below.
+                if inputs.len() == 1 && inputs[0].starts_with("merge-rows-") {
+                    return Ok(inputs.into_iter().next().expect("one row merge root"));
+                }
                 let receipt = measured_merge!(
                     &self.diagnostic_family,
                     level + 1,
@@ -1286,7 +1294,7 @@ impl RowMergeAccumulator {
                         unlink_shape_artifact(root, &input, evidence)?;
                     }
                 }
-                return Ok(receipt);
+                return Ok(receipt.name);
             }
             let name = if inputs.len() == 1 {
                 inputs[0].clone()
@@ -1343,6 +1351,206 @@ mod tests {
     use arrow::array::{FixedSizeBinaryArray, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    const FINAL_ROWS: &str = concat!(
+        "shaped-rows-0-",
+        "0000000000000000000000000000000000000000000000000000000000000000.parquet"
+    );
+
+    fn row_merge_fixture(
+        root: &StableDirectory,
+        inputs: u64,
+    ) -> (RowMergeAccumulator, GraphConstructionEvidence) {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let mut accumulator = RowMergeAccumulator::new(32, "0-retention-test");
+        let mut evidence = GraphConstructionEvidence::default();
+        // Session admission normally initializes the authoritative allocation
+        // categories before any derived merge artifact can be installed.
+        let category = crate::ArtifactCategory::ConstructionStaging;
+        evidence.storage_current.entry(category).or_default();
+        evidence
+            .storage_receipt_category_authorities
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_transient_peak_allocated_bytes
+            .entry(category)
+            .or_default();
+        evidence
+            .storage_receipt_transient_peak_authorities
+            .entry(category)
+            .or_default();
+        // Reverse submission order independently checks that the final root
+        // retains sorted results, including groups carried across levels.
+        for id in (1..=inputs).rev() {
+            let name = format!("source-{id}.parquet");
+            let values = [u128::from(id).to_be_bytes()];
+            let array =
+                FixedSizeBinaryArray::try_from_iter(values.iter().map(|value| value.as_slice()))
+                    .unwrap();
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap();
+            let file = std::fs::File::create(root.path().join(&name)).unwrap();
+            let mut writer = ArrowWriter::try_new(file, schema.clone(), None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            accumulator
+                .push(root, name, 64, 1 << 20, &mut || false, &mut evidence)
+                .unwrap();
+        }
+        (accumulator, evidence)
+    }
+
+    fn assert_row_merge_ids(root: &StableDirectory, name: &str, inputs: u64) {
+        let file = root.open_child_file(OsStr::new(name)).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut expected = 1;
+        for batch in reader {
+            let batch = batch.unwrap();
+            let ids = uuid_column(&batch, "node_uuid").unwrap();
+            for row in 0..batch.num_rows() {
+                assert_eq!(
+                    uuid_value(ids, row).unwrap(),
+                    u128::from(expected).to_be_bytes()
+                );
+                expected += 1_u64;
+            }
+        }
+        assert_eq!(expected, inputs + 1);
+    }
+
+    #[test]
+    fn row_merge_retains_exact_completed_root_without_io_or_reinstallation() {
+        for inputs in [32, 1024] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let names = accumulator.levels.iter().flatten().collect::<Vec<_>>();
+            assert_eq!(names.len(), 1);
+            let name = names[0].clone();
+            let receipt = super::super::receipt_for_existing(&root, &name).unwrap();
+            let capability = super::super::shape_receipt_name(&name);
+            let before_payload = std::fs::read(root.path().join(&name)).unwrap();
+            let before_capability = std::fs::read(root.path().join(&capability)).unwrap();
+            let before_evidence = evidence.clone();
+            let before_names = root.child_names().unwrap();
+            let output = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || false,
+                    &mut evidence,
+                )
+                .unwrap();
+            assert_eq!(output, name);
+            assert_eq!(evidence, before_evidence);
+            assert_eq!(root.child_names().unwrap(), before_names);
+            assert_eq!(
+                super::super::receipt_for_existing(&root, &output).unwrap(),
+                receipt
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(&output)).unwrap(),
+                before_payload
+            );
+            assert_eq!(
+                std::fs::read(root.path().join(capability)).unwrap(),
+                before_capability
+            );
+            assert_eq!(sha256(&before_payload), receipt.sha256);
+            assert_row_merge_ids(&root, &output, inputs);
+        }
+    }
+
+    #[test]
+    fn row_merge_work_is_exact_across_production_fan_in_boundaries() {
+        for (inputs, rows, groups) in [
+            (1, 1, 1),
+            (31, 31, 1),
+            (32, 32, 1),
+            (33, 65, 2),
+            (1023, 2046, 33),
+            (1024, 2048, 33),
+            (1025, 3073, 34),
+        ] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let output = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || false,
+                    &mut evidence,
+                )
+                .unwrap();
+            assert_eq!(evidence.merge_read_records, rows, "inputs={inputs}");
+            assert_eq!(evidence.merge_written_records, rows, "inputs={inputs}");
+            assert_eq!(evidence.merge_groups, groups, "inputs={inputs}");
+            assert!(evidence.parquet_read_bytes > 0);
+            assert!(evidence.parquet_write_bytes > 0);
+            assert!(evidence.peak_merge_inputs <= 32);
+            assert_eq!(
+                output.starts_with("merge-rows-"),
+                matches!(inputs, 32 | 1024)
+            );
+            assert_row_merge_ids(&root, &output, inputs);
+            if inputs == 1 {
+                assert_eq!(output, FINAL_ROWS);
+                assert!(root.path().join("source-1.parquet").exists());
+                let source = root
+                    .open_child_file(OsStr::new("source-1.parquet"))
+                    .unwrap();
+                let output = root.open_child_file(OsStr::new(&output)).unwrap();
+                assert_ne!(
+                    file_identity(&source).unwrap(),
+                    file_identity(&output).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_merge_empty_and_cancelled_finalization_preserve_artifacts_and_evidence() {
+        for inputs in [0, 1, 32] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let root = StableDirectory::open(temporary.path()).unwrap();
+            let (accumulator, mut evidence) = row_merge_fixture(&root, inputs);
+            let before = evidence.clone();
+            let names = root.child_names().unwrap();
+            let error = accumulator
+                .finish(
+                    &root,
+                    FINAL_ROWS,
+                    64,
+                    1 << 20,
+                    32,
+                    &mut || true,
+                    &mut evidence,
+                )
+                .unwrap_err();
+            let expected = if inputs == 0 {
+                "no input"
+            } else {
+                "construction cancelled"
+            };
+            assert!(error.to_string().contains(expected));
+            assert_eq!(evidence, before);
+            assert_eq!(root.child_names().unwrap(), names);
+        }
+    }
 
     #[test]
     fn selected_rows_share_sources_across_interleaving_refill_and_flush() {

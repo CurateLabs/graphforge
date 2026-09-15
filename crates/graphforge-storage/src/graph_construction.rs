@@ -3457,7 +3457,7 @@ impl GraphConstructionSession {
         for ((kind, schema_digest), rows) in row_groups {
             reject_cancelled(&mut cancelled)?;
             let output = format!("shaped-rows-{kind}-{schema_digest}.parquet");
-            rows.finish(
+            let output = rows.finish(
                 &self.root,
                 &output,
                 self.checkpoint.budgets.max_batch_rows,

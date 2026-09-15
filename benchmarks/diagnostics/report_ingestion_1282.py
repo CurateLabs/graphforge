@@ -21,7 +21,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def summarize(directory):
+def summarize(directory, *, retain_completed_roots=False):
     summary = json.loads((directory / "summary.json").read_text())
     if summary.get("status") != "passed":
         raise ValueError("campaign is unfinished")
@@ -60,6 +60,9 @@ def summarize(directory):
         if key not in {"observations", "host_activity", "rustc"}
     }
     result["rustc"] = summary["rustc"]
+    if retain_completed_roots:
+        result["issue"] = 1286
+        result["row_root_policy"] = "retain_completed_intermediate"
     source_manifest = json.loads((directory / "source-manifest.json").read_text())
     native_inputs = {
         path: sha
@@ -157,7 +160,10 @@ def summarize(directory):
                 raise ValueError("missing required merge family diagnostic")
             if boundary_ingest:
                 validate_boundary_families(
-                    command["boundary"]["nodes"], command["boundary"]["edges"], families
+                    command["boundary"]["nodes"],
+                    command["boundary"]["edges"],
+                    families,
+                    retain_completed_roots=retain_completed_roots,
                 )
             else:
                 selected_case = next(
@@ -167,7 +173,11 @@ def summarize(directory):
                     and case["repetition"] == observation["repetition"]
                 )
                 validate_boundary_families(
-                    selected_case["nodes"], selected_case["edges"], families, 65536
+                    selected_case["nodes"],
+                    selected_case["edges"],
+                    families,
+                    65536,
+                    retain_completed_roots=retain_completed_roots,
                 )
         result["commands"].append(command)
         tag = f"{observation['case']}-r{observation['repetition']}"

@@ -147,7 +147,12 @@ def expected_commands(
 
 
 def validate_boundary_families(
-    nodes: int, edges: int, families: dict[str, Any], batch_rows: int = 1
+    nodes: int,
+    edges: int,
+    families: dict[str, Any],
+    batch_rows: int = 1,
+    *,
+    retain_completed_roots: bool = False,
 ) -> None:
     # Hand-derived production fan-in-32 work for one-record input runs. Detail
     # labels are exactly four UTF-8 bytes; compact wire widths are 16+1+4 and 48+1+4.
@@ -201,7 +206,10 @@ def validate_boundary_families(
             raise ValueError(f"fixed family work oracle mismatch: {family}")
     for kind, count in (("node-rows-", nodes), ("edge-rows-", edges)):
         entries = [entry for family, entry in families.items() if family.startswith(kind)]
-        rows = (work[count] + (count if count in {1, 32, 1024} else 0)) * batch_rows
+        # Historical #1282 receipts include the final unary rewrite. #1286
+        # retains completed intermediate roots; original singletons still copy.
+        rewritten = {1} if retain_completed_roots else {1, 32, 1024}
+        rows = (work[count] + (count if count in rewritten else 0)) * batch_rows
         if len(entries) != 1 or any(
             (entry["input_runs"], entry["rows_read"], entry["rows_written"]) != (count, rows, rows)
             for entry in entries
