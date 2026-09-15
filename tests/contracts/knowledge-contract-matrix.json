@@ -88,7 +88,7 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/lib.rs", "symbol": "persistent_open_resolves_and_reuses_one_committed_generation"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/workspace_hydration/tests.rs", "symbol": "persistent_open_resolves_and_reuses_one_committed_generation"},
         {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_publication_is_atomic_idempotent_and_reopenable"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_lifecycle"},
         {"kind": "node", "path": "crates/graphforge-bindings-node/tests/smoke.test.mjs", "symbol": "lifecycle"}

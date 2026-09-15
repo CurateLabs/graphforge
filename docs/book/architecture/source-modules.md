@@ -3,7 +3,10 @@
 The canonical close gate is [#1016](https://github.com/CurateLabs/graphforge/issues/1016).
 Extract cohesive domains inside the settled crate boundaries. Keep production
 behavior, public exports, resource ownership, and current-format semantics intact.
-Each extraction has a native child issue, independent review, and its own green PR.
+Each coherent batch has a native child issue, independent review, and a green PR.
+The maintainer requested larger PRs: complete source modules or related module
+families within a batch, retaining private domain boundaries and the three-change
+work-in-progress limit.
 
 ## Completion policy
 
@@ -32,6 +35,12 @@ exemptions or unchanged-tree release certification are required.
   the parent and new duration module both fit the default bound.
 - [#1293](https://github.com/CurateLabs/graphforge/pull/1293) merged storage
   construction catalog extraction and closed #1292.
+- [#1298](https://github.com/CurateLabs/graphforge/issues/1298) completes the API
+  root decomposition in one batch: `query_execution`, `result_shaping`,
+  `workspace_hydration`, `graph_publication`, and `runtime_ownership`. Direct tests
+  follow those owners; public query integration tests remain at the facade layer.
+  The root and every extracted source/test file fit the default bound. Public
+  methods and the `RuntimeGuard` export retain their existing paths.
 
 ## Remaining domain sequence
 
@@ -42,7 +51,6 @@ Follow live child dependencies and finish queued work before starting more.
 | Relational expressions | Heterogeneous lists; graph/path values; scalar UDFs and builtin dispatch |
 | Relational plan lowering | Scans/property joins; traversal; nested/optional queries; writes |
 | IR binding | Patterns/paths; writes; projection/aggregation; expression/property binding |
-| API root | Query/result shaping; hydration/read authority; graph publication; runtime |
 | API domains | Bulk normalization/publication; knowledge ledgers; repository definitions/skills; checkpoint views/diffs; ontology candidates; composite property routing/rebase |
 | Executor | CREATE; DELETE/SET/REMOVE; traversal/ordinal identity; optional/UNWIND; session/planner |
 | Write driver | CREATE/MERGE; property/label/delete phases |
@@ -58,7 +66,7 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1297; recompute before canonical
+This snapshot records the working tree during #1298; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
@@ -67,7 +75,6 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-api/src/checkpoints.rs` | 3,807 |
 | `crates/graphforge-api/src/composite_publish.rs` | 3,188 |
 | `crates/graphforge-api/src/knowledge.rs` | 5,073 |
-| `crates/graphforge-api/src/lib.rs` | 5,740 |
 | `crates/graphforge-api/src/multi_ontology.rs` | 3,226 |
 | `crates/graphforge-api/src/repository.rs` | 4,457 |
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
