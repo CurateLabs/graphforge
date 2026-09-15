@@ -1352,6 +1352,11 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
+    const FINAL_ROWS: &str = concat!(
+        "shaped-rows-0-",
+        "0000000000000000000000000000000000000000000000000000000000000000.parquet"
+    );
+
     fn row_merge_fixture(
         root: &StableDirectory,
         inputs: u64,
@@ -1438,7 +1443,7 @@ mod tests {
             let output = accumulator
                 .finish(
                     &root,
-                    "shaped-rows.parquet",
+                    FINAL_ROWS,
                     64,
                     1 << 20,
                     32,
@@ -1483,7 +1488,7 @@ mod tests {
             let output = accumulator
                 .finish(
                     &root,
-                    "shaped-rows.parquet",
+                    FINAL_ROWS,
                     64,
                     1 << 20,
                     32,
@@ -1503,7 +1508,7 @@ mod tests {
             );
             assert_row_merge_ids(&root, &output, inputs);
             if inputs == 1 {
-                assert_eq!(output, "shaped-rows.parquet");
+                assert_eq!(output, FINAL_ROWS);
                 assert!(root.path().join("source-1.parquet").exists());
                 let source = root
                     .open_child_file(OsStr::new("source-1.parquet"))
@@ -1528,7 +1533,7 @@ mod tests {
             let error = accumulator
                 .finish(
                     &root,
-                    "shaped-rows.parquet",
+                    FINAL_ROWS,
                     64,
                     1 << 20,
                     32,
