@@ -3,6 +3,12 @@ name: Test Suite
 on:
   pull_request:
     branches: ["main"]
+  # Merge-queue validation. Every merge to main invalidates every other open PR
+  # under the strict status-check policy, so N pull requests cost N full CI
+  # cycles. The queue tests a batch once against the tree it will land on. CI
+  # Gate must report here or the queue stalls, which is why this trigger lands
+  # before the queue rule is enabled.
+  merge_group:
 
 permissions:
   contents: read
