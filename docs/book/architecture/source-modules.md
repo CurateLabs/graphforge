@@ -44,8 +44,8 @@ exemptions or unchanged-tree release certification are required.
 - `expr/list_values.rs` owns heterogeneous-list construction, tagged-value
   assembly, list concatenation, and element promotion. Its direct tests live in
   `expr/list_values/tests.rs`; both reuse the existing scalar and value codecs.
-  [#1300](https://github.com/CurateLabs/graphforge/issues/1300) records this
-  extraction. Expression dispatch and graph-shape compatibility remain in the parent.
+  [#1307](https://github.com/CurateLabs/graphforge/pull/1307) merged this
+  extraction and closed #1300. Expression dispatch and graph-shape compatibility remain in the parent.
 - The same #1300 batch completes the expression root: `expr/graph_values.rs`
   owns whole graph values, graph metadata, and neutral path hydration descriptors;
   `expr/scalar_execution.rs` owns scalar builtin dispatch and execution UDFs.
