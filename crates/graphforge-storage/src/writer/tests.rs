@@ -156,6 +156,22 @@ fn reopened_property_patch_seals_a_complete_authenticated_snapshot() {
 
 #[test]
 fn reopen_recovers_surrogate_tails_without_full_topology_reads() {
+    const CHILD: &str = "GRAPHFORGE_SURROGATE_TAIL_REOPEN_IO_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("writer::tests::reopen_recovers_surrogate_tails_without_full_topology_reads")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated surrogate-tail reopen I/O proof failed"
+        );
+        return;
+    }
+
     let dir = TempDir::new().unwrap();
     let first_node = new_v7();
     let second_node = new_v7();
