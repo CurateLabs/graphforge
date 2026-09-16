@@ -314,12 +314,23 @@ jobs:
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
 
+      # Runs before actions/setup-node deliberately. pnpm/action-setup picks its
+      # bootstrap flavour from whichever `node` is on PATH: below Node 22.13 it
+      # forces the @pnpm/exe standalone bootstrap, whose 11.x release ships no
+      # Intel-macOS binary (pnpm/pnpm#11423, nodejs/node#62893), so the
+      # x86_64-apple-darwin lane died in `npm ci` before any GraphForge code ran.
+      # Ahead of setup-node the action sees the runner image's Node 22.x and
+      # installs the plain, architecture-independent pnpm package instead, which
+      # then self-updates to the packageManager pin and runs fine under the
+      # Node 20 toolchain that setup-node installs next. Revisit once @pnpm/exe
+      # ships a working darwin-x64 binary or the lane moves to pnpm 12.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           architecture: ${{ matrix.node_arch }}
 
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         if: matrix.native_builder == 'napi'
         with:
