@@ -1,0 +1,93 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace run_portable -> Result<(), crate::CliRuntimeError> with Ok(())
+@@ -215,89 +215,17 @@
+ pub(crate) fn run_portable(
+     graph: &mut GraphForge,
+     project_root: &std::path::Path,
+     command: PortableCommand,
+     json: bool,
+     output: &mut dyn Write,
+     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+ ) -> Result<(), crate::CliRuntimeError> {
+-    match command {
+-        PortableCommand::Preview(args) => {
+-            let plan = graph
+-                .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+-                    selection: selection_flag(args.current, args.checkpoint)?,
+-                    request: PortableV2SelectionRequest {
+-                        profile: args.profile.into(),
+-                        strict: args.strict,
+-                    },
+-                    limits: PortableV2Limits::default(),
+-                })
+-                .map_err(map_portable)?;
+-            if json {
+-                write_json(&plan, output)?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "selection class={} fingerprint={} estimated_bytes={}",
+-                    plan.package_class, plan.selection_fingerprint, plan.estimated_payload_bytes
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-        }
+-        PortableCommand::Export(args) => {
+-            let result = graph
+-                .export_portable_v2(
+-                    &PortableV2ExportRequest {
+-                        selection: selection_flag(args.current, args.checkpoint)?,
+-                        output_path: args.output,
+-                        representation: args.format.into(),
+-                        profile: args.profile.into(),
+-                        subset: None,
+-                        limits: PortableV2Limits::default(),
+-                    },
+-                    None,
+-                    |progress| {
+-                        if !json {
+-                            let _ = writeln!(
+-                                output,
+-                                "export progress entries={}/{} bytes={}/{}",
+-                                progress.entries_completed,
+-                                progress.entries_total,
+-                                progress.bytes_completed,
+-                                progress.bytes_total
+-                            );
+-                        }
+-                    },
+-                )
+-                .map_err(map_portable)?;
+-            if json {
+-                write_json(&portable_export_receipt(&result), output)?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "exported {} package_digest={} transport_digest={}",
+-                    result.representation, result.package_digest, result.transport_digest
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-        }
+-        PortableCommand::Staging { command } => match command {
+-            PortableStagingCommand::Inspect => {
+-                crate::ontology_cli::run_portable_staging_inspect(graph, json, output)?;
+-            }
+-            PortableStagingCommand::Adopt(args) => {
+-                crate::ontology_cli::run_portable_staging_adopt(graph, &args, json, output)?;
+-            }
+-        },
+-        command => {
+-            return run_portable_without_graph(project_root, command, json, output, allocation);
+-        }
+-    }
+-    Ok(())
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+     serde_json::to_value(result.receipt())
+         .expect("portable receipt contains serializable scalar values")
+ }
+ 
+ /// Project-free portable operations that must not hold a live `GraphForge` lock.

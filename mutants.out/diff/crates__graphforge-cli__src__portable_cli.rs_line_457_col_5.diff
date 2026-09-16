@@ -1,0 +1,21 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(0)
+@@ -449,17 +449,17 @@
+             Ok(())
+         }
+     }
+ }
+ 
+ fn import_transient_peak(
+     result: &graphforge_api::PortableV2ImportResult,
+ ) -> Result<u64, graphforge_api::GfError> {
+-    result.transient_peak_allocated_bytes()
++    Ok(0) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[derive(Clone, Copy, ValueEnum)]
+ pub(crate) enum QuerySinkFormat {
+     Parquet,
+     ArrowIpc,
+ }
+ 

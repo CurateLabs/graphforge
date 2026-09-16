@@ -1,0 +1,14 @@
+crates/graphforge-cli/src/portable_cli.rs:29:5: replace write_json -> Result<(), graphforge_api::GfError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:39:9: delete match arm (true, None) in selection_flag
+crates/graphforge-cli/src/portable_cli.rs:40:9: delete match arm (false, Some(name)) in selection_flag
+crates/graphforge-cli/src/portable_cli.rs:223:5: replace run_portable -> Result<(), crate::CliRuntimeError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:259:28: delete ! in run_portable
+crates/graphforge-cli/src/portable_cli.rs:299:5: replace portable_export_receipt -> Value with Default::default()
+crates/graphforge-cli/src/portable_cli.rs:315:5: replace run_portable_without_graph -> Result<(), crate::CliRuntimeError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(0)
+crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(1)
+crates/graphforge-cli/src/portable_cli.rs:488:5: replace run_query -> Result<(), graphforge_api::GfError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:605:5: replace run_import_session -> Result<(), graphforge_api::GfError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:698:5: replace write_import_commit -> Result<(), graphforge_api::GfError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:727:5: replace write_session_receipt -> Result<(), graphforge_api::GfError> with Ok(())
+crates/graphforge-cli/src/portable_cli.rs:750:5: replace write_progress -> Result<(), graphforge_api::GfError> with Ok(())

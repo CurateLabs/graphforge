@@ -1,0 +1,1431 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 178.886972231,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.617775468,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:22:5: replace map_portable -> crate::CliRuntimeError with Default::default()",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "map_portable",
+            "return_type": "-> crate::CliRuntimeError",
+            "span": {
+              "start": {
+                "line": 21,
+                "column": 1
+              },
+              "end": {
+                "line": 23,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 22,
+              "column": 5
+            },
+            "end": {
+              "line": 22,
+              "column": 59
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_22_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_22_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.802235976,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:29:5: replace write_json -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "write_json",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 25,
+                "column": 1
+              },
+              "end": {
+                "line": 32,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 29,
+              "column": 5
+            },
+            "end": {
+              "line": 31,
+              "column": 92
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_29_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_29_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.039017234,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.56802638,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:38:5: replace selection_flag -> Result<PortableSelection, graphforge_api::GfError> with Ok(Default::default())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "selection_flag",
+            "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 34,
+                "column": 1
+              },
+              "end": {
+                "line": 45,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 38,
+              "column": 5
+            },
+            "end": {
+              "line": 44,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_38_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_38_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.052601293,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:39:9: delete match arm (true, None) in selection_flag",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "selection_flag",
+            "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 34,
+                "column": 1
+              },
+              "end": {
+                "line": 45,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 39,
+              "column": 9
+            },
+            "end": {
+              "line": 39,
+              "column": 56
+            }
+          },
+          "replacement": "",
+          "genre": "MatchArm"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_39_col_9.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_39_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.056354187,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.317328194,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:40:9: delete match arm (false, Some(name)) in selection_flag",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "selection_flag",
+            "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 34,
+                "column": 1
+              },
+              "end": {
+                "line": 45,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 40,
+              "column": 9
+            },
+            "end": {
+              "line": 40,
+              "column": 72
+            }
+          },
+          "replacement": "",
+          "genre": "MatchArm"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_40_col_9.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_40_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.615673923,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.967345511,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:87:9: replace <impl From<PortableProfile> for PortableV2SelectionProfile>::from -> Self with Default::default()",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "<impl From<PortableProfile> for PortableV2SelectionProfile>::from",
+            "return_type": "-> Self",
+            "span": {
+              "start": {
+                "line": 86,
+                "column": 5
+              },
+              "end": {
+                "line": 94,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 87,
+              "column": 9
+            },
+            "end": {
+              "line": 93,
+              "column": 10
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_87_col_9.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_87_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.05243416,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:105:9: replace <impl From<PortableFormat> for PortableV2Output>::from -> Self with Default::default()",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "<impl From<PortableFormat> for PortableV2Output>::from",
+            "return_type": "-> Self",
+            "span": {
+              "start": {
+                "line": 104,
+                "column": 5
+              },
+              "end": {
+                "line": 109,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 105,
+              "column": 9
+            },
+            "end": {
+              "line": 108,
+              "column": 10
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_105_col_9.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_105_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.002332292,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:120:9: replace <impl From<VerifyMode> for PortableV2Mode>::from -> Self with Default::default()",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "<impl From<VerifyMode> for PortableV2Mode>::from",
+            "return_type": "-> Self",
+            "span": {
+              "start": {
+                "line": 119,
+                "column": 5
+              },
+              "end": {
+                "line": 124,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 120,
+              "column": 9
+            },
+            "end": {
+              "line": 123,
+              "column": 10
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_120_col_9.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_120_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.002572456,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with None",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "oci_credential",
+            "return_type": "-> Option<String>",
+            "span": {
+              "start": {
+                "line": 207,
+                "column": 1
+              },
+              "end": {
+                "line": 209,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 208,
+              "column": 5
+            },
+            "end": {
+              "line": 208,
+              "column": 52
+            }
+          },
+          "replacement": "None",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.460897329,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.568114999,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some(String::new())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "oci_credential",
+            "return_type": "-> Option<String>",
+            "span": {
+              "start": {
+                "line": 207,
+                "column": 1
+              },
+              "end": {
+                "line": 209,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 208,
+              "column": 5
+            },
+            "end": {
+              "line": 208,
+              "column": 52
+            }
+          },
+          "replacement": "Some(String::new())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5_001.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.483155261,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.617782798,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some(\"xyzzy\".into())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "oci_credential",
+            "return_type": "-> Option<String>",
+            "span": {
+              "start": {
+                "line": 207,
+                "column": 1
+              },
+              "end": {
+                "line": 209,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 208,
+              "column": 5
+            },
+            "end": {
+              "line": 208,
+              "column": 52
+            }
+          },
+          "replacement": "Some(\"xyzzy\".into())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5_002.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_208_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.372292692,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.618146648,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:223:5: replace run_portable -> Result<(), crate::CliRuntimeError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "run_portable",
+            "return_type": "-> Result<(), crate::CliRuntimeError>",
+            "span": {
+              "start": {
+                "line": 211,
+                "column": 1
+              },
+              "end": {
+                "line": 296,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 223,
+              "column": 5
+            },
+            "end": {
+              "line": 295,
+              "column": 11
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_223_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_223_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.020811375,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.31601457,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:259:28: delete ! in run_portable",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "run_portable",
+            "return_type": "-> Result<(), crate::CliRuntimeError>",
+            "span": {
+              "start": {
+                "line": 211,
+                "column": 1
+              },
+              "end": {
+                "line": 296,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 259,
+              "column": 28
+            },
+            "end": {
+              "line": 259,
+              "column": 29
+            }
+          },
+          "replacement": "",
+          "genre": "UnaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_259_col_28.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_259_col_28.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.107152155,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.817241219,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:299:5: replace portable_export_receipt -> Value with Default::default()",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "portable_export_receipt",
+            "return_type": "-> Value",
+            "span": {
+              "start": {
+                "line": 298,
+                "column": 1
+              },
+              "end": {
+                "line": 301,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 299,
+              "column": 5
+            },
+            "end": {
+              "line": 300,
+              "column": 72
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_299_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_299_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.750116544,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 12.766262292,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:315:5: replace run_portable_without_graph -> Result<(), crate::CliRuntimeError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "run_portable_without_graph",
+            "return_type": "-> Result<(), crate::CliRuntimeError>",
+            "span": {
+              "start": {
+                "line": 303,
+                "column": 1
+              },
+              "end": {
+                "line": 452,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 315,
+              "column": 5
+            },
+            "end": {
+              "line": 451,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_315_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_315_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.883385627,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 13.31708204,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(0)",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "import_transient_peak",
+            "return_type": "-> Result<u64, graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 454,
+                "column": 1
+              },
+              "end": {
+                "line": 458,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 457,
+              "column": 5
+            },
+            "end": {
+              "line": 457,
+              "column": 44
+            }
+          },
+          "replacement": "Ok(0)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_457_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_457_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.861205575,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 12.716406613,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(1)",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "import_transient_peak",
+            "return_type": "-> Result<u64, graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 454,
+                "column": 1
+              },
+              "end": {
+                "line": 458,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 457,
+              "column": 5
+            },
+            "end": {
+              "line": 457,
+              "column": 44
+            }
+          },
+          "replacement": "Ok(1)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_457_col_5_001.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_457_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.368182752,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 12.765713344,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:488:5: replace run_query -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "run_query",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 482,
+                "column": 1
+              },
+              "end": {
+                "line": 535,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 488,
+              "column": 5
+            },
+            "end": {
+              "line": 534,
+              "column": 11
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_488_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_488_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.812705302,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.367837608,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:605:5: replace run_import_session -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "run_import_session",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 599,
+                "column": 1
+              },
+              "end": {
+                "line": 690,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 605,
+              "column": 5
+            },
+            "end": {
+              "line": 689,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_605_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_605_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.879981045,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.31755312,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:698:5: replace write_import_commit -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "write_import_commit",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 692,
+                "column": 1
+              },
+              "end": {
+                "line": 719,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 698,
+              "column": 5
+            },
+            "end": {
+              "line": 718,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_698_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_698_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.653148474,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.268332173,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:727:5: replace write_session_receipt -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "write_session_receipt",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 721,
+                "column": 1
+              },
+              "end": {
+                "line": 740,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 727,
+              "column": 5
+            },
+            "end": {
+              "line": 739,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_727_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_727_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.477513049,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.318335869,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/graphforge-cli/src/portable_cli.rs:750:5: replace write_progress -> Result<(), graphforge_api::GfError> with Ok(())",
+          "package": "graphforge-cli",
+          "file": "crates/graphforge-cli/src/portable_cli.rs",
+          "function": {
+            "function_name": "write_progress",
+            "return_type": "-> Result<(), graphforge_api::GfError>",
+            "span": {
+              "start": {
+                "line": 742,
+                "column": 1
+              },
+              "end": {
+                "line": 772,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 750,
+              "column": 5
+            },
+            "end": {
+              "line": 771,
+              "column": 6
+            }
+          },
+          "replacement": "Ok(())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__graphforge-cli__src__portable_cli.rs_line_750_col_5.log",
+      "diff_path": "diff/crates__graphforge-cli__src__portable_cli.rs_line_750_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.607254858,
+          "process_status": "Success",
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 14.318391929,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/ubuntu/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=graphforge-cli@0.5.2",
+            "--tests"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 22,
+  "missed": 3,
+  "caught": 14,
+  "timeout": 0,
+  "unviable": 5,
+  "success": 0,
+  "start_time": "2026-09-16T17:11:36.462905961Z",
+  "end_time": "2026-09-16T17:20:46.095204644Z",
+  "cargo_mutants_version": "27.1.0"
+}

@@ -1,0 +1,706 @@
+[
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace map_portable -> crate::CliRuntimeError with Default::default()\n@@ -14,17 +14,17 @@\n     ResultSinkOptions, publish_portable_v2_oci, pull_portable_v2_oci, verify_portable_v2,\n };\n use serde_json::Value;\n use uuid::Uuid;\n \n use crate::canonical_uuid;\n \n fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {\n-    graphforge_api::MultiOntologyError::from(error).into()\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n fn write_json(\n     value: &impl serde::Serialize,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n     serde_json::to_writer(&mut *output, value)\n         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "map_portable",
+      "return_type": "-> crate::CliRuntimeError",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 23
+        },
+        "start": {
+          "column": 1,
+          "line": 21
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:22:5: replace map_portable -> crate::CliRuntimeError with Default::default()",
+    "package": "graphforge-cli",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 22
+      },
+      "start": {
+        "column": 5,
+        "line": 22
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace write_json -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -21,19 +21,17 @@\n fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {\n     graphforge_api::MultiOntologyError::from(error).into()\n }\n \n fn write_json(\n     value: &impl serde::Serialize,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    serde_json::to_writer(&mut *output, value)\n-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-    writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn selection_flag(\n     current: bool,\n     checkpoint: Option<String>,\n ) -> Result<PortableSelection, graphforge_api::GfError> {\n     match (current, checkpoint) {\n         (true, None) => Ok(PortableSelection::Current),\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "write_json",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 32
+        },
+        "start": {
+          "column": 1,
+          "line": 25
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:29:5: replace write_json -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 92,
+        "line": 31
+      },
+      "start": {
+        "column": 5,
+        "line": 29
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace selection_flag -> Result<PortableSelection, graphforge_api::GfError> with Ok(Default::default())\n@@ -30,23 +30,17 @@\n         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n     writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n }\n \n fn selection_flag(\n     current: bool,\n     checkpoint: Option<String>,\n ) -> Result<PortableSelection, graphforge_api::GfError> {\n-    match (current, checkpoint) {\n-        (true, None) => Ok(PortableSelection::Current),\n-        (false, Some(name)) => Ok(PortableSelection::Checkpoint(name)),\n-        _ => Err(graphforge_api::GfError::Validation(\n-            \"exactly one of --current or --checkpoint is required\".into(),\n-        )),\n-    }\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Subcommand)]\n pub(crate) enum PortableCommand {\n     /// Preview a content-free portable-v2 component selection.\n     Preview(PortablePreviewArgs),\n     /// Export an expanded or bundled portable-v2 package.\n     Export(PortableV2ExportArgs),\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "selection_flag",
+      "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 45
+        },
+        "start": {
+          "column": 1,
+          "line": 34
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:38:5: replace selection_flag -> Result<PortableSelection, graphforge_api::GfError> with Ok(Default::default())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 44
+      },
+      "start": {
+        "column": 5,
+        "line": 38
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ delete match arm (true, None) in selection_flag\n@@ -31,17 +31,17 @@\n     writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n }\n \n fn selection_flag(\n     current: bool,\n     checkpoint: Option<String>,\n ) -> Result<PortableSelection, graphforge_api::GfError> {\n     match (current, checkpoint) {\n-        (true, None) => Ok(PortableSelection::Current),\n+         /* ~ changed by cargo-mutants ~ */\n         (false, Some(name)) => Ok(PortableSelection::Checkpoint(name)),\n         _ => Err(graphforge_api::GfError::Validation(\n             \"exactly one of --current or --checkpoint is required\".into(),\n         )),\n     }\n }\n \n #[derive(Subcommand)]\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "selection_flag",
+      "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 45
+        },
+        "start": {
+          "column": 1,
+          "line": 34
+        }
+      }
+    },
+    "genre": "MatchArm",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:39:9: delete match arm (true, None) in selection_flag",
+    "package": "graphforge-cli",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 56,
+        "line": 39
+      },
+      "start": {
+        "column": 9,
+        "line": 39
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ delete match arm (false, Some(name)) in selection_flag\n@@ -32,17 +32,17 @@\n }\n \n fn selection_flag(\n     current: bool,\n     checkpoint: Option<String>,\n ) -> Result<PortableSelection, graphforge_api::GfError> {\n     match (current, checkpoint) {\n         (true, None) => Ok(PortableSelection::Current),\n-        (false, Some(name)) => Ok(PortableSelection::Checkpoint(name)),\n+         /* ~ changed by cargo-mutants ~ */\n         _ => Err(graphforge_api::GfError::Validation(\n             \"exactly one of --current or --checkpoint is required\".into(),\n         )),\n     }\n }\n \n #[derive(Subcommand)]\n pub(crate) enum PortableCommand {\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "selection_flag",
+      "return_type": "-> Result<PortableSelection, graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 45
+        },
+        "start": {
+          "column": 1,
+          "line": 34
+        }
+      }
+    },
+    "genre": "MatchArm",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:40:9: delete match arm (false, Some(name)) in selection_flag",
+    "package": "graphforge-cli",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 72,
+        "line": 40
+      },
+      "start": {
+        "column": 9,
+        "line": 40
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace <impl From<PortableProfile> for PortableV2SelectionProfile>::from -> Self with Default::default()\n@@ -79,23 +79,17 @@\n     OntologyOnly,\n     DataComponents,\n     Artifacts,\n     Settings,\n }\n \n impl From<PortableProfile> for PortableV2SelectionProfile {\n     fn from(value: PortableProfile) -> Self {\n-        match value {\n-            PortableProfile::Complete => Self::Complete,\n-            PortableProfile::OntologyOnly => Self::OntologyOnly,\n-            PortableProfile::DataComponents => Self::DataComponents,\n-            PortableProfile::Artifacts => Self::Artifacts,\n-            PortableProfile::Settings => Self::Settings,\n-        }\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[derive(Clone, Copy, ValueEnum)]\n enum PortableFormat {\n     Expanded,\n     Bundle,\n }\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "<impl From<PortableProfile> for PortableV2SelectionProfile>::from",
+      "return_type": "-> Self",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 94
+        },
+        "start": {
+          "column": 5,
+          "line": 86
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:87:9: replace <impl From<PortableProfile> for PortableV2SelectionProfile>::from -> Self with Default::default()",
+    "package": "graphforge-cli",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 93
+      },
+      "start": {
+        "column": 9,
+        "line": 87
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace <impl From<PortableFormat> for PortableV2Output>::from -> Self with Default::default()\n@@ -97,20 +97,17 @@\n #[derive(Clone, Copy, ValueEnum)]\n enum PortableFormat {\n     Expanded,\n     Bundle,\n }\n \n impl From<PortableFormat> for PortableV2Output {\n     fn from(value: PortableFormat) -> Self {\n-        match value {\n-            PortableFormat::Expanded => Self::Expanded,\n-            PortableFormat::Bundle => Self::Bundle,\n-        }\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[derive(Clone, Copy, ValueEnum)]\n enum VerifyMode {\n     Inspect,\n     Full,\n }\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "<impl From<PortableFormat> for PortableV2Output>::from",
+      "return_type": "-> Self",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 109
+        },
+        "start": {
+          "column": 5,
+          "line": 104
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:105:9: replace <impl From<PortableFormat> for PortableV2Output>::from -> Self with Default::default()",
+    "package": "graphforge-cli",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 108
+      },
+      "start": {
+        "column": 9,
+        "line": 105
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace <impl From<VerifyMode> for PortableV2Mode>::from -> Self with Default::default()\n@@ -112,20 +112,17 @@\n #[derive(Clone, Copy, ValueEnum)]\n enum VerifyMode {\n     Inspect,\n     Full,\n }\n \n impl From<VerifyMode> for PortableV2Mode {\n     fn from(value: VerifyMode) -> Self {\n-        match value {\n-            VerifyMode::Inspect => Self::StructureOnly,\n-            VerifyMode::Full => Self::Full,\n-        }\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[derive(Args)]\n pub(crate) struct PortablePreviewArgs {\n     #[arg(\n         long,\n         required_unless_present = \"checkpoint\",\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "<impl From<VerifyMode> for PortableV2Mode>::from",
+      "return_type": "-> Self",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 124
+        },
+        "start": {
+          "column": 5,
+          "line": 119
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:120:9: replace <impl From<VerifyMode> for PortableV2Mode>::from -> Self with Default::default()",
+    "package": "graphforge-cli",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 123
+      },
+      "start": {
+        "column": 9,
+        "line": 120
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace oci_credential -> Option<String> with None\n@@ -200,17 +200,17 @@\n     expected_digest: Option<String>,\n     #[arg(long)]\n     destination: PathBuf,\n     #[arg(long)]\n     insecure_http: bool,\n }\n \n fn oci_credential() -> Option<String> {\n-    std::env::var(\"GRAPHFORGE_OCI_CREDENTIAL\").ok()\n+    None /* ~ changed by cargo-mutants ~ */\n }\n \n #[allow(\n     clippy::too_many_lines,\n     reason = \"CLI dispatch keeps preview/export in one portable command table\"\n )]\n pub(crate) fn run_portable(\n     graph: &mut GraphForge,\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "oci_credential",
+      "return_type": "-> Option<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 209
+        },
+        "start": {
+          "column": 1,
+          "line": 207
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with None",
+    "package": "graphforge-cli",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 208
+      },
+      "start": {
+        "column": 5,
+        "line": 208
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace oci_credential -> Option<String> with Some(String::new())\n@@ -200,17 +200,17 @@\n     expected_digest: Option<String>,\n     #[arg(long)]\n     destination: PathBuf,\n     #[arg(long)]\n     insecure_http: bool,\n }\n \n fn oci_credential() -> Option<String> {\n-    std::env::var(\"GRAPHFORGE_OCI_CREDENTIAL\").ok()\n+    Some(String::new()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[allow(\n     clippy::too_many_lines,\n     reason = \"CLI dispatch keeps preview/export in one portable command table\"\n )]\n pub(crate) fn run_portable(\n     graph: &mut GraphForge,\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "oci_credential",
+      "return_type": "-> Option<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 209
+        },
+        "start": {
+          "column": 1,
+          "line": 207
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some(String::new())",
+    "package": "graphforge-cli",
+    "replacement": "Some(String::new())",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 208
+      },
+      "start": {
+        "column": 5,
+        "line": 208
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace oci_credential -> Option<String> with Some(\"xyzzy\".into())\n@@ -200,17 +200,17 @@\n     expected_digest: Option<String>,\n     #[arg(long)]\n     destination: PathBuf,\n     #[arg(long)]\n     insecure_http: bool,\n }\n \n fn oci_credential() -> Option<String> {\n-    std::env::var(\"GRAPHFORGE_OCI_CREDENTIAL\").ok()\n+    Some(\"xyzzy\".into()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[allow(\n     clippy::too_many_lines,\n     reason = \"CLI dispatch keeps preview/export in one portable command table\"\n )]\n pub(crate) fn run_portable(\n     graph: &mut GraphForge,\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "oci_credential",
+      "return_type": "-> Option<String>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 209
+        },
+        "start": {
+          "column": 1,
+          "line": 207
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some(\"xyzzy\".into())",
+    "package": "graphforge-cli",
+    "replacement": "Some(\"xyzzy\".into())",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 208
+      },
+      "start": {
+        "column": 5,
+        "line": 208
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace run_portable -> Result<(), crate::CliRuntimeError> with Ok(())\n@@ -215,89 +215,17 @@\n pub(crate) fn run_portable(\n     graph: &mut GraphForge,\n     project_root: &std::path::Path,\n     command: PortableCommand,\n     json: bool,\n     output: &mut dyn Write,\n     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,\n ) -> Result<(), crate::CliRuntimeError> {\n-    match command {\n-        PortableCommand::Preview(args) => {\n-            let plan = graph\n-                .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {\n-                    selection: selection_flag(args.current, args.checkpoint)?,\n-                    request: PortableV2SelectionRequest {\n-                        profile: args.profile.into(),\n-                        strict: args.strict,\n-                    },\n-                    limits: PortableV2Limits::default(),\n-                })\n-                .map_err(map_portable)?;\n-            if json {\n-                write_json(&plan, output)?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"selection class={} fingerprint={} estimated_bytes={}\",\n-                    plan.package_class, plan.selection_fingerprint, plan.estimated_payload_bytes\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-        }\n-        PortableCommand::Export(args) => {\n-            let result = graph\n-                .export_portable_v2(\n-                    &PortableV2ExportRequest {\n-                        selection: selection_flag(args.current, args.checkpoint)?,\n-                        output_path: args.output,\n-                        representation: args.format.into(),\n-                        profile: args.profile.into(),\n-                        subset: None,\n-                        limits: PortableV2Limits::default(),\n-                    },\n-                    None,\n-                    |progress| {\n-                        if !json {\n-                            let _ = writeln!(\n-                                output,\n-                                \"export progress entries={}/{} bytes={}/{}\",\n-                                progress.entries_completed,\n-                                progress.entries_total,\n-                                progress.bytes_completed,\n-                                progress.bytes_total\n-                            );\n-                        }\n-                    },\n-                )\n-                .map_err(map_portable)?;\n-            if json {\n-                write_json(&portable_export_receipt(&result), output)?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"exported {} package_digest={} transport_digest={}\",\n-                    result.representation, result.package_digest, result.transport_digest\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-        }\n-        PortableCommand::Staging { command } => match command {\n-            PortableStagingCommand::Inspect => {\n-                crate::ontology_cli::run_portable_staging_inspect(graph, json, output)?;\n-            }\n-            PortableStagingCommand::Adopt(args) => {\n-                crate::ontology_cli::run_portable_staging_adopt(graph, &args, json, output)?;\n-            }\n-        },\n-        command => {\n-            return run_portable_without_graph(project_root, command, json, output, allocation);\n-        }\n-    }\n-    Ok(())\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {\n     serde_json::to_value(result.receipt())\n         .expect(\"portable receipt contains serializable scalar values\")\n }\n \n /// Project-free portable operations that must not hold a live `GraphForge` lock.\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "run_portable",
+      "return_type": "-> Result<(), crate::CliRuntimeError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 296
+        },
+        "start": {
+          "column": 1,
+          "line": 211
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:223:5: replace run_portable -> Result<(), crate::CliRuntimeError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 295
+      },
+      "start": {
+        "column": 5,
+        "line": 223
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ delete ! in run_portable\n@@ -251,17 +251,17 @@\n                         output_path: args.output,\n                         representation: args.format.into(),\n                         profile: args.profile.into(),\n                         subset: None,\n                         limits: PortableV2Limits::default(),\n                     },\n                     None,\n                     |progress| {\n-                        if !json {\n+                        if  /* ~ changed by cargo-mutants ~ */json {\n                             let _ = writeln!(\n                                 output,\n                                 \"export progress entries={}/{} bytes={}/{}\",\n                                 progress.entries_completed,\n                                 progress.entries_total,\n                                 progress.bytes_completed,\n                                 progress.bytes_total\n                             );\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "run_portable",
+      "return_type": "-> Result<(), crate::CliRuntimeError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 296
+        },
+        "start": {
+          "column": 1,
+          "line": 211
+        }
+      }
+    },
+    "genre": "UnaryOperator",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:259:28: delete ! in run_portable",
+    "package": "graphforge-cli",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 29,
+        "line": 259
+      },
+      "start": {
+        "column": 28,
+        "line": 259
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace portable_export_receipt -> Value with Default::default()\n@@ -291,18 +291,17 @@\n         command => {\n             return run_portable_without_graph(project_root, command, json, output, allocation);\n         }\n     }\n     Ok(())\n }\n \n fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {\n-    serde_json::to_value(result.receipt())\n-        .expect(\"portable receipt contains serializable scalar values\")\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n /// Project-free portable operations that must not hold a live `GraphForge` lock.\n #[allow(\n     clippy::too_many_lines,\n     reason = \"CLI dispatch keeps verify/import/OCI in one project-free portable table\"\n )]\n pub(crate) fn run_portable_without_graph(\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "portable_export_receipt",
+      "return_type": "-> Value",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 301
+        },
+        "start": {
+          "column": 1,
+          "line": 298
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:299:5: replace portable_export_receipt -> Value with Default::default()",
+    "package": "graphforge-cli",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 72,
+        "line": 300
+      },
+      "start": {
+        "column": 5,
+        "line": 299
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace run_portable_without_graph -> Result<(), crate::CliRuntimeError> with Ok(())\n@@ -307,153 +307,17 @@\n )]\n pub(crate) fn run_portable_without_graph(\n     project_root: &std::path::Path,\n     command: PortableCommand,\n     json: bool,\n     output: &mut dyn Write,\n     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,\n ) -> Result<(), crate::CliRuntimeError> {\n-    match command {\n-        PortableCommand::Preview(_)\n-        | PortableCommand::Export(_)\n-        | PortableCommand::Staging { .. } => Err(graphforge_api::GfError::Validation(\n-            \"preview/export require an open project handle\".into(),\n-        )\n-        .into()),\n-        PortableCommand::Verify(args) => {\n-            let report = verify_portable_v2(\n-                &PortableVerifyRequest {\n-                    input: args.input,\n-                    mode: args.mode.into(),\n-                    limits: PortableV2Limits::default(),\n-                },\n-                None,\n-            )\n-            .map_err(map_portable)?;\n-            if json {\n-                write_json(&report, output)?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"verified package_digest={} integrity={:?} compatibility={:?}\",\n-                    report.package_digest, report.integrity, report.compatibility\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-            Ok(())\n-        }\n-        PortableCommand::Import(args) => {\n-            let request = PortableV2ImportRequest {\n-                input: args.input,\n-                operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),\n-                limits: PortableV2Limits::default(),\n-            };\n-            let result = match allocation {\n-                Some(allocation) => allocation.import(project_root, &request, None),\n-                None => GraphForge::import_portable_v2(project_root, &request, None),\n-            }\n-            .map_err(map_portable)?;\n-            let transient_peak_allocated_bytes = import_transient_peak(&result)?;\n-            if json {\n-                write_json(\n-                    &serde_json::json!({\n-                        \"contract\": \"graphforge-portable-import/2\",\n-                        \"package_digest\": result.package_digest,\n-                        \"transport_digest\": result.transport_digest,\n-                        \"generation_uuid\": result.generation_uuid,\n-                        \"idempotent_replay\": result.idempotent_replay,\n-                        \"transient_peak_allocated_bytes\": transient_peak_allocated_bytes,\n-                    }),\n-                    output,\n-                )?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"imported generation {} package_digest={}\",\n-                    result.generation_uuid, result.package_digest\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-            Ok(())\n-        }\n-        PortableCommand::PublishOci(args) => {\n-            let reference = publish_portable_v2_oci(\n-                &PortableV2OciPublishFacadeRequest {\n-                    package_path: args.package,\n-                    registry: args.registry,\n-                    repository: args.repository,\n-                    tag: args.tag,\n-                    limits: PortableV2Limits::default(),\n-                    authenticity: PortableV2OciAuthenticityPolicy::default(),\n-                    signature: None,\n-                    insecure_http: args.insecure_http,\n-                    credential: oci_credential(),\n-                },\n-                None,\n-            )\n-            .map_err(map_portable)?;\n-            if json {\n-                write_json(\n-                    &serde_json::json!({\n-                        \"contract\": \"graphforge-portable-oci-publish/2\",\n-                        \"registry\": reference.registry,\n-                        \"repository\": reference.repository,\n-                        \"oci_manifest_digest\": reference.oci_manifest_digest,\n-                        \"package_digest\": reference.package_digest,\n-                        \"tag\": reference.tag,\n-                    }),\n-                    output,\n-                )?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"published oci_manifest_digest={}\",\n-                    reference.oci_manifest_digest\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-            Ok(())\n-        }\n-        PortableCommand::PullOci(args) => {\n-            let receipt = pull_portable_v2_oci(\n-                &PortableV2OciPullFacadeRequest {\n-                    registry: args.registry,\n-                    repository: args.repository,\n-                    reference: args.reference,\n-                    expected_oci_digest: args.expected_digest,\n-                    destination: args.destination,\n-                    limits: PortableV2Limits::default(),\n-                    authenticity: PortableV2OciAuthenticityPolicy::default(),\n-                    insecure_http: args.insecure_http,\n-                    credential: oci_credential(),\n-                },\n-                None,\n-            )\n-            .map_err(map_portable)?;\n-            if json {\n-                write_json(\n-                    &serde_json::json!({\n-                        \"contract\": \"graphforge-portable-oci-pull/2\",\n-                        \"oci_manifest_digest\": receipt.reference.oci_manifest_digest,\n-                        \"package_digest\": receipt.reference.package_digest,\n-                    }),\n-                    output,\n-                )?;\n-            } else {\n-                writeln!(\n-                    output,\n-                    \"pulled package_digest={} oci_manifest_digest={}\",\n-                    receipt.reference.package_digest, receipt.reference.oci_manifest_digest\n-                )\n-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-            }\n-            Ok(())\n-        }\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn import_transient_peak(\n     result: &graphforge_api::PortableV2ImportResult,\n ) -> Result<u64, graphforge_api::GfError> {\n     result.transient_peak_allocated_bytes()\n }\n \n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "run_portable_without_graph",
+      "return_type": "-> Result<(), crate::CliRuntimeError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 452
+        },
+        "start": {
+          "column": 1,
+          "line": 303
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:315:5: replace run_portable_without_graph -> Result<(), crate::CliRuntimeError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 451
+      },
+      "start": {
+        "column": 5,
+        "line": 315
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(0)\n@@ -449,17 +449,17 @@\n             Ok(())\n         }\n     }\n }\n \n fn import_transient_peak(\n     result: &graphforge_api::PortableV2ImportResult,\n ) -> Result<u64, graphforge_api::GfError> {\n-    result.transient_peak_allocated_bytes()\n+    Ok(0) /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Clone, Copy, ValueEnum)]\n pub(crate) enum QuerySinkFormat {\n     Parquet,\n     ArrowIpc,\n }\n \n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "import_transient_peak",
+      "return_type": "-> Result<u64, graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 458
+        },
+        "start": {
+          "column": 1,
+          "line": 454
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(0)",
+    "package": "graphforge-cli",
+    "replacement": "Ok(0)",
+    "span": {
+      "end": {
+        "column": 44,
+        "line": 457
+      },
+      "start": {
+        "column": 5,
+        "line": 457
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(1)\n@@ -449,17 +449,17 @@\n             Ok(())\n         }\n     }\n }\n \n fn import_transient_peak(\n     result: &graphforge_api::PortableV2ImportResult,\n ) -> Result<u64, graphforge_api::GfError> {\n-    result.transient_peak_allocated_bytes()\n+    Ok(1) /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Clone, Copy, ValueEnum)]\n pub(crate) enum QuerySinkFormat {\n     Parquet,\n     ArrowIpc,\n }\n \n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "import_transient_peak",
+      "return_type": "-> Result<u64, graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 458
+        },
+        "start": {
+          "column": 1,
+          "line": 454
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:457:5: replace import_transient_peak -> Result<u64, graphforge_api::GfError> with Ok(1)",
+    "package": "graphforge-cli",
+    "replacement": "Ok(1)",
+    "span": {
+      "end": {
+        "column": 44,
+        "line": 457
+      },
+      "start": {
+        "column": 5,
+        "line": 457
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace run_query -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -480,63 +480,17 @@\n }\n \n pub(crate) fn run_query(\n     graph: &GraphForge,\n     args: &QueryArgs,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    let options = ResultSinkOptions {\n-        max_batch_rows: args.max_batch_rows.unwrap_or(65_536),\n-        max_row_group_rows: args.max_row_group_rows.unwrap_or(65_536),\n-    };\n-    let path = args.output.to_str().ok_or_else(|| {\n-        graphforge_api::GfError::Validation(\"query --output must be valid UTF-8\".into())\n-    })?;\n-    let params = std::collections::HashMap::new();\n-    let format = match args.format {\n-        QuerySinkFormat::Parquet => graphforge_api::ResultSinkFormat::Parquet,\n-        QuerySinkFormat::ArrowIpc => graphforge_api::ResultSinkFormat::ArrowIpc,\n-    };\n-    let receipt = graph.execute_to_result_sink_with_evidence(\n-        &args.cypher,\n-        &params,\n-        path,\n-        format,\n-        &options,\n-        None,\n-    )?;\n-    if json {\n-        write_json(\n-            &serde_json::json!({\n-                \"contract\": \"graphforge-result-sink/2\",\n-                \"destination\": receipt.sink.destination,\n-                \"format\": format!(\"{:?}\", receipt.sink.format),\n-                \"rows\": receipt.sink.progress.rows,\n-                \"batches\": receipt.sink.progress.batches,\n-                \"bytes\": receipt.sink.progress.bytes,\n-                \"complete\": receipt.sink.progress.complete,\n-                \"result_sha256\": receipt.result_sha256,\n-                \"scalar_u64\": receipt.scalar_u64,\n-                \"query_evidence\": receipt.evidence,\n-            }),\n-            output,\n-        )?;\n-    } else {\n-        writeln!(\n-            output,\n-            \"wrote {} rows={} bytes={}\",\n-            receipt.sink.destination.display(),\n-            receipt.sink.progress.rows,\n-            receipt.sink.progress.bytes\n-        )\n-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;\n-    }\n-    Ok(())\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Subcommand)]\n pub(crate) enum ImportSessionCommand {\n     /// Open a new staged import session.\n     Begin(ImportSessionBeginArgs),\n     /// Resume an existing session by UUID.\n     Resume(ImportSessionResumeArgs),\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "run_query",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 535
+        },
+        "start": {
+          "column": 1,
+          "line": 482
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:488:5: replace run_query -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 534
+      },
+      "start": {
+        "column": 5,
+        "line": 488
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace run_import_session -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -597,101 +597,17 @@\n }\n \n pub(crate) fn run_import_session(\n     graph: &GraphForge,\n     command: ImportSessionCommand,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    match command {\n-        ImportSessionCommand::Begin(args) => {\n-            let session = graph.begin_import_session(\n-                OperationId(canonical_uuid(&args.operation_uuid)?),\n-                ImportSessionLimits::default(),\n-            )?;\n-            write_session_receipt(session.session_uuid(), \"begun\", json, output)\n-        }\n-        ImportSessionCommand::Resume(args) => {\n-            let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            write_session_receipt(session.session_uuid(), \"resumed\", json, output)\n-        }\n-        ImportSessionCommand::Status(args) => {\n-            let session_uuid = canonical_uuid(&args.session_uuid)?;\n-            let (phase, progress) = graph.import_session_status(session_uuid)?;\n-            write_progress(\n-                session_uuid,\n-                &format!(\"{phase:?}\").to_ascii_lowercase(),\n-                &progress,\n-                None,\n-                json,\n-                output,\n-            )\n-        }\n-        ImportSessionCommand::RegisterParquet(args) => {\n-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            let kind = match args.kind {\n-                ImportSourceKindArg::Nodes => BulkInputKind::Node,\n-                ImportSourceKindArg::Edges => BulkInputKind::Edge,\n-            };\n-            session.register_parquet(kind, &args.path)?;\n-            write_session_receipt(session.session_uuid(), \"registered\", json, output)\n-        }\n-        ImportSessionCommand::Checkpoint(args) => {\n-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            let progress = session.checkpoint()?;\n-            write_progress(\n-                session.session_uuid(),\n-                \"checkpointed\",\n-                &progress,\n-                None,\n-                json,\n-                output,\n-            )\n-        }\n-        ImportSessionCommand::Validate(args) => {\n-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            let progress = session.validate(graph)?;\n-            write_progress(\n-                session.session_uuid(),\n-                \"validated\",\n-                &progress,\n-                Some(session.operation_timings()),\n-                json,\n-                output,\n-            )\n-        }\n-        ImportSessionCommand::Commit(args) => {\n-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            let generation = session.commit(graph, None)?;\n-            write_import_commit(&session, generation, json, output)\n-        }\n-        ImportSessionCommand::Abort(args) => {\n-            let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;\n-            let session_uuid = session.session_uuid();\n-            let progress = session.abort(graph)?;\n-            write_progress(session_uuid, \"aborted\", &progress, None, json, output)\n-        }\n-        ImportSessionCommand::Cleanup(args) => {\n-            let removed =\n-                graph.cleanup_stale_import_sessions(Duration::from_secs(args.max_age_secs))?;\n-            if json {\n-                write_json(\n-                    &serde_json::json!({\n-                        \"contract\": \"graphforge-import-session-cleanup/1\",\n-                        \"removed\": removed,\n-                    }),\n-                    output,\n-                )\n-            } else {\n-                writeln!(output, \"removed {removed} stale import sessions\")\n-                    .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n-            }\n-        }\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn write_import_commit(\n     session: &graphforge_api::GraphImportSession,\n     generation: Uuid,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "run_import_session",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 690
+        },
+        "start": {
+          "column": 1,
+          "line": 599
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:605:5: replace run_import_session -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 689
+      },
+      "start": {
+        "column": 5,
+        "line": 605
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace write_import_commit -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -690,37 +690,17 @@\n }\n \n fn write_import_commit(\n     session: &graphforge_api::GraphImportSession,\n     generation: Uuid,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    let (_, progress) = session.status();\n-    if json {\n-        write_json(\n-            &serde_json::json!({\n-                \"contract\": \"graphforge-import-session/1\",\n-                \"outcome\": \"committed\",\n-                \"session_uuid\": session.session_uuid(),\n-                \"generation_uuid\": generation,\n-                \"construction\": progress.construction,\n-                \"operation_timings\": session.operation_timings(),\n-            }),\n-            output,\n-        )\n-    } else {\n-        writeln!(\n-            output,\n-            \"committed session {} generation {generation}\",\n-            session.session_uuid()\n-        )\n-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn write_session_receipt(\n     session_uuid: Uuid,\n     outcome: &str,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "write_import_commit",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 719
+        },
+        "start": {
+          "column": 1,
+          "line": 692
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:698:5: replace write_import_commit -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 718
+      },
+      "start": {
+        "column": 5,
+        "line": 698
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace write_session_receipt -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -719,29 +719,17 @@\n }\n \n fn write_session_receipt(\n     session_uuid: Uuid,\n     outcome: &str,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    if json {\n-        write_json(\n-            &serde_json::json!({\n-                \"contract\": \"graphforge-import-session/1\",\n-                \"outcome\": outcome,\n-                \"session_uuid\": session_uuid,\n-            }),\n-            output,\n-        )\n-    } else {\n-        writeln!(output, \"{outcome} session {session_uuid}\")\n-            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n fn write_progress(\n     session_uuid: Uuid,\n     outcome: &str,\n     progress: &graphforge_api::ImportProgress,\n     timings: Option<graphforge_api::ImportOperationTimings>,\n     json: bool,\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "write_session_receipt",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 740
+        },
+        "start": {
+          "column": 1,
+          "line": 721
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:727:5: replace write_session_receipt -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 739
+      },
+      "start": {
+        "column": 5,
+        "line": 727
+      }
+    }
+  },
+  {
+    "diff": "--- crates/graphforge-cli/src/portable_cli.rs\n+++ replace write_progress -> Result<(), graphforge_api::GfError> with Ok(())\n@@ -742,38 +742,17 @@\n fn write_progress(\n     session_uuid: Uuid,\n     outcome: &str,\n     progress: &graphforge_api::ImportProgress,\n     timings: Option<graphforge_api::ImportOperationTimings>,\n     json: bool,\n     output: &mut dyn Write,\n ) -> Result<(), graphforge_api::GfError> {\n-    if json {\n-        let mut receipt = serde_json::json!({\n-            \"contract\": \"graphforge-import-session/1\",\n-            \"outcome\": outcome,\n-            \"session_uuid\": session_uuid,\n-            \"rows_accepted\": progress.rows_accepted,\n-            \"rows_rejected\": progress.rows_rejected,\n-            \"bytes_accepted\": progress.bytes_accepted,\n-            \"construction\": progress.construction,\n-        });\n-        if let Some(timings) = timings {\n-            receipt[\"operation_timings\"] = serde_json::json!(timings);\n-        }\n-        write_json(&receipt, output)\n-    } else {\n-        writeln!(\n-            output,\n-            \"{outcome} session {session_uuid} rows_accepted={} bytes_accepted={}\",\n-            progress.rows_accepted, progress.bytes_accepted\n-        )\n-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod lifecycle_storage_tests {\n     use super::*;\n     use std::collections::BTreeMap;\n \n     #[test]\n",
+    "file": "crates/graphforge-cli/src/portable_cli.rs",
+    "function": {
+      "function_name": "write_progress",
+      "return_type": "-> Result<(), graphforge_api::GfError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 772
+        },
+        "start": {
+          "column": 1,
+          "line": 742
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/graphforge-cli/src/portable_cli.rs:750:5: replace write_progress -> Result<(), graphforge_api::GfError> with Ok(())",
+    "package": "graphforge-cli",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 771
+      },
+      "start": {
+        "column": 5,
+        "line": 750
+      }
+    }
+  }
+]

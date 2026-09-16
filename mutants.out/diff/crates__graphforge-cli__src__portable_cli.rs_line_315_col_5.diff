@@ -1,0 +1,157 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace run_portable_without_graph -> Result<(), crate::CliRuntimeError> with Ok(())
+@@ -307,153 +307,17 @@
+ )]
+ pub(crate) fn run_portable_without_graph(
+     project_root: &std::path::Path,
+     command: PortableCommand,
+     json: bool,
+     output: &mut dyn Write,
+     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
+ ) -> Result<(), crate::CliRuntimeError> {
+-    match command {
+-        PortableCommand::Preview(_)
+-        | PortableCommand::Export(_)
+-        | PortableCommand::Staging { .. } => Err(graphforge_api::GfError::Validation(
+-            "preview/export require an open project handle".into(),
+-        )
+-        .into()),
+-        PortableCommand::Verify(args) => {
+-            let report = verify_portable_v2(
+-                &PortableVerifyRequest {
+-                    input: args.input,
+-                    mode: args.mode.into(),
+-                    limits: PortableV2Limits::default(),
+-                },
+-                None,
+-            )
+-            .map_err(map_portable)?;
+-            if json {
+-                write_json(&report, output)?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "verified package_digest={} integrity={:?} compatibility={:?}",
+-                    report.package_digest, report.integrity, report.compatibility
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-            Ok(())
+-        }
+-        PortableCommand::Import(args) => {
+-            let request = PortableV2ImportRequest {
+-                input: args.input,
+-                operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
+-                limits: PortableV2Limits::default(),
+-            };
+-            let result = match allocation {
+-                Some(allocation) => allocation.import(project_root, &request, None),
+-                None => GraphForge::import_portable_v2(project_root, &request, None),
+-            }
+-            .map_err(map_portable)?;
+-            let transient_peak_allocated_bytes = import_transient_peak(&result)?;
+-            if json {
+-                write_json(
+-                    &serde_json::json!({
+-                        "contract": "graphforge-portable-import/2",
+-                        "package_digest": result.package_digest,
+-                        "transport_digest": result.transport_digest,
+-                        "generation_uuid": result.generation_uuid,
+-                        "idempotent_replay": result.idempotent_replay,
+-                        "transient_peak_allocated_bytes": transient_peak_allocated_bytes,
+-                    }),
+-                    output,
+-                )?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "imported generation {} package_digest={}",
+-                    result.generation_uuid, result.package_digest
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-            Ok(())
+-        }
+-        PortableCommand::PublishOci(args) => {
+-            let reference = publish_portable_v2_oci(
+-                &PortableV2OciPublishFacadeRequest {
+-                    package_path: args.package,
+-                    registry: args.registry,
+-                    repository: args.repository,
+-                    tag: args.tag,
+-                    limits: PortableV2Limits::default(),
+-                    authenticity: PortableV2OciAuthenticityPolicy::default(),
+-                    signature: None,
+-                    insecure_http: args.insecure_http,
+-                    credential: oci_credential(),
+-                },
+-                None,
+-            )
+-            .map_err(map_portable)?;
+-            if json {
+-                write_json(
+-                    &serde_json::json!({
+-                        "contract": "graphforge-portable-oci-publish/2",
+-                        "registry": reference.registry,
+-                        "repository": reference.repository,
+-                        "oci_manifest_digest": reference.oci_manifest_digest,
+-                        "package_digest": reference.package_digest,
+-                        "tag": reference.tag,
+-                    }),
+-                    output,
+-                )?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "published oci_manifest_digest={}",
+-                    reference.oci_manifest_digest
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-            Ok(())
+-        }
+-        PortableCommand::PullOci(args) => {
+-            let receipt = pull_portable_v2_oci(
+-                &PortableV2OciPullFacadeRequest {
+-                    registry: args.registry,
+-                    repository: args.repository,
+-                    reference: args.reference,
+-                    expected_oci_digest: args.expected_digest,
+-                    destination: args.destination,
+-                    limits: PortableV2Limits::default(),
+-                    authenticity: PortableV2OciAuthenticityPolicy::default(),
+-                    insecure_http: args.insecure_http,
+-                    credential: oci_credential(),
+-                },
+-                None,
+-            )
+-            .map_err(map_portable)?;
+-            if json {
+-                write_json(
+-                    &serde_json::json!({
+-                        "contract": "graphforge-portable-oci-pull/2",
+-                        "oci_manifest_digest": receipt.reference.oci_manifest_digest,
+-                        "package_digest": receipt.reference.package_digest,
+-                    }),
+-                    output,
+-                )?;
+-            } else {
+-                writeln!(
+-                    output,
+-                    "pulled package_digest={} oci_manifest_digest={}",
+-                    receipt.reference.package_digest, receipt.reference.oci_manifest_digest
+-                )
+-                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-            }
+-            Ok(())
+-        }
+-    }
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn import_transient_peak(
+     result: &graphforge_api::PortableV2ImportResult,
+ ) -> Result<u64, graphforge_api::GfError> {
+     result.transient_peak_allocated_bytes()
+ }
+ 

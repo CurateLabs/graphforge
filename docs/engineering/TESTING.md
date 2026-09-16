@@ -340,6 +340,28 @@ publish-track and human-close workflows certify registry publication; they are
 not close rituals for ordinary implementation issues. Details:
 [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
+### Mutation evidence
+
+Line coverage proves a line executed, not that anything asserted its result.
+`cargo-mutants` is the check that a test fails when the code under it is wrong.
+It is a developer tool installed like `cargo-llvm-cov`, not a `Cargo.toml`
+dependency, and it ships nothing:
+
+```bash
+cargo install cargo-mutants --locked
+cargo mutants --file <path/to/module.rs> --package <crate> -- --tests
+```
+
+Always scope it to the module a change touches. A workspace-wide run rebuilds
+and retests once per mutant and does not finish at this size; one module is
+minutes. Tests that write project directories need `TMPDIR` on a filesystem the
+admission policy accepts, the same as the native pre-push runs, because the
+default temporary directory is refused as `filesystem_class_unproven`.
+
+Report the score and every surviving mutant. A survivor is either killed by a
+further test or justified individually; "mutation testing was impractical" is
+not a disposition.
+
 ## Test data & environments
 
 - Prefer hermetic temp project directories; no shared mutable fixtures across tests.
