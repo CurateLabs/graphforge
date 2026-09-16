@@ -1036,7 +1036,7 @@ impl GraphForge {
         normalization: &str,
         replace: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let configured = self.provider.as_ref().ok_or_else(|| {
             to_pyerr(
                 py,
@@ -1054,11 +1054,7 @@ impl GraphForge {
         )
         .map_err(|error| to_pyerr(py, &error))?;
         let inspection = py
-            .detach(|| {
-                configured
-                    .session
-                    .inspect_embedding_plan(&self.inner, &request)
-            })
+            .detach(|| configured.session.inspect_embedding_plan(native, &request))
             .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))?;
         provider_plan_to_python(py, inspection)
     }
@@ -1076,7 +1072,7 @@ impl GraphForge {
         normalization: &str,
         replace: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let configured = self.provider.as_ref().ok_or_else(|| {
             to_pyerr(
                 py,
@@ -1094,7 +1090,7 @@ impl GraphForge {
         )
         .map_err(|error| to_pyerr(py, &error))?;
         let space = py
-            .detach(|| configured.session.publish_embeddings(&self.inner, &request))
+            .detach(|| configured.session.publish_embeddings(native, &request))
             .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))?;
         embedding_space_to_python(py, space)
     }
@@ -1116,7 +1112,7 @@ impl GraphForge {
         rerank: Option<&Bound<'_, PyDict>>,
         suppress_rerank_advisory: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let similar_to = similar_to
             .map(|value| py_to_node_selector(py, value))
             .transpose()?;
@@ -1162,8 +1158,8 @@ impl GraphForge {
             },
         };
         let result = match self.provider.as_ref() {
-            Some(configured) => py.detach(|| configured.session.find(&self.inner, execution)),
-            None => py.detach(|| self.inner.find_with_diagnostics(execution, None)),
+            Some(configured) => py.detach(|| configured.session.find(native, execution)),
+            None => py.detach(|| native.find_with_diagnostics(execution, None)),
         }
         .map_err(|error| to_pyerr(py, &error))?;
         let (batch, diagnostics, _) = result.into_parts();
@@ -1185,7 +1181,7 @@ impl GraphForge {
         normalization: &str,
         replace: bool,
     ) -> PyResult<String> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let normalization = match normalization {
             "none" => CallerEmbeddingNormalization::None,
             "l2" => CallerEmbeddingNormalization::L2,
@@ -1209,7 +1205,7 @@ impl GraphForge {
             replace_alias: replace,
         };
         let published = py
-            .detach(|| self.inner.publish_caller_embeddings(request))
+            .detach(|| native.publish_caller_embeddings(request))
             .map_err(|error| to_pyerr(py, &error))?;
         Ok(published.compatibility_id)
     }
@@ -1231,7 +1227,7 @@ impl GraphForge {
         normalization: &str,
         replace: bool,
     ) -> PyResult<String> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let normalization = match normalization {
             "none" => AlgorithmEmbeddingNormalization::None,
             "l2" => AlgorithmEmbeddingNormalization::L2,
@@ -1259,15 +1255,15 @@ impl GraphForge {
             replace_alias: replace,
         };
         let published = py
-            .detach(|| self.inner.publish_algorithm_embeddings(request))
+            .detach(|| native.publish_algorithm_embeddings(request))
             .map_err(|error| to_pyerr(py, &error))?;
         Ok(published.compatibility_id)
     }
 
     /// List verified embedding-space lineages in deterministic Rust order.
     fn embedding_spaces(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.embedding_spaces())
+        let native = self.ensure_open()?;
+        py.detach(|| native.embedding_spaces())
             .map_err(|error| to_pyerr(py, &error))?
             .into_iter()
             .map(|space| embedding_space_to_python(py, space))
@@ -1277,10 +1273,10 @@ impl GraphForge {
     /// Inspect one embedding-space alias, or the configured default.
     #[pyo3(signature = (name=None))]
     fn embedding_space(&self, py: Python<'_>, name: Option<&str>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.map(str::to_owned);
         let space = py
-            .detach(|| self.inner.embedding_space(name.as_deref()))
+            .detach(|| native.embedding_space(name.as_deref()))
             .map_err(|error| to_pyerr(py, &error))?;
         embedding_space_to_python(py, space)
     }
@@ -1294,32 +1290,29 @@ impl GraphForge {
         compatibility_id: &str,
         replace: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.to_owned();
         let compatibility_id = compatibility_id.to_owned();
         let space = py
-            .detach(|| {
-                self.inner
-                    .bind_embedding_space_alias(&name, &compatibility_id, replace)
-            })
+            .detach(|| native.bind_embedding_space_alias(&name, &compatibility_id, replace))
             .map_err(|error| to_pyerr(py, &error))?;
         embedding_space_to_python(py, space)
     }
 
     /// Remove one alias without deleting primary vector data.
     fn remove_embedding_space_alias(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.to_owned();
-        py.detach(|| self.inner.remove_embedding_space_alias(&name))
+        py.detach(|| native.remove_embedding_space_alias(&name))
             .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Delete one named/default compatibility lineage and every targeting alias.
     #[pyo3(signature = (name=None))]
     fn delete_embedding_space(&self, py: Python<'_>, name: Option<&str>) -> PyResult<bool> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.map(str::to_owned);
-        py.detach(|| self.inner.delete_embedding_space(name.as_deref()))
+        py.detach(|| native.delete_embedding_space(name.as_deref()))
             .map_err(|error| to_pyerr(py, &error))
     }
 
@@ -1330,9 +1323,9 @@ impl GraphForge {
         py: Python<'_>,
         name: Option<&str>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.map(str::to_owned);
-        py.detach(|| self.inner.set_default_embedding_space(name.as_deref()))
+        py.detach(|| native.set_default_embedding_space(name.as_deref()))
             .map_err(|error| to_pyerr(py, &error))?
             .map(|space| embedding_space_to_python(py, space))
             .transpose()
@@ -1346,22 +1339,19 @@ impl GraphForge {
         name: Option<&str>,
         force_stale: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.map(str::to_owned);
         let freshness = py
-            .detach(|| {
-                self.inner
-                    .inspect_embedding_space_freshness(name.as_deref(), force_stale)
-            })
+            .detach(|| native.inspect_embedding_space_freshness(name.as_deref(), force_stale))
             .map_err(|error| to_pyerr(py, &error))?;
         refresh_freshness_to_python(py, freshness)
     }
 
     /// Read the durable project-wide embedding refresh defaults.
     fn embedding_refresh_project_policy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let policy = py
-            .detach(|| self.inner.embedding_refresh_project_policy())
+            .detach(|| native.embedding_refresh_project_policy())
             .map_err(|error| to_pyerr(py, &error))?;
         refresh_project_policy_to_python(py, policy)
     }
@@ -1375,15 +1365,14 @@ impl GraphForge {
         debounce_millis: u64,
         max_concurrent_jobs: usize,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let policy = py
             .detach(|| {
-                self.inner
-                    .set_embedding_refresh_project_policy(EmbeddingRefreshProjectPolicy {
-                        proactive,
-                        debounce: Duration::from_millis(debounce_millis),
-                        max_concurrent_jobs,
-                    })
+                native.set_embedding_refresh_project_policy(EmbeddingRefreshProjectPolicy {
+                    proactive,
+                    debounce: Duration::from_millis(debounce_millis),
+                    max_concurrent_jobs,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         refresh_project_policy_to_python(py, policy)
@@ -1399,7 +1388,7 @@ impl GraphForge {
         debounce_millis: Option<u64>,
         clear: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let policy = if clear {
             if proactive.is_some() || debounce_millis.is_some() {
                 return Err(to_pyerr(
@@ -1428,10 +1417,7 @@ impl GraphForge {
         };
         let name = name.map(str::to_owned);
         let inspection = py
-            .detach(|| {
-                self.inner
-                    .set_embedding_refresh_space_policy(name.as_deref(), policy)
-            })
+            .detach(|| native.set_embedding_refresh_space_policy(name.as_deref(), policy))
             .map_err(|error| to_pyerr(py, &error))?;
         refresh_inspection_to_python(py, inspection)
     }
@@ -1439,10 +1425,10 @@ impl GraphForge {
     /// Inspect durable refresh state and this process's worker counters.
     #[pyo3(signature = (name=None))]
     fn inspect_embedding_refresh(&self, py: Python<'_>, name: Option<&str>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.map(str::to_owned);
         let inspection = py
-            .detach(|| self.inner.inspect_embedding_refresh(name.as_deref()))
+            .detach(|| native.inspect_embedding_refresh(name.as_deref()))
             .map_err(|error| to_pyerr(py, &error))?;
         refresh_inspection_to_python(py, inspection)
     }
@@ -1458,16 +1444,16 @@ impl GraphForge {
         label: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let label = label.to_owned();
         if kwargs.is_none_or(pyo3::types::PyDictMethods::is_empty) && label == "adjacency" {
-            py.detach(|| self.inner.index(&label))
+            py.detach(|| native.index(&label))
                 .map_err(|error| to_pyerr(py, &error))?;
             return Ok(py.None());
         }
         let options = search_index_options_from_kwargs(py, kwargs)?;
         let receipt = py
-            .detach(|| self.inner.index_search(&label, options))
+            .detach(|| native.index_search(&label, options))
             .map_err(|error| to_pyerr(py, &error))?;
         receipt.map_or_else(
             || Ok(py.None()),
@@ -1484,28 +1470,28 @@ impl GraphForge {
         label: &str,
         properties: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let label = label.to_owned();
         let inspection = py
-            .detach(|| self.inner.inspect_text_index(&label, properties.as_deref()))
+            .detach(|| native.inspect_text_index(&label, properties.as_deref()))
             .map_err(|error| to_pyerr(py, &error))?;
         text_index_inspection_to_python(py, inspection)
     }
 
     /// Explicitly build the derived CSR adjacency index.
     fn index_adjacency(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let inspection = py
-            .detach(|| self.inner.index_adjacency())
+            .detach(|| native.index_adjacency())
             .map_err(|error| to_pyerr(py, &error))?;
         adjacency_inspection_to_python(py, inspection)
     }
 
     /// Inspect the derived adjacency index without rebuilding it.
     fn inspect_adjacency(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let inspection = py
-            .detach(|| self.inner.inspect_adjacency())
+            .detach(|| native.inspect_adjacency())
             .map_err(|error| to_pyerr(py, &error))?;
         adjacency_inspection_to_python(py, inspection)
     }
@@ -1517,10 +1503,10 @@ impl GraphForge {
         py: Python<'_>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let inspection = py
-            .detach(|| self.inner.rebuild_adjacency(cancellation))
+            .detach(|| native.rebuild_adjacency(cancellation))
             .map_err(|error| to_pyerr(py, &error))?;
         adjacency_inspection_to_python(py, inspection)
     }

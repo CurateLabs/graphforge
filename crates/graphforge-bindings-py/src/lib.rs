@@ -229,9 +229,20 @@ fn hex_bytes(bytes: &[u8]) -> String {
 /// analyst verbs (`rank`/`cluster`/…) are exposed in a follow-up binding-surface PR.
 #[pyclass(module = "graphforge")]
 pub struct GraphForge {
-    pub(crate) inner: graphforge_api::GraphForge,
+    /// The native engine, taken by [`close`](Self::close).
+    ///
+    /// Closing drops it here rather than waiting for Python to collect the
+    /// wrapper, because an open persistent instance retains OS handles on the
+    /// committed generation it reads from — most visibly the
+    /// `AuthenticatedPropertyInventory` directory handle on
+    /// `generations/<uuid>/graph` (#1363). Windows refuses to remove a
+    /// directory with a live handle, so the release point has to be `close()`.
+    inner: Option<graphforge_api::GraphForge>,
     provider: Option<ConfiguredProviderBinding>,
-    pub(crate) closed: bool,
+    /// Last observed values, refreshed by `close()` so the inert attributes
+    /// `path`, `ontology_mode` and `__repr__` keep answering afterwards.
+    released_path: Option<String>,
+    released_ontology_mode: String,
 }
 
 /// Native cloneable cooperative cancellation token.
@@ -261,18 +272,35 @@ impl PyCancellationToken {
 
 impl GraphForge {
     /// Guard mirroring the v0.5 lifecycle contract: operations after `close()`
-    /// raise `LifecycleError`.
-    pub(crate) fn ensure_open(&self) -> PyResult<()> {
-        if self.closed {
-            return Err(Python::attach(|py| {
-                to_pyerr(
-                    py,
-                    &GfError::Lifecycle("operation on a closed GraphForge instance".into()),
-                )
-            }));
-        }
-        Ok(())
+    /// raise `LifecycleError`. Returns the live engine so callers never reach
+    /// around the guard.
+    pub(crate) fn ensure_open(&self) -> PyResult<&graphforge_api::GraphForge> {
+        self.inner.as_ref().ok_or_else(closed_instance_error)
     }
+
+    /// Mutable counterpart to [`ensure_open`](Self::ensure_open).
+    pub(crate) fn ensure_open_mut(&mut self) -> PyResult<&mut graphforge_api::GraphForge> {
+        self.inner.as_mut().ok_or_else(closed_instance_error)
+    }
+
+    /// Whether [`close`](Self::close) already released the native engine.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.is_none()
+    }
+}
+
+/// The effective ontology mode as the binding reports it.
+fn ontology_mode_name(inner: &graphforge_api::GraphForge) -> String {
+    format!("{:?}", inner.ontology_mode()).to_lowercase()
+}
+
+fn closed_instance_error() -> PyErr {
+    Python::attach(|py| {
+        to_pyerr(
+            py,
+            &GfError::Lifecycle("operation on a closed GraphForge instance".into()),
+        )
+    })
 }
 
 fn project_write_mode(value: &str) -> Result<ProjectWriteMode, GfError> {
@@ -319,9 +347,10 @@ impl GraphForge {
             .detach(|| graphforge_api::GraphForge::new_with_options(path.as_deref(), options))
             .map_err(|e| to_pyerr(py, &e))?;
         Ok(Self {
-            inner,
+            released_path: inner.path().map(|path| path.display().to_string()),
+            released_ontology_mode: ontology_mode_name(&inner),
+            inner: Some(inner),
             provider: None,
-            closed: false,
         })
     }
 
@@ -331,37 +360,36 @@ impl GraphForge {
 
     /// Sorted label and relationship counts as a `pyarrow.Table`.
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
-        algorithm_result(py, py.detach(|| self.inner.schema()))
+        let native = self.ensure_open()?;
+        algorithm_result(py, py.detach(|| native.schema()))
     }
 
     /// The node labels present in the graph.
     fn labels(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.labels())
-            .map_err(|e| to_pyerr(py, &e))
+        let native = self.ensure_open()?;
+        py.detach(|| native.labels()).map_err(|e| to_pyerr(py, &e))
     }
 
     /// The relationship types present in the graph.
     fn relationship_types(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.relationship_types())
+        let native = self.ensure_open()?;
+        py.detach(|| native.relationship_types())
             .map_err(|e| to_pyerr(py, &e))
     }
 
     /// Count nodes (optionally for one `label`).
     #[pyo3(signature = (label=None))]
     fn node_count(&self, py: Python<'_>, label: Option<&str>) -> PyResult<u64> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let label = label.map(str::to_owned);
-        py.detach(|| self.inner.node_count(label.as_deref().unwrap_or("")))
+        py.detach(|| native.node_count(label.as_deref().unwrap_or("")))
             .map_err(|e| to_pyerr(py, &e))
     }
 
     /// Read optional project-level graph directedness (`directed` / `undirected`).
     fn graph_directedness(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.graph_directedness())
+        let native = self.ensure_open()?;
+        py.detach(|| native.graph_directedness())
             .map(|value| value.map(GraphDirectedness::as_str))
             .map_err(|error| to_pyerr(py, &error))
     }
@@ -375,7 +403,7 @@ impl GraphForge {
         operation_uuid: &str,
         actor_uuid: Option<&str>,
     ) -> PyResult<()> {
-        self.ensure_open()?;
+        let native = self.ensure_open_mut()?;
         let directedness = match directedness {
             None => None,
             Some(value) => {
@@ -391,40 +419,56 @@ impl GraphForge {
                 .map_err(|error| to_pyerr(py, &error))?
                 .map(|operation| operation.0),
         };
-        py.detach(|| self.inner.set_graph_directedness(&context, directedness))
+        py.detach(|| native.set_graph_directedness(&context, directedness))
             .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Grade the live graph to a Graph Scale Index profile.
     fn profile_gsi(&self, py: Python<'_>) -> PyResult<PyGraphScaleIndexProfile> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.profile_gsi())
+        let native = self.ensure_open()?;
+        py.detach(|| native.profile_gsi())
             .map(|inner| PyGraphScaleIndexProfile { inner })
             .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Close the instance; subsequent operations raise `LifecycleError`.
-    /// Idempotent. Storage is flushed/released when the handle is dropped.
-    fn close(&mut self) {
-        self.closed = true;
+    /// Idempotent.
+    ///
+    /// Releases the native engine here, so every project handle it retains —
+    /// including the generation `graph` directory handle held by the
+    /// authenticated property inventory — is closed before `close()` returns.
+    /// Callers may then remove the project directory on any platform (#1363).
+    fn close(&mut self, py: Python<'_>) {
+        self.provider = None;
+        let Some(released) = self.inner.take() else {
+            return;
+        };
+        self.released_path = released.path().map(|path| path.display().to_string());
+        self.released_ontology_mode = ontology_mode_name(&released);
+        py.detach(move || drop(released));
     }
 
     /// The storage path, or `None` for an in-memory instance.
     #[getter]
     fn path(&self) -> Option<String> {
-        self.inner.path().map(|p| p.display().to_string())
+        self.inner.as_ref().map_or_else(
+            || self.released_path.clone(),
+            |inner| inner.path().map(|path| path.display().to_string()),
+        )
     }
 
     /// The effective ontology mode: `"exploratory"` | `"advisory"` | `"strict"`.
     #[getter]
     fn ontology_mode(&self) -> String {
-        format!("{:?}", self.inner.ontology_mode()).to_lowercase()
+        self.inner
+            .as_ref()
+            .map_or_else(|| self.released_ontology_mode.clone(), ontology_mode_name)
     }
 
     fn __repr__(&self) -> String {
-        self.inner.path().map_or_else(
+        self.path().as_ref().map_or_else(
             || "GraphForge(in-memory)".to_owned(),
-            |p| format!("GraphForge(path={})", p.display()),
+            |path| format!("GraphForge(path={path})"),
         )
     }
 }

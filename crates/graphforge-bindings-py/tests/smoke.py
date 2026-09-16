@@ -9,6 +9,7 @@ execute_polars (#590).
 
 import math
 from pathlib import Path
+import shutil
 import tempfile
 import uuid
 
@@ -301,6 +302,56 @@ def check_clear() -> None:
         else:
             raise SystemExit("expected StorageError from persistent clear()")
         assert persistent.execute("MATCH (n:Person) RETURN n.name").num_rows == 1
+        # #1363 — an open project retains handles on its committed generation
+        # (notably the graph tree directory). close() releases them, so the
+        # enclosing TemporaryDirectory can be removed on Windows too.
+        persistent.close()
+
+
+def _expect_lifecycle_error(call) -> None:
+    try:
+        call()
+    except g.LifecycleError as error:
+        assert error.code == "GF_LIFECYCLE", error.code
+        return
+    raise SystemExit("expected LifecycleError after close()")
+
+
+def check_close_releases_project_handles() -> None:
+    # #1363 — an open persistent instance retains OS handles on the committed
+    # generation it reads from; the authenticated property inventory holds a
+    # directory handle on ``generations/<uuid>/graph``. close() releases the
+    # native engine, so the project tree is removable from this process
+    # (Windows refuses to remove a directory that still has a live handle)
+    # while the committed data reopens unchanged.
+    with tempfile.TemporaryDirectory() as directory:
+        project = Path(directory) / "project"
+        project.mkdir()
+        forge = g.GraphForge(str(project))
+        forge.execute("CREATE (:Person {name: 'Alice'})")
+        generations = [entry for entry in (project / "generations").iterdir() if entry.is_dir()]
+        assert generations, "expected a published generation"
+        assert any((entry / "graph").is_dir() for entry in generations), generations
+        forge.close()
+
+        # The engine is gone, but the inert attributes still answer, and every
+        # native entry point — including the ones that guard before parsing
+        # their arguments — reports the closed lifecycle.
+        assert forge.path == str(project), forge.path
+        assert forge.ontology_mode == "exploratory", forge.ontology_mode
+        assert repr(forge) == f"GraphForge(path={project})", repr(forge)
+        _expect_lifecycle_error(lambda: forge.execute("MATCH (n) RETURN n"))
+        _expect_lifecycle_error(
+            lambda: forge.begin_transaction(operation_uuid="018f0f4e-7b8c-7000-8000-000000009363")
+        )
+
+        # Released at close, not before: the committed generation still reopens.
+        reopened = g.GraphForge(str(project))
+        assert reopened.execute("MATCH (n:Person) RETURN n.name").num_rows == 1
+        reopened.close()
+
+        shutil.rmtree(project)
+        assert not project.exists()
 
 
 def _expect_validation_error(call) -> None:
@@ -6978,6 +7029,7 @@ def main() -> None:
     check_parse_error_span()
     check_explain()
     check_clear()
+    check_close_releases_project_handles()
     check_load_ontology()
     check_execute_polars()
     check_execute_stream()

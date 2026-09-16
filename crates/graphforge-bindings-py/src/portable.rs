@@ -385,7 +385,7 @@ pub(crate) fn preview_portable_v2_selection(
     strict: bool,
     limits: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let request = PortableV2SelectionPreviewRequest {
         selection: selection_from_checkpoint(checkpoint),
         request: PortableV2SelectionRequest {
@@ -395,7 +395,7 @@ pub(crate) fn preview_portable_v2_selection(
         limits: parse_limits(py, limits)?,
     };
     let plan = py
-        .detach(|| forge.inner.preview_portable_v2_selection(&request))
+        .detach(|| native.preview_portable_v2_selection(&request))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &selection_plan_json(&plan))
 }
@@ -408,7 +408,7 @@ pub(crate) fn preview_portable_v2_graph_subset(
     subset: &Bound<'_, PyDict>,
     limits: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let subset = parse_subset(py, Some(subset))?.ok_or_else(|| {
         to_pyerr(
             py,
@@ -421,7 +421,7 @@ pub(crate) fn preview_portable_v2_graph_subset(
         limits: parse_limits(py, limits)?,
     };
     let plan = py
-        .detach(|| forge.inner.preview_portable_v2_graph_subset(&request))
+        .detach(|| native.preview_portable_v2_graph_subset(&request))
         .map_err(|error| to_portable_pyerr(py, error))?;
     json_value_to_python(py, &subset_plan_json(&plan))
 }
@@ -441,7 +441,7 @@ pub(crate) fn export_portable_v2(
     cancellation: Option<&PyCancellationToken>,
     progress: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let request = PortableV2ExportRequest {
         selection: selection_from_checkpoint(checkpoint),
         output_path: PathBuf::from(output_path),
@@ -466,29 +466,27 @@ pub(crate) fn export_portable_v2(
     let progress_error = std::sync::Mutex::new(None::<PyErr>);
     let result = py
         .detach(|| {
-            forge
-                .inner
-                .export_portable_v2(&request, cancelled, |event| {
-                    if let Some(callback) = progress_cb.as_ref() {
-                        let callback_result = Python::attach(|py| {
-                            let payload = PyDict::new(py);
-                            payload.set_item("entries_completed", event.entries_completed)?;
-                            payload.set_item("bytes_completed", event.bytes_completed)?;
-                            payload.set_item("entries_total", event.entries_total)?;
-                            payload.set_item("bytes_total", event.bytes_total)?;
-                            callback.bind(py).call1((payload,))?;
-                            Ok::<(), PyErr>(())
-                        });
-                        if let Err(error) = callback_result {
-                            let mut slot = progress_error
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if slot.is_none() {
-                                *slot = Some(error);
-                            }
+            native.export_portable_v2(&request, cancelled, |event| {
+                if let Some(callback) = progress_cb.as_ref() {
+                    let callback_result = Python::attach(|py| {
+                        let payload = PyDict::new(py);
+                        payload.set_item("entries_completed", event.entries_completed)?;
+                        payload.set_item("bytes_completed", event.bytes_completed)?;
+                        payload.set_item("entries_total", event.entries_total)?;
+                        payload.set_item("bytes_total", event.bytes_total)?;
+                        callback.bind(py).call1((payload,))?;
+                        Ok::<(), PyErr>(())
+                    });
+                    if let Err(error) = callback_result {
+                        let mut slot = progress_error
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if slot.is_none() {
+                            *slot = Some(error);
                         }
                     }
-                })
+                }
+            })
         })
         .map_err(|error| to_portable_pyerr(py, error))?;
     if let Some(error) = progress_error
@@ -620,7 +618,7 @@ pub(crate) fn execute_to_parquet_stream(
     max_batch_rows: usize,
     cancellation: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let params = params_from_dict(params)?;
     let options = ResultSinkOptions {
         max_row_group_rows,
@@ -631,7 +629,7 @@ pub(crate) fn execute_to_parquet_stream(
     let path = path.to_owned();
     let receipt = py
         .detach(|| {
-            forge.inner.execute_to_parquet_stream_with_params(
+            native.execute_to_parquet_stream_with_params(
                 &query,
                 &params,
                 &path,
@@ -655,7 +653,7 @@ pub(crate) fn execute_to_arrow_ipc_stream(
     max_batch_rows: usize,
     cancellation: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let params = params_from_dict(params)?;
     let options = ResultSinkOptions {
         max_row_group_rows,
@@ -666,7 +664,7 @@ pub(crate) fn execute_to_arrow_ipc_stream(
     let path = path.to_owned();
     let receipt = py
         .detach(|| {
-            forge.inner.execute_to_arrow_ipc_stream_with_params(
+            native.execute_to_arrow_ipc_stream_with_params(
                 &query,
                 &params,
                 &path,

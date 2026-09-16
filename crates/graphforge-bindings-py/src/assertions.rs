@@ -142,7 +142,7 @@ impl GraphForge {
         capability_version: u32,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let actor_uuid = actor_uuid
@@ -154,15 +154,14 @@ impl GraphForge {
             parse_capability_id(capability_id).map_err(|error| to_pyerr(py, &error))?;
         let result = py
             .detach(|| {
-                self.inner
-                    .enable_capability(graphforge_api::EnableCapabilityRequest {
-                        context: WriteContext {
-                            operation_uuid,
-                            actor_uuid,
-                        },
-                        capability_id,
-                        capability_version,
-                    })
+                native.enable_capability(graphforge_api::EnableCapabilityRequest {
+                    context: WriteContext {
+                        operation_uuid,
+                        actor_uuid,
+                    },
+                    capability_id,
+                    capability_version,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -176,16 +175,13 @@ impl GraphForge {
         provenance_uuid: &str,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let provenance_uuid = canonical_operation_id(provenance_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
-            .detach(|| {
-                self.inner
-                    .provenance_event(provenance_uuid, cancellation.clone())
-            })
+            .detach(|| native.provenance_event(provenance_uuid, cancellation.clone()))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -201,7 +197,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let subject_uuid = subject_uuid
             .map(canonical_operation_id)
             .transpose()
@@ -218,16 +214,15 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .list_provenance_history(graphforge_api::ProvenanceHistoryRequest {
-                        subject_uuid,
-                        operation_uuid,
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.list_provenance_history(graphforge_api::ProvenanceHistoryRequest {
+                    subject_uuid,
+                    operation_uuid,
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -244,7 +239,7 @@ impl GraphForge {
         graph_refs: &Bound<'_, PyList>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let assertion_uuid = canonical_operation_id(assertion_uuid)
@@ -261,16 +256,15 @@ impl GraphForge {
             .collect::<PyResult<Vec<_>>>()?;
         let result = py
             .detach(|| {
-                self.inner
-                    .create_assertion(graphforge_api::CreateAssertionRequest {
-                        context: WriteContext {
-                            operation_uuid,
-                            actor_uuid,
-                        },
-                        assertion_uuid,
-                        claim,
-                        graph_refs,
-                    })
+                native.create_assertion(graphforge_api::CreateAssertionRequest {
+                    context: WriteContext {
+                        operation_uuid,
+                        actor_uuid,
+                    },
+                    assertion_uuid,
+                    claim,
+                    graph_refs,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -289,7 +283,7 @@ impl GraphForge {
         evidence: &Bound<'_, PyList>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let assertion_uuid = canonical_operation_id(assertion_uuid)
@@ -310,7 +304,7 @@ impl GraphForge {
             .collect::<PyResult<Vec<_>>>()?;
         let result = py
             .detach(|| {
-                self.inner.create_assertion_with_evidence(
+                native.create_assertion_with_evidence(
                     graphforge_api::CreateAssertionWithEvidenceRequest {
                         assertion: graphforge_api::CreateAssertionRequest {
                             context: WriteContext {
@@ -343,7 +337,7 @@ impl GraphForge {
         status: &str,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let assertion_uuid = canonical_operation_id(assertion_uuid)
@@ -364,7 +358,7 @@ impl GraphForge {
             .collect::<PyResult<Vec<_>>>()?;
         let result = py
             .detach(|| {
-                self.inner.create_assertion_with_status(
+                native.create_assertion_with_status(
                     graphforge_api::CreateAssertionWithStatusRequest {
                         assertion: graphforge_api::CreateAssertionRequest {
                             context: WriteContext {
@@ -394,13 +388,13 @@ impl GraphForge {
         assertion_uuid: &str,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let assertion_uuid = canonical_operation_id(assertion_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
-            .detach(|| self.inner.assertion(assertion_uuid, cancellation.clone()))
+            .detach(|| native.assertion(assertion_uuid, cancellation.clone()))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -415,7 +409,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let graph_uuid = graph_uuid
             .map(canonical_operation_id)
             .transpose()
@@ -428,15 +422,14 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .list_assertions(graphforge_api::ListAssertionsRequest {
-                        graph_uuid,
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.list_assertions(graphforge_api::ListAssertionsRequest {
+                    graph_uuid,
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -452,7 +445,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let assertion_uuid = canonical_operation_id(assertion_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
@@ -463,7 +456,7 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner.assertion_graph_refs(
+                native.assertion_graph_refs(
                     assertion_uuid,
                     graphforge_api::PageRequest {
                         limit,
@@ -490,7 +483,7 @@ impl GraphForge {
         input_confidence_uuids: Option<Vec<String>>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let confidence_uuid = canonical_operation_id(confidence_uuid)
@@ -541,16 +534,15 @@ impl GraphForge {
         };
         let result = py
             .detach(|| {
-                self.inner
-                    .assess_confidence(graphforge_api::AssessConfidenceRequest {
-                        context: WriteContext {
-                            operation_uuid,
-                            actor_uuid,
-                        },
-                        confidence_uuid,
-                        assertion_uuid,
-                        policy,
-                    })
+                native.assess_confidence(graphforge_api::AssessConfidenceRequest {
+                    context: WriteContext {
+                        operation_uuid,
+                        actor_uuid,
+                    },
+                    confidence_uuid,
+                    assertion_uuid,
+                    policy,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -564,16 +556,13 @@ impl GraphForge {
         confidence_uuid: &str,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let confidence_uuid = canonical_operation_id(confidence_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
-            .detach(|| {
-                self.inner
-                    .confidence_assessment(confidence_uuid, cancellation.clone())
-            })
+            .detach(|| native.confidence_assessment(confidence_uuid, cancellation.clone()))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -588,7 +577,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let assertion_uuid = assertion_uuid
             .map(canonical_operation_id)
             .transpose()
@@ -601,7 +590,7 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner.list_confidence_assessments(
+                native.list_confidence_assessments(
                     graphforge_api::ListConfidenceAssessmentsRequest {
                         assertion_uuid,
                         page: graphforge_api::PageRequest {
@@ -626,7 +615,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let confidence_uuid = canonical_operation_id(confidence_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
@@ -637,7 +626,7 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner.confidence_inputs(
+                native.confidence_inputs(
                     confidence_uuid,
                     graphforge_api::PageRequest {
                         limit,
@@ -665,7 +654,7 @@ impl GraphForge {
         weight: Option<f64>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let evidence_uuid = canonical_operation_id(evidence_uuid)
@@ -707,19 +696,18 @@ impl GraphForge {
         };
         let result = py
             .detach(|| {
-                self.inner
-                    .attach_evidence(graphforge_api::AttachEvidenceRequest {
-                        context: WriteContext {
-                            operation_uuid,
-                            actor_uuid,
-                        },
-                        evidence_uuid,
-                        assertion_uuid,
-                        source_uuid,
-                        source_kind,
-                        role,
-                        weight,
-                    })
+                native.attach_evidence(graphforge_api::AttachEvidenceRequest {
+                    context: WriteContext {
+                        operation_uuid,
+                        actor_uuid,
+                    },
+                    evidence_uuid,
+                    assertion_uuid,
+                    source_uuid,
+                    source_kind,
+                    role,
+                    weight,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -733,16 +721,13 @@ impl GraphForge {
         evidence_uuid: &str,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let evidence_uuid = canonical_operation_id(evidence_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
-            .detach(|| {
-                self.inner
-                    .evidence_link(evidence_uuid, cancellation.clone())
-            })
+            .detach(|| native.evidence_link(evidence_uuid, cancellation.clone()))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -758,7 +743,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let assertion_uuid = assertion_uuid
             .map(canonical_operation_id)
             .transpose()
@@ -776,16 +761,15 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .list_evidence_links(graphforge_api::ListEvidenceLinksRequest {
-                        assertion_uuid,
-                        source_uuid,
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.list_evidence_links(graphforge_api::ListEvidenceLinksRequest {
+                    assertion_uuid,
+                    source_uuid,
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)

@@ -481,6 +481,9 @@ def _run_four_surface_operation_conformance() -> dict[str, object]:
             "bridge": bridge_validation,
             "invalid_bridge": invalid_bridge_validation,
         }
+        # #1363 — release the project handles this instance retains on its
+        # committed generation before the TemporaryDirectory is removed.
+        forge.close()
         return semantic
 
 

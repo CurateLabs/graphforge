@@ -1042,6 +1042,20 @@ jobs:
           cargo test -p graphforge-api --lib maintenance::tests::in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode -- --exact --nocapture || route_status=1
           exit "$route_status"
 
+      - name: Verify released project handles on Windows
+        shell: bash
+        run: |
+          # #1363 — an open facade retains a directory handle on
+          # generations/<uuid>/graph plus its generation leases. Windows is the
+          # only platform that reports the retention, by refusing to remove the
+          # directory, so the release contract is exercised here.
+          cargo test -p graphforge-api --lib \
+            workspace_hydration::tests::releasing_the_facade_releases_every_committed_generation_handle \
+            -- --exact --nocapture
+          cargo test -p graphforge-api --lib \
+            workspace_hydration::tests::retained_generation_handles_outlive_reads_and_survive_reopen \
+            -- --exact --nocapture
+
       - name: Cross-check Windows publication-kill results against the fault oracle
         shell: bash
         env:

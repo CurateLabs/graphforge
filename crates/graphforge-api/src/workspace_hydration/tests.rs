@@ -358,3 +358,119 @@ fn persistent_open_does_not_cleanup_generation_files() {
     assert!(graph.dir().join("topology/notes.tmp").exists());
     assert_eq!(graph.path(), Some(dir.path()));
 }
+
+/// Retained paths under `root` that this process still holds an OS handle on.
+///
+/// `/proc/self/fd` is the only portable-enough way to observe the retention
+/// directly; on other platforms the removal assertion below carries the
+/// contract instead.
+#[cfg(target_os = "linux")]
+fn retained_handles_under(root: &Path) -> Vec<(bool, PathBuf)> {
+    let mut retained = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/fd").expect("read /proc/self/fd") {
+        let entry = entry.expect("read /proc/self/fd entry");
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        if !target.starts_with(root) {
+            continue;
+        }
+        let is_dir = std::fs::metadata(&target).is_ok_and(|metadata| metadata.is_dir());
+        retained.push((is_dir, target));
+    }
+    retained.sort();
+    retained
+}
+
+/// #1363 — an open persistent facade retains OS handles inside the committed
+/// generations it reads from. The authenticated property inventory
+/// (`AuthenticatedPropertyInventory::root`, admitted at the generation's
+/// `graph_tree_root`) holds a *directory* handle on `generations/<uuid>/graph`,
+/// and the resolved generations hold their `lease.lock` files.
+///
+/// POSIX unlinks around all three, so only Windows reports them: it refuses
+/// `RemoveDirectoryW` on a directory that still has a live handle
+/// (`ERROR_SHARING_VIOLATION`), and `graph` sorts before `lease.lock`, which is
+/// why cleanup surfaced the directory first. Every one of these must be
+/// released when the facade is released — not before it, so reads of the
+/// active snapshot stay authenticated for the facade's whole life.
+#[test]
+fn releasing_the_facade_releases_every_committed_generation_handle() {
+    let root = tempfile::TempDir::new().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let graph = GraphForge::new(project.to_str()).expect("open persistent project");
+    graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+
+    let generation_graph_trees = std::fs::read_dir(project.join("generations"))
+        .expect("read generations")
+        .map(|entry| entry.expect("generation entry").path().join("graph"))
+        .filter(|tree| tree.is_dir())
+        .collect::<Vec<_>>();
+    assert!(
+        !generation_graph_trees.is_empty(),
+        "the write published a file-backed generation graph tree"
+    );
+
+    #[cfg(target_os = "linux")]
+    {
+        let open = retained_handles_under(&project);
+        assert!(
+            open.iter()
+                .any(|(is_dir, path)| *is_dir
+                    && generation_graph_trees.iter().any(|tree| tree == path)),
+            "the open facade retains a directory handle on a generation graph tree: {open:?}"
+        );
+        assert!(
+            open.iter()
+                .any(|(_, path)| path.file_name() == Some("lease.lock".as_ref())),
+            "the open facade retains its generation lease: {open:?}"
+        );
+    }
+
+    drop(graph);
+
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        retained_handles_under(&project),
+        Vec::new(),
+        "releasing the facade releases every handle inside the project"
+    );
+
+    // The load-bearing assertion on Windows: a released facade leaves nothing
+    // pinned, so the project directory can be removed by its owner.
+    std::fs::remove_dir_all(&project).expect("released project directory is removable");
+    assert!(!project.exists());
+}
+
+/// Releasing is a *close-time* obligation, never an early one: the facade must
+/// keep serving authenticated reads from the pinned generation for its whole
+/// life, and the committed data must survive the release and reopen.
+#[test]
+fn retained_generation_handles_outlive_reads_and_survive_reopen() {
+    let root = tempfile::TempDir::new().unwrap();
+    let path = root.path().to_str().unwrap();
+    let graph = GraphForge::new(Some(path)).expect("open persistent project");
+    graph.execute("CREATE (:Person {name: 'Alice'})").unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            graph
+                .execute("MATCH (n:Person) RETURN n.name")
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+    }
+    drop(graph);
+
+    let reopened = GraphForge::new(Some(path)).expect("reopen persistent project");
+    assert_eq!(
+        reopened
+            .execute("MATCH (n:Person) RETURN n.name")
+            .unwrap()
+            .stats
+            .rows_produced,
+        1
+    );
+}

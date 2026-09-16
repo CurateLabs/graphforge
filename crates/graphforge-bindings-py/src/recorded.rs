@@ -296,7 +296,7 @@ impl GraphForge {
         actor_uuid: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<PyRecordedAlgorithmResult> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             canonical_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let run_uuid = canonical_operation_id(run_uuid)
@@ -311,16 +311,15 @@ impl GraphForge {
         let descriptor = descriptor.inner.clone();
         let recorded = py
             .detach(|| {
-                self.inner
-                    .invoke_recorded(graphforge_api::RecordedAlgorithmRequest {
-                        context: WriteContext {
-                            operation_uuid,
-                            actor_uuid,
-                        },
-                        run_uuid,
-                        descriptor,
-                        cancellation: cancellation.clone(),
-                    })
+                native.invoke_recorded(graphforge_api::RecordedAlgorithmRequest {
+                    context: WriteContext {
+                        operation_uuid,
+                        actor_uuid,
+                    },
+                    run_uuid,
+                    descriptor,
+                    cancellation: cancellation.clone(),
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         Ok(PyRecordedAlgorithmResult {
@@ -342,7 +341,7 @@ impl GraphForge {
         hypotheses: &str,
         valid_time: Option<i64>,
     ) -> PyResult<PyResolvedBeliefProjection> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let policy = parse_belief_projection_policy(
             &included_statuses,
             statusless,
@@ -351,12 +350,11 @@ impl GraphForge {
         )
         .map_err(|error| to_pyerr(py, &error))?;
         py.detach(|| {
-            self.inner
-                .resolve_belief_projection(graphforge_api::ResolveBeliefProjectionRequest {
-                    transaction_cutoff_micros: transaction_cutoff,
-                    valid_time_micros: valid_time,
-                    policy,
-                })
+            native.resolve_belief_projection(graphforge_api::ResolveBeliefProjectionRequest {
+                transaction_cutoff_micros: transaction_cutoff,
+                valid_time_micros: valid_time,
+                policy,
+            })
         })
         .map(|inner| PyResolvedBeliefProjection {
             inner: Arc::new(inner),
@@ -378,7 +376,7 @@ impl GraphForge {
         actor_uuid: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<PyResolvedRecordedAlgorithmResult> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let parse =
             |value: &str| canonical_operation_id(value).map_err(|error| to_pyerr(py, &error));
         let attachment_uuid = parse(attachment_uuid)?.0;
@@ -391,7 +389,7 @@ impl GraphForge {
         let run_uuid = parse(run_uuid)?.0;
         let result = py
             .detach(|| {
-                self.inner.invoke_resolved_recorded(
+                native.invoke_resolved_recorded(
                     &projection,
                     graphforge_api::ResolvedRecordedAlgorithmRequest {
                         recorded: graphforge_api::RecordedAlgorithmRequest {
@@ -424,7 +422,7 @@ impl GraphForge {
         descriptor: &PyInvocationDescriptor,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let parse =
             |value: &str| canonical_operation_id(value).map_err(|error| to_pyerr(py, &error));
         let projection = Arc::clone(&projection.inner);
@@ -438,7 +436,7 @@ impl GraphForge {
             descriptor: descriptor.inner.clone(),
         };
         let result = py
-            .detach(|| self.inner.attach_resolved_run(&projection, request))
+            .detach(|| native.attach_resolved_run(&projection, request))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -451,13 +449,13 @@ impl GraphForge {
         run_uuid: &str,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let run_uuid = canonical_operation_id(run_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
-            .detach(|| self.inner.algorithm_run(run_uuid, cancellation.clone()))
+            .detach(|| native.algorithm_run(run_uuid, cancellation.clone()))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -472,7 +470,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let algorithm = algorithm
             .map(parse_algorithm_id)
             .transpose()
@@ -484,15 +482,14 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .list_algorithm_runs(graphforge_api::ListAlgorithmRunsRequest {
-                        algorithm,
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.list_algorithm_runs(graphforge_api::ListAlgorithmRunsRequest {
+                    algorithm,
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -508,7 +505,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let run_uuid = canonical_operation_id(run_uuid)
             .map_err(|error| to_pyerr(py, &error))?
             .0;
@@ -519,7 +516,7 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner.algorithm_run_events(
+                native.algorithm_run_events(
                     run_uuid,
                     graphforge_api::PageRequest {
                         limit,
