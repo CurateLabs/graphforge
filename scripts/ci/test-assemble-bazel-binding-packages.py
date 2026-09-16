@@ -11,11 +11,13 @@ import unittest
 import zipfile
 
 from assemble_bazel_binding_packages import (
+    EXPORT_SURFACE_FILENAME,
     FORBIDDEN_RECOMPILE,
     assemble_node,
     assemble_python,
     main,
     pep427_wheel_filename,
+    read_node_export_surface,
     resolve_python_wheel_out,
     synthesize_node_index_dts,
     synthesize_node_index_js,
@@ -132,35 +134,92 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 module = next(n for n in names if n.endswith("_graphforge_rs.abi3.so"))
                 self.assertEqual(archive.read(module), b"FAKE_NATIVE_PY_CDYLIB")
 
-    def test_synthesize_node_index_exposes_version_for_esm(self) -> None:
-        body = synthesize_node_index_js("graphforge.linux-x64-gnu.node")
+    def test_export_surface_manifest_is_declared_and_well_formed(self) -> None:
+        package_root = ROOT / "crates" / "graphforge-bindings-node"
+        surface = read_node_export_surface(package_root)
+        self.assertIn("GraphForge", surface)
+        self.assertEqual(surface["GraphForge"], "class")
+        self.assertEqual(surface["version"], "function")
+        self.assertEqual(list(surface), sorted(surface))
+
+    def test_export_surface_manifest_rejects_bad_declarations(self) -> None:
+        for payload in (
+            {},
+            {"exports": {}},
+            {"exports": {"not an identifier": "class"}},
+            {"exports": {"GraphForge": "widget"}},
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / EXPORT_SURFACE_FILENAME).write_text(
+                    json.dumps(payload),
+                    encoding="utf-8",
+                )
+                with self.assertRaises(SystemExit):
+                    read_node_export_surface(root)
+
+    def test_synthesized_loader_resolves_named_esm_and_cjs_imports(self) -> None:
+        # #1360 — a dynamic mirror loop is invisible to cjs-module-lexer, so
+        # `import { GraphForge } from '../index.js'` used to throw
+        # `SyntaxError: Named export 'GraphForge' not found`.
+        surface = {"GraphForge": "class", "runCli": "function", "version": "function"}
+        body = synthesize_node_index_js("graphforge.linux-x64-gnu.node", surface)
         self.assertIn("const nativeBinding = require('./graphforge.linux-x64-gnu.node');", body)
         self.assertIn("module.exports = nativeBinding;", body)
-        self.assertIn("module.exports.version = nativeBinding.version;", body)
-        self.assertIn("export declare function version(): string;", synthesize_node_index_dts())
+        for name in surface:
+            self.assertIn(f"module.exports.{name} = nativeBinding.{name};", body)
+        self.assertNotIn("Object.keys(nativeBinding)", body)
 
-        # Prove the CJS pattern yields a named `version` under ESM import.
+        declarations = synthesize_node_index_dts(surface)
+        self.assertIn("export declare class GraphForge {", declarations)
+        self.assertIn("export declare function version(...args: any[]): any;", declarations)
+
         with tempfile.TemporaryDirectory() as tmp:
             pkg = Path(tmp)
             stub = pkg / "native-stub.js"
             stub.write_text(
-                "module.exports = { version() { return '0.0.0-test'; } };\n",
+                "module.exports = {\n"
+                "  GraphForge: class GraphForge {},\n"
+                "  runCli() { return 0; },\n"
+                "  version() { return '0.0.0-test'; },\n"
+                "};\n",
                 encoding="utf-8",
             )
             index = pkg / "index.js"
             index.write_text(
-                synthesize_node_index_js("native-stub.js"),
+                synthesize_node_index_js("native-stub.js", surface),
                 encoding="utf-8",
             )
-            script = (
-                "import('file://" + index.resolve().as_posix() + "').then(m => {"
-                "  if (typeof m.version !== 'function') process.exit(2);"
-                "  if (typeof m.version() !== 'string') process.exit(3);"
-                "  process.stdout.write(m.version());"
-                "}).catch(err => { console.error(err); process.exit(1); })"
+            # Static ESM named import — the form the Binding RC smoke contract uses.
+            esm = pkg / "named-import.mjs"
+            esm.write_text(
+                "import { GraphForge, runCli, version } from './index.js';\n"
+                "if (typeof GraphForge !== 'function') process.exit(2);\n"
+                "if (typeof runCli !== 'function') process.exit(3);\n"
+                "new GraphForge();\n"
+                "process.stdout.write(version());\n",
+                encoding="utf-8",
             )
             completed = subprocess.run(
-                ["node", "-e", script],
+                ["node", str(esm)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.stdout, "0.0.0-test")
+
+            # CommonJS require of the same file.
+            cjs = pkg / "named-require.cjs"
+            cjs.write_text(
+                "const { GraphForge, runCli, version } = require('./index.js');\n"
+                "if (typeof GraphForge !== 'function') process.exit(2);\n"
+                "if (typeof runCli !== 'function') process.exit(3);\n"
+                "new GraphForge();\n"
+                "process.stdout.write(version());\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                ["node", str(cjs)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -192,8 +251,13 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 self.assertEqual(body["recompiled"], "false")
                 index_js = archive.read("index.js").decode("utf-8")
                 self.assertIn("module.exports.version = nativeBinding.version;", index_js)
+                self.assertIn("module.exports.GraphForge = nativeBinding.GraphForge;", index_js)
                 index_dts = archive.read("index.d.ts").decode("utf-8")
-                self.assertIn("export declare function version(): string;", index_dts)
+                self.assertIn("export declare class GraphForge {", index_dts)
+                self.assertIn(
+                    "export declare function version(...args: any[]): any;",
+                    index_dts,
+                )
 
     def test_explicit_cross_platform_tags(self) -> None:
         py_root = ROOT / "crates" / "graphforge-bindings-py"

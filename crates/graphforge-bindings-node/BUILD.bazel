@@ -7,13 +7,15 @@ exports_files(["Cargo.toml"])
 package(default_visibility = ["//visibility:public"])
 
 # Checked-in package inputs. `index.js` / `index.d.ts` are napi-generated and
-# gitignored; the packaging handoff synthesizes a smoke loader instead of
-# invoking `napi build` (which would recompile Rust).
+# gitignored; the packaging handoff synthesizes them from
+# `napi-export-surface.json` instead of invoking `napi build` (which would
+# recompile Rust).
 filegroup(
     name = "node_package_sources",
     srcs = glob(
         [
             "package.json",
+            "napi-export-surface.json",
             "lib/**",
             "LICENSE",
             "NOTICE",
