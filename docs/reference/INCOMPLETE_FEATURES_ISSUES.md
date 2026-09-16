@@ -28,7 +28,7 @@ Inventory of partially implemented and unimplemented OpenCypher features in Grap
 **CALL { } — Current:** EXISTS/COUNT subqueries only
 **CALL { } — Needs:** General CALL { } syntax, UNION in subqueries, variable importing
 
-**MERGE — Current:** Standalone new-node MERGE and relationship MERGE with already-bound endpoints; `ON CREATE` / `ON MATCH` property/label actions when all frontier rows share one branch. Authority: `crates/graphforge-exec/src/write_driver.rs`. Direct evidence: `crates/graphforge-api/tests/e2e_baseline.rs` (`merge_node_*`, `merge_relationship_*`).
+**MERGE — Current:** Standalone new-node MERGE and relationship MERGE with already-bound endpoints; `ON CREATE` / `ON MATCH` property/label actions when all frontier rows share one branch. Authority: `crates/graphforge-exec/src/write_driver/create_merge.rs`. Direct evidence: `crates/graphforge-api/tests/e2e_baseline.rs` (`merge_node_*`, `merge_relationship_*`).
 **MERGE — Rejected (not support):** multi-node / relationship-construction MERGE (`relationship and multi-node MERGE execution is not implemented yet`); row-conditional map actions (`row-conditional MERGE map actions are not implemented yet`). Details: [clauses.md](implementation-status/clauses.md#merge).
 
 ### Not Implemented (3)
