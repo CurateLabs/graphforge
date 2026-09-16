@@ -153,8 +153,7 @@ EXPECTED_STICKY_KEYS = Counter(
         ): 1,
         "${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3": 1,
         (
-            "${{ github.repository }}-coverage-rust-1.96.0-"
-            "${{ hashFiles('Cargo.lock') }}-target-v1"
+            "${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1"
         ): 1,
     }
 )
