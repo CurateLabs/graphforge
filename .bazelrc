@@ -17,3 +17,19 @@ common:ci --lockfile_mode=error
 # must retain Rust's debug assertions and checked arithmetic.
 build:correctness --compilation_mode=opt
 build:correctness --@rules_rust//rust/settings:extra_rustc_flags=-Cdebug-assertions=yes,-Coverflow-checks=yes
+
+# Select the Linux linker explicitly (#1340). Bazel's auto-detected C++
+# toolchain appends `-fuse-ld=gold` whenever `ld.gold` happens to be installed
+# on the executor, and rustc then warns once per link action that gold is
+# deprecated and has known bugs with Rust. Pinning the linker here keeps the
+# choice identical locally and in CI instead of inheriting whatever the machine
+# provides. `lld` is not installed on the blacksmith-4vcpu-ubuntu-2404 runners
+# (`cc -fuse-ld=lld` fails there; `cc -fuse-ld=bfd` succeeds), so bfd is the
+# portable selection. User linkopts are emitted after the toolchain's default
+# link flags, and the last `-fuse-ld` wins, so this overrides gold.
+# Both flags are required: `--linkopt` covers target-configuration links and
+# `--host_linkopt` covers the exec-configuration build scripts and proc macros
+# that account for most of the link actions. macOS and Windows are untouched.
+build --enable_platform_specific_config
+build:linux --linkopt=-fuse-ld=bfd
+build:linux --host_linkopt=-fuse-ld=bfd
