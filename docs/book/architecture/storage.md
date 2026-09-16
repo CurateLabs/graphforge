@@ -25,6 +25,20 @@ The unused `StorageProvider`, `StorageRow`, and `ParquetProvider` stubs were rem
 
 ---
 
+## Lifecycle implementation ownership
+
+Object-store manifest updates, materialization, installation, and garbage collection
+have private modules under `graph_object_store`. Read/publication leases and shared
+lifecycle locking remain in the parent. `project_publication` retains commit order,
+`CURRENT` replacement, and reconciliation; its `participants` and `control` modules
+own staging and bounded journal/atomic-file operations. Checkpoint lifecycle and
+locks remain in `project_checkpoints`, with `registry` pair recovery and
+`restoration` participant construction as private children.
+
+The filesystem crate keeps common capability types and public exports in its root.
+`cache_io`, `platform`, `windows`, and `windows_cas` own the corresponding native
+implementations and direct tests. See the [source inventory](source-modules.md).
+
 ## Value contract and current dependencies
 
 `graphforge-storage` currently depends on both `graphforge-ir` and

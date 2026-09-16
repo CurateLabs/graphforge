@@ -99,8 +99,8 @@ exemptions or unchanged-tree release certification are required.
   retains context, frontier, ordered phase dispatch, final staging and cleanup.
   Existing test bodies and assertions move intact with their owning domains.
 
-- [#1311](https://github.com/CurateLabs/graphforge/issues/1311) decomposes UUID
-  identity and construction together. UUID `probing` owns authenticated snapshots
+- [#1319](https://github.com/CurateLabs/graphforge/pull/1319) merged #1311, decomposing
+  UUID identity and construction together. UUID `probing` owns authenticated snapshots
   and lookup; `construction` owns index encoding and merge cursors;
   `ordinal_artifacts` owns artifact writers and their publication guards;
   `topology_delta` owns topology preparation and commit; `ordinal_compaction`
@@ -119,8 +119,8 @@ exemptions or unchanged-tree release certification are required.
   construction's `compact_details` and `lifecycle_budget` modules. Their
   subprocess selectors and native-platform workflow selections remain unchanged.
 
-- [#1312](https://github.com/CurateLabs/graphforge/issues/1312) completes property
-  storage in one batch. Writer `replay_topology`, `replay_properties`,
+- [#1320](https://github.com/CurateLabs/graphforge/pull/1320) merged #1312, completing
+  property storage in one batch. Writer `replay_topology`, `replay_properties`,
   `property_codec`, and `property_mutation` own stream inputs, encoding, and
   authenticated staging. `GraphWriter` retains batching, topology commits and
   shared work accounting; replay cleanup guards stay with their resources.
@@ -141,33 +141,42 @@ exemptions or unchanged-tree release certification are required.
   `writer::property_mutation::tests::staged_property_mutation_conflicts_after_intervening_project_publication`;
   historical execution evidence keeps its recorded source revision and selector.
 
+- [#1313](https://github.com/CurateLabs/graphforge/issues/1313) extracts storage
+  lifecycle and filesystem ownership together. Object-store `manifest_tree`,
+  `materialization`, `installation`, and `gc` own their operations and direct tests;
+  the parent retains read/publication leases and lifecycle locks.
+- Publication `participants` owns validation/staging and `control` owns bounded
+  journal serialization and atomic-file publication. Commit sequencing, `CURRENT`
+  replacement, reconciliation, and mutation locks remain in the parent.
+- Checkpoint `registry` owns authenticated pair commit/recovery and `restoration`
+  owns revert participant construction. Lifecycle methods, shared authority,
+  retention/read locks, and subprocess test helpers remain in the parent.
+- Filesystem `cache_io`, `platform`, `windows`, and `windows_cas` own cache-release
+  I/O and platform implementations. Capability types and public root exports
+  retain their interfaces and field/drop order. Windows backend admission and
+  unsafe-code boundaries are unchanged. Direct tests follow their owners.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
 
 | Area | Remaining ownership extractions |
 | --- | --- |
-| Storage lifecycle | CAS manifest/materialization/install/GC; publication staging/control; checkpoint registry/revert |
-| Filesystem | Cache release; platform capabilities; Windows CAS sealing |
 | Knowledge core | Algorithm-run and confidence ledgers |
 | Bindings | Conversions, domain methods/tasks/types, lifecycle/construction; preserve registration and signatures |
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1312; recompute before canonical
+This snapshot records the working tree during #1313; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
 | --- | ---: |
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
 | `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
-| `crates/graphforge-filesystem/src/lib.rs` | 5,488 |
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
-| `crates/graphforge-storage/src/graph_object_store.rs` | 6,304 |
-| `crates/graphforge-storage/src/project_checkpoints.rs` | 4,091 |
 | `crates/graphforge-storage/src/project_generation.rs` | 3,014 |
-| `crates/graphforge-storage/src/project_publication.rs` | 4,805 |
 
 ## Evidence requirements
 
