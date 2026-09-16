@@ -41,6 +41,8 @@ const PAGES = [
   'README.md',
   // Public contributor engineering lifecycle (ADRs under Engineering per #2771)
   'engineering/README.md',
+  'engineering/analyst-ux.md',
+  'book/architecture/research-workspaces.md',
   'engineering/ARCHITECTURE.md',
   'engineering/TESTING.md',
   'engineering/PUBLISHING.md',
@@ -147,6 +149,7 @@ const PAGES = [
   'adr/0026-read-plan-resources.md',
   'adr/0027-native-runtime-boundary.md',
   'adr/0031-source-size-policy.md',
+  'adr/0032-research-project-authority.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

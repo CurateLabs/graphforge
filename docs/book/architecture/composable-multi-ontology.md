@@ -58,6 +58,20 @@ fingerprint before query or write. A mismatch is `coherence.fingerprint`.
 
 ## Project authority and enforcement
 
+### Branch authority (M11, Designed)
+
+The [research workspace contract](research-workspaces.md) requires a Branch
+to inherit exact ontology composition and enforcement context at its base
+Version. Local extensions and reclassification affect only that Branch.
+Upstream updates and Proposals preview ontology dependencies before adoption;
+deferring a required extension also prevents acceptance of dependent research.
+Competing classifications coexist only when valid under the selected authority.
+Module identity, composition identity, and runtime catalog identity remain
+distinct. These are additional research lifecycle requirements, not a claim
+that current project authority APIs already provide Branches.
+
+### Current project authority
+
 Reusable modules contain definitions, never activation policy. Project
 authority owns an `ActivationProfile` with a default and exact overrides for
 modules and bridges. Each scope is `exploratory`, `advisory`, or `strict`:

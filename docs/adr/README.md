@@ -34,6 +34,7 @@ are not retained in this tree.
 | 0026 | [Read plans bind resources in execution](0026-read-plan-resources.md) | `0026-read-plan-resources.md` |
 | 0027 | [Native GraphForge execution boundary](0027-native-runtime-boundary.md) | `0027-native-runtime-boundary.md` |
 | 0031 | [Reviewed source file size bounds](0031-source-size-policy.md) | `0031-source-size-policy.md` |
+| 0032 | [Research Branches share Project publication authority](0032-research-project-authority.md) | `0032-research-project-authority.md` |
 
 ## Numbering
 

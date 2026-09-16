@@ -42,7 +42,9 @@ flowchart LR
 
 ## Data model
 
-- **Project** — unit of work: graph + knowledge + workbench assets + sync state.
+- **Project** — durable research universe containing or referencing evidence,
+  graph knowledge, metadata, ontologies, and research lineage. M11 extends the
+  existing project workspace with Branches, Versions, and Proposals.
 - **Node / edge** — graph-native entities with properties; surrogate keys in execution;
   UUID identity at the API boundary.
 - **Ontology** — optional progressive model (`exploratory` / `advisory` / `strict`).
@@ -61,13 +63,54 @@ architecture deep-dives in [`../book/architecture/`](../book/architecture/overvi
 
 | Concept | Meaning in this project | Relationships, states, rules, and owner |
 | --- | --- | --- |
-| Project | Portable analysis workspace | Contains graph + knowledge + workbench assets; `graphforge-api` / storage |
+| Project | Durable research universe, not a single graph snapshot | Existing graph/knowledge workspace extended by the M11 research lifecycle; facade / storage |
 | Graph layer | Topology, properties, traversal, algorithms | Never stores knowledge semantics; Cypher reads only this layer |
 | Knowledge layer | Provenance, evidence, epistemic status | Attaches by UUID; append-only interpretation (ADR 0006) |
 | Workbench layer | Analyst verbs, search, workflows, recipes | Consumes lower layers; holds no graph-semantic state |
 | Progressive ontology | Exploration-first typing | Modes exploratory → advisory → strict; ADR 0003 |
 | Catalog ID vs ontology ID | Distinct ID spaces | Never substitute one for the other |
 | Analyst verb | Intent API bypassing Cypher | rank/cluster/paths/analyze/similar/find → Arrow |
+
+### M11 research model (Designed)
+
+The [analyst research experience](analyst-ux.md) supersedes the earlier
+portable-workspace-only Project definition and expands the workflow to
+Explore → Focus → Branch → Analyze → Compare → Propose → Integrate.
+The [research workspace contract](../book/architecture/research-workspaces.md)
+defines Slice selection, independent Branches, immutable Versions, separately
+governed Forks, and selective Proposals.
+
+Evidence, Knowledge, Research, and Lineage are analyst-facing conceptual layers,
+not replacements for the three Rust ownership layers. Evidence/Artifact
+derivation, claims, hypotheses, and acceptance history use domain-owned records
+with UUID references. Graph visibility and local graph edits belong to the
+selected workspace's graph view. Facade orchestration assembles both under
+storage publication authority; bindings hold no alternative state engine.
+Branches share one Project container and `CURRENT` authority; parent integration
+and its acceptance receipt publish together. A Branch's original base remains
+immutable while selected object/field comparison baselines advance explicitly.
+
+Explicit graph suppression changes a Branch's active graph. Epistemic status
+and canonicality never silently filter ordinary Cypher or algorithms. Canonical
+means accepted in a Project/community context and is distinct from confidence
+or the existing “supported” status.
+Integration does not automatically promote imported knowledge to canonical;
+that is a separate recorded decision, optionally in the same publication.
+
+Associated projects including XYG and graphforge-nextjs, other applications,
+and peer extensions own UX rendering, hosting, authentication, and access
+enforcement. Core supplies metadata, provenance, comparison, conflict, and
+proposal state through Rust and thin Python/Node/CLI surfaces. Consumer UI
+implementation is outside the M11 Core close gate.
+
+Existing checkpoints, append-only knowledge ledgers, ontology composition, and
+portable selection are foundations. None alone constitutes a Branch lifecycle.
+Retained research Versions pin selected dependency/baseline closure, not whole
+ancestors merely for genealogy. Measure retained storage as well as copy cost;
+external-only evidence and unavailable historical expansion must be disclosed.
+Compatible-reader reproduction is not pre-v1 migration support. Define consumer
+projections in #1346; each implementation issue proves its own contract and
+#1358 verifies composition. See [acceptance evidence](TESTING.md#analyst-ux-acceptance).
 
 ## Key flows
 

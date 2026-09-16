@@ -189,6 +189,13 @@ contract.
 
 ## Assertions
 
+This section describes the existing immutable assertion API. M11's
+[research workspace model](research-workspaces.md#local-changes-and-interpretation)
+adds scoped Branch changes and contextual canonicality; it does not make
+`CreateAssertionRequest` an in-place update API or equate “supported” with
+canonical. New research operations require explicit public contracts and
+facade/binding acceptance evidence.
+
 ```rust
 pub struct AssertionGraphRefInput {
     pub graph_uuid: uuid::Uuid,

@@ -11,7 +11,8 @@ The **published Starlight site** is organized around **reader journeys** (Diáta
 7. **Community** — licensing, security, code of conduct
 
 On disk, published sources live in Guide / Book / Reference / `engineering/` plus supporting
-folders. This repository contains only current user and contributor documentation.
+folders. Documentation covers current user and contributor workflows as well as
+explicitly marked planned product specifications.
 
 The Astro Starlight site (`docs-site/`) syncs an allowlisted subset of these trees.
 Sidebar labels follow reader journeys; **content paths / URLs stay on the Guide / Book /
@@ -80,6 +81,8 @@ extension documents are eligible for publication.
 
 | Document | Question it answers |
 | --- | --- |
+| [`engineering/analyst-ux.md`](engineering/analyst-ux.md) | What analyst experience and consumer contract must M11 deliver? (Designed.) |
+| [`book/architecture/research-workspaces.md`](book/architecture/research-workspaces.md) | How must Slices, Branches, Versions, and Proposals behave? (Designed.) |
 | [`engineering/ARCHITECTURE.md`](engineering/ARCHITECTURE.md) | Which concepts, boundaries, and components shape the system? |
 | [`engineering/TESTING.md`](engineering/TESTING.md) | How do we prove it before release? |
 | [`engineering/PUBLISHING.md`](engineering/PUBLISHING.md) | How do verified artifacts reach users safely? |
@@ -101,7 +104,9 @@ extension documents are eligible for publication.
 
 - **Keep docs current.** When behavior changes, update the doc in the same change.
 - **Link, don't duplicate.** Deep dives stay in `book/`; published pages stay focused on
-  current product behavior and contributor operations.
+  current product behavior and contributor operations. Planned requirements are
+  explicitly marked and integrated into the relevant product and architecture docs;
+  they are not claims of implementation.
 - **Decisions are recorded.** Significant choices get ADRs under [`adr/`](adr/), indexed from
   [`engineering/adrs/`](engineering/adrs/).
 - **Site tooling is separate.** Starlight config under `docs-site/` owns published nav.
