@@ -959,6 +959,14 @@ def main() -> None:
     validator_from_workspace = 'python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py"'
     assert "working-directory: crates/graphforge-bindings-node" in package_validation_step
     assert package_validation_step.count(validator_from_workspace) == 1
+    # `napi artifacts` fails unless every manifest target has an addon, and this
+    # lane builds exactly one, so it must narrow napi to the target it built.
+    assert '--config-path "$RUNNER_TEMP/napi-lane-target.json"' in package_validation_step, (
+        "the single-target cross lane must narrow napi artifacts to the target it built"
+    )
+    assert '{"targets":["%s"]}' in package_validation_step, (
+        "the cross lane's napi config must be generated from the matrix target"
+    )
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in package_validation_step
     assert (ROOT / "scripts/ci/validate-napi-artifacts.py").samefile(ARTIFACT_VALIDATOR)
 
@@ -968,6 +976,9 @@ def main() -> None:
     release_candidate_job = rc_workflow_text.split("  release_candidate:\n", 1)[1]
     assert 'node-version: "22"' in release_candidate_job
     assert validator_from_workspace in release_candidate_job
+    assert "--config-path" not in release_candidate_job, (
+        "the release-candidate job must collect artifacts against the full manifest target list"
+    )
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in release_candidate_job
     assert "--skip-optional-publish --no-gh-release" in release_candidate_job
     assert 'npm pack "./$package_dir"' in release_candidate_job
@@ -1157,6 +1168,25 @@ def main() -> None:
         )
         assert "arm_cflags || ''" in workflow_text, (
             f"{workflow.name} must source target-scoped CFLAGS from its matrix entry"
+        )
+        # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`, whose
+        # native binding is an optional dependency gated on `engines.node`. pnpm
+        # silently omits it when the running Node is older, and the toolchain then
+        # fails with "Cannot find native binding", so pin the cross lane's build
+        # host ahead of the executing lanes rather than letting it inherit them.
+        arm_node_version = re.search(r'node_version: "(\d+)"', arm_entry)
+        assert arm_node_version is not None, (
+            f"{workflow.name} must pin an explicit Node build host on the ARM64 cross lane"
+        )
+        assert int(arm_node_version.group(1)) >= 22, (
+            f"{workflow.name} ARM64 cross lane needs Node >= 22 for the "
+            "@napi-rs/cross-toolchain decompressor's native binding"
+        )
+        assert all("node_version:" not in entry for entry in entries if entry != arm_entry), (
+            f"{workflow.name} must leave the executing Node lanes on the default runtime"
+        )
+        assert "node-version: ${{ matrix.node_version || '20' }}" in workflow_text, (
+            f"{workflow.name} must source the Node lane runtime from its matrix entry"
         )
         assert workflow_text.count(ARTIFACT_COMMAND) == 2, (
             f"{workflow.name} must use the shared explicit napi artifact command"

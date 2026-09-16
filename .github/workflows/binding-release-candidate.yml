@@ -290,6 +290,16 @@ jobs:
             node_arch: x64
             native_builder: napi
             sticky_target: "true"
+            # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`,
+            # whose native binding declares `engines.node: ^22.20 || ^24.12 ||
+            # >=25`. pnpm silently skips an optional dependency whose engine the
+            # running Node does not satisfy, so on Node 20 the lane installed 484
+            # packages instead of 485 and the toolchain setup died with "Cannot
+            # find native binding". This lane never executes the addon it builds
+            # (execution_mode: package-validation — the runner is x64, the artifact
+            # is arm64), so its Node is a build host only and is free to move
+            # ahead of the `engines.node: >=20` floor the executing lanes assert.
+            node_version: "22"
           - os: blacksmith-8vcpu-windows-2025
             target: x86_64-pc-windows-msvc
             report_target: node-x86_64-pc-windows-msvc
@@ -328,7 +338,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node_version || '20' }}
           architecture: ${{ matrix.node_arch }}
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
@@ -449,7 +459,16 @@ jobs:
           mkdir -p artifacts
           cp "${addons[0]}" artifacts/
           pnpm exec napi create-npm-dirs
-          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+          # `napi artifacts` refuses to run unless an addon exists for every
+          # target in the manifest's `napi.targets`. This lane deliberately
+          # builds one target on a runner that cannot execute it, so point napi
+          # at a config declaring only that target. The release-candidate job
+          # runs the same command against the manifest, where all five addons
+          # have been collected, so the published set is still gated on the
+          # full target list.
+          printf '{"targets":["%s"]}\n' "$NODE_TARGET" > "$RUNNER_TEMP/napi-lane-target.json"
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm \
+            --config-path "$RUNNER_TEMP/napi-lane-target.json"
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json --target "$NODE_TARGET"
 
