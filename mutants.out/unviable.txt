@@ -1,5 +1,0 @@
-crates/graphforge-cli/src/portable_cli.rs:22:5: replace map_portable -> crate::CliRuntimeError with Default::default()
-crates/graphforge-cli/src/portable_cli.rs:38:5: replace selection_flag -> Result<PortableSelection, graphforge_api::GfError> with Ok(Default::default())
-crates/graphforge-cli/src/portable_cli.rs:87:9: replace <impl From<PortableProfile> for PortableV2SelectionProfile>::from -> Self with Default::default()
-crates/graphforge-cli/src/portable_cli.rs:105:9: replace <impl From<PortableFormat> for PortableV2Output>::from -> Self with Default::default()
-crates/graphforge-cli/src/portable_cli.rs:120:9: replace <impl From<VerifyMode> for PortableV2Mode>::from -> Self with Default::default()

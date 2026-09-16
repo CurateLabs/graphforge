@@ -1,3 +1,0 @@
-crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with None
-crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some(String::new())
-crates/graphforge-cli/src/portable_cli.rs:208:5: replace oci_credential -> Option<String> with Some("xyzzy".into())
