@@ -392,7 +392,7 @@ compression level; the shared builder establishes level 1.
 | Permanent producer | Publishing path | Retained resource/lifecycle choices |
 | --- | --- | --- |
 | `graph_construction_encoding::write_parquet` | Resumable topology, properties and controls | Existing bounded construction windows, cache advice and publication leases |
-| `graph_construction::write_parquet_with_properties` | Privately shaped runtime catalog, then published unchanged | Permanent caller explicitly supplies policy; accepted construction batches remain private |
+| `graph_construction::intake::write_parquet_with_properties` | Privately shaped runtime catalog, then published unchanged | Permanent caller explicitly supplies policy; accepted construction batches remain private |
 | `writer::stream_replay_nodes` | Canonical replay and compaction nodes | Dictionaries off, row groups at most `max_batch_rows`; bounded decoder strategy below |
 | `writer::stream_replay_edges` | Canonical replay and compaction edge routes | Dictionaries off, same row-group bound, authenticated physical route/schema |
 | `writer::open_replay_property_fragment` | Immutable property/tombstone fragments | Dictionaries off, chunk flushes, same row-group bound, route/generation metadata |
@@ -405,7 +405,7 @@ compression level; the shared builder establishes level 1.
 | `vector_store::write_vector_snapshot` | Vector-search participant | Dimension, vector, cell and encoded-file limits; complete Arrow batch remains |
 | `project_checkpoints` restoration encoder | Restoration-transition participant | `graphforge-restoration-transition/1` creator marker and restoration lifecycle |
 | `runtime_entity_labels::persist_runtime_catalog` | Bulk/composite runtime catalog publication | Existing private staging and catalog authority |
-| API `knowledge::write_parquet` | Assertion/evidence/confidence/reasoning participants | Existing serialized-Vec ownership and atomic participant publication |
+| API `knowledge::ledger::write_parquet` | Assertion/evidence/confidence/reasoning participants | Existing serialized-Vec ownership and atomic participant publication |
 | API `provenance::write_parquet` | Provenance participant | Existing serialized-Vec ownership and atomic participant publication |
 
 Separate writer implementations remain. The policy does not own files,

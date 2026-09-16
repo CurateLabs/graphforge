@@ -31,6 +31,15 @@ Behavior lives in a **Rust core**. Python and Node are thin bindings over `graph
 engines. v0.5.0 exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as
 the stable in-memory and FFI contract, Parquet for durable graph data).
 
+Within the Rust facade, `query_execution` owns query binding/execution, streaming,
+parameter validation, and result sinks. `result_shaping` owns public Arrow column
+selection and per-query schema metadata. These private modules preserve the
+`GraphForge` public methods. `workspace_hydration` owns authenticated workspace
+materialization and generation read authority. `graph_publication` owns mutation
+publication, reconciliation, and in-memory reset; `runtime_ownership` owns runtime
+lifetime, synchronous execution, and query admission. A streamed query retains
+its workspace until the stream and its file descriptors are dropped.
+
 The normative pre-v1 geometry, CRS, Arrow layout, and ownership boundary is
 defined in [Canonical spatial values](spatial-values.md).
 ---

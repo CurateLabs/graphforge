@@ -27,7 +27,7 @@ jobs:
       - name: Execute Rust and CLI matrix
         run: |
           cargo test -p graphforge-storage --lib project_checkpoints::tests --no-fail-fast
-          cargo test -p graphforge-api --lib checkpoints::tests --no-fail-fast
+          cargo test -p graphforge-api --lib checkpoints:: --no-fail-fast
           cargo test -p graphforge-cli --no-fail-fast
           cargo build -p graphforge-cli
       - name: Record Rust and CLI artifacts
@@ -73,7 +73,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

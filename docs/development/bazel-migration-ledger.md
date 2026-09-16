@@ -207,6 +207,11 @@ Frozen scan of `.github/workflows/`, `scripts/`, and `Makefile` for `cargo`,
 **27** files. Representative required path is `CI Gate` via
 `.github/workflows/test.yml` on Blacksmith runners.
 
+After API domain decomposition (#1308), the checkpoint recovery workflow uses
+`cargo test -p graphforge-api --lib checkpoints:: --no-fail-fast` to include
+view and diff child tests. The frozen command-site listing below retains its
+original selector.
+
 ### Sticky Cargo `target/` disks (#4 cutover)
 
 After [#4](https://github.com/CurateLabs/graphforge/issues/4), Test Suite

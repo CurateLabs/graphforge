@@ -3415,8 +3415,9 @@ Shipped evidence is finite and layer-specific. The two
 `algorithm_analyze_automorphism` modules cover normalization, refinement,
 brute-force small-graph equivalence, UUID-renaming invariance, overflow,
 cancellation, depth, matrix, search-state, iteration, allocation, and malformed
-projection boundaries. `algorithm_analyze.rs` proves registered dispatch,
-canonical families, schema, replay, and atomic controls. The `graphforge-api`
+projection boundaries. `algorithm_analyze.rs` retains registration and shared
+invocation tests; `algorithm_analyze/structural.rs` and its direct tests prove
+automorphism dispatch, canonical families, schema, replay, and atomic controls. The `graphforge-api`
 acceptance tests prove persisted reopen, exact metadata and nullability,
 closed options, overflow, and graph-property independence.
 `knowledge_isolation.rs` proves reserved-sidecar and equivalent resolved
