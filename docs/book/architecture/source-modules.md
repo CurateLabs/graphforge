@@ -119,14 +119,34 @@ exemptions or unchanged-tree release certification are required.
   construction's `compact_details` and `lifecycle_budget` modules. Their
   subprocess selectors and native-platform workflow selections remain unchanged.
 
+- [#1312](https://github.com/CurateLabs/graphforge/issues/1312) completes property
+  storage in one batch. Writer `replay_topology`, `replay_properties`,
+  `property_codec`, and `property_mutation` own stream inputs, encoding, and
+  authenticated staging. `GraphWriter` retains batching, topology commits and
+  shared work accounting; replay cleanup guards stay with their resources.
+- Property-overlay owners separate inventory admission, projected and targeted
+  reads, Parquet budgets, and newest-snapshot merging. Shared formats, metrics,
+  limits and resource ownership remain explicit. The source-contract gate follows
+  declared production modules and verifies root exports and moved evidence tests.
+- Catalog `filtered_parquet`, `property_readers`, and `providers` own pruning,
+  property decoding and DataFusion adapters. Registration and graph authority
+  remain in the parent; shared observer and test fixtures have one owner.
+- Semantic `migration/planning` and `migration/materialization` own retained-data
+  planning and private candidate construction. `legacy_routes` owns installation
+  and rollback guards. Binding identity, validation, schemas and inventory
+  authentication remain in the parent. Public paths use explicit reexports.
+- Existing direct assertions follow each owner; cross-domain tests retain their
+  original layer. Writer subprocess targets remain under `writer::tests`.
+  The current staging conflict test is
+  `writer::property_mutation::tests::staged_property_mutation_conflicts_after_intervening_project_publication`;
+  historical execution evidence keeps its recorded source revision and selector.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
 
 | Area | Remaining ownership extractions |
 | --- | --- |
-| Property storage | Replay topology/properties; property codecs/staging; authenticated inventories; projected reads/budgets; newest-snapshot merges |
-| Catalog/bindings/projection | Filtered readers; property readers; table providers; semantic migration |
 | Storage lifecycle | CAS manifest/materialization/install/GC; publication staging/control; checkpoint registry/revert |
 | Filesystem | Cache release; platform capabilities; Windows CAS sealing |
 | Knowledge core | Algorithm-run and confidence ledgers |
@@ -134,7 +154,7 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1311; recompute before canonical
+This snapshot records the working tree during #1312; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
@@ -144,14 +164,10 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-filesystem/src/lib.rs` | 5,488 |
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
-| `crates/graphforge-storage/src/catalog.rs` | 5,467 |
 | `crates/graphforge-storage/src/graph_object_store.rs` | 6,304 |
 | `crates/graphforge-storage/src/project_checkpoints.rs` | 4,091 |
 | `crates/graphforge-storage/src/project_generation.rs` | 3,014 |
 | `crates/graphforge-storage/src/project_publication.rs` | 4,805 |
-| `crates/graphforge-storage/src/property_overlay.rs` | 6,677 |
-| `crates/graphforge-storage/src/semantic_bindings.rs` | 4,043 |
-| `crates/graphforge-storage/src/writer.rs` | 10,432 |
 
 ## Evidence requirements
 

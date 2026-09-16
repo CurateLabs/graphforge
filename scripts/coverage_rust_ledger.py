@@ -232,17 +232,22 @@ def _cfg_test_analysis(source: str, path: str) -> tuple[set[int], set[str]]:
     """Return cfg(test) item lines and out-of-line module names."""
     tokens = _rust_tokens(source, path)
     delimiter_stack: list[tuple[str, int]] = []
-    brace_close: dict[int, int] = {}
+    delimiter_close: dict[int, int] = {}
+    enclosing: dict[int, int] = {}
+    line_tokens: dict[int, tuple[int, int]] = {}
     pairs = {"}": "{", ")": "(", "]": "["}
     for position, (token, token_line) in enumerate(tokens):
+        first, _ = line_tokens.get(token_line, (position, position))
+        line_tokens[token_line] = (first, position)
+        if delimiter_stack:
+            enclosing[position] = delimiter_stack[-1][1]
         if token in {"{", "(", "["}:
             delimiter_stack.append((token, position))
         elif token in pairs:
             if not delimiter_stack or delimiter_stack[-1][0] != pairs[token]:
                 raise LedgerError(f"unbalanced Rust delimiter in {path}:{token_line}")
-            opening, opening_position = delimiter_stack.pop()
-            if opening == "{":
-                brace_close[opening_position] = position
+            _, opening_position = delimiter_stack.pop()
+            delimiter_close[opening_position] = position
     if delimiter_stack:
         _, opening_position = delimiter_stack[-1]
         _, token_line = tokens[opening_position]
@@ -258,6 +263,73 @@ def _cfg_test_analysis(source: str, path: str) -> tuple[set[int], set[str]]:
             continue
         attribute_line = tokens[position][1]
         cursor = position + 7
+        # A test-only named field or parameter ends at its own comma/container,
+        # not at the next production item's opening brace. Skip complete extra
+        # attributes and visibility before recognizing the name/colon pair.
+        member = cursor
+        while member + 1 < len(tokens) and [value for value, _ in tokens[member : member + 2]] == [
+            "#",
+            "[",
+        ]:
+            member = delimiter_close[member + 1] + 1
+        if member < len(tokens) and tokens[member][0] == "pub":
+            member += 1
+            if member < len(tokens) and tokens[member][0] == "(":
+                member = delimiter_close[member] + 1
+        if member < len(tokens) and tokens[member][0] == "mut":
+            member += 1
+        named_member = (
+            member + 2 < len(tokens)
+            and re.fullmatch(r"[A-Za-z_]\w*", tokens[member][0]) is not None
+            and tokens[member + 1][0] == ":"
+            and tokens[member + 2][0] != ":"
+        )
+        if named_member:
+            container = enclosing.get(position)
+            if container is None:
+                raise LedgerError(f"ambiguous cfg(test) member in {path}:{attribute_line}")
+            limit = delimiter_close[container]
+            typed_member = tokens[container][0] == "("
+            if tokens[container][0] == "{":
+                prefix = container - 1
+                while prefix >= 0 and tokens[prefix][0] not in {"{", "}", ";"}:
+                    if tokens[prefix][0] == "struct":
+                        typed_member = True
+                        break
+                    prefix -= 1
+            cursor = member + 2
+            angle_depth = 0
+            while cursor < limit:
+                token = tokens[cursor][0]
+                if token in {"(", "[", "{"}:
+                    cursor = delimiter_close[cursor] + 1
+                    continue
+                if token == "<":
+                    # In an initializer this may be a comparison, not a type
+                    # argument list. Refuse ambiguity rather than consuming a
+                    # later production field while searching for its closing >.
+                    if not typed_member:
+                        raise LedgerError(
+                            f"ambiguous cfg(test) initializer in {path}:{attribute_line}"
+                        )
+                    angle_depth += 1
+                elif token == ">" and angle_depth:
+                    angle_depth -= 1
+                elif token == "," and angle_depth == 0:
+                    break
+                cursor += 1
+            if angle_depth:
+                raise LedgerError(f"ambiguous cfg(test) member in {path}:{attribute_line}")
+            end = cursor if cursor < limit else cursor - 1
+            end_line = tokens[end][1]
+            excluded.update(
+                line
+                for line in range(attribute_line, end_line + 1)
+                if line not in line_tokens
+                or (line_tokens[line][0] >= position and line_tokens[line][1] <= end)
+            )
+            position = end + 1
+            continue
         paren_depth = bracket_depth = 0
         boundary: int | None = None
         while cursor < len(tokens):
@@ -277,7 +349,7 @@ def _cfg_test_analysis(source: str, path: str) -> tuple[set[int], set[str]]:
         if boundary is None or paren_depth or bracket_depth:
             raise LedgerError(f"ambiguous cfg(test) item in {path}:{attribute_line}")
         if tokens[boundary][0] == "{":
-            close = brace_close.get(boundary)
+            close = delimiter_close.get(boundary)
             if close is None:
                 raise LedgerError(f"unbalanced cfg(test) item in {path}:{attribute_line}")
             end_line = tokens[close][1]
