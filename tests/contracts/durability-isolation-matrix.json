@@ -482,7 +482,7 @@
       "evidence": [
         {
           "kind": "rust",
-          "path": "crates/graphforge-storage/src/project_publication.rs",
+          "path": "crates/graphforge-storage/src/project_publication/tests.rs",
           "symbol": "identical_published_transaction_is_idempotent"
         }
       ]
@@ -493,7 +493,7 @@
       "evidence": [
         {
           "kind": "rust",
-          "path": "crates/graphforge-storage/src/project_publication.rs",
+          "path": "crates/graphforge-storage/src/project_publication/tests.rs",
           "symbol": "changed_content_under_same_transaction_conflicts"
         }
       ]
@@ -777,7 +777,7 @@
     },
     {
       "kind": "rust",
-      "path": "crates/graphforge-filesystem/src/lib.rs",
+      "path": "crates/graphforge-filesystem/src/windows.rs",
       "symbol": "write_through_source_handle_performs_replacement_rename"
     }
   ]

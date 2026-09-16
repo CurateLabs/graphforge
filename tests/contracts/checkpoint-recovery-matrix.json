@@ -3,7 +3,7 @@
   "contract": "graphforge-checkpoint-recovery/1",
   "issue": 2481,
   "command_groups": {
-    "rust-storage": "cargo test -p graphforge-storage --lib project_checkpoints::tests --no-fail-fast",
+    "rust-storage": "cargo test -p graphforge-storage --lib project_checkpoints:: --no-fail-fast",
     "rust-api": "cargo test -p graphforge-api --lib checkpoints:: --no-fail-fast",
     "python": "python crates/graphforge-bindings-py/tests/checkpoints.py",
     "node": "node --test crates/graphforge-bindings-node/tests/checkpoints.test.mjs",
@@ -18,9 +18,9 @@
       "expected_columns": ["checkpoint_uuid", "name", "source_generation_uuid", "operation"],
       "expected_errors": ["GF_IDEMPOTENCY_CONFLICT", "GF_CHECKPOINT_EXISTS", "GF_VALIDATION", "GF_CHECKPOINT_REGISTRY_CORRUPT"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "create_list_delete_and_replays_are_deterministic"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "identity_is_stable_across_independent_projects"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "conflicts_names_and_corruption_fail_closed"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "create_list_delete_and_replays_are_deterministic"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "identity_is_stable_across_independent_projects"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "conflicts_names_and_corruption_fail_closed"}
       ]
     },
     {
@@ -31,11 +31,11 @@
       "expected_columns": [],
       "expected_errors": ["GF_CHECKPOINT_NOT_FOUND", "GF_VALIDATION", "GF_WRITER_BUSY"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "opened_checkpoint_generation_remains_pinned_after_delete"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "checkpoint_pin_and_open_lease_control_recovery_cleanup"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "checkpoint_pin_survives_process_restart"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "checkpoint_cleanup_removes_all_transient_resources"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "exact_input_bounds_and_writer_lock_are_enforced"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "opened_checkpoint_generation_remains_pinned_after_delete"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "checkpoint_pin_and_open_lease_control_recovery_cleanup"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "checkpoint_pin_survives_process_restart"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "checkpoint_cleanup_removes_all_transient_resources"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "exact_input_bounds_and_writer_lock_are_enforced"}
       ]
     },
     {
@@ -83,8 +83,8 @@
       "expected_columns": ["result_generation_uuid"],
       "expected_errors": ["GF_VALIDATION"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "revert_publication_failpoint_matrix"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "revert_validation_failure_preserves_prior_current"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "revert_publication_failpoint_matrix"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "revert_validation_failure_preserves_prior_current"}
       ]
     },
     {
@@ -95,9 +95,9 @@
       "expected_columns": [],
       "expected_errors": ["GF_CHECKPOINT_REGISTRY_CORRUPT"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "registry_failpoints_recover_exact_previous_or_next_revision"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "seeded_create_and_delete_failpoints_recover_exact_previous_or_next_revision"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "recovery_rejects_missing_or_tampered_staged_pair"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "registry_failpoints_recover_exact_previous_or_next_revision"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/tests.rs", "symbol": "seeded_create_and_delete_failpoints_recover_exact_previous_or_next_revision"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/registry/tests.rs", "symbol": "recovery_rejects_missing_or_tampered_staged_pair"}
       ]
     },
     {
@@ -110,7 +110,7 @@
       "tests": [
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "revert_source_validation_rejects_cross_domain_dangling_assertion"},
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "checkpoint_revert_corruption_matrix_fails_closed"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "checksummed_but_impossible_registry_identities_fail_closed"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/registry/tests.rs", "symbol": "checksummed_but_impossible_registry_identities_fail_closed"}
       ]
     },
     {
@@ -121,7 +121,7 @@
       "expected_columns": ["operation", "result_generation_uuid", "restoration_uuid"],
       "expected_errors": [],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints.rs", "symbol": "revert_identity_matches_frozen_golden_vector"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_checkpoints/restoration/tests.rs", "symbol": "revert_identity_matches_frozen_golden_vector"},
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "revert_is_visible_on_the_same_graphforge_instance"},
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "in_memory_revert_preserves_its_backing_project_owner"}
       ]

@@ -112,8 +112,8 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_publication.rs", "symbol": "identical_published_transaction_is_idempotent"},
-        {"kind": "rust", "path": "crates/graphforge-storage/src/project_publication.rs", "symbol": "changed_content_under_same_transaction_conflicts"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_publication/tests.rs", "symbol": "identical_published_transaction_is_idempotent"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_publication/tests.rs", "symbol": "changed_content_under_same_transaction_conflicts"},
         {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "invalid_graph_reference_and_conflicting_replay_publish_nothing"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_algorithm_runs"},
         {"kind": "node", "path": "crates/graphforge-bindings-node/tests/algorithm-runs.test.mjs", "symbol": "recorded rank exposes the same result and durable lifecycle"}
