@@ -146,6 +146,7 @@ const PAGES = [
   'adr/0025-storage-value-contract.md',
   'adr/0026-read-plan-resources.md',
   'adr/0027-native-runtime-boundary.md',
+  'adr/0031-source-size-policy.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

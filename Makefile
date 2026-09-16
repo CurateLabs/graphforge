@@ -216,6 +216,9 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@python3 scripts/ci/python-build-mode-check.py
 	@python3 scripts/ci/test-python-build-mode-check.py
 	@python3 scripts/ci/test-uuid-derivation-policy.py
+	@echo "━━━ Source size policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@python3 scripts/source_size_policy.py
+	@python3 scripts/ci/test-source-size-policy.py
 	@echo "━━━ Public API BDD policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/ci/api-bdd-policy.py --check-issues
 	@python3 scripts/ci/test-api-bdd-policy.py

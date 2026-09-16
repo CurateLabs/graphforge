@@ -68,6 +68,14 @@ jobs:
       - name: Test Python lock validation policy
         run: python3 scripts/ci/test-python-lock-policy.py
 
+      - name: Validate reviewed source size bounds
+        run: python3 scripts/source_size_policy.py
+
+      - name: Test source size policy and validation cache
+        run: |
+          python3 scripts/ci/test-source-size-policy.py
+          python3 scripts/ci/test-pre-push-validation.py
+
       - name: Classify Repository Policy suites
         id: policy-suites
         shell: bash

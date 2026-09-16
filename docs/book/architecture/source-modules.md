@@ -13,12 +13,15 @@ work-in-progress limit.
 The approved default is 3,000 physical lines for every tracked file beneath
 `crates/*/src`, including comments, blank lines, and embedded tests. Larger files
 require an accepted ADR with an exact path, finite bound, and cohesion rationale.
-The planned policy ADR grants 3,500-line limits only to storage's `adjacency.rs`
-and `project_generation.rs`; those exemptions are not yet recorded as accepted ADRs.
-Strict CI enforcement lands after the remaining extractions. No temporary blanket
-exemptions or unchanged-tree release certification are required.
+[ADR-0031](../../adr/0031-source-size-policy.md) grants 3,500-line limits only
+to storage's `adjacency.rs` and `project_generation.rs`, with separate cohesion
+and reviewability rationales. `config/source-size-policy.json` records those exact
+paths and finite bounds. `python3 scripts/source_size_policy.py` enforces the policy
+in Repository Policy CI and `make pre-push-fast`; full pre-push caching includes
+tracked membership, source contents, policy and ADR contents. Obsolete exemptions
+fail once a source fits the default. No transitional exemptions apply.
 
-## Landed and active ownership
+## Landed ownership
 
 - Relational aggregates, scalar conversion, value comparison, temporal UDFs,
   list execution, and map/property access have their own expression modules.
@@ -156,7 +159,7 @@ exemptions or unchanged-tree release certification are required.
   retain their interfaces and field/drop order. Windows backend admission and
   unsafe-code boundaries are unchanged. Direct tests follow their owners.
 
-- [#1314](https://github.com/CurateLabs/graphforge/issues/1314) extracts knowledge
+- [#1328](https://github.com/CurateLabs/graphforge/pull/1328) merged #1314, extracting knowledge
   ledgers and both native language surfaces together. Knowledge `algorithm_run`
   and `confidence` own records, validation and direct tests; shared schema/reader
   authority and registry remain in the root.
@@ -172,23 +175,24 @@ exemptions or unchanged-tree release certification are required.
   The expanded GIL check also requires two existing certification-report inputs
   to become owned strings before the unchanged detached native call.
 
-## Remaining domain sequence
-
-Follow live child dependencies and finish queued work before starting more.
-
-| Area | Remaining completion work |
-| --- | --- |
-| Size policy | Accepted ADR with two bounded exemptions; strict checker in Repository Policy and `make pre-push-fast`; clean merged inventory |
-
 ## Measured source inventory
 
-This snapshot records the working tree during #1314; recompute before canonical
-closure. Files above the default bound remain pending unless an accepted exemption applies.
+After the final extraction merged in #1328 (`ece7b375`), all 676 tracked source
+files fit the policy: 674 fit the 3,000-line default and these two accepted
+exemptions fit their finite bounds. Every extracted production and test file is
+included. Recompute with `python3 scripts/source_size_policy.py --inventory`.
 
-| Source | Physical lines |
-| --- | ---: |
-| `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
-| `crates/graphforge-storage/src/project_generation.rs` | 3,014 |
+| Source | Physical lines | Permitted bound | ADR |
+| --- | ---: | ---: | --- |
+| `crates/graphforge-storage/src/adjacency.rs` | 3,017 | 3,500 | [0031](../../adr/0031-source-size-policy.md#adjacency) |
+| `crates/graphforge-storage/src/project_generation.rs` | 3,014 | 3,500 | [0031](../../adr/0031-source-size-policy.md#project-generation) |
+
+The expression root now keeps lowering state and central dispatch, with value,
+list, temporal/spatial and scalar execution owned by child modules (#1307).
+The API root retains the facade type and public exports, with query execution,
+hydration, publication and runtime ownership in private modules (#1303).
+The linked batch PRs above record body/test preservation and exact-head CI;
+#1315 adds strict enforcement after every extraction child has closed.
 
 ## Evidence requirements
 

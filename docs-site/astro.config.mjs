@@ -301,6 +301,7 @@ export default defineConfig({
                 },
                 { label: '0026 Read plan resources', slug: 'adr/0026-read-plan-resources' },
                 { label: '0027 Native runtime boundary', slug: 'adr/0027-native-runtime-boundary' },
+                { label: '0031 Source file size bounds', slug: 'adr/0031-source-size-policy' },
               ],
             },
           ],

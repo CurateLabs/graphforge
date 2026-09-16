@@ -148,6 +148,37 @@ class Coordinator:
             records.append({"path": relative.as_posix(), "sha256": file_digest(path)})
         return records
 
+    def source_size_policy_state(self) -> list[dict[str, str]]:
+        """Hash exact tracked size-policy inputs, without generic build-directory exclusions."""
+        try:
+            tracked = subprocess.check_output(
+                ("git", "ls-files", "-z"), cwd=self.root, stderr=subprocess.PIPE
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValidationError(
+                "unable to enumerate tracked source-size policy inputs"
+            ) from error
+        records: list[dict[str, str]] = []
+        for name in sorted({os.fsdecode(value) for value in tracked.split(b"\0") if value}):
+            parts = Path(name).parts
+            source = len(parts) >= 4 and parts[0] == "crates" and parts[2] == "src"
+            policy = name == "config/source-size-policy.json"
+            adr = len(parts) == 3 and parts[:2] == ("docs", "adr") and name.endswith(".md")
+            if not (source or policy or adr):
+                continue
+            path = self.root / name
+            record = {"path": name}
+            if path.is_symlink():
+                record["kind"] = "symlink"
+            elif not path.resolve().is_relative_to(self.root):
+                record["kind"] = "outside-repository"
+            elif path.is_file():
+                record.update(kind="regular", sha256=file_digest(path))
+            else:
+                record["kind"] = "missing-or-non-regular"
+            records.append(record)
+        return records
+
     def command_versions(self, stage: Stage) -> dict[str, str]:
         executables = {command[0] for command in stage.commands if command}
         if stage.name == "preflight":
@@ -175,6 +206,11 @@ class Coordinator:
                 "schema": SCHEMA,
                 "stage": stage.name,
                 "inputs": self.source_state(stage.inputs),
+                **(
+                    {"source_size_policy": self.source_size_policy_state()}
+                    if stage.name == "policy-static"
+                    else {}
+                ),
                 "execution_contract": {
                     "commands": stage.commands,
                     "artifacts": stage.artifacts,
@@ -575,6 +611,8 @@ def stages() -> tuple[Stage, ...]:
                 "scripts/**/*.py",
                 "**/*.py",
                 ".github/**/*.yml",
+                "config/source-size-policy.json",
+                "docs/adr/*.md",
             ),
         ),
         Stage(
