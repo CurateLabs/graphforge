@@ -62,6 +62,13 @@ exemptions or unchanged-tree release certification are required.
   export orchestration, final verification, leases, and platform admission.
   All moved tests retain their assertions; native workflow selectors stay in place.
 
+- [#1306](https://github.com/CurateLabs/graphforge/issues/1306) extracts the four
+  algorithm adapter roots together. Rank and clustering algorithms own individual
+  modules and direct tests. Analysis families own matching/partition, coloring,
+  paths/cycles/DAG, structural, and embedding adapters. Path flow/cut and Steiner
+  adapters have separate owners. Existing kernels remain single-owned; parents
+  retain registration, invocation controls, and shared projection helpers.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
@@ -73,7 +80,6 @@ Follow live child dependencies and finish queued work before starting more.
 | API domains | Bulk normalization/publication; knowledge ledgers; repository definitions/skills; checkpoint views/diffs; ontology candidates; composite property routing/rebase |
 | Executor | CREATE; DELETE/SET/REMOVE; traversal/ordinal identity; optional/UNWIND; session/planner |
 | Write driver | CREATE/MERGE; property/label/delete phases |
-| Algorithms | Rank families; analysis families/embeddings; clustering families; flow/cut/Steiner adapters |
 | UUID membership | Probing/snapshots; construction encoding; ordinal writers/publication; topology deltas; compaction; rebuild/maintenance |
 | Construction | Intake/receipts; shape validation/surrogates; encoding/publication; recovery/cleanup; bounded control; I/O evidence |
 | Property storage | Replay topology/properties; property codecs/staging; authenticated inventories; projected reads/budgets; newest-snapshot merges |
@@ -85,7 +91,7 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1301; recompute before canonical
+This snapshot records the working tree during #1306; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
@@ -98,10 +104,6 @@ closure. Files above the default bound remain pending unless an accepted exempti
 | `crates/graphforge-api/src/repository.rs` | 4,457 |
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
 | `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
-| `crates/graphforge-exec/src/algorithm_analyze.rs` | 7,161 |
-| `crates/graphforge-exec/src/algorithm_cluster.rs` | 4,487 |
-| `crates/graphforge-exec/src/algorithm_paths.rs` | 3,402 |
-| `crates/graphforge-exec/src/algorithm_rank.rs` | 10,408 |
 | `crates/graphforge-exec/src/lib.rs` | 8,533 |
 | `crates/graphforge-exec/src/write_driver.rs` | 4,861 |
 | `crates/graphforge-filesystem/src/lib.rs` | 5,488 |

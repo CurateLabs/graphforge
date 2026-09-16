@@ -1,5 +1,12 @@
 //! Rust-owned path handlers registered under the shared algorithm dispatch contract.
 
+mod flow_cut;
+use flow_cut::{GomoryHuTree, MaxFlow, MinCostFlow, MinCut};
+use flow_cut::{cost_capacity_edges, validate_gomory_hu_invocation, validate_min_cost_properties};
+mod steiner;
+use steiner::steiner_kind;
+use steiner::{execute_steiner, validate_source_and_steiner_fields};
+
 use graphforge_value::EntityTypeSelection;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -149,161 +156,12 @@ struct Yens {
 
 struct TransitiveClosure;
 
-struct MaxFlow {
-    source: [u8; 16],
-    target: Option<[u8; 16]>,
-    edges: bool,
-}
-
-struct MinCut {
-    source: [u8; 16],
-    target: Option<[u8; 16]>,
-    edges: bool,
-}
-
-struct GomoryHuTree;
-
-impl RustAlgorithm for GomoryHuTree {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(PathAlgorithm::GomoryHuTree),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        control.check_cancelled()?;
-        let rows: Vec<Vec<AlgorithmValue>> = gomory_hu_forest(
-            &graph.node_uuids().collect::<Vec<_>>(),
-            &capacity_edges(graph)?,
-            graph.is_directed(),
-            control,
-        )?
-        .into_iter()
-        .map(|edge| {
-            vec![
-                AlgorithmValue::Uuid(edge.source_uuid),
-                AlgorithmValue::Uuid(edge.target_uuid),
-                AlgorithmValue::Float64(edge.cut_value),
-            ]
-        })
-        .collect();
-        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
-    }
-}
-
-struct MinCostFlow {
-    source: [u8; 16],
-    target: Option<[u8; 16]>,
-    edges: bool,
-    input: Arc<[CostCapacityEdge]>,
-}
-
 struct RandomWalk {
     source: [u8; 16],
     k: usize,
     walk_length: usize,
     seed: u64,
     weighted: bool,
-}
-
-struct MinSteinerTree {
-    terminals: Arc<[[u8; 16]]>,
-}
-
-struct PrizeCollectingSteinerTree {
-    terminals: Arc<[[u8; 16]]>,
-    prizes: Arc<[NodePrize]>,
-}
-
-impl RustAlgorithm for PrizeCollectingSteinerTree {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(PathAlgorithm::PrizeCollectingSteinerTree),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        control.check_cancelled()?;
-        let nodes = graph.node_uuids().collect::<Vec<_>>();
-        let edges = capacity_edges(graph)?
-            .into_iter()
-            .map(|edge| PrizeSteinerInputEdge {
-                edge_uuid: edge.edge_uuid,
-                source_uuid: edge.source_uuid,
-                target_uuid: edge.target_uuid,
-                cost: ResolvedNumber::Float64(edge.capacity),
-            })
-            .collect::<Vec<_>>();
-        let rows: Vec<Vec<AlgorithmValue>> = prize_collecting_steiner_tree(
-            &nodes,
-            &self.prizes,
-            &edges,
-            &self.terminals,
-            graph.is_directed(),
-            control,
-        )?
-        .into_iter()
-        .map(|edge| {
-            vec![
-                AlgorithmValue::Uuid(edge.edge_uuid),
-                AlgorithmValue::Uuid(edge.source_uuid),
-                AlgorithmValue::Uuid(edge.target_uuid),
-                AlgorithmValue::Float64(edge.weight),
-            ]
-        })
-        .collect();
-        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
-    }
-}
-
-impl RustAlgorithm for MinSteinerTree {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(PathAlgorithm::MinSteinerTree),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        control.check_cancelled()?;
-        let nodes = graph.node_uuids().collect::<Vec<_>>();
-        let solution = minimum_steiner_tree(
-            &nodes,
-            &weighted_undirected_edges(graph)?,
-            &self.terminals,
-            control,
-        )?;
-        let rows: Vec<Vec<AlgorithmValue>> = solution
-            .edges
-            .into_iter()
-            .map(|edge| {
-                vec![
-                    AlgorithmValue::Uuid(edge.edge_uuid),
-                    AlgorithmValue::Uuid(edge.source_uuid),
-                    AlgorithmValue::Uuid(edge.target_uuid),
-                    AlgorithmValue::Float64(edge.weight),
-                ]
-            })
-            .collect();
-        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
-    }
 }
 
 struct GraphRandomWalkAdjacency<'a>(&'a AdjacencyGraph);
@@ -367,168 +225,6 @@ impl RustAlgorithm for RandomWalk {
     }
 }
 
-impl RustAlgorithm for MaxFlow {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(if self.edges {
-                PathAlgorithm::MaxFlowEdges
-            } else {
-                PathAlgorithm::MaxFlow
-            }),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let target = self
-            .target
-            .ok_or_else(|| execution("maximum flow requires a target selector"))?;
-        let algorithm = self.capability().algorithm;
-        let solution = maximum_flow(
-            &graph.node_uuids().collect::<Vec<_>>(),
-            &capacity_edges(graph)?,
-            self.source,
-            target,
-            graph.is_directed(),
-            control,
-        )?;
-        let rows: Vec<Vec<AlgorithmValue>> = if self.edges {
-            solution
-                .edge_flows
-                .into_iter()
-                .map(|(edge, flow)| {
-                    vec![
-                        AlgorithmValue::Uuid(edge.edge_uuid),
-                        AlgorithmValue::Uuid(edge.source_uuid),
-                        AlgorithmValue::Uuid(edge.target_uuid),
-                        AlgorithmValue::Float64(flow),
-                    ]
-                })
-                .collect()
-        } else {
-            vec![vec![
-                AlgorithmValue::Uuid(self.source),
-                AlgorithmValue::Uuid(target),
-                AlgorithmValue::Float64(solution.value),
-            ]]
-        };
-        AlgorithmOutput::from_rows(algorithm, control, rows)
-    }
-}
-
-impl RustAlgorithm for MinCut {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(if self.edges {
-                PathAlgorithm::MinCutEdges
-            } else {
-                PathAlgorithm::MinCut
-            }),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let target = self
-            .target
-            .ok_or_else(|| execution("minimum cut requires a target selector"))?;
-        let algorithm = self.capability().algorithm;
-        let solution = minimum_cut(
-            &graph.node_uuids().collect::<Vec<_>>(),
-            &capacity_edges(graph)?,
-            self.source,
-            target,
-            graph.is_directed(),
-            control,
-        )?;
-        let rows: Vec<Vec<AlgorithmValue>> = if self.edges {
-            solution
-                .cut_edges
-                .into_iter()
-                .map(|edge| {
-                    vec![
-                        AlgorithmValue::Uuid(edge.edge_uuid),
-                        AlgorithmValue::Uuid(edge.source_uuid),
-                        AlgorithmValue::Uuid(edge.target_uuid),
-                        AlgorithmValue::Float64(edge.capacity),
-                    ]
-                })
-                .collect()
-        } else {
-            vec![vec![
-                AlgorithmValue::Uuid(self.source),
-                AlgorithmValue::Uuid(target),
-                AlgorithmValue::Float64(solution.value),
-            ]]
-        };
-        AlgorithmOutput::from_rows(algorithm, control, rows)
-    }
-}
-
-impl RustAlgorithm for MinCostFlow {
-    fn capability(&self) -> AlgorithmCapability {
-        AlgorithmCapability {
-            algorithm: Algorithm::Paths(if self.edges {
-                PathAlgorithm::MinCostMaxFlowEdges
-            } else {
-                PathAlgorithm::MinCostMaxFlow
-            }),
-            backend: "rust",
-            dependency: BUILTIN_REVIEW,
-        }
-    }
-
-    fn execute(
-        &self,
-        graph: &AdjacencyGraph,
-        control: &AlgorithmControl,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let target = self
-            .target
-            .ok_or_else(|| execution("minimum-cost maximum flow requires a target selector"))?;
-        let adjacency_entries = min_cost_flow_adjacency_entries(&self.input, graph.is_directed())?;
-        control.check_graph_size(graph.node_ids().len(), adjacency_entries)?;
-        control.check_cancelled()?;
-        let mut node_uuids = Vec::new();
-        #[cfg(test)]
-        MIN_COST_NODE_PROJECTION_ATTEMPTS.with(|attempts| {
-            attempts.set(attempts.get().saturating_add(1));
-        });
-        node_uuids
-            .try_reserve_exact(graph.node_ids().len())
-            .map_err(|_| {
-                execution("minimum-cost maximum-flow node projection allocation failed")
-            })?;
-        node_uuids.extend(graph.node_uuids());
-        let solution = minimum_cost_maximum_flow(
-            &node_uuids,
-            &self.input,
-            self.source,
-            target,
-            graph.is_directed(),
-            control,
-        )?;
-        shape_min_cost_flow_output(solution, self.source, target, self.edges, control)
-    }
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static MIN_COST_NODE_PROJECTION_ATTEMPTS: std::cell::Cell<u64> = const {
-        std::cell::Cell::new(0)
-    };
-}
-
 fn capacity_edges(graph: &AdjacencyGraph) -> Result<Vec<CapacityEdge>, AlgorithmError> {
     let mut edges = std::collections::BTreeMap::new();
     for &source_id in graph.node_ids() {
@@ -556,58 +252,6 @@ fn capacity_edges(graph: &AdjacencyGraph) -> Result<Vec<CapacityEdge>, Algorithm
         }
     }
     Ok(edges.into_values().collect())
-}
-
-fn weighted_undirected_edges(graph: &AdjacencyGraph) -> Result<Vec<WeightedEdge>, AlgorithmError> {
-    if graph.is_directed() {
-        return Err(execution(
-            "minimum Steiner tree requires an undirected graph",
-        ));
-    }
-    capacity_edges(graph).map(|edges| {
-        edges
-            .into_iter()
-            .map(|edge| WeightedEdge {
-                edge_uuid: edge.edge_uuid,
-                source_uuid: edge.source_uuid,
-                target_uuid: edge.target_uuid,
-                weight: edge.capacity,
-            })
-            .collect()
-    })
-}
-
-fn cost_capacity_edges(
-    capacity_graph: &AdjacencyGraph,
-    cost_graph: &AdjacencyGraph,
-) -> Result<Vec<CostCapacityEdge>, AlgorithmError> {
-    let capacities = capacity_edges(capacity_graph)?
-        .into_iter()
-        .map(|edge| (edge.edge_uuid, edge))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let costs = capacity_edges(cost_graph)?
-        .into_iter()
-        .map(|edge| (edge.edge_uuid, edge.capacity))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    if capacities.len() != costs.len() || capacities.keys().ne(costs.keys()) {
-        return Err(execution(
-            "minimum-cost maximum-flow property projections disagree on selected edges",
-        ));
-    }
-    capacities
-        .into_values()
-        .map(|edge| {
-            Ok(CostCapacityEdge {
-                edge_uuid: edge.edge_uuid,
-                source_uuid: edge.source_uuid,
-                target_uuid: edge.target_uuid,
-                capacity: edge.capacity,
-                unit_cost: *costs.get(&edge.edge_uuid).ok_or_else(|| {
-                    execution("minimum-cost maximum-flow edge has no resolved cost")
-                })?,
-            })
-        })
-        .collect()
 }
 
 impl RustAlgorithm for TransitiveClosure {
@@ -1369,59 +1013,6 @@ fn update_node_numeric_projection(
     Ok(())
 }
 
-fn execute_steiner(
-    graph: &AdjacencyGraph,
-    dir: &Path,
-    source: Option<[u8; 16]>,
-    target: Option<[u8; 16]>,
-    options: &PathsOptions,
-    kind: SteinerKind,
-    control: &AlgorithmControl,
-) -> Result<RecordBatch, GfError> {
-    let mut selected_nodes = Vec::new();
-    selected_nodes
-        .try_reserve_exact(graph.node_ids().len())
-        .map_err(|_| execution("Steiner projection allocation exceeds available memory"))?;
-    for uuid in graph.node_uuids() {
-        control.check_cancelled()?;
-        selected_nodes.push(uuid);
-    }
-    let invocation =
-        normalize_steiner_invocation(kind, source, target, options, &selected_nodes, control)?;
-    let mut registry = AlgorithmRegistry::default();
-    match kind {
-        SteinerKind::MinimumTree => registry.register(Arc::new(MinSteinerTree {
-            terminals: Arc::from(invocation.terminal_uuids()),
-        }))?,
-        SteinerKind::PrizeCollecting => {
-            let property = options
-                .prize_property
-                .as_deref()
-                .expect("prize property normalized");
-            let mapping = load_node_numeric_property(graph, dir, property)?;
-            let prizes = graph
-                .node_ids()
-                .iter()
-                .map(|node_id| NodePrize {
-                    node_uuid: graph
-                        .node_uuid(*node_id)
-                        .expect("selected node ID has a UUID"),
-                    prize: ResolvedNumber::Float64(mapping[node_id]),
-                })
-                .collect::<Vec<_>>();
-            registry.register(Arc::new(PrizeCollectingSteinerTree {
-                terminals: Arc::from(invocation.terminal_uuids()),
-                prizes: Arc::from(prizes),
-            }))?;
-        }
-    }
-    let algorithm = Algorithm::Paths(options.by);
-    registry
-        .execute(algorithm, graph, control)
-        .and_then(|output| shape_algorithm_output(algorithm, &output))
-        .map_err(Into::into)
-}
-
 fn validate_path_options(
     source: Option<[u8; 16]>,
     target: Option<[u8; 16]>,
@@ -1528,61 +1119,6 @@ fn validate_path_options(
     Ok(())
 }
 
-fn validate_gomory_hu_invocation(
-    source: Option<[u8; 16]>,
-    target: Option<[u8; 16]>,
-    options: &PathsOptions,
-) -> Result<(), GfError> {
-    if !matches!(options.by, PathAlgorithm::GomoryHuTree) {
-        return Ok(());
-    }
-    if source.is_some() || target.is_some() {
-        return Err(GfError::Validation(format!(
-            "{} does not accept positional source or target selectors",
-            options.by
-        )));
-    }
-    if options.directed {
-        return Err(GfError::Validation(
-            "gomory_hu_tree requires directed=false".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_source_and_steiner_fields(
-    source: Option<[u8; 16]>,
-    options: &PathsOptions,
-) -> Result<(), GfError> {
-    let by = options.by;
-    let steiner = steiner_kind(by).is_some();
-    let source_free = steiner || matches!(by, PathAlgorithm::GomoryHuTree);
-    if !source_free && source.is_none() {
-        return Err(GfError::Validation(format!(
-            "{by} requires a source selector"
-        )));
-    }
-    if !steiner && !options.terminal_uuids.is_empty() {
-        return Err(GfError::Validation(format!(
-            "{by} does not accept terminal UUIDs"
-        )));
-    }
-    if !steiner && options.prize_property.is_some() {
-        return Err(GfError::Validation(format!(
-            "{by} does not accept a prize property"
-        )));
-    }
-    Ok(())
-}
-
-const fn steiner_kind(by: PathAlgorithm) -> Option<SteinerKind> {
-    match by {
-        PathAlgorithm::MinSteinerTree => Some(SteinerKind::MinimumTree),
-        PathAlgorithm::PrizeCollectingSteinerTree => Some(SteinerKind::PrizeCollecting),
-        _ => None,
-    }
-}
-
 fn validate_heuristic(by: PathAlgorithm, heuristic: Option<&str>) -> Result<(), GfError> {
     if let Some(heuristic) = heuristic
         && invalid_selector(heuristic)
@@ -1595,40 +1131,6 @@ fn validate_heuristic(by: PathAlgorithm, heuristic: Option<&str>) -> Result<(), 
         return Err(GfError::Validation(format!(
             "{by} does not accept a heuristic property"
         )));
-    }
-    Ok(())
-}
-
-fn validate_min_cost_properties(
-    by: PathAlgorithm,
-    min_cost: bool,
-    weight: Option<&str>,
-    capacity_property: Option<&str>,
-    cost_property: Option<&str>,
-) -> Result<(), GfError> {
-    if min_cost && weight.is_some() {
-        return Err(GfError::Validation(format!(
-            "{by} uses capacity_property and cost_property instead of weight"
-        )));
-    }
-    if !min_cost && (capacity_property.is_some() || cost_property.is_some()) {
-        return Err(GfError::Validation(format!(
-            "{by} does not accept min-cost flow properties"
-        )));
-    }
-    if min_cost && cost_property.is_none() {
-        return Err(GfError::Validation(format!(
-            "{by} requires a cost_property"
-        )));
-    }
-    for (name, property) in [("capacity", capacity_property), ("cost", cost_property)] {
-        if let Some(property) = property
-            && invalid_selector(property)
-        {
-            return Err(GfError::Validation(format!(
-                "invalid paths {name} property {property:?}"
-            )));
-        }
     }
     Ok(())
 }
@@ -1671,91 +1173,35 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
-
-    fn uuid(id: u64) -> [u8; 16] {
-        u128::from(id).to_be_bytes()
-    }
-
-    fn value(id: u64) -> AlgorithmValue {
-        AlgorithmValue::Uuid(uuid(id))
-    }
-
-    fn path(ids: &[u64]) -> AlgorithmValue {
-        AlgorithmValue::UuidList(ids.iter().map(|&id| uuid(id)).collect())
-    }
-
-    fn traversal(node: u64, depth: u64, order: u64) -> Vec<AlgorithmValue> {
-        vec![
-            value(node),
-            AlgorithmValue::UInt64(depth),
-            AlgorithmValue::UInt64(order),
-        ]
-    }
-
-    fn execute(
+    fn execute_random_walk(
         graph: &AdjacencyGraph,
         source: u64,
-        target: Option<u64>,
-        limits: AlgorithmLimits,
-        cancellation: AlgorithmCancellation,
+        k: usize,
+        walk_length: usize,
+        seed: u64,
+        weighted: bool,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let algorithm = Algorithm::Paths(PathAlgorithm::Bfs);
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(&mut registry, uuid(source), target.map(uuid), 1, None, None)?;
-        registry.execute(
-            algorithm,
+        RandomWalk {
+            source: uuid(source),
+            k,
+            walk_length,
+            seed,
+            weighted,
+        }
+        .execute(
             graph,
-            &AlgorithmControl::new(limits, cancellation),
+            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
         )
     }
 
-    fn execute_dfs(
-        graph: &AdjacencyGraph,
-        source: u64,
-        limits: AlgorithmLimits,
-        cancellation: AlgorithmCancellation,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let algorithm = Algorithm::Paths(PathAlgorithm::Dfs);
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(&mut registry, uuid(source), None, 1, None, None)?;
-        registry.execute(
-            algorithm,
-            graph,
-            &AlgorithmControl::new(limits, cancellation),
-        )
-    }
-
-    fn execute_path_with_compute_threads(
-        graph: &AdjacencyGraph,
-        algorithm: PathAlgorithm,
-        source: u64,
-        target: Option<u64>,
-        threads: usize,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(&mut registry, uuid(source), target.map(uuid), 1, None, None)?;
-        let control = AlgorithmControl::new(
-            AlgorithmLimits::default().with_compute_threads(threads),
-            AlgorithmCancellation::default(),
-        )
-        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
-        registry.execute(Algorithm::Paths(algorithm), graph, &control)
-    }
-
-    fn output_fingerprint(output: &AlgorithmOutput) -> String {
-        format!("{:?}|{:?}", output.schema, output.rows())
-    }
-
-    fn execute_gomory_hu(
+    fn execute_transitive_closure(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
         cancellation: AlgorithmCancellation,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let algorithm = Algorithm::Paths(PathAlgorithm::GomoryHuTree);
+        let algorithm = Algorithm::Paths(PathAlgorithm::TransitiveClosure);
         let mut registry = AlgorithmRegistry::default();
-        registry.register(Arc::new(GomoryHuTree))?;
+        register_path_algorithms(&mut registry, uuid(0), None, 1, None, None)?;
         registry.execute(
             algorithm,
             graph,
@@ -1788,14 +1234,32 @@ mod tests {
         )
     }
 
-    fn execute_transitive_closure(
+    fn execute_path_with_compute_threads(
         graph: &AdjacencyGraph,
+        algorithm: PathAlgorithm,
+        source: u64,
+        target: Option<u64>,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_path_algorithms(&mut registry, uuid(source), target.map(uuid), 1, None, None)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(Algorithm::Paths(algorithm), graph, &control)
+    }
+
+    fn execute_dfs(
+        graph: &AdjacencyGraph,
+        source: u64,
         limits: AlgorithmLimits,
         cancellation: AlgorithmCancellation,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let algorithm = Algorithm::Paths(PathAlgorithm::TransitiveClosure);
+        let algorithm = Algorithm::Paths(PathAlgorithm::Dfs);
         let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(&mut registry, uuid(0), None, 1, None, None)?;
+        register_path_algorithms(&mut registry, uuid(source), None, 1, None, None)?;
         registry.execute(
             algorithm,
             graph,
@@ -1803,210 +1267,48 @@ mod tests {
         )
     }
 
-    fn execute_flow(
+    fn execute(
         graph: &AdjacencyGraph,
-        algorithm: PathAlgorithm,
         source: u64,
-        target: u64,
-        limits: AlgorithmLimits,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(
-            &mut registry,
-            uuid(source),
-            Some(uuid(target)),
-            1,
-            None,
-            None,
-        )?;
-        registry.execute(
-            Algorithm::Paths(algorithm),
-            graph,
-            &AlgorithmControl::new(limits, AlgorithmCancellation::default()),
-        )
-    }
-
-    fn execute_min_steiner(
-        graph: &AdjacencyGraph,
-        terminals: &[u64],
+        target: Option<u64>,
         limits: AlgorithmLimits,
         cancellation: AlgorithmCancellation,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let algorithm = Algorithm::Paths(PathAlgorithm::Bfs);
         let mut registry = AlgorithmRegistry::default();
-        registry.register(Arc::new(MinSteinerTree {
-            terminals: terminals.iter().copied().map(uuid).collect(),
-        }))?;
+        register_path_algorithms(&mut registry, uuid(source), target.map(uuid), 1, None, None)?;
         registry.execute(
-            Algorithm::Paths(PathAlgorithm::MinSteinerTree),
+            algorithm,
             graph,
             &AlgorithmControl::new(limits, cancellation),
         )
     }
 
-    fn execute_prize_steiner(
-        graph: &AdjacencyGraph,
-        terminals: &[u64],
-        prizes: &[(u64, f64)],
-        limits: AlgorithmLimits,
-        cancellation: AlgorithmCancellation,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let mut registry = AlgorithmRegistry::default();
-        registry.register(Arc::new(PrizeCollectingSteinerTree {
-            terminals: terminals.iter().copied().map(uuid).collect(),
-            prizes: prizes
-                .iter()
-                .map(|(node, prize)| NodePrize {
-                    node_uuid: uuid(*node),
-                    prize: ResolvedNumber::Float64(*prize),
-                })
-                .collect(),
-        }))?;
-        registry.execute(
-            Algorithm::Paths(PathAlgorithm::PrizeCollectingSteinerTree),
-            graph,
-            &AlgorithmControl::new(limits, cancellation),
-        )
+    use super::*;
+    use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+
+    pub(super) fn uuid(id: u64) -> [u8; 16] {
+        u128::from(id).to_be_bytes()
     }
 
-    fn execute_cut(
-        graph: &AdjacencyGraph,
-        algorithm: PathAlgorithm,
-        source: u64,
-        target: u64,
-        limits: AlgorithmLimits,
-        cancellation: AlgorithmCancellation,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(
-            &mut registry,
-            uuid(source),
-            Some(uuid(target)),
-            1,
-            None,
-            None,
-        )?;
-        registry.execute(
-            Algorithm::Paths(algorithm),
-            graph,
-            &AlgorithmControl::new(limits, cancellation),
-        )
+    pub(super) fn value(id: u64) -> AlgorithmValue {
+        AlgorithmValue::Uuid(uuid(id))
     }
 
-    fn execute_min_cost_flow(
-        graph: &AdjacencyGraph,
-        algorithm: PathAlgorithm,
-        limits: AlgorithmLimits,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let input: Arc<[CostCapacityEdge]> = Arc::from([
-            CostCapacityEdge {
-                edge_uuid: uuid(10),
-                source_uuid: uuid(0),
-                target_uuid: uuid(1),
-                capacity: 2.0,
-                unit_cost: -1.0,
-            },
-            CostCapacityEdge {
-                edge_uuid: uuid(11),
-                source_uuid: uuid(1),
-                target_uuid: uuid(2),
-                capacity: 2.0,
-                unit_cost: 3.0,
-            },
-            CostCapacityEdge {
-                edge_uuid: uuid(12),
-                source_uuid: uuid(0),
-                target_uuid: uuid(2),
-                capacity: 1.0,
-                unit_cost: 5.0,
-            },
-        ]);
-        let mut registry = AlgorithmRegistry::default();
-        register_path_algorithms(&mut registry, uuid(0), Some(uuid(2)), 1, None, Some(input))?;
-        registry.execute(
-            Algorithm::Paths(algorithm),
-            graph,
-            &AlgorithmControl::new(limits, AlgorithmCancellation::default()),
-        )
+    fn path(ids: &[u64]) -> AlgorithmValue {
+        AlgorithmValue::UuidList(ids.iter().map(|&id| uuid(id)).collect())
     }
 
-    fn execute_random_walk(
-        graph: &AdjacencyGraph,
-        source: u64,
-        k: usize,
-        walk_length: usize,
-        seed: u64,
-        weighted: bool,
-    ) -> Result<AlgorithmOutput, AlgorithmError> {
-        RandomWalk {
-            source: uuid(source),
-            k,
-            walk_length,
-            seed,
-            weighted,
-        }
-        .execute(
-            graph,
-            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
-        )
+    fn traversal(node: u64, depth: u64, order: u64) -> Vec<AlgorithmValue> {
+        vec![
+            value(node),
+            AlgorithmValue::UInt64(depth),
+            AlgorithmValue::UInt64(order),
+        ]
     }
 
-    #[test]
-    fn gomory_hu_dispatch_shapes_canonical_forest_and_honors_controls() {
-        for graph in [
-            AdjacencyGraph::with_test_counts(0, 0),
-            AdjacencyGraph::with_test_counts(1, 0),
-        ] {
-            assert!(
-                execute_gomory_hu(
-                    &graph,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
-                )
-                .unwrap()
-                .rows()
-                .is_empty()
-            );
-        }
-        let graph = AdjacencyGraph::with_test_undirected_multigraph(
-            4,
-            &[(10, 0, 1), (11, 0, 2), (12, 1, 2)],
-        )
-        .with_test_edge_weights(&[3.0, 3.0, 2.0, 2.0, 4.0, 4.0]);
-        let output = execute_gomory_hu(
-            &graph,
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            output.schema,
-            Algorithm::Paths(PathAlgorithm::GomoryHuTree).result_schema()
-        );
-        assert_eq!(
-            output.rows(),
-            vec![
-                vec![value(0), value(1), AlgorithmValue::Float64(5.0),],
-                vec![value(1), value(2), AlgorithmValue::Float64(6.0),],
-            ]
-        );
-
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        assert_eq!(
-            execute_gomory_hu(&graph, AlgorithmLimits::default(), cancellation),
-            Err(AlgorithmError::Cancelled)
-        );
-        assert!(matches!(
-            execute_gomory_hu(
-                &graph,
-                AlgorithmLimits {
-                    output_rows: 1,
-                    ..AlgorithmLimits::default()
-                },
-                AlgorithmCancellation::default(),
-            ),
-            Err(AlgorithmError::OutputLimit { .. })
-        ));
+    fn output_fingerprint(output: &AlgorithmOutput) -> String {
+        format!("{:?}|{:?}", output.schema, output.rows())
     }
 
     #[test]
@@ -2047,108 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn min_cost_flow_views_share_one_typed_solution_and_limits() {
-        let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1), (1, 2), (0, 2)]);
-        let scalar = execute_min_cost_flow(
-            &graph,
-            PathAlgorithm::MinCostMaxFlow,
-            AlgorithmLimits::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            scalar.rows(),
-            vec![vec![
-                value(0),
-                value(2),
-                AlgorithmValue::Float64(3.0),
-                AlgorithmValue::Float64(9.0),
-            ]]
-        );
-        assert!(
-            execute_min_cost_flow(
-                &graph,
-                PathAlgorithm::MinCostMaxFlow,
-                AlgorithmLimits {
-                    output_rows: 1,
-                    ..AlgorithmLimits::default()
-                },
-            )
-            .is_ok()
-        );
-        let edges = execute_min_cost_flow(
-            &graph,
-            PathAlgorithm::MinCostMaxFlowEdges,
-            AlgorithmLimits::default(),
-        )
-        .unwrap();
-        assert_eq!(edges.rows().len(), 3);
-        assert_eq!(
-            edges.schema,
-            Algorithm::Paths(PathAlgorithm::MinCostMaxFlowEdges).result_schema()
-        );
-        assert!(matches!(
-            execute_min_cost_flow(
-                &graph,
-                PathAlgorithm::MinCostMaxFlowEdges,
-                AlgorithmLimits {
-                    output_rows: 2,
-                    ..AlgorithmLimits::default()
-                },
-            ),
-            Err(AlgorithmError::OutputLimit { .. })
-        ));
-        assert_eq!(
-            execute_min_cost_flow(
-                &graph,
-                PathAlgorithm::MinCostMaxFlow,
-                AlgorithmLimits {
-                    nodes: 2,
-                    ..AlgorithmLimits::default()
-                },
-            ),
-            Err(AlgorithmError::NodeLimit {
-                observed: 3,
-                limit: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn min_cost_flow_checks_cancellation_before_node_projection_allocation() {
-        let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1), (1, 2)]);
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        MIN_COST_NODE_PROJECTION_ATTEMPTS.with(|attempts| attempts.set(0));
-        let handler = MinCostFlow {
-            source: uuid(0),
-            target: Some(uuid(2)),
-            input: Arc::from([CostCapacityEdge {
-                edge_uuid: uuid(10),
-                source_uuid: uuid(0),
-                target_uuid: uuid(1),
-                capacity: 1.0,
-                unit_cost: 0.0,
-            }]),
-            edges: false,
-        };
-
-        assert_eq!(
-            handler.execute(
-                &graph,
-                &AlgorithmControl::new(AlgorithmLimits::default(), cancellation,),
-            ),
-            Err(AlgorithmError::Cancelled)
-        );
-        MIN_COST_NODE_PROJECTION_ATTEMPTS.with(|attempts| {
-            assert_eq!(
-                attempts.get(),
-                0,
-                "cancelled execution reached node projection"
-            );
-        });
-    }
-
-    #[test]
     fn random_walk_dispatch_shapes_canonical_arrow_uuid_lists() {
         use arrow::array::{FixedSizeBinaryArray, ListArray};
 
@@ -2181,307 +1381,6 @@ mod tests {
             .unwrap();
         assert_eq!(values.value(0), uuid(0));
         assert_eq!(values.value(1), uuid(1));
-    }
-
-    #[test]
-    fn maximum_flow_views_share_one_canonical_solution_and_apply_view_limits() {
-        let graph =
-            AdjacencyGraph::with_test_directed_edges(4, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3)])
-                .with_test_edge_weights(&[3.0, 2.0, 1.0, 2.0, 4.0]);
-        let scalar = execute_flow(
-            &graph,
-            PathAlgorithm::MaxFlow,
-            0,
-            3,
-            AlgorithmLimits {
-                output_rows: 1,
-                ..AlgorithmLimits::default()
-            },
-        )
-        .unwrap();
-        let edges = execute_flow(
-            &graph,
-            PathAlgorithm::MaxFlowEdges,
-            0,
-            3,
-            AlgorithmLimits::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            scalar,
-            crate::algorithm_output::shape_logical_rows(
-                Algorithm::Paths(PathAlgorithm::MaxFlow),
-                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
-                8192,
-                u64::MAX
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            edges.rows().iter().map(|row| &row[3]).collect::<Vec<_>>(),
-            vec![
-                &AlgorithmValue::Float64(3.0),
-                &AlgorithmValue::Float64(2.0),
-                &AlgorithmValue::Float64(1.0),
-                &AlgorithmValue::Float64(2.0),
-                &AlgorithmValue::Float64(3.0),
-            ]
-        );
-        assert!(matches!(
-            execute_flow(
-                &graph,
-                PathAlgorithm::MaxFlowEdges,
-                0,
-                3,
-                AlgorithmLimits {
-                    output_rows: 1,
-                    ..AlgorithmLimits::default()
-                },
-            ),
-            Err(AlgorithmError::OutputLimit {
-                observed: 2,
-                limit: 1
-            })
-        ));
-    }
-
-    #[test]
-    fn minimum_cut_views_shape_one_shared_canonical_solution() {
-        let graph =
-            AdjacencyGraph::with_test_directed_edges(4, &[(0, 1), (0, 2), (1, 2), (1, 3), (2, 3)])
-                .with_test_edge_weights(&[3.0, 2.0, 1.0, 2.0, 4.0]);
-        let scalar = execute_cut(
-            &graph,
-            PathAlgorithm::MinCut,
-            0,
-            3,
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap();
-        let edges = execute_cut(
-            &graph,
-            PathAlgorithm::MinCutEdges,
-            0,
-            3,
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            scalar,
-            crate::algorithm_output::shape_logical_rows(
-                Algorithm::Paths(PathAlgorithm::MinCut),
-                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
-                8192,
-                u64::MAX
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            edges,
-            crate::algorithm_output::shape_logical_rows(
-                Algorithm::Paths(PathAlgorithm::MinCutEdges),
-                vec![
-                    vec![value(0), value(0), value(1), AlgorithmValue::Float64(3.0)],
-                    vec![value(1), value(0), value(2), AlgorithmValue::Float64(2.0)],
-                ],
-                8192,
-                u64::MAX
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            scalar.rows()[0][2],
-            AlgorithmValue::Float64(
-                edges
-                    .rows()
-                    .iter()
-                    .map(|row| match &row[3] {
-                        AlgorithmValue::Float64(capacity) => *capacity,
-                        _ => unreachable!("minimum-cut edge capacity is Float64"),
-                    })
-                    .sum()
-            )
-        );
-        for (algorithm, output, fields) in [
-            (
-                PathAlgorithm::MinCut,
-                &scalar,
-                vec!["source_uuid", "sink_uuid", "cut_value"],
-            ),
-            (
-                PathAlgorithm::MinCutEdges,
-                &edges,
-                vec!["edge_uuid", "source_uuid", "target_uuid", "capacity"],
-            ),
-        ] {
-            let batch = shape_algorithm_output(Algorithm::Paths(algorithm), output).unwrap();
-            assert_eq!(
-                batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|field| field.name().as_str())
-                    .collect::<Vec<_>>(),
-                fields
-            );
-            assert!(
-                batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .all(|field| !field.is_nullable())
-            );
-            assert_eq!(
-                batch.schema().metadata()["graphforge.algorithm"],
-                algorithm.as_str()
-            );
-            assert_eq!(batch.schema().metadata()["graphforge.verb"], "paths");
-        }
-    }
-
-    #[test]
-    fn minimum_cut_edges_preserve_undirected_storage_orientation_and_zero_results() {
-        let undirected = AdjacencyGraph::with_test_undirected_multigraph(
-            4,
-            &[(10, 0, 1), (11, 1, 2), (12, 2, 3)],
-        )
-        .with_test_edge_weights(&[2.0; 6]);
-        assert_eq!(
-            execute_cut(
-                &undirected,
-                PathAlgorithm::MinCutEdges,
-                3,
-                0,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows(),
-            vec![vec![
-                value(10),
-                value(0),
-                value(1),
-                AlgorithmValue::Float64(2.0),
-            ]]
-        );
-
-        let unreachable = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1)]);
-        assert_eq!(
-            execute_cut(
-                &unreachable,
-                PathAlgorithm::MinCut,
-                0,
-                2,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows(),
-            vec![vec![value(0), value(2), AlgorithmValue::Float64(0.0)]]
-        );
-        assert!(
-            execute_cut(
-                &unreachable,
-                PathAlgorithm::MinCutEdges,
-                0,
-                2,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn minimum_cut_dispatch_rejects_invalid_inputs_and_propagates_controls() {
-        let graph = AdjacencyGraph::with_test_directed_edges(2, &[(0, 1)]);
-        assert!(matches!(
-            execute_cut(
-                &graph,
-                PathAlgorithm::MinCut,
-                0,
-                0,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            ),
-            Err(AlgorithmError::Execution { message })
-                if message == "minimum cut requires distinct endpoints"
-        ));
-        let invalid = AdjacencyGraph::with_test_directed_edges(2, &[(0, 1)])
-            .with_test_edge_weights(&[f64::NAN]);
-        assert!(matches!(
-            execute_cut(
-                &invalid,
-                PathAlgorithm::MinCut,
-                0,
-                1,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            ),
-            Err(AlgorithmError::Execution { message })
-                if message == "minimum cut requires finite nonnegative capacities"
-        ));
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        assert!(matches!(
-            execute_cut(
-                &graph,
-                PathAlgorithm::MinCut,
-                0,
-                1,
-                AlgorithmLimits::default(),
-                cancellation,
-            ),
-            Err(AlgorithmError::Cancelled)
-        ));
-        assert!(matches!(
-            execute_cut(
-                &graph,
-                PathAlgorithm::MinCutEdges,
-                0,
-                1,
-                AlgorithmLimits {
-                    output_rows: 0,
-                    ..AlgorithmLimits::default()
-                },
-                AlgorithmCancellation::default(),
-            ),
-            Err(AlgorithmError::OutputLimit {
-                observed: 1,
-                limit: 0
-            })
-        ));
-    }
-
-    #[test]
-    fn undirected_flow_rows_use_canonical_endpoints_and_signed_assignments() {
-        let graph = AdjacencyGraph::with_test_undirected_multigraph(
-            4,
-            &[(10, 1, 0), (11, 2, 1), (12, 3, 2)],
-        )
-        .with_test_edge_weights(&[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]);
-        let rows: Vec<Vec<AlgorithmValue>> = execute_flow(
-            &graph,
-            PathAlgorithm::MaxFlowEdges,
-            3,
-            0,
-            AlgorithmLimits::default(),
-        )
-        .unwrap()
-        .rows();
-        assert_eq!(
-            rows,
-            vec![
-                vec![value(10), value(0), value(1), AlgorithmValue::Float64(-2.0)],
-                vec![value(11), value(1), value(2), AlgorithmValue::Float64(-2.0)],
-                vec![value(12), value(2), value(3), AlgorithmValue::Float64(-2.0)],
-            ]
-        );
     }
 
     #[test]
@@ -2888,144 +1787,6 @@ mod tests {
     }
 
     #[test]
-    fn maximum_flow_views_reject_noncanonical_k() {
-        for by in [
-            PathAlgorithm::MaxFlow,
-            PathAlgorithm::MaxFlowEdges,
-            PathAlgorithm::MinCut,
-            PathAlgorithm::MinCutEdges,
-        ] {
-            for k in [0, 2] {
-                assert!(matches!(
-                    validate_path_options(
-                        Some(uuid(0)),
-                        Some(uuid(1)),
-                        &PathsOptions {
-                            by,
-                            k,
-                            ..PathsOptions::default()
-                        },
-                    ),
-                    Err(GfError::Validation(message))
-                        if message == format!("{by} k must be 1")
-                ));
-            }
-        }
-    }
-
-    #[test]
-    fn minimum_cut_views_require_target_and_reject_unrelated_options() {
-        for by in [PathAlgorithm::MinCut, PathAlgorithm::MinCutEdges] {
-            assert!(matches!(
-                validate_path_options(
-                    Some(uuid(0)),
-                    None,
-                    &PathsOptions {
-                        by,
-                        ..PathsOptions::default()
-                    },
-                ),
-                Err(GfError::Validation(message))
-                    if message == format!("{by} requires a target selector")
-            ));
-            assert!(matches!(
-                validate_path_options(
-                    Some(uuid(0)),
-                    Some(uuid(1)),
-                    &PathsOptions {
-                        by,
-                        heuristic: Some("estimate".into()),
-                        ..PathsOptions::default()
-                    },
-                ),
-                Err(GfError::Validation(message))
-                    if message == format!("{by} does not accept a heuristic property")
-            ));
-            assert!(matches!(
-                validate_path_options(
-                    Some(uuid(0)),
-                    Some(uuid(1)),
-                    &PathsOptions {
-                        by,
-                        seed: Some(7),
-                        ..PathsOptions::default()
-                    },
-                ),
-                Err(GfError::Validation(message))
-                    if message == format!("{by} does not accept random-walk options")
-            ));
-        }
-    }
-
-    #[test]
-    fn min_cost_flow_public_options_require_exact_capacity_and_cost_contract() {
-        for by in [
-            PathAlgorithm::MinCostMaxFlow,
-            PathAlgorithm::MinCostMaxFlowEdges,
-        ] {
-            let validate = |options: PathsOptions| {
-                validate_path_options(Some(uuid(0)), Some(uuid(1)), &options)
-            };
-            assert!(matches!(
-                validate(PathsOptions {
-                    by,
-                    weight: Some("weight".into()),
-                    capacity_property: Some("capacity".into()),
-                    cost_property: Some("cost".into()),
-                    ..PathsOptions::default()
-                }),
-                Err(GfError::Validation(message))
-                    if message == format!(
-                        "{by} uses capacity_property and cost_property instead of weight"
-                    )
-            ));
-            assert!(matches!(
-                validate(PathsOptions {
-                    by,
-                    capacity_property: Some("capacity".into()),
-                    ..PathsOptions::default()
-                }),
-                Err(GfError::Validation(message))
-                    if message == format!("{by} requires a cost_property")
-            ));
-            assert!(matches!(
-                validate(PathsOptions {
-                    by,
-                    capacity_property: Some(" bad".into()),
-                    cost_property: Some("cost".into()),
-                    ..PathsOptions::default()
-                }),
-                Err(GfError::Validation(message))
-                    if message == "invalid paths capacity property \" bad\""
-            ));
-            assert!(
-                validate(PathsOptions {
-                    by,
-                    capacity_property: Some("capacity".into()),
-                    cost_property: Some("cost".into()),
-                    ..PathsOptions::default()
-                })
-                .is_ok()
-            );
-        }
-
-        assert!(matches!(
-            validate_path_options(
-                Some(uuid(0)),
-                Some(uuid(1)),
-                &PathsOptions {
-                    by: PathAlgorithm::MaxFlow,
-                    capacity_property: Some("capacity".into()),
-                    cost_property: Some("cost".into()),
-                    ..PathsOptions::default()
-                }
-            ),
-            Err(GfError::Validation(message))
-                if message == "max_flow does not accept min-cost flow properties"
-        ));
-    }
-
-    #[test]
     fn public_projection_fingerprint_is_stable_across_provider_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let options = PathsOptions {
@@ -3101,205 +1862,6 @@ mod tests {
             Err(GfError::Validation(message))
                 if message == "bfs does not accept random-walk options"
         ));
-    }
-
-    #[test]
-    fn source_and_steiner_fields_follow_closed_catalog_policy() {
-        for by in [PathAlgorithm::Bfs, PathAlgorithm::RandomWalk] {
-            assert!(matches!(
-                validate_path_options(
-                    None,
-                    None,
-                    &PathsOptions {
-                        by,
-                        ..PathsOptions::default()
-                    },
-                ),
-                Err(GfError::Validation(message))
-                    if message == format!("{by} requires a source selector")
-            ));
-        }
-        for options in [
-            PathsOptions {
-                by: PathAlgorithm::Bfs,
-                terminal_uuids: vec![uuid(1)],
-                ..PathsOptions::default()
-            },
-            PathsOptions {
-                by: PathAlgorithm::Bfs,
-                prize_property: Some("prize".into()),
-                ..PathsOptions::default()
-            },
-        ] {
-            assert!(matches!(
-                validate_path_options(Some(uuid(0)), None, &options),
-                Err(GfError::Validation(_))
-            ));
-        }
-        for by in [
-            PathAlgorithm::MinSteinerTree,
-            PathAlgorithm::PrizeCollectingSteinerTree,
-        ] {
-            assert!(
-                validate_path_options(
-                    None,
-                    None,
-                    &PathsOptions {
-                        by,
-                        ..PathsOptions::default()
-                    },
-                )
-                .is_ok()
-            );
-        }
-    }
-
-    #[test]
-    fn gomory_hu_public_validation_rejects_positional_and_directed_requests() {
-        let positional = PathsOptions {
-            by: PathAlgorithm::GomoryHuTree,
-            ..PathsOptions::default()
-        };
-        assert!(matches!(
-            validate_path_options(Some(uuid(0)), None, &positional),
-            Err(GfError::Validation(message))
-                if message.contains("does not accept positional source or target")
-        ));
-
-        let directed = PathsOptions {
-            by: PathAlgorithm::GomoryHuTree,
-            directed: true,
-            ..PathsOptions::default()
-        };
-        assert!(matches!(
-            validate_path_options(None, None, &directed),
-            Err(GfError::Validation(message)) if message == "gomory_hu_tree requires directed=false"
-        ));
-    }
-
-    #[test]
-    fn minimum_steiner_dispatch_preserves_atomic_shared_controls() {
-        let graph = AdjacencyGraph::with_test_undirected_multigraph(
-            4,
-            &[(9, 0, 1), (8, 1, 2), (7, 2, 3), (6, 0, 3)],
-        );
-        let output = execute_min_steiner(
-            &graph,
-            &[0, 2],
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap();
-        assert_eq!(output.rows().len(), 2);
-        assert_eq!(
-            output.rows().iter().map(|row| &row[0]).collect::<Vec<_>>(),
-            [&value(6), &value(7)]
-        );
-
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        assert!(matches!(
-            execute_min_steiner(&graph, &[0, 2], AlgorithmLimits::default(), cancellation,),
-            Err(AlgorithmError::Cancelled)
-        ));
-        for limits in [
-            AlgorithmLimits {
-                output_rows: 0,
-                ..AlgorithmLimits::default()
-            },
-            AlgorithmLimits {
-                states: 0,
-                ..AlgorithmLimits::default()
-            },
-        ] {
-            assert!(
-                execute_min_steiner(&graph, &[0, 2], limits, AlgorithmCancellation::default(),)
-                    .is_err()
-            );
-        }
-        assert_eq!(
-            execute_min_steiner(
-                &graph,
-                &[0, 2],
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows(),
-            output.rows()
-        );
-    }
-
-    #[test]
-    fn prize_steiner_dispatch_preserves_atomic_shared_controls() {
-        let graph = AdjacencyGraph::with_test_undirected_multigraph(
-            3,
-            &[(9, 0, 1), (8, 0, 1), (7, 0, 2), (6, 1, 1)],
-        );
-        let prizes = [(0, 0.0), (1, 3.0), (2, 0.0)];
-        let output = execute_prize_steiner(
-            &graph,
-            &[0],
-            &prizes,
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap();
-        assert_eq!(
-            output.rows(),
-            vec![vec![
-                value(8),
-                value(0),
-                value(1),
-                AlgorithmValue::Float64(1.0)
-            ]]
-        );
-
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        assert!(matches!(
-            execute_prize_steiner(
-                &graph,
-                &[0],
-                &prizes,
-                AlgorithmLimits::default(),
-                cancellation,
-            ),
-            Err(AlgorithmError::Cancelled)
-        ));
-        for limits in [
-            AlgorithmLimits {
-                output_rows: 0,
-                ..AlgorithmLimits::default()
-            },
-            AlgorithmLimits {
-                states: 0,
-                ..AlgorithmLimits::default()
-            },
-        ] {
-            assert!(
-                execute_prize_steiner(
-                    &graph,
-                    &[0],
-                    &prizes,
-                    limits,
-                    AlgorithmCancellation::default(),
-                )
-                .is_err()
-            );
-        }
-        assert_eq!(
-            execute_prize_steiner(
-                &graph,
-                &[0],
-                &prizes,
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows(),
-            output.rows()
-        );
     }
 
     #[test]

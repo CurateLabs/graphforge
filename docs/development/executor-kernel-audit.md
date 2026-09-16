@@ -15,49 +15,49 @@ The current cleanup is tracked by #1026.
 
 | Retained module | Direct production consumers | Tracking recorded in allowance |
 | --- | --- | --- |
-| `algorithm_analyze_automorphism` | `algorithm_analyze.rs`, `algorithm_analyze_automorphism_count.rs` | #2106 |
-| `algorithm_analyze_automorphism_count` | `algorithm_analyze.rs` | #2111 |
-| `algorithm_analyze_bipartite` | `algorithm_analyze.rs`, `algorithm_analyze_bipartite_matching.rs` | #1223 |
-| `algorithm_analyze_bipartite_matching` | `algorithm_analyze.rs` | #1223 |
-| `algorithm_analyze_chromatic_number` | `algorithm_analyze.rs` | #1214 |
-| `algorithm_analyze_dag_longest_path` | `algorithm_analyze.rs`, `algorithm_analyze_dag_longest_path_weighted.rs` | #1206 |
-| `algorithm_analyze_dag_longest_path_weighted` | `algorithm_analyze.rs` | #1208 |
-| `algorithm_analyze_dag_topology` | `algorithm_analyze.rs` | #1741 |
-| `algorithm_analyze_dyad_census` | `algorithm_analyze.rs` | #1884 |
-| `algorithm_analyze_edge_coloring` | `algorithm_analyze.rs` | #1212 |
-| `algorithm_analyze_euler` | `algorithm_analyze.rs`, `algorithm_analyze_has_euler_circuit.rs`, `algorithm_analyze_has_euler_path.rs` | #2104 |
-| `algorithm_analyze_find_cycles` | `algorithm_analyze.rs` | #1204 |
-| `algorithm_analyze_has_euler_circuit` | `algorithm_analyze.rs` | #1227 |
-| `algorithm_analyze_has_euler_path` | `algorithm_analyze.rs` | #1228 |
-| `algorithm_analyze_is_planar` | `algorithm_analyze.rs` | #1229 |
-| `algorithm_analyze_k1_coloring` | `algorithm_analyze.rs` | #1217 |
-| `algorithm_analyze_lowlink` | `algorithm_analyze.rs` | #1230, #1231 |
-| `algorithm_analyze_max_cardinality_matching` | `algorithm_analyze.rs` | #1221 |
-| `algorithm_analyze_minimum_k_spanning_tree` | `algorithm_analyze.rs` | #1198 |
-| `algorithm_analyze_modularity` | `algorithm_analyze.rs` | #1234 |
-| `algorithm_analyze_triad_census` | `algorithm_analyze.rs` | #1885 |
-| `algorithm_analyze_triangle_count` | `algorithm_analyze.rs` | #1232 |
+| `algorithm_analyze_automorphism` | `algorithm_analyze/structural.rs`, `algorithm_analyze_automorphism_count.rs` | #2106 |
+| `algorithm_analyze_automorphism_count` | `algorithm_analyze/structural.rs` | #2111 |
+| `algorithm_analyze_bipartite` | `algorithm_analyze/matching_partition.rs`, `algorithm_analyze_bipartite_matching.rs` | #1223 |
+| `algorithm_analyze_bipartite_matching` | `algorithm_analyze/matching_partition.rs` | #1223 |
+| `algorithm_analyze_chromatic_number` | `algorithm_analyze/coloring.rs` | #1214 |
+| `algorithm_analyze_dag_longest_path` | `algorithm_analyze/paths_cycles_dag.rs`, `algorithm_analyze_dag_longest_path_weighted.rs` | #1206 |
+| `algorithm_analyze_dag_longest_path_weighted` | `algorithm_analyze/paths_cycles_dag.rs` | #1208 |
+| `algorithm_analyze_dag_topology` | `algorithm_analyze/paths_cycles_dag.rs` | #1741 |
+| `algorithm_analyze_dyad_census` | `algorithm_analyze/structural.rs` | #1884 |
+| `algorithm_analyze_edge_coloring` | `algorithm_analyze/coloring.rs` | #1212 |
+| `algorithm_analyze_euler` | `algorithm_analyze/paths_cycles_dag.rs`, `algorithm_analyze_has_euler_circuit.rs`, `algorithm_analyze_has_euler_path.rs` | #2104 |
+| `algorithm_analyze_find_cycles` | `algorithm_analyze/paths_cycles_dag.rs` | #1204 |
+| `algorithm_analyze_has_euler_circuit` | `algorithm_analyze/paths_cycles_dag.rs` | #1227 |
+| `algorithm_analyze_has_euler_path` | `algorithm_analyze/paths_cycles_dag.rs` | #1228 |
+| `algorithm_analyze_is_planar` | `algorithm_analyze/structural.rs` | #1229 |
+| `algorithm_analyze_k1_coloring` | `algorithm_analyze/coloring.rs` | #1217 |
+| `algorithm_analyze_lowlink` | `algorithm_analyze/structural.rs` | #1230, #1231 |
+| `algorithm_analyze_max_cardinality_matching` | `algorithm_analyze/matching_partition.rs` | #1221 |
+| `algorithm_analyze_minimum_k_spanning_tree` | `algorithm_analyze/paths_cycles_dag.rs` | #1198 |
+| `algorithm_analyze_modularity` | `algorithm_analyze/matching_partition.rs` | #1234 |
+| `algorithm_analyze_triad_census` | `algorithm_analyze/structural.rs` | #1885 |
+| `algorithm_analyze_triangle_count` | `algorithm_analyze/structural.rs` | #1232 |
 | `algorithm_cluster_scc` | `algorithm_cluster.rs` | None recorded |
 | `algorithm_cluster_spinglass` | `algorithm_cluster.rs` | None recorded |
-| `algorithm_embedding_control` | `algorithm_analyze.rs`, `algorithm_embedding_fastrp.rs`, `algorithm_embedding_graphsage.rs`, `algorithm_embedding_hashgnn.rs`, `algorithm_embedding_node2vec.rs`, `algorithm_embedding_output.rs` | None recorded |
-| `algorithm_embedding_options` | `algorithm_analyze.rs`, `algorithm_embedding_output.rs` | None recorded |
-| `algorithm_embedding_node2vec` | `algorithm_analyze.rs` | None recorded |
-| `algorithm_embedding_output` | `algorithm_analyze.rs`, `algorithm_embedding_fastrp.rs`, `algorithm_embedding_graphsage.rs`, `algorithm_embedding_hashgnn.rs`, `algorithm_embedding_node2vec.rs` | None recorded |
+| `algorithm_embedding_control` | `algorithm_analyze/embedding.rs`, `algorithm_embedding_fastrp.rs`, `algorithm_embedding_graphsage.rs`, `algorithm_embedding_hashgnn.rs`, `algorithm_embedding_node2vec.rs`, `algorithm_embedding_output.rs` | None recorded |
+| `algorithm_embedding_options` | `algorithm_analyze/embedding.rs`, `algorithm_embedding_output.rs` | None recorded |
+| `algorithm_embedding_node2vec` | `algorithm_analyze/embedding.rs` | None recorded |
+| `algorithm_embedding_output` | `algorithm_analyze/embedding.rs`, `algorithm_embedding_fastrp.rs`, `algorithm_embedding_graphsage.rs`, `algorithm_embedding_hashgnn.rs`, `algorithm_embedding_node2vec.rs` | None recorded |
 | `algorithm_embedding_rng` | `algorithm_embedding_fastrp.rs`, `algorithm_embedding_graphsage.rs`, `algorithm_embedding_hashgnn.rs`, `algorithm_embedding_node2vec.rs` | None recorded |
-| `algorithm_partition` | `algorithm_analyze.rs`, `algorithm_analyze_bipartite.rs`, `algorithm_analyze_conductance.rs`, `algorithm_analyze_modularity.rs`, `algorithm_graph.rs` | #1223, #1233 |
+| `algorithm_partition` | `algorithm_analyze/matching_partition.rs`, `algorithm_analyze_bipartite.rs`, `algorithm_analyze_conductance.rs`, `algorithm_analyze_modularity.rs`, `algorithm_graph.rs` | #1223, #1233 |
 | `algorithm_paths_astar` | `algorithm_paths.rs` | #1683 |
 | `algorithm_paths_bellman_ford` | `algorithm_paths.rs` | #1691 |
 | `algorithm_paths_delta_stepping` | `algorithm_paths.rs` | #1706 |
 | `algorithm_paths_dfs` | `algorithm_paths.rs` | #1220 |
 | `algorithm_paths_dijkstra` | `algorithm_paths.rs`, `algorithm_paths_astar.rs`, `algorithm_paths_bellman_ford.rs`, `algorithm_paths_delta_stepping.rs`, `algorithm_paths_floyd_warshall.rs` | #1665 |
 | `algorithm_paths_floyd_warshall` | `algorithm_paths.rs` | #1701 |
-| `algorithm_paths_gomory_hu` | `algorithm_paths.rs` | #2121 |
-| `algorithm_paths_max_flow` | `algorithm_paths.rs`, `algorithm_paths_gomory_hu.rs`, `algorithm_paths_min_cut.rs` | #1209 |
-| `algorithm_paths_min_cost_flow` | `algorithm_paths.rs` | #1213 |
-| `algorithm_paths_min_cut` | `algorithm_paths.rs`, `algorithm_paths_gomory_hu.rs` | #1211 |
-| `algorithm_paths_prize_steiner` | `algorithm_paths.rs` | None recorded |
+| `algorithm_paths_gomory_hu` | `algorithm_paths/flow_cut.rs` | #2121 |
+| `algorithm_paths_max_flow` | `algorithm_paths/flow_cut.rs`, `algorithm_paths_gomory_hu.rs`, `algorithm_paths_min_cut.rs` | #1209 |
+| `algorithm_paths_min_cost_flow` | `algorithm_paths/flow_cut.rs` | #1213 |
+| `algorithm_paths_min_cut` | `algorithm_paths/flow_cut.rs`, `algorithm_paths_gomory_hu.rs` | #1211 |
+| `algorithm_paths_prize_steiner` | `algorithm_paths/steiner.rs` | None recorded |
 | `algorithm_paths_random_walk` | `algorithm_paths.rs` | #1222 |
-| `algorithm_paths_steiner` | `algorithm_paths.rs` | #2159 |
+| `algorithm_paths_steiner` | `algorithm_paths/steiner.rs` | #2159 |
 
 ## Item-level disposition
 
