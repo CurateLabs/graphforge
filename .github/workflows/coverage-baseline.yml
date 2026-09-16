@@ -1,0 +1,111 @@
+name: Coverage
+
+# Rust coverage enforcement. PR CI does not otherwise run llvm-cov, so the 90%
+# patch floor had no enforcement point on the merge path and did not hold.
+#
+# Post-merge only. Repository policy keeps full llvm-cov out of pull-request CI,
+# where its cost would be paid on every review cycle; this pays it once per merge
+# and blocks nobody. It enforces every floor and records the baseline.
+#
+# Runs are never cancelled. An earlier draft cancelled in-progress runs, which
+# on a day with 21 merges meant no run ever completed.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  rust-coverage-ledger:
+    name: Rust Coverage Ledger
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve patch base
+        id: scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          if [[ -n "$before" && "$before" != "0000000000000000000000000000000000000000" ]] \
+            && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            base="$before"
+          else
+            base="$(git rev-parse HEAD~1)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "Patch coverage base: $base"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Measure coverage and enforce floors
+        shell: bash
+        env:
+          COVERAGE_RUST_PATCH_BASE: ${{ steps.scope.outputs.base }}
+          COVERAGE_FAIL_UNDER_RUST: "80"
+          COVERAGE_FAIL_UNDER_RUST_CRATE: "80"
+          COVERAGE_FAIL_UNDER_RUST_PATCH: "90"
+          COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER: "80"
+          COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER: "80"
+        run: make coverage-rust
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -s build/coverage-rust/summary.txt ]]; then
+            {
+              echo '### Rust coverage'
+              echo '```'
+              cat build/coverage-rust/summary.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
