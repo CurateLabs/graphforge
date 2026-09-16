@@ -204,8 +204,17 @@ pub(crate) struct PortablePullOciArgs {
     insecure_http: bool,
 }
 
-fn oci_credential() -> Option<String> {
-    std::env::var("GRAPHFORGE_OCI_CREDENTIAL").ok()
+/// Environment variable carrying the OCI registry credential.
+const OCI_CREDENTIAL_ENV: &str = "GRAPHFORGE_OCI_CREDENTIAL";
+
+/// Map a raw environment value to a credential, treating an empty or
+/// whitespace-only value as no credential at all.
+///
+/// A variable that is exported but unset yields `Some("")`, which would
+/// otherwise travel to the registry as a malformed empty bearer token and turn
+/// an anonymous pull into an authentication failure.
+fn oci_credential(raw: Option<String>) -> Option<String> {
+    raw.filter(|value| !value.trim().is_empty())
 }
 
 #[allow(
@@ -386,7 +395,7 @@ pub(crate) fn run_portable_without_graph(
                     authenticity: PortableV2OciAuthenticityPolicy::default(),
                     signature: None,
                     insecure_http: args.insecure_http,
-                    credential: oci_credential(),
+                    credential: oci_credential(std::env::var(OCI_CREDENTIAL_ENV).ok()),
                 },
                 None,
             )
@@ -424,7 +433,7 @@ pub(crate) fn run_portable_without_graph(
                     limits: PortableV2Limits::default(),
                     authenticity: PortableV2OciAuthenticityPolicy::default(),
                     insecure_http: args.insecure_http,
-                    credential: oci_credential(),
+                    credential: oci_credential(std::env::var(OCI_CREDENTIAL_ENV).ok()),
                 },
                 None,
             )
@@ -846,5 +855,34 @@ mod lifecycle_storage_tests {
         let mut result = import_result();
         result.materialized_cleanup_parent_sync_confirmed = false;
         assert!(import_transient_peak(&result).is_err());
+    }
+}
+
+#[cfg(test)]
+mod oci_credential_tests {
+    use super::{OCI_CREDENTIAL_ENV, oci_credential};
+
+    #[test]
+    fn absent_empty_and_whitespace_values_yield_no_credential() {
+        for raw in [
+            None,
+            Some(String::new()),
+            Some("   ".to_owned()),
+            Some("\t\n ".to_owned()),
+        ] {
+            assert_eq!(oci_credential(raw), None);
+        }
+    }
+
+    #[test]
+    fn present_values_reach_the_registry_unchanged() {
+        for raw in ["plain-token", "user:secret", " padded-token "] {
+            assert_eq!(oci_credential(Some(raw.to_owned())), Some(raw.to_owned()));
+        }
+    }
+
+    #[test]
+    fn the_credential_variable_keeps_its_documented_name() {
+        assert_eq!(OCI_CREDENTIAL_ENV, "GRAPHFORGE_OCI_CREDENTIAL");
     }
 }

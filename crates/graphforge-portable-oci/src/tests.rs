@@ -140,3 +140,54 @@ fn malformed_truncated_and_digest_mismatched_downloads_are_typed() {
         server.join().unwrap();
     }
 }
+
+#[test]
+fn credentials_map_to_the_expected_authorization_header() {
+    for (credential, expected) in [
+        (None, None),
+        (Some(""), None),
+        (Some("   "), None),
+        (Some("\t\n "), None),
+        (Some("plain-token"), Some("Bearer plain-token".to_owned())),
+        (
+            Some("user:secret"),
+            Some("Basic dXNlcjpzZWNyZXQ=".to_owned()),
+        ),
+    ] {
+        let client = HttpOciRegistry::new("registry.invalid", credential, true).unwrap();
+        assert_eq!(client.auth_header(), expected);
+    }
+}
+
+#[test]
+fn an_empty_credential_sends_no_authorization_header() {
+    let body = b"data";
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    let (host, server) = response_server(response);
+    let client = HttpOciRegistry::new(&host, Some(""), true).unwrap();
+    assert_eq!(client.get_blob("repo", &digest_sha256(body)).unwrap(), body);
+    let request = server.join().unwrap().to_ascii_lowercase();
+    assert!(!request.contains("authorization"));
+}
+
+#[test]
+fn control_character_credentials_are_refused_by_the_message_they_report() {
+    for credential in [
+        "token\nsecond",
+        "token\rsecond",
+        "token\tsecond",
+        "token\u{7}",
+    ] {
+        let Err(error) = HttpOciRegistry::new("registry.invalid", Some(credential), true) else {
+            panic!("a control character must be refused");
+        };
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidPath);
+        assert!(error.to_string().contains("control characters"));
+    }
+    assert!(HttpOciRegistry::new("registry.invalid", Some("token-second"), true).is_ok());
+}
