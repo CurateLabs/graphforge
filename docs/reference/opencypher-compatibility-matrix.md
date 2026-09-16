@@ -67,7 +67,7 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 | **ORDER BY** | ✅ Complete | 134 | executor.py | ASC/DESC, multiple keys, NULL ordering |
 | **LIMIT** | ✅ Complete | 40 | executor.py | Result limiting |
 | **SKIP** | ✅ Complete | 40 | executor.py | Pagination support |
-| **MERGE** | ⚠️ Partial | 75 | `write_driver.rs` (`run_merge_phase`) | Standalone new-node + referenced-endpoint relationship forms; multi-node construction and row-conditional map actions rejected |
+| **MERGE** | ⚠️ Partial | 75 | `write_driver/create_merge.rs` (`run_merge_phase`) | Standalone new-node + referenced-endpoint relationship forms; multi-node construction and row-conditional map actions rejected |
 | **SET** | ✅ Complete | 53 | executor.py | Property/label updates |
 | **REMOVE** | ✅ Complete | 33 | executor.py | Property/label removal |
 | **DELETE** | ✅ Complete | 41 | executor.py | Node/relationship deletion |

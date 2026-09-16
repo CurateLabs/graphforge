@@ -69,8 +69,8 @@ exemptions or unchanged-tree release certification are required.
   adapters have separate owners. Existing kernels remain single-owned; parents
   retain registration, invocation controls, and shared projection helpers.
 
-- [#1308](https://github.com/CurateLabs/graphforge/issues/1308) completes six API
-  domain roots in one batch. Bulk `normalization` and `publication` keep shared
+- [#1317](https://github.com/CurateLabs/graphforge/pull/1317) merged the six API
+  domain roots together and closed #1308. Bulk `normalization` and `publication` keep shared
   request types and membership admission in the parent. Knowledge `assertions`,
   `supporting`, and `ledger` own operations and shared publication encoding.
 - Repository `configuration` owns definition/configuration validation; `skills`
@@ -86,16 +86,25 @@ exemptions or unchanged-tree release certification are required.
   reconciliation, and cross-domain tests remain with their existing coordinators.
   Public paths remain explicit reexports; direct tests follow their domain owners.
 
+- [#1310](https://github.com/CurateLabs/graphforge/issues/1310) completes the
+  query-pipeline roots in one batch. `binder/{patterns,writes,projection,expressions}`
+  owns binding domains while the parent retains state, scopes and clause orchestration.
+  `lowerer/{scans,traversal,nested_queries,writes}` owns relational construction while
+  the parent retains shared read authority and plan orchestration.
+- Executor `create_exec`, `write_exec`, `expand_exec`, `row_exec` and `session`
+  own physical operators and session planning, with explicit public root reexports.
+  The session evidence stream retains its original field/drop ordering. Mixed tests
+  remain under the original root test module; direct tests follow each owner.
+- `write_driver/{create_merge,mutation_phases}` owns statement phases. The parent
+  retains context, frontier, ordered phase dispatch, final staging and cleanup.
+  Existing test bodies and assertions move intact with their owning domains.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
 
 | Area | Remaining ownership extractions |
 | --- | --- |
-| Relational plan lowering | Scans/property joins; traversal; nested/optional queries; writes |
-| IR binding | Patterns/paths; writes; projection/aggregation; expression/property binding |
-| Executor | CREATE; DELETE/SET/REMOVE; traversal/ordinal identity; optional/UNWIND; session/planner |
-| Write driver | CREATE/MERGE; property/label/delete phases |
 | UUID membership | Probing/snapshots; construction encoding; ordinal writers/publication; topology deltas; compaction; rebuild/maintenance |
 | Construction | Intake/receipts; shape validation/surrogates; encoding/publication; recovery/cleanup; bounded control; I/O evidence |
 | Property storage | Replay topology/properties; property codecs/staging; authenticated inventories; projected reads/budgets; newest-snapshot merges |
@@ -107,19 +116,15 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1308; recompute before canonical
+This snapshot records the working tree during #1310; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
 | --- | ---: |
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
 | `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
-| `crates/graphforge-exec/src/lib.rs` | 8,533 |
-| `crates/graphforge-exec/src/write_driver.rs` | 4,861 |
 | `crates/graphforge-filesystem/src/lib.rs` | 5,488 |
-| `crates/graphforge-ir/src/binder.rs` | 9,579 |
 | `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
-| `crates/graphforge-rel/src/lowerer.rs` | 7,217 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
 | `crates/graphforge-storage/src/catalog.rs` | 5,467 |
 | `crates/graphforge-storage/src/graph_construction.rs` | 12,687 |

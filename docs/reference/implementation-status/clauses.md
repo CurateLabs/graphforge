@@ -294,9 +294,9 @@ Implementation status of OpenCypher query clauses in GraphForge.
 
 **Implementation (Rust authority):**
 - Parser: `crates/graphforge-cypher/src/parser/clauses.rs` (`parse_merge_clause`)
-- Binder / IR: `crates/graphforge-ir/src/binder.rs` (MERGE op with `on_create` / `on_match`)
+- Binder / IR: `crates/graphforge-ir/src/binder/writes.rs` (MERGE op with `on_create` / `on_match`)
 - Planner node: `crates/graphforge-plan/src/lib.rs` (`GraphMergeNode`)
-- Executor: `crates/graphforge-exec/src/write_driver.rs` (`run_merge_phase`, `run_relationship_merge_phase`)
+- Executor: `crates/graphforge-exec/src/write_driver/create_merge.rs` (`run_merge_phase`, `run_relationship_merge_phase`)
 
 **Supported forms (direct execution evidence):**
 - ✅ Standalone new-node MERGE by label + properties — `MERGE (:Person {name:'Alice'})`
@@ -308,9 +308,9 @@ Implementation status of OpenCypher query clauses in GraphForge.
 
 **Unsupported forms (structured plan errors — not support):**
 - ❌ Multi-node / relationship-construction MERGE that creates endpoints in the same pattern (for example `MERGE (a:A)-[:R]->(b:B)`), merging an already-bound node alone, or any MERGE pattern that is not exactly one standalone new node or one edge with reference-only endpoints
-  - Error: `relationship and multi-node MERGE execution is not implemented yet` (`write_driver.rs` `run_merge_phase`)
+  - Error: `relationship and multi-node MERGE execution is not implemented yet` (`write_driver/create_merge.rs` `run_merge_phase`)
 - ❌ Row-conditional `ON CREATE` / `ON MATCH` map actions (`n += {…}` / `n = {…}`) when some frontier rows create and others match in the same MERGE
-  - Error: `row-conditional MERGE map actions are not implemented yet` (`write_driver.rs` `run_merge_actions_masked`)
+  - Error: `row-conditional MERGE map actions are not implemented yet` (`write_driver/create_merge.rs` `run_merge_actions_masked`)
 - ❌ Comma-separated / multi-pattern MERGE in one clause (parser accepts a single `PathPattern` only)
 - ❌ Treating parse/bind/plan success or TCK inventory counts as end-to-end proof — logical-plan / wrapper tests are not execution support
 
@@ -461,8 +461,8 @@ Implementation status of OpenCypher query clauses in GraphForge.
 ## References
 
 - OpenCypher Specification: https://opencypher.org/resources/
-- MERGE executor authority: `crates/graphforge-exec/src/write_driver.rs`
+- MERGE executor authority: `crates/graphforge-exec/src/write_driver/create_merge.rs`
 - MERGE parser: `crates/graphforge-cypher/src/parser/clauses.rs`
-- MERGE binder: `crates/graphforge-ir/src/binder.rs`
+- MERGE binder: `crates/graphforge-ir/src/binder/writes.rs`
 - MERGE planner node: `crates/graphforge-plan/src/lib.rs` (`GraphMergeNode`)
 - Direct MERGE execution tests: `crates/graphforge-api/tests/e2e_baseline.rs`
