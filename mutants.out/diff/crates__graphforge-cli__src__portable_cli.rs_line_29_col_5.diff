@@ -1,0 +1,23 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace write_json -> Result<(), graphforge_api::GfError> with Ok(())
+@@ -21,19 +21,17 @@
+ fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {
+     graphforge_api::MultiOntologyError::from(error).into()
+ }
+ 
+ fn write_json(
+     value: &impl serde::Serialize,
+     output: &mut dyn Write,
+ ) -> Result<(), graphforge_api::GfError> {
+-    serde_json::to_writer(&mut *output, value)
+-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+-    writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn selection_flag(
+     current: bool,
+     checkpoint: Option<String>,
+ ) -> Result<PortableSelection, graphforge_api::GfError> {
+     match (current, checkpoint) {
+         (true, None) => Ok(PortableSelection::Current),

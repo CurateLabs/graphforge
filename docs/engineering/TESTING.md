@@ -11,6 +11,11 @@ has a wall-clock target, sheds work that is not required for its objective, and
 parallelizes the rest. Frequent publishing uses the **publish-track**, not a
 separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
+The **Coverage** workflow runs the same ledger on every merge to `main` and fails
+on a breached floor, so drift surfaces within one merge rather than at release
+time. Repository policy keeps full `llvm-cov` out of pull-request CI, where its
+cost would be paid on every review cycle; `scripts/ci/test-coverage-rust.sh`
+enforces that and fails closed.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
@@ -24,7 +29,8 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 | --- | --- | --- | --- | --- | --- |
 | `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
-| `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default; CI enforcement |
+| `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
+| Coverage | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | Running on pull requests |
 | Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
 | **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
 | **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
@@ -193,10 +199,26 @@ weakened assertions (`AGENTS.md`).
 
 ## Behavior coverage
 
-PR CI does **not** enforce full `llvm-cov` floors. Use `make coverage-rust`
-locally (or when claiming floor changes). Default maintainer loop is
-`make pre-push-fast`; run full `make coverage` / `make pre-push` when the changed
-surface needs coverage honesty.
+PR CI does **not** enforce full `llvm-cov` floors, by design. Use
+`make coverage-rust` locally (or when claiming floor changes). Default maintainer
+loop is `make pre-push-fast`; run full `make coverage` / `make pre-push` when the
+changed surface needs coverage honesty.
+
+The floors are enforced by the **Coverage** workflow
+(`.github/workflows/coverage-baseline.yml`).
+
+It runs on every push to `main`, enforces every floor, and records the baseline.
+Its patch total compares `HEAD` against the previous `main` commit rather than a
+merge base, because post-merge the merge base with `origin/main` is `HEAD` itself
+and would measure an empty patch.
+
+Runs never cancel. An earlier draft cancelled in-progress runs, which on a day
+with 21 merges would have left the baseline unmeasured entirely.
+
+Coverage does not run on pull requests. That is policy, not omission, and
+`scripts/ci/test-coverage-rust.sh` refuses any workflow a pull request can
+trigger that invokes it. The trade is deliberate: pull-request cycles stay fast,
+and the floors are enforced one merge later instead of never.
 
 ### Rust coverage evidence
 
@@ -213,8 +235,10 @@ matches the measured object.
 `build/coverage-rust/ledger.json` also binds the evidence to `HEAD`, the current
 `origin/main` merge base, and the LLVM toolchain. Missing, empty, malformed,
 stale, wrong-artifact, or wrong-SHA evidence fails before totals are accepted.
-Core has a 95% ratchet, every non-binding production crate has an independent
-80% floor, and changed executable Rust lines have a 90% floor. Each Rust
+Core has an 80% floor, every non-binding production crate has an independent
+80% floor, and changed executable Rust lines have a 90% floor. The floors are
+fixed values, not a ratchet: an aggregate floor set above the measured value
+cannot be met while the codebase grows faster than its marginal coverage rate. Each Rust
 binding adapter also retains its
 independent 80% floor; neither the merged workspace percentage nor a strong
 crate can average away a failed surface. Patch coverage uses executable lines
@@ -315,6 +339,28 @@ Merge requires green required checks and CI Gate at the exact head SHA.
 publish-track and human-close workflows certify registry publication; they are
 not close rituals for ordinary implementation issues. Details:
 [`.github/workflows/README.md`](../../.github/workflows/README.md).
+
+### Mutation evidence
+
+Line coverage proves a line executed, not that anything asserted its result.
+`cargo-mutants` is the check that a test fails when the code under it is wrong.
+It is a developer tool installed like `cargo-llvm-cov`, not a `Cargo.toml`
+dependency, and it ships nothing:
+
+```bash
+cargo install cargo-mutants --locked
+cargo mutants --file <path/to/module.rs> --package <crate> -- --tests
+```
+
+Always scope it to the module a change touches. A workspace-wide run rebuilds
+and retests once per mutant and does not finish at this size; one module is
+minutes. Tests that write project directories need `TMPDIR` on a filesystem the
+admission policy accepts, the same as the native pre-push runs, because the
+default temporary directory is refused as `filesystem_class_unproven`.
+
+Report the score and every surviving mutant. A survivor is either killed by a
+further test or justified individually; "mutation testing was impractical" is
+not a disposition.
 
 ## Test data & environments
 

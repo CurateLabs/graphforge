@@ -1,0 +1,21 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace oci_credential -> Option<String> with Some(String::new())
+@@ -200,17 +200,17 @@
+     expected_digest: Option<String>,
+     #[arg(long)]
+     destination: PathBuf,
+     #[arg(long)]
+     insecure_http: bool,
+ }
+ 
+ fn oci_credential() -> Option<String> {
+-    std::env::var("GRAPHFORGE_OCI_CREDENTIAL").ok()
++    Some(String::new()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[allow(
+     clippy::too_many_lines,
+     reason = "CLI dispatch keeps preview/export in one portable command table"
+ )]
+ pub(crate) fn run_portable(
+     graph: &mut GraphForge,

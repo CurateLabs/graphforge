@@ -1,0 +1,42 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace write_progress -> Result<(), graphforge_api::GfError> with Ok(())
+@@ -742,38 +742,17 @@
+ fn write_progress(
+     session_uuid: Uuid,
+     outcome: &str,
+     progress: &graphforge_api::ImportProgress,
+     timings: Option<graphforge_api::ImportOperationTimings>,
+     json: bool,
+     output: &mut dyn Write,
+ ) -> Result<(), graphforge_api::GfError> {
+-    if json {
+-        let mut receipt = serde_json::json!({
+-            "contract": "graphforge-import-session/1",
+-            "outcome": outcome,
+-            "session_uuid": session_uuid,
+-            "rows_accepted": progress.rows_accepted,
+-            "rows_rejected": progress.rows_rejected,
+-            "bytes_accepted": progress.bytes_accepted,
+-            "construction": progress.construction,
+-        });
+-        if let Some(timings) = timings {
+-            receipt["operation_timings"] = serde_json::json!(timings);
+-        }
+-        write_json(&receipt, output)
+-    } else {
+-        writeln!(
+-            output,
+-            "{outcome} session {session_uuid} rows_accepted={} bytes_accepted={}",
+-            progress.rows_accepted, progress.bytes_accepted
+-        )
+-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
+-    }
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod lifecycle_storage_tests {
+     use super::*;
+     use std::collections::BTreeMap;
+ 
+     #[test]
