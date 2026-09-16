@@ -128,8 +128,9 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         # test.yml: policy + rust-lint + python/node binding + Windows/macOS
         # durability (6);
-        # Binding RC: 3. PR Cargo sticky disks retired after #4 cutover.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 9,
+        # Binding RC: 3; coverage-baseline post-merge ledger: 1.
+        # PR Cargo sticky disks retired after #4 cutover.
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
