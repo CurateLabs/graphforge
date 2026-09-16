@@ -53,6 +53,7 @@ coverage/
 .nyc_output/
 *.lcov
 *.profraw
+.bazel-disk-cache/
 
 # Translations
 *.mo
