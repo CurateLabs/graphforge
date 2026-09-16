@@ -97,6 +97,13 @@ python3 scripts/ci/bazel-cache-perf.py --mode cold-correctness
 
 Repo flags live in `.bazelrc` (Bzlmod on; **no** `--remote_cache`).
 
+Linux builds select `ld.bfd` explicitly via `build:linux --linkopt=-fuse-ld=bfd`
+and the matching `--host_linkopt` ([#1340](https://github.com/CurateLabs/graphforge/issues/1340)).
+Without that pin, Bazel's auto-detected C++ toolchain uses `gold` wherever it is
+installed and rustc warns once per link action that gold is deprecated. `lld` is
+not installed on the CI runners, so `bfd` is the portable choice. macOS and
+Windows lanes keep their platform default linkers.
+
 ## Extending the graph
 
 ### New first-party crate
