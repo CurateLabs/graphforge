@@ -19,6 +19,10 @@
       "codspeed",
       "build"
     ],
+    "coverage-baseline": [
+      "make",
+      "coverage-rust"
+    ],
     "documentation": [
       "pnpm",
       "docs:build"
@@ -148,6 +152,17 @@
       ],
       "evidence_contract": "graphforge-concurrency-stress/1",
       "freshness": "14d",
+      "sha_rule": "exact_main"
+    },
+    {
+      "id": "coverage-baseline",
+      "path": ".github/workflows/coverage-baseline.yml",
+      "class": "scheduled_health_stress",
+      "owner": "core",
+      "command": "coverage-baseline",
+      "args": [],
+      "evidence_contract": "rust-coverage-ledger",
+      "freshness": "latest_main_change",
       "sha_rule": "exact_main"
     },
     {
