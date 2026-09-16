@@ -173,6 +173,68 @@ mod external_tests;
                 f"{sorted(filtered['crates/example/src/lib.rs'])}"
             )
 
+        # An attributed member must not consume a later production item. Inline
+        # parameters/fields share executable lines with production and stay in
+        # the denominator; dedicated test-only member lines are excluded.
+        member_source = """struct Handle {
+    #[cfg(test)]
+    #[allow(dead_code)] pub(crate) counts: Arc<Counts>,
+    production: u64,
+}
+fn acquired(#[cfg(test)] mut counts: &Arc<Counts>) -> Handle {
+    let production = 7;
+    #[cfg(test)]
+    { observe(counts); }
+    Handle {
+        #[cfg(test)]
+        counts: Arc::clone(counts),
+        production,
+    }
+}
+fn many(
+    #[cfg(test)]
+    counts: Result<
+        Arc<Counts>,
+        Error,
+    >,
+    production: u64,
+) -> u64 {
+    production
+}
+struct Shared { #[cfg(test)] counts: Arc<Counts>, production: u64 }
+#[cfg(test)]
+mod external_tests;
+"""
+        source_path.write_text(member_source, encoding="utf-8")
+        member_lines = set(range(1, len(member_source.splitlines()) + 1))
+        member_excluded = {2, 3, 8, 9, 11, 12, 17, 18, 19, 20, 21, 27, 28}
+        member_records = {
+            "crates/example/src/lib.rs": dict.fromkeys(member_lines, 0),
+            "crates/example/src/external_tests.rs": {1: 1},
+        }
+        member_filtered = ledger_module.production_records(member_records, fixture_root)
+        expected_members = {
+            "crates/example/src/lib.rs": dict.fromkeys(member_lines - member_excluded, 0)
+        }
+        if member_filtered != expected_members:
+            raise AssertionError(
+                "cfg(test) members changed production coverage or leaked test modules: "
+                f"{member_filtered}"
+            )
+
+        comparison_initializer = """fn production(a: i32, b: i32) -> Handle {
+    Handle {
+        #[cfg(test)]
+        test_only: a < b,
+        production: a > b,
+    }
+}
+"""
+        expect_error(
+            "ambiguous cfg(test) initializer",
+            lambda: ledger_module.cfg_test_lines(comparison_initializer, "comparison.rs"),
+        )
+
         binding_records = {
             "crates/graphforge-bindings-py/src/lib.rs": {1: 1},
             "crates/graphforge-bindings-node/src/lib.rs": {1: 1},
