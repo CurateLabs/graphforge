@@ -125,14 +125,14 @@ impl GraphForge {
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let query = query.to_owned();
         let result = match params {
             Some(_) => {
                 let p = params_from_dict(params)?;
-                py.detach(|| self.inner.execute_with_params(&query, &p))
+                py.detach(|| native.execute_with_params(&query, &p))
             }
-            None => py.detach(|| self.inner.execute(&query)),
+            None => py.detach(|| native.execute(&query)),
         }
         .map_err(|e| to_pyerr(py, &e))?;
         result_to_pyarrow(py, &result)
@@ -185,11 +185,11 @@ impl GraphForge {
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let query = query.to_owned();
         let p = params_from_dict(params)?;
         let (stream, schema, guard) = py
-            .detach(|| self.inner.execute_stream_owned(&query, &p))
+            .detach(|| native.execute_stream_owned(&query, &p))
             .map_err(|e| to_pyerr(py, &e))?;
         let reader = StreamReader {
             schema,
@@ -203,9 +203,9 @@ impl GraphForge {
     /// Return a human-readable explanation of the compiler pipeline for `query`
     /// (`AST` → `GraphIR` → `LogicalPlan` → `PhysicalPlan`).
     fn explain(&self, py: Python<'_>, query: &str) -> PyResult<String> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let query = query.to_owned();
-        py.detach(|| self.inner.explain(&query))
+        py.detach(|| native.explain(&query))
             .map_err(|e| to_pyerr(py, &e))
     }
 }

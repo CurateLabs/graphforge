@@ -228,7 +228,10 @@ python3 scripts/ci/bulk-construction-conformance.py validate
 2. **Prefer `MERGE`** when re-running ETL or scripts that must be idempotent.
 3. **Pass `operation_uuid` on every bulk call** and keep it stable for retries.
 4. **Close persistent graphs** (`forge.close()`) when finished with a directory
-   project.
+   project. An open instance keeps OS handles on the committed generation it
+   reads from, including a directory handle on `generations/<uuid>/graph`;
+   `close()` releases them, which Windows requires before the project directory
+   can be moved or removed.
 5. **Consume Arrow results** with `to_pandas()`, `polars.from_arrow`, or
    `to_pylist()` — there are no `CypherValue` wrappers in v0.5.0.
 

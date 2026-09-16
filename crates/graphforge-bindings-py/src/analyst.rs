@@ -159,7 +159,7 @@ impl GraphForge {
         directed: bool,
         write_property: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let opts = graphforge_api::RankOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
             via: via.map(str::to_owned),
@@ -167,7 +167,7 @@ impl GraphForge {
             write_property: write_property.map(str::to_owned),
         };
         let label = label.to_owned();
-        algorithm_result(py, py.detach(|| self.inner.rank(&label, opts)))
+        algorithm_result(py, py.detach(|| native.rank(&label, opts)))
     }
 
     /// Prepare a Rust-owned neutral rank invocation without executing it.
@@ -180,7 +180,7 @@ impl GraphForge {
         via: Option<&str>,
         directed: bool,
     ) -> PyResult<PyInvocationDescriptor> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let options = graphforge_api::RankOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
             via: via.map(str::to_owned),
@@ -188,7 +188,7 @@ impl GraphForge {
             write_property: None,
         };
         let label = label.to_owned();
-        py.detach(|| self.inner.prepare_rank_invocation(&label, &options))
+        py.detach(|| native.prepare_rank_invocation(&label, &options))
             .map(|inner| PyInvocationDescriptor { inner })
             .map_err(|error| to_py_invocation_error(py, &error))
     }
@@ -199,20 +199,20 @@ impl GraphForge {
         py: Python<'_>,
         descriptor: &PyInvocationDescriptor,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let descriptor = descriptor.inner.clone();
         let batch = py
-            .detach(|| self.inner.invoke_descriptor(&descriptor))
+            .detach(|| native.invoke_descriptor(&descriptor))
             .map_err(|error| to_py_invocation_error(py, &error))?;
         algorithm_result(py, Ok(batch))
     }
 
     /// Decode canonical descriptor bytes in Rust and dispatch them.
     fn invoke_descriptor_bytes(&self, py: Python<'_>, descriptor: &[u8]) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let descriptor = descriptor.to_owned();
         let batch = py
-            .detach(|| self.inner.invoke_descriptor_bytes(&descriptor))
+            .detach(|| native.invoke_descriptor_bytes(&descriptor))
             .map_err(|error| to_py_invocation_error(py, &error))?;
         algorithm_result(py, Ok(batch))
     }
@@ -230,7 +230,7 @@ impl GraphForge {
         directed: bool,
         write_property: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let opts = graphforge_api::ClusterOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
             vector_property: vector_property.map(str::to_owned),
@@ -239,7 +239,7 @@ impl GraphForge {
             write_property: write_property.map(str::to_owned),
         };
         let label = label.to_owned();
-        algorithm_result(py, py.detach(|| self.inner.cluster(&label, opts)))
+        algorithm_result(py, py.detach(|| native.cluster(&label, opts)))
     }
 
     /// Path-finding / flow between nodes (`by=`). Returns a `pyarrow.Table`.
@@ -263,7 +263,7 @@ impl GraphForge {
         terminal_uuids: Option<Vec<String>>,
         prize_property: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let terminal_uuids = terminal_uuids.unwrap_or_default();
         let terminal_uuids =
             parse_terminal_uuids(&terminal_uuids).map_err(|error| to_pyerr(py, &error))?;
@@ -289,7 +289,7 @@ impl GraphForge {
             .transpose()?;
         algorithm_result(
             py,
-            py.detach(|| self.inner.paths(source.as_ref(), target.as_ref(), opts)),
+            py.detach(|| native.paths(source.as_ref(), target.as_ref(), opts)),
         )
     }
 
@@ -308,7 +308,7 @@ impl GraphForge {
         k: Option<usize>,
         embedding_options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let algorithm = by.parse().map_err(|error| to_pyerr(py, &error))?;
         let label = label.map(str::to_owned);
         if matches!(
@@ -339,7 +339,7 @@ impl GraphForge {
             validate_embedding_options(&options).map_err(|error| to_pyerr(py, &error))?;
             return algorithm_result(
                 py,
-                py.detach(|| self.inner.analyze_embedding(label.as_deref(), &options)),
+                py.detach(|| native.analyze_embedding(label.as_deref(), &options)),
             );
         }
         if embedding_options.is_some() {
@@ -359,7 +359,7 @@ impl GraphForge {
             partition_property: partition_property.map(str::to_owned),
             ..graphforge_api::AnalyzeOptions::default()
         };
-        algorithm_result(py, py.detach(|| self.inner.analyze(label.as_deref(), opts)))
+        algorithm_result(py, py.detach(|| native.analyze(label.as_deref(), opts)))
     }
 
     /// Pairwise node similarity (`by=`). Returns a `pyarrow.Table`.
@@ -373,7 +373,7 @@ impl GraphForge {
         vector_property: Option<&str>,
         via: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let opts = graphforge_api::SimilarOptions {
             by: by.parse().map_err(|error| to_pyerr(py, &error))?,
             k,
@@ -381,7 +381,7 @@ impl GraphForge {
             via: via.map(str::to_owned),
         };
         let label = label.to_owned();
-        algorithm_result(py, py.detach(|| self.inner.similar(&label, opts)))
+        algorithm_result(py, py.detach(|| native.similar(&label, opts)))
     }
 }
 

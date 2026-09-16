@@ -23,7 +23,7 @@ impl GraphForge {
         session: &Mutex<Option<GraphImportSession>>,
         cancellation: Option<&graphforge_api::CancellationToken>,
     ) -> PyResult<ImportProgress> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         // Lock only inside `detach` so a concurrent GIL-holding caller cannot
         // wait on this mutex while the detached worker needs the GIL to return.
         py.detach(|| {
@@ -33,7 +33,7 @@ impl GraphForge {
             let session = guard
                 .as_mut()
                 .ok_or_else(|| GfError::Lifecycle("import session handle is closed".into()))?;
-            session.validate_with_cancellation(&self.inner, cancellation)
+            session.validate_with_cancellation(native, cancellation)
         })
         .map_err(|error| to_pyerr(py, &error))
     }
@@ -45,7 +45,7 @@ impl GraphForge {
         session: &Mutex<Option<GraphImportSession>>,
         cancellation: Option<&graphforge_api::CancellationToken>,
     ) -> PyResult<String> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         py.detach(|| {
             let mut guard = session
                 .lock()
@@ -54,7 +54,7 @@ impl GraphForge {
                 .as_mut()
                 .ok_or_else(|| GfError::Lifecycle("import session handle is closed".into()))?;
             session
-                .commit(&self.inner, cancellation)
+                .commit(native, cancellation)
                 .map(|uuid| uuid.to_string())
         })
         .map_err(|error| to_pyerr(py, &error))
@@ -66,8 +66,8 @@ impl GraphForge {
         py: Python<'_>,
         session: GraphImportSession,
     ) -> PyResult<ImportProgress> {
-        self.ensure_open()?;
-        py.detach(|| session.abort(&self.inner))
+        let native = self.ensure_open()?;
+        py.detach(|| session.abort(native))
             .map_err(|error| to_pyerr(py, &error))
     }
 }
@@ -269,7 +269,7 @@ pub(crate) fn begin_import_session(
     max_rejected_rows: Option<u64>,
     io_concurrency: Option<usize>,
 ) -> PyResult<Py<PyGraphImportSession>> {
-    if slf.borrow().closed {
+    if slf.borrow().is_closed() {
         return Err(to_pyerr(
             py,
             &GfError::Lifecycle("operation on a closed GraphForge instance".into()),
@@ -285,7 +285,7 @@ pub(crate) fn begin_import_session(
     );
     let session = slf
         .borrow()
-        .inner
+        .ensure_open()?
         .begin_import_session(operation, limits)
         .map_err(|error| to_pyerr(py, &error))?;
     Bound::new(
@@ -304,7 +304,7 @@ pub(crate) fn resume_import_session(
     py: Python<'_>,
     session_uuid: &str,
 ) -> PyResult<Py<PyGraphImportSession>> {
-    if forge.borrow().closed {
+    if forge.borrow().is_closed() {
         return Err(to_pyerr(
             py,
             &GfError::Lifecycle("operation on a closed GraphForge instance".into()),
@@ -318,7 +318,7 @@ pub(crate) fn resume_import_session(
     })?;
     let session = forge
         .borrow()
-        .inner
+        .ensure_open()?
         .resume_import_session(uuid)
         .map_err(|error| to_pyerr(py, &error))?;
     Bound::new(
@@ -337,8 +337,8 @@ pub(crate) fn cleanup_stale_import_sessions(
     py: Python<'_>,
     max_age_secs: u64,
 ) -> PyResult<u64> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let max_age = Duration::from_secs(max_age_secs);
-    py.detach(|| forge.inner.cleanup_stale_import_sessions(max_age))
+    py.detach(|| native.cleanup_stale_import_sessions(max_age))
         .map_err(|error| to_pyerr(py, &error))
 }

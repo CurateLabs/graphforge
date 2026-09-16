@@ -50,17 +50,17 @@ pub(super) fn rename_map<'py>(
 impl GraphForge {
     /// Load and apply an ontology from `path` (YAML/JSON by extension).
     fn load_ontology(&mut self, py: Python<'_>, path: &str) -> PyResult<()> {
-        self.ensure_open()?;
+        let native = self.ensure_open_mut()?;
         let path = path.to_owned();
-        py.detach(|| self.inner.load_ontology(&path))
+        py.detach(|| native.load_ontology(&path))
             .map_err(|e| to_pyerr(py, &e))
     }
 
     /// Return the stable, deterministically ordered runtime-catalog contract.
     fn inspect_runtime_catalog(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let snapshot = py
-            .detach(|| self.inner.inspect_runtime_catalog())
+            .detach(|| native.inspect_runtime_catalog())
             .map_err(|error| to_pyerr(py, &error))?;
         let value = serde_json::to_value(snapshot)
             .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
@@ -74,16 +74,15 @@ impl GraphForge {
         ontology_id: &str,
         version: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let ontology_id = ontology_id.to_owned();
         let version = version.to_owned();
         let suggestion = py
             .detach(|| {
-                self.inner
-                    .suggest_ontology(graphforge_api::OntologySuggestionOptions {
-                        ontology_id,
-                        version,
-                    })
+                native.suggest_ontology(graphforge_api::OntologySuggestionOptions {
+                    ontology_id,
+                    version,
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         let value = serde_json::json!({
@@ -101,11 +100,11 @@ impl GraphForge {
         py: Python<'_>,
         document: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let document: graphforge_api::OntologyDoc =
             serde_json::from_value(py_to_json_value(document)?)
                 .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
-        let report = py.detach(|| self.inner.validate_ontology(&document));
+        let report = py.detach(|| native.validate_ontology(&document));
         let diagnostics = report
             .diagnostics
             .into_iter()
@@ -133,7 +132,7 @@ impl GraphForge {
         format: &str,
         document: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let source = match source {
             "loaded" => graphforge_api::OntologyExportSource::Loaded,
             "adopted" => graphforge_api::OntologyExportSource::Adopted,
@@ -161,15 +160,15 @@ impl GraphForge {
         };
         let format = ontology_export_format(format).map_err(|error| to_pyerr(py, &error))?;
         let destination = std::path::PathBuf::from(destination);
-        py.detach(|| self.inner.export_ontology(source, &destination, format))
+        py.detach(|| native.export_ontology(source, &destination, format))
             .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Inspect the generation-managed authoritative ontology record.
     fn workspace_ontology(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let record = py
-            .detach(|| self.inner.workspace_ontology())
+            .detach(|| native.workspace_ontology())
             .map_err(|error| to_pyerr(py, &error))?;
         let value = serde_json::to_value(record)
             .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
@@ -186,7 +185,7 @@ impl GraphForge {
         operation_uuid: &str,
         actor_uuid: Option<&str>,
     ) -> PyResult<()> {
-        self.ensure_open()?;
+        let native = self.ensure_open_mut()?;
         let request = graphforge_api::AdoptOntologyRequest {
             context: WriteContext {
                 operation_uuid: canonical_operation_id(operation_uuid)
@@ -200,7 +199,7 @@ impl GraphForge {
             path: path.into(),
             mode: ontology_mode(mode).map_err(|error| to_pyerr(py, &error))?,
         };
-        py.detach(|| self.inner.adopt_ontology(request))
+        py.detach(|| native.adopt_ontology(request))
             .map_err(|error| to_pyerr(py, &error))
     }
 
@@ -212,7 +211,7 @@ impl GraphForge {
         operation_uuid: &str,
         actor_uuid: Option<&str>,
     ) -> PyResult<()> {
-        self.ensure_open()?;
+        let native = self.ensure_open_mut()?;
         let request = graphforge_api::ClearOntologyRequest {
             context: WriteContext {
                 operation_uuid: canonical_operation_id(operation_uuid)
@@ -224,7 +223,7 @@ impl GraphForge {
                     .map(|operation| operation.0),
             },
         };
-        py.detach(|| self.inner.clear_ontology(request))
+        py.detach(|| native.clear_ontology(request))
             .map_err(|error| to_pyerr(py, &error))
     }
 

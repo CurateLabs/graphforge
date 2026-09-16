@@ -78,10 +78,10 @@ impl GraphForge {
         label: &str,
         props: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyNodeHandle> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let props = props_from_dict(props)?;
         let label = label.to_owned();
-        py.detach(|| self.inner.add_node(&label, &props))
+        py.detach(|| native.add_node(&label, &props))
             .map(|inner| PyNodeHandle { inner })
             .map_err(|error| to_pyerr(py, &error))
     }
@@ -96,12 +96,12 @@ impl GraphForge {
         dst: &PyNodeHandle,
         props: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyEdgeHandle> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let props = props_from_dict(props)?;
         let src = src.inner.clone();
         let dst = dst.inner.clone();
         let rel_type = rel_type.to_owned();
-        py.detach(|| self.inner.add_edge(&src, &rel_type, &dst, &props))
+        py.detach(|| native.add_edge(&src, &rel_type, &dst, &props))
             .map(|inner| PyEdgeHandle { inner })
             .map_err(|error| to_pyerr(py, &error))
     }
@@ -121,7 +121,7 @@ impl GraphForge {
         actor_uuid: Option<&str>,
         contract_version: u32,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let request = composite::py_composite_request(
             py,
             operation_uuid,
@@ -131,7 +131,7 @@ impl GraphForge {
             contract_version,
         )?;
         let receipt = py
-            .detach(|| self.inner.publish_composite_transaction(request))
+            .detach(|| native.publish_composite_transaction(request))
             .map_err(|error| to_pyerr(py, &error))?;
         record_batch_to_pyarrow_table(py, &receipt)
     }
@@ -147,12 +147,12 @@ impl GraphForge {
         operation_uuid: &Bound<'_, PyAny>,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             py_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let batch = py_bulk_input_to_batch(py, data)?;
         let receipt = py
-            .detach(|| self.inner.publish_bulk_nodes(operation_uuid, &[batch]))
+            .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
             .map_err(|error| bulk_node_publication_error(py, error))?;
         record_batch_to_pyarrow_table(py, &receipt)
     }
@@ -168,12 +168,12 @@ impl GraphForge {
         operation_uuid: &Bound<'_, PyAny>,
         data: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             py_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let batch = py_bulk_input_to_batch(py, data)?;
         let receipt = py
-            .detach(|| self.inner.publish_bulk_edges(operation_uuid, &[batch]))
+            .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
             .map_err(|error| bulk_edge_publication_error(py, error))?;
         record_batch_to_pyarrow_table(py, &receipt)
     }
@@ -191,12 +191,12 @@ impl GraphForge {
         data: &Bound<'_, PyAny>,
         operation_uuid: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             py_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let batch = ensure_bulk_node_batch(py, label, data)?;
         let receipt = py
-            .detach(|| self.inner.publish_bulk_nodes(operation_uuid, &[batch]))
+            .detach(|| native.publish_bulk_nodes(operation_uuid, &[batch]))
             .map_err(|error| bulk_node_publication_error(py, error))?;
         record_batch_to_pyarrow_table(py, &receipt)
     }
@@ -216,20 +216,19 @@ impl GraphForge {
         src: &str,
         dst: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let operation_uuid =
             py_operation_id(operation_uuid).map_err(|error| to_pyerr(py, &error))?;
         let batch = ensure_bulk_edge_batch(py, rel_type, data, src, dst)?;
         let receipt = py
-            .detach(|| self.inner.publish_bulk_edges(operation_uuid, &[batch]))
+            .detach(|| native.publish_bulk_edges(operation_uuid, &[batch]))
             .map_err(|error| bulk_edge_publication_error(py, error))?;
         record_batch_to_pyarrow_table(py, &receipt)
     }
 
     /// Remove all nodes and edges (in-memory instances only).
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.clear())
-            .map_err(|e| to_pyerr(py, &e))
+        let native = self.ensure_open()?;
+        py.detach(|| native.clear()).map_err(|e| to_pyerr(py, &e))
     }
 }

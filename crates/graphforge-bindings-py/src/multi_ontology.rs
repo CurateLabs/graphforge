@@ -138,17 +138,17 @@ fn cancellation(value: Option<&PyCancellationToken>) -> Option<graphforge_api::C
 }
 
 pub(crate) fn ontology_modules(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let result = py
-        .detach(|| forge.inner.ontology_modules())
+        .detach(|| native.ontology_modules())
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
 
 pub(crate) fn authority_state(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let result = py
-        .detach(|| forge.inner.ontology_authority_state())
+        .detach(|| native.ontology_authority_state())
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -160,10 +160,10 @@ pub(crate) fn inspect_module(
     authored_version: Option<&str>,
     canonical_digest: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let result = py
-        .detach(|| forge.inner.inspect_ontology_module(&selector))
+        .detach(|| native.inspect_ontology_module(&selector))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -173,10 +173,10 @@ pub(crate) fn validate_module(
     py: Python<'_>,
     document: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let document: OntologyDoc = from_python(py, document)?;
     let result = py
-        .detach(|| forge.inner.validate_ontology_module(&document))
+        .detach(|| native.validate_ontology_module(&document))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -188,16 +188,12 @@ pub(crate) fn create_module(
     dependencies: &Bound<'_, PyAny>,
     enforcement: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let document: OntologyDoc = from_python(py, document)?;
     let dependencies: Vec<OntologyModuleId> = from_python(py, dependencies)?;
     let enforcement = enforcement.map(|value| mode(py, value)).transpose()?;
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .create_ontology_module(document, dependencies, enforcement)
-        })
+        .detach(|| native.create_ontology_module(document, dependencies, enforcement))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -209,7 +205,7 @@ pub(crate) fn import_module(
     format: &str,
     dependencies: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let text = text.to_owned();
     let dependencies: Vec<OntologyModuleId> = from_python(py, dependencies)?;
     let format = match format {
@@ -224,11 +220,7 @@ pub(crate) fn import_module(
         }
     };
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .import_ontology_module(&text, format, dependencies)
-        })
+        .detach(|| native.import_ontology_module(&text, format, dependencies))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -243,7 +235,7 @@ pub(crate) fn adopt_module(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let candidate: ModuleCandidate = from_python(py, candidate)?;
     let authority = authority(
         py,
@@ -258,7 +250,7 @@ pub(crate) fn adopt_module(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| forge.inner.adopt_ontology_module(&request, cancel.as_ref()))
+        .detach(|| native.adopt_ontology_module(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -272,16 +264,12 @@ pub(crate) fn preview_update_module(
     document: &Bound<'_, PyAny>,
     dependencies: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let document: OntologyDoc = from_python(py, document)?;
     let dependencies: Vec<OntologyModuleId> = from_python(py, dependencies)?;
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .preview_update_ontology_module(&selector, &document, &dependencies)
-        })
+        .detach(|| native.preview_update_ontology_module(&selector, &document, &dependencies))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -301,7 +289,7 @@ pub(crate) fn update_module(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let document: OntologyDoc = from_python(py, document)?;
     let dependencies: Vec<OntologyModuleId> = from_python(py, dependencies)?;
@@ -322,11 +310,7 @@ pub(crate) fn update_module(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .update_ontology_module(&request, cancel.as_ref())
-        })
+        .detach(|| native.update_ontology_module(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -338,10 +322,10 @@ pub(crate) fn preview_delete_module(
     authored_version: Option<&str>,
     canonical_digest: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let result = py
-        .detach(|| forge.inner.preview_delete_ontology_module(&selector))
+        .detach(|| native.preview_delete_ontology_module(&selector))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -361,7 +345,7 @@ pub(crate) fn preview_migrate_module(
     operation_uuid: &str,
     actor_uuid: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let request = ModuleMigrationRequest {
         authority: authority(
             py,
@@ -376,7 +360,7 @@ pub(crate) fn preview_migrate_module(
         enforcement: enforcement.map(|value| mode(py, value)).transpose()?,
     };
     let result = py
-        .detach(|| forge.inner.preview_migrate_ontology_module(&request))
+        .detach(|| native.preview_migrate_ontology_module(&request))
         .map_err(|error| to_multi_ontology_pyerr(py, &error))?;
     to_python(py, &result)
 }
@@ -398,7 +382,7 @@ pub(crate) fn migrate_module(
     preview: &Bound<'_, PyAny>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let request = ModuleMigrationRequest {
         authority: authority(
             py,
@@ -415,11 +399,7 @@ pub(crate) fn migrate_module(
     let preview: ModuleMigrationPreview = from_python(py, preview)?;
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .migrate_ontology_module(&request, &preview, cancel.as_ref())
-        })
+        .detach(|| native.migrate_ontology_module(&request, &preview, cancel.as_ref()))
         .map_err(|error| to_multi_ontology_pyerr(py, &error))?;
     to_python(py, &result)
 }
@@ -431,12 +411,12 @@ pub(crate) fn certification_report(
     migration_plan_digest: &str,
     rows_scanned: u64,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let composition_before = composition_before.to_owned();
     let migration_plan_digest = migration_plan_digest.to_owned();
     let result = py
         .detach(|| {
-            forge.inner.multi_ontology_certification_report(
+            native.multi_ontology_certification_report(
                 "python",
                 &composition_before,
                 &migration_plan_digest,
@@ -459,7 +439,7 @@ pub(crate) fn delete_module(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let authority = authority(
         py,
@@ -474,11 +454,7 @@ pub(crate) fn delete_module(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .delete_ontology_module(&request, cancel.as_ref())
-        })
+        .detach(|| native.delete_ontology_module(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -491,7 +467,7 @@ pub(crate) fn export_module(
     canonical_digest: Option<&str>,
     format: &str,
 ) -> PyResult<String> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = module_selector(py, ontology_id, authored_version, canonical_digest)?;
     let format = match format {
         "json" => graphforge_api::ExportFormat::Json,
@@ -503,14 +479,14 @@ pub(crate) fn export_module(
             ));
         }
     };
-    py.detach(|| forge.inner.export_ontology_module(&selector, format))
+    py.detach(|| native.export_ontology_module(&selector, format))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))
 }
 
 pub(crate) fn ontology_bridges(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let result = py
-        .detach(|| forge.inner.ontology_bridges())
+        .detach(|| native.ontology_bridges())
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -522,10 +498,10 @@ pub(crate) fn inspect_bridge(
     authored_version: Option<&str>,
     canonical_digest: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let result = py
-        .detach(|| forge.inner.inspect_ontology_bridge(&selector))
+        .detach(|| native.inspect_ontology_bridge(&selector))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -535,10 +511,10 @@ pub(crate) fn validate_bridge(
     py: Python<'_>,
     document: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let document: BridgeDocument = from_python(py, document)?;
     let result = py
-        .detach(|| forge.inner.validate_ontology_bridge(&document))
+        .detach(|| native.validate_ontology_bridge(&document))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -548,10 +524,10 @@ pub(crate) fn create_bridge(
     py: Python<'_>,
     document: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let document: BridgeDocument = from_python(py, document)?;
     let result = py
-        .detach(|| forge.inner.create_ontology_bridge(document))
+        .detach(|| native.create_ontology_bridge(document))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -562,7 +538,7 @@ pub(crate) fn import_bridge(
     text: &str,
     format: &str,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let text = text.to_owned();
     let format = match format {
         "auto" => BridgeImportFormatHint::Auto,
@@ -576,7 +552,7 @@ pub(crate) fn import_bridge(
         }
     };
     let result = py
-        .detach(|| forge.inner.import_ontology_bridge(&text, format))
+        .detach(|| native.import_ontology_bridge(&text, format))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -591,7 +567,7 @@ pub(crate) fn adopt_bridge(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let candidate: BridgeCandidate = from_python(py, candidate)?;
     let authority = authority(
         py,
@@ -606,7 +582,7 @@ pub(crate) fn adopt_bridge(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| forge.inner.adopt_ontology_bridge(&request, cancel.as_ref()))
+        .detach(|| native.adopt_ontology_bridge(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -619,15 +595,11 @@ pub(crate) fn preview_update_bridge(
     canonical_digest: Option<&str>,
     document: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let document: BridgeDocument = from_python(py, document)?;
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .preview_update_ontology_bridge(&selector, &document)
-        })
+        .detach(|| native.preview_update_ontology_bridge(&selector, &document))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -645,7 +617,7 @@ pub(crate) fn update_bridge(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let document: BridgeDocument = from_python(py, document)?;
     let authority = authority(
@@ -662,11 +634,7 @@ pub(crate) fn update_bridge(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .update_ontology_bridge(&request, cancel.as_ref())
-        })
+        .detach(|| native.update_ontology_bridge(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -678,10 +646,10 @@ pub(crate) fn preview_delete_bridge(
     authored_version: Option<&str>,
     canonical_digest: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let result = py
-        .detach(|| forge.inner.preview_delete_ontology_bridge(&selector))
+        .detach(|| native.preview_delete_ontology_bridge(&selector))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -698,7 +666,7 @@ pub(crate) fn delete_bridge(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let authority = authority(
         py,
@@ -713,11 +681,7 @@ pub(crate) fn delete_bridge(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .delete_ontology_bridge(&request, cancel.as_ref())
-        })
+        .detach(|| native.delete_ontology_bridge(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -730,7 +694,7 @@ pub(crate) fn export_bridge(
     canonical_digest: Option<&str>,
     format: &str,
 ) -> PyResult<String> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let selector = bridge_selector(py, bridge_id, authored_version, canonical_digest)?;
     let format = match format {
         "json" => BridgeExportFormat::Json,
@@ -742,14 +706,14 @@ pub(crate) fn export_bridge(
             ));
         }
     };
-    py.detach(|| forge.inner.export_ontology_bridge(&selector, format))
+    py.detach(|| native.export_ontology_bridge(&selector, format))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))
 }
 
 pub(crate) fn activation_profile(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let (profile_default, activation) = py
-        .detach(|| forge.inner.ontology_activation_profile())
+        .detach(|| native.ontology_activation_profile())
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(
         py,
@@ -768,7 +732,7 @@ pub(crate) fn change_activation_profile(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let profile_default = mode(py, profile_default)?;
     let activation: Vec<ActivationRecord> = from_python(py, activation)?;
     let authority = authority(
@@ -785,11 +749,7 @@ pub(crate) fn change_activation_profile(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .change_ontology_activation_profile(&request, cancel.as_ref())
-        })
+        .detach(|| native.change_ontology_activation_profile(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -799,10 +759,10 @@ pub(crate) fn validate_composition(
     py: Python<'_>,
     candidate: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let candidate: WorkspaceOntologyComposition = from_python(py, candidate)?;
     let result = py
-        .detach(|| forge.inner.validate_ontology_composition(&candidate))
+        .detach(|| native.validate_ontology_composition(&candidate))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -817,7 +777,7 @@ pub(crate) fn preflight_composition(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let candidate: WorkspaceOntologyComposition = from_python(py, candidate)?;
     let authority = authority(
         py,
@@ -835,11 +795,7 @@ pub(crate) fn preflight_composition(
     };
     let cancel = cancellation(cancel);
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .preflight_ontology_composition(&request, cancel.as_ref())
-        })
+        .detach(|| native.preflight_ontology_composition(&request, cancel.as_ref()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -852,7 +808,7 @@ pub(crate) fn explain_resolution(
     local_id: &str,
     max_candidates: usize,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let module = module.map(|value| from_python(py, value)).transpose()?;
     let kind = match kind {
         "entity" => SymbolKind::Entity,
@@ -872,19 +828,15 @@ pub(crate) fn explain_resolution(
         max_candidates,
     };
     let result = py
-        .detach(|| forge.inner.explain_ontology_resolution(&request))
+        .detach(|| native.explain_ontology_resolution(&request))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
 
 pub(crate) fn portable_staging(forge: &GraphForge, py: Python<'_>) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open()?;
     let result = py
-        .detach(|| {
-            forge
-                .inner
-                .portable_ontology_staging(graphforge_api::PortableV2Limits::default())
-        })
+        .detach(|| native.portable_ontology_staging(graphforge_api::PortableV2Limits::default()))
         .map_err(|e| to_multi_ontology_pyerr(py, &e))?;
     to_python(py, &result)
 }
@@ -898,7 +850,7 @@ pub(crate) fn adopt_portable_staging(
     actor_uuid: Option<&str>,
     cancel: Option<&PyCancellationToken>,
 ) -> PyResult<Py<PyAny>> {
-    forge.ensure_open()?;
+    let native = forge.ensure_open_mut()?;
     let authority = authority(
         py,
         expected_generation,
@@ -909,7 +861,7 @@ pub(crate) fn adopt_portable_staging(
     let cancel = cancellation(cancel);
     let result = py
         .detach(|| {
-            forge.inner.adopt_portable_ontology_staging(
+            native.adopt_portable_ontology_staging(
                 &authority,
                 graphforge_api::PortableV2Limits::default(),
                 cancel.as_ref(),

@@ -169,7 +169,9 @@ impl PyGraphTransaction {
         let parent = self.parent.clone_ref(py);
         self.with_tx(py, |tx| {
             let graph = parent.bind(py).borrow();
-            tx.validate(&graph.inner)
+            tx.validate(graph.ensure_open().map_err(|_| {
+                GfError::Lifecycle("operation on a closed GraphForge instance".into())
+            })?)
         })
     }
 
@@ -184,7 +186,10 @@ impl PyGraphTransaction {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let receipt = self.with_tx(py, |tx| {
             let graph = parent.bind(py).borrow();
-            tx.commit_with_cancellation(&graph.inner, cancellation.clone())
+            let native = graph.ensure_open().map_err(|_| {
+                GfError::Lifecycle("operation on a closed GraphForge instance".into())
+            })?;
+            tx.commit_with_cancellation(native, cancellation.clone())
         })?;
         Ok(receipt.generation_uuid.to_string())
     }
@@ -223,7 +228,7 @@ pub(crate) fn begin_transaction(
     operation_uuid: &str,
     actor_uuid: Option<&str>,
 ) -> PyResult<Py<PyGraphTransaction>> {
-    if forge.borrow().closed {
+    if forge.borrow().is_closed() {
         return Err(to_pyerr(
             py,
             &GfError::Lifecycle("operation on a closed GraphForge instance".into()),
@@ -242,7 +247,7 @@ pub(crate) fn begin_transaction(
     };
     let inner = forge
         .borrow()
-        .inner
+        .ensure_open()?
         .begin_transaction(context)
         .map_err(|error| to_pyerr(py, &error))?;
     let parent = forge.clone().unbind();
@@ -494,7 +499,8 @@ pub(crate) mod ops {
         forge: &GraphForge,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        recovery_evidence_dict(py, forge.inner.project_open_recovery())
+        let native = forge.ensure_open()?;
+        recovery_evidence_dict(py, native.project_open_recovery())
     }
 
     pub(crate) fn inspect_project_reachability<'py>(
@@ -507,7 +513,7 @@ pub(crate) mod ops {
         cleanup_batch: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let report = forge
-            .inner
+            .ensure_open()?
             .inspect_project_reachability(
                 retention_policy(retained_ancestors),
                 retention_limits(
@@ -531,7 +537,7 @@ pub(crate) mod ops {
         cleanup_batch: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let report = forge
-            .inner
+            .ensure_open()?
             .preview_project_cleanup(
                 retention_policy(retained_ancestors),
                 retention_limits(
@@ -555,7 +561,7 @@ pub(crate) mod ops {
         cleanup_batch: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let report = forge
-            .inner
+            .ensure_open()?
             .execute_project_cleanup(
                 retention_policy(retained_ancestors),
                 retention_limits(
@@ -577,7 +583,7 @@ pub(crate) mod ops {
         compact_when_replay_memory_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let status = forge
-            .inner
+            .ensure_open()?
             .graph_delta_compaction_status(
                 graphforge_api::GraphDeltaCompactionPolicy {
                     compact_when_runs,
@@ -609,7 +615,7 @@ pub(crate) mod ops {
             retained_ancestors,
         )?;
         let report = forge
-            .inner
+            .ensure_open()?
             .preview_graph_delta_compaction(&request, cancellation.map(|token| &token.inner))
             .map_err(|error| to_pyerr(py, &error))?;
         compaction_report_dict(py, &report)
@@ -634,7 +640,7 @@ pub(crate) mod ops {
             retained_ancestors,
         )?;
         let report = forge
-            .inner
+            .ensure_open_mut()?
             .compact_graph_delta(&request, cancellation.map(|token| &token.inner))
             .map_err(|error| to_pyerr(py, &error))?;
         compaction_report_dict(py, &report)

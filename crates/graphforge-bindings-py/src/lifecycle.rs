@@ -167,9 +167,9 @@ fn reload_reason(reason: ReloadRequiredReason) -> &'static str {
 impl GraphForge {
     /// Inspect the committed project capability manifest as a `pyarrow.Table`.
     fn project_capabilities(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let result = py
-            .detach(|| self.inner.project_capabilities())
+            .detach(|| native.project_capabilities())
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -184,7 +184,7 @@ impl GraphForge {
         description: Option<String>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let request = graphforge_api::CheckpointRequest {
             name,
             description,
@@ -197,7 +197,7 @@ impl GraphForge {
                 .map(|id| id.0),
         };
         let result = py
-            .detach(|| self.inner.checkpoint(request))
+            .detach(|| native.checkpoint(request))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -211,7 +211,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let after = after
             .map(graphforge_api::PageToken::parse)
             .transpose()
@@ -219,14 +219,13 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .list_checkpoints(graphforge_api::ListCheckpointsRequest {
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.list_checkpoints(graphforge_api::ListCheckpointsRequest {
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
@@ -234,9 +233,9 @@ impl GraphForge {
 
     /// Open an immutable view pinned to one named checkpoint.
     fn open_checkpoint(&self, py: Python<'_>, name: &str) -> PyResult<PyCheckpointView> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let name = name.to_owned();
-        py.detach(|| self.inner.open_checkpoint(&name))
+        py.detach(|| native.open_checkpoint(&name))
             .map(|inner| PyCheckpointView { inner })
             .map_err(|error| to_pyerr(py, &error))
     }
@@ -250,7 +249,7 @@ impl GraphForge {
         idempotency_key: &Bound<'_, PyAny>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let request = graphforge_api::DeleteCheckpointRequest {
             name,
             idempotency_key: py_operation_id(idempotency_key)
@@ -262,7 +261,7 @@ impl GraphForge {
                 .map(|id| id.0),
         };
         let result = py
-            .detach(|| self.inner.delete_checkpoint(request))
+            .detach(|| native.delete_checkpoint(request))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
@@ -277,7 +276,7 @@ impl GraphForge {
         idempotency_key: &Bound<'_, PyAny>,
         actor_uuid: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open_mut()?;
         let request = graphforge_api::RevertCheckpointRequest {
             name,
             reason,
@@ -290,16 +289,15 @@ impl GraphForge {
                 .map(|id| id.0),
         };
         let result = py
-            .detach(|| self.inner.revert_to_checkpoint(request))
+            .detach(|| native.revert_to_checkpoint(request))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
     }
 
     /// Return the exact binary identity of the selected committed generation.
     fn committed_generation_identity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
-        let identity = self
-            .inner
+        let native = self.ensure_open()?;
+        let identity = native
             .committed_generation_identity()
             .map_err(|error| to_pyerr(py, &error))?;
         Ok(py_identity_dict(py, identity)?.into_any().unbind())
@@ -319,7 +317,7 @@ impl GraphForge {
         max_output_bytes: usize,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let request = GenerationDiffRequest {
             source: py_generation_identity(py, source_generation_uuid, source_manifest_sha256)?,
             target: py_generation_identity(py, target_generation_uuid, target_manifest_sha256)?,
@@ -330,7 +328,7 @@ impl GraphForge {
             cancellation: cancellation.map(|token| token.inner.clone()),
         };
         let disposition = py
-            .detach(|| self.inner.diff_committed_generations(&request))
+            .detach(|| native.diff_committed_generations(&request))
             .map_err(|error| to_pyerr(py, &error))?;
         let out = match disposition {
             GenerationDiffDisposition::Ready(diff) => py_generation_diff(py, &diff)?,
@@ -549,7 +547,7 @@ impl GraphForge {
         after: Option<&str>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        self.ensure_open()?;
+        let native = self.ensure_open()?;
         let selector = |name: Option<String>| {
             name.map_or(
                 graphforge_api::CheckpointSelector::Current,
@@ -590,18 +588,17 @@ impl GraphForge {
         let cancellation = cancellation.map(|token| token.inner.clone());
         let result = py
             .detach(|| {
-                self.inner
-                    .diff_checkpoints(graphforge_api::DiffCheckpointsRequest {
-                        from: selector(from_checkpoint),
-                        to: selector(to_checkpoint),
-                        scope,
-                        detail,
-                        page: graphforge_api::PageRequest {
-                            limit,
-                            after,
-                            cancellation: cancellation.clone(),
-                        },
-                    })
+                native.diff_checkpoints(graphforge_api::DiffCheckpointsRequest {
+                    from: selector(from_checkpoint),
+                    to: selector(to_checkpoint),
+                    scope,
+                    detail,
+                    page: graphforge_api::PageRequest {
+                        limit,
+                        after,
+                        cancellation: cancellation.clone(),
+                    },
+                })
             })
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
