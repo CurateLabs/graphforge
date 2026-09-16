@@ -311,8 +311,11 @@ impl HttpOciRegistry {
                 "registry must be a host[:port] without scheme or credentials",
             ));
         }
+        // An exported-but-unset credential arrives as an empty string; it is no
+        // credential, not an empty bearer token.
+        let credential = credential.filter(|cred| !cred.trim().is_empty());
         if let Some(cred) = credential
-            && (cred.contains('\n') || cred.contains('\r'))
+            && cred.chars().any(char::is_control)
         {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::InvalidPath,
