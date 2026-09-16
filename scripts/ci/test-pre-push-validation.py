@@ -45,6 +45,109 @@ class PrePushValidationTests(unittest.TestCase):
         coordinator.command_versions = lambda _stage: {"tool": "test"}
         return coordinator
 
+    def test_policy_cache_tracks_source_size_contents_and_git_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def git(*arguments: str) -> None:
+                GATE.subprocess.run(("git", *arguments), cwd=root, check=True, capture_output=True)
+
+            def write(name: str, content: str) -> None:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            git("init", "--quiet")
+            source = "crates/demo/src/build/nested.data"
+            target_source = "crates/demo/src/target/other.txt"
+            ordinary_source = "crates/demo/src/lib.rs"
+            policy = "config/source-size-policy.json"
+            adr = "docs/adr/0031-source-size-policy.md"
+            for name in (source, target_source, ordinary_source, policy, adr, "unrelated.md"):
+                write(name, "initial\n")
+            git("add", ".")
+            calls: list[tuple[str, ...]] = []
+            selected = tuple(
+                stage for stage in GATE.stages() if stage.name in {"preflight", "policy-static"}
+            )
+            policy_stage = next(stage for stage in selected if stage.name == "policy-static")
+
+            def run(expected: str) -> None:
+                calls.clear()
+                coordinator = GATE.Coordinator(
+                    root, selected, runner=lambda command, _environment: calls.append(command)
+                )
+                coordinator.run_preflight = lambda _environment: None
+                coordinator.command_versions = lambda _stage: {"tool": "test"}
+                coordinator.run()
+                self.assertEqual(coordinator.results["policy-static"].status, expected)
+                self.assertEqual(calls, list(policy_stage.commands) if expected == "miss" else [])
+
+            run("miss")
+            run("hit")
+            # Every covered extension and ignored-looking source component is authoritative.
+            for name in (source, target_source, ordinary_source, policy, adr):
+                with self.subTest(changed=name):
+                    write(name, "changed\n")
+                    run("miss")
+                    run("hit")
+            # Same bytes and paths, different Git membership: neither operation may reuse proof.
+            added = "crates/demo/src/new.bin"
+            write(added, "new\n")
+            run("hit")
+            git("add", added)
+            run("miss")
+            for name in (source, adr, policy):
+                with self.subTest(untracked=name):
+                    git("rm", "--cached", "--force", name)
+                    self.assertTrue((root / name).is_file())
+                    run("miss")
+                    git("add", name)
+                    # Returning to the exact previously proven state can reuse its evidence.
+                    run("hit")
+            # A missing tracked working-tree file remains represented, forcing the checker to run.
+            (root / ordinary_source).unlink()
+            run("miss")
+            write(ordinary_source, "restored\n")
+            run("miss")
+            # Invalid file kinds must not reuse proof for identical regular-file contents.
+            for name in (source, adr):
+                with self.subTest(symlink=name):
+                    path = root / name
+                    original_bytes = path.read_bytes()
+                    target = root / "same-content.bin"
+                    target.write_bytes(original_bytes)
+                    path.unlink()
+                    path.symlink_to(target)
+                    run("miss")
+                    path.unlink()
+                    path.write_bytes(original_bytes)
+                    run("hit")
+            # A regular terminal file reached through an escaping directory is also invalid.
+            with tempfile.TemporaryDirectory() as outside:
+                directory = (root / source).parent
+                original_bytes = (root / source).read_bytes()
+                (root / source).unlink()
+                directory.rmdir()
+                external = Path(outside)
+                (external / Path(source).name).write_bytes(original_bytes)
+                directory.symlink_to(external, target_is_directory=True)
+                run("miss")
+                directory.unlink()
+                directory.mkdir()
+                (root / source).write_bytes(original_bytes)
+                run("hit")
+            # Near-miss source roots and unrelated index/content changes are not size inputs.
+            for name in (
+                "unrelated.md",
+                "crates/group/demo/src/note.txt",
+                "crates/demo/test/note.txt",
+            ):
+                with self.subTest(unrelated=name):
+                    write(name, "unrelated change\n")
+                    git("add", name)
+                    run("hit")
+
     def test_late_failure_resume_reuses_proven_upstream_stages(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -276,6 +379,7 @@ class PrePushValidationTests(unittest.TestCase):
             coordinator = GATE.Coordinator(root, ())
             usage = type("DiskUsage", (), {"free": 0})()
             with (
+                patch.object(GATE.shutil, "which", return_value="/bin/tool"),
                 patch.object(GATE.shutil, "disk_usage", return_value=usage),
                 self.assertRaisesRegex(GATE.ValidationError, "make clean-builds"),
             ):
