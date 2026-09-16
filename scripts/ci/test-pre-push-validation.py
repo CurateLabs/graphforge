@@ -379,6 +379,7 @@ class PrePushValidationTests(unittest.TestCase):
             coordinator = GATE.Coordinator(root, ())
             usage = type("DiskUsage", (), {"free": 0})()
             with (
+                patch.object(GATE.shutil, "which", return_value="/bin/tool"),
                 patch.object(GATE.shutil, "disk_usage", return_value=usage),
                 self.assertRaisesRegex(GATE.ValidationError, "make clean-builds"),
             ):
