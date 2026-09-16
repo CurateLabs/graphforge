@@ -52,6 +52,7 @@ cover/
 coverage/
 .nyc_output/
 *.lcov
+*.profraw
 
 # Translations
 *.mo

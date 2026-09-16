@@ -27,7 +27,7 @@ jobs:
       - name: Execute Rust and CLI matrix
         run: |
           cargo test -p graphforge-storage --lib project_checkpoints::tests --no-fail-fast
-          cargo test -p graphforge-api --lib checkpoints::tests --no-fail-fast
+          cargo test -p graphforge-api --lib checkpoints:: --no-fail-fast
           cargo test -p graphforge-cli --no-fail-fast
           cargo build -p graphforge-cli
       - name: Record Rust and CLI artifacts

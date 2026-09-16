@@ -57,7 +57,7 @@ state.
 2. Facade stores the normalized policy + `HeavyQueryAdmission`
 3. `build_runtime(&policy)` sets Tokio worker threads
 4. Every DataFusion `ExecutionSession` receives a
-   [`SessionResourceConfig`](../../crates/graphforge-exec/src/lib.rs) with
+   [`SessionResourceConfig`](../../crates/graphforge-exec/src/session.rs) with
    partitions, batch size, memory, optional spill, and `io_concurrency`
 5. Heavy ops (`run_query`, streams construction, `rank`, `similar`,
    `analyze_embedding`) take an admission permit

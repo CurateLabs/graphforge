@@ -3615,6 +3615,72 @@ fn execute_stream_owned_guard_outlives_dropped_forge() {
 }
 
 #[test]
+fn owned_stream_releases_admission_and_reports_resource_limits() {
+    use futures::StreamExt;
+    use graphforge_api::{ExecutionResourcePolicy, GraphForgeOptions};
+
+    let gf = GraphForge::new_with_options(
+        None,
+        GraphForgeOptions {
+            resource: ExecutionResourcePolicy {
+                tokio_worker_threads: Some(1),
+                target_partitions: Some(1),
+                batch_size: Some(128),
+                memory_budget_bytes: Some(64 * 1024 * 1024),
+                io_concurrency: Some(1),
+                compute_threads: Some(1),
+                max_concurrent_heavy_queries: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let diagnostics = gf.resource_diagnostics();
+    assert_eq!(diagnostics.tokio_worker_threads, 1);
+    assert_eq!(diagnostics.target_partitions, 1);
+    assert_eq!(diagnostics.batch_size, 128);
+    assert_eq!(diagnostics.memory_budget_bytes, 64 * 1024 * 1024);
+    assert_eq!(diagnostics.io_concurrency, 1);
+    assert_eq!(diagnostics.compute_threads, 1);
+    assert_eq!(diagnostics.max_concurrent_heavy_queries, 1);
+    assert_eq!(diagnostics.heavy_query_available, 1);
+
+    let (mut stream, _, guard) = gf
+        .execute_stream_owned("RETURN 41 AS value", &HashMap::new())
+        .unwrap();
+    // An undrained stream keeps runtime ownership but releases query admission.
+    assert_eq!(gf.resource_diagnostics().heavy_query_available, 1);
+    let second = gf.execute("RETURN 42 AS value").unwrap();
+    assert_eq!(second.batches.len(), 1);
+    assert_eq!(second.batches[0].num_rows(), 1);
+    assert!(!second.batches[0].column(0).is_null(0));
+    assert_eq!(
+        second.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        42
+    );
+    let first = guard.block_on(stream.next()).unwrap().unwrap();
+    assert_eq!(first.num_rows(), 1);
+    assert!(!first.column(0).is_null(0));
+    assert_eq!(
+        first
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        41
+    );
+    assert!(guard.block_on(stream.next()).is_none());
+    assert_eq!(gf.resource_diagnostics().heavy_query_available, 1);
+}
+
+#[test]
 fn execute_stream_rejects_writes() {
     let gf = forge();
     // `SendableRecordBatchStream` isn't `Debug`, so match the Result directly
@@ -5335,6 +5401,38 @@ fn certified_spatial_point_and_distance_execute_in_rust() {
             .contains("unsupported spatial CRS `OGC:CRS84` for point() computation"),
         "{error}"
     );
+}
+
+#[test]
+fn geographic_distance_is_in_metres_symmetric_and_zero_for_identical_points() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    let result = rows(
+        &gf,
+        "RETURN \
+         distance(point({longitude: 0.0, latitude: 0.0}), \
+                  point({longitude: 1.0, latitude: 0.0})) AS forward, \
+         distance(point({longitude: 1.0, latitude: 0.0}), \
+                  point({longitude: 0.0, latitude: 0.0})) AS reverse, \
+         distance(point({longitude: 1.0, latitude: 0.0}), \
+                  point({longitude: 1.0, latitude: 0.0})) AS identical",
+    );
+    assert_eq!(result.batches.len(), 1);
+    let batch = &result.batches[0];
+    assert_eq!(batch.num_rows(), 1);
+    let distance = |name| {
+        let values = batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("distance returns Arrow Float64");
+        assert_eq!(values.null_count(), 0);
+        values.value(0)
+    };
+    // One equatorial degree spans about 111.195 km under the spherical model.
+    assert!((distance("forward") - 111_195.08).abs() < 1.0);
+    assert!((distance("reverse") - distance("forward")).abs() < 1e-9);
+    assert!(distance("identical").abs() < 1e-9);
 }
 
 /// The constant and dynamic encodings have different tag meanings. Both must
