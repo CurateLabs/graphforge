@@ -13,6 +13,15 @@ test --test_output=errors
 # CI must not silently update MODULE.bazel.lock.
 common:ci --lockfile_mode=error
 
+# The authoritative test build uses --config=correctness, which is a distinct
+# configuration nothing else populates, so it reused only 34 of 2273 actions
+# from the injected remote cache and rebuilt every dependency. A disk cache on a
+# persistent volume gives that configuration cross-run reuse. Bounded so the
+# volume cannot grow without limit; entries are content-addressed, so a stale
+# entry is simply never read.
+build:ci --disk_cache=%workspace%/.bazel-disk-cache
+build:ci --experimental_disk_cache_gc_max_size=40G
+
 # Production-sized correctness fixtures need optimized runtime dependencies, but
 # must retain Rust's debug assertions and checked arithmetic.
 build:correctness --compilation_mode=opt
