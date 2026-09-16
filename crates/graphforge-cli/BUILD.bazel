@@ -206,6 +206,7 @@ test_suite(
         ":graphforge_cli_test",
         ":multi_ontology",
         ":portable",
+        ":query_sink",
         ":repository",
     ],
 )
