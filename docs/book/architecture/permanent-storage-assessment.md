@@ -405,7 +405,7 @@ compression level; the shared builder establishes level 1.
 | `vector_store::write_vector_snapshot` | Vector-search participant | Dimension, vector, cell and encoded-file limits; complete Arrow batch remains |
 | `project_checkpoints` restoration encoder | Restoration-transition participant | `graphforge-restoration-transition/1` creator marker and restoration lifecycle |
 | `runtime_entity_labels::persist_runtime_catalog` | Bulk/composite runtime catalog publication | Existing private staging and catalog authority |
-| API `knowledge::write_parquet` | Assertion/evidence/confidence/reasoning participants | Existing serialized-Vec ownership and atomic participant publication |
+| API `knowledge::ledger::write_parquet` | Assertion/evidence/confidence/reasoning participants | Existing serialized-Vec ownership and atomic participant publication |
 | API `provenance::write_parquet` | Provenance participant | Existing serialized-Vec ownership and atomic participant publication |
 
 Separate writer implementations remain. The policy does not own files,

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("non-cypher-surface-gate.py")
 SPEC = importlib.util.spec_from_file_location("non_cypher_surface_gate", SCRIPT)
@@ -31,6 +32,33 @@ class SurfaceGateTests(unittest.TestCase):
         self.assertEqual(GATE.validate(), [])
         self.assertEqual(len(GATE.public_methods()), 386)
         self.assertEqual(len(GATE.algorithm_registry()), 94)
+
+    def test_public_inventory_follows_nested_domain_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "lib.rs").write_text("impl GraphForge { pub fn execute(&self) {} }")
+            child = root / "knowledge" / "assertions"
+            child.mkdir(parents=True)
+            source = child / "operations.rs"
+            source.write_text(
+                "impl GraphForge { pub async fn create_assertion(&self) {} "
+                "pub(super) fn stage(&self) {} fn validate(&self) {} }\n"
+                "pub fn assertion_schema() {}\n"
+            )
+            (child / "notes.txt").write_text("pub fn not_rust() {}")
+            with patch.object(GATE, "API_SRC", root):
+                methods = GATE.public_methods()
+                self.assertEqual(
+                    methods,
+                    {
+                        "GraphForge.execute",
+                        "GraphForge.create_assertion",
+                        "crate.assertion_schema",
+                    },
+                )
+                digest = GATE.method_digest(methods)
+                source.write_text(source.read_text() + "pub fn added_schema() {}\n")
+                self.assertNotEqual(GATE.method_digest(GATE.public_methods()), digest)
 
     def test_new_or_removed_public_method_fails_frozen_digest(self) -> None:
         manifest = self.manifest()

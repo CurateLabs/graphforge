@@ -103,13 +103,13 @@
       "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"no_partial_import_or_authority_change","kind":"rust_test","markers":["portable","authority"]}
     },
     "bounded_structured_diagnostics": {
-      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_bounded_structured_diagnostics","kind":"rust_test","markers":["diagnostics","limit"]},
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology/diagnostics/tests.rs","symbol":"conformance_bounded_structured_diagnostics","kind":"rust_test","markers":["diagnostics","limit"]},
       "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_bounded_structured_diagnostics","kind":"python_test","markers":["diagnostics","limit"]},
       "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"bounded structured diagnostics","kind":"node_test","markers":["diagnostics","limit"]},
       "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"bounded_structured_diagnostics","kind":"rust_test","markers":["details","semantic_code"]}
     },
     "deterministic_path_free_cli_json": {
-      "rust":{"path":"crates/graphforge-api/src/multi_ontology.rs","symbol":"conformance_deterministic_path_free_serialization","kind":"rust_test","markers":["serde_json","project_generation_uuid"]},
+      "rust":{"path":"crates/graphforge-api/src/multi_ontology/diagnostics/tests.rs","symbol":"conformance_deterministic_path_free_serialization","kind":"rust_test","markers":["serde_json","project_generation_uuid"]},
       "python":{"path":"crates/graphforge-bindings-py/tests/multi_ontology.py","symbol":"test_deterministic_path_free_serialization","kind":"python_test","markers":["json.dumps","project_generation_uuid"]},
       "node":{"path":"crates/graphforge-bindings-node/tests/multi-ontology.test.mjs","symbol":"deterministic path free serialization","kind":"node_test","markers":["JSON.stringify","project_generation_uuid"]},
       "cli":{"path":"crates/graphforge-cli/tests/multi_ontology.rs","symbol":"inventory_json_and_errors_are_deterministic_path_free_and_semantic","kind":"rust_test","markers":["semantic_code","project.path().display()"]}
