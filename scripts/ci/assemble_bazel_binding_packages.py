@@ -152,7 +152,7 @@ def resolve_python_wheel_out(out: Path, version: str, wheel_tag: str) -> Path:
 EXPORT_SURFACE_FILENAME = "napi-export-surface.json"
 
 _IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*\Z")
-_EXPORT_KINDS = ("class", "function", "value")
+_EXPORT_KINDS = ("alias", "class", "function", "value")
 
 
 def read_node_export_surface(package_root: Path) -> dict[str, str]:
@@ -220,7 +220,11 @@ def synthesize_node_index_dts(surface: dict[str, str]) -> str:
         "/* Declares exactly the runtime exports of the assembled index.js. */",
     ]
     for name, kind in surface.items():
-        if kind == "class":
+        if kind in ("class", "alias"):
+            # An alias is a second runtime name for a class, which napi emits
+            # when `#[napi(js_name = "…")]` renames a struct. napi declares it
+            # as `export type Old = New`; declaring the constructor directly
+            # keeps this file a description of the runtime exports.
             lines.extend(
                 [
                     f"export declare class {name} {{",

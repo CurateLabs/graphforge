@@ -44,7 +44,12 @@ test("the declared napi export surface matches the built addon", () => {
       "Binding RC loader is generated from it",
   );
   for (const [name, kind] of Object.entries(declared)) {
-    if (kind === "value") {
+    if (kind === "alias") {
+      // napi assigns the pre-rename struct name unconditionally, so the key
+      // exists with an `undefined` value. The assembled loader mirrors that
+      // key set rather than inventing a different one.
+      assert.ok(Object.hasOwn(binding, name), name);
+    } else if (kind === "value") {
       assert.notEqual(typeof binding[name], "function", name);
     } else {
       assert.equal(typeof binding[name], "function", name);
@@ -52,15 +57,26 @@ test("the declared napi export surface matches the built addon", () => {
   }
 });
 
+// napi declares a `#[napi(js_name = "...")]` rename as `export type Old = New`
+// while still exporting both names at runtime; the assembler declares the
+// alias as its constructor instead. Accept either shape.
+const declarationPatterns = {
+  alias: (name) =>
+    new RegExp(`^export (?:type ${name} =|declare class ${name}[\\s<{])`, "m"),
+  class: (name) => new RegExp(`^export declare class ${name}[\\s<{]`, "m"),
+  function: (name) =>
+    new RegExp(`^export declare function ${name}[\\s<(]`, "m"),
+  value: (name) =>
+    new RegExp(`^export declare (?:const|enum) ${name}[\\s<:{]`, "m"),
+};
+
 test("the declared export kinds match the generated TypeScript surface", () => {
   const declarations = readFileSync(join(here, "..", "index.d.ts"), "utf8");
   for (const [name, kind] of Object.entries(declared)) {
-    const pattern =
-      kind === "class"
-        ? new RegExp(`^export declare class ${name}[\\s<{]`, "m")
-        : kind === "function"
-          ? new RegExp(`^export declare function ${name}[\\s<(]`, "m")
-          : new RegExp(`^export declare (?:const|enum) ${name}[\\s<:{]`, "m");
-    assert.match(declarations, pattern, `${name} is not declared as ${kind}`);
+    assert.match(
+      declarations,
+      declarationPatterns[kind](name),
+      `${name} is not declared as ${kind}`,
+    );
   }
 });
