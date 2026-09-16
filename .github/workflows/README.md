@@ -22,8 +22,9 @@ GitHub workflow files are compatibility wrappers and evidence viewers, not the
 operational control plane.
 
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
-not required for their objective. PR CI does **not** run full `llvm-cov`; the
-post-merge **Coverage Baseline** workflow enforces the coverage floors instead.
+not required for their objective. The **Coverage** workflow runs
+`llvm-cov` only on PRs that touch Rust paths, where it enforces the patch floor on
+changed lines, and on every merge to `main`, where it enforces every floor.
 Frequent publishing uses the **publish-track** (Binding RC → tag →
 `publish.yaml` on retained bytes). release-load, checkpoint, and knowledge/epistemic remain
 **human-close / milestone** evidence and are not publish-track blockers.
@@ -327,9 +328,8 @@ See [`docs/development/clean-environment-verification.md`](../../docs/developmen
 ## Local equivalents
 
 Default maintainer loop is `make pre-push-fast` (~30s). Run `make coverage-rust`
-when claiming coverage floors; PR CI does not enforce full llvm-cov. Coverage
-Baseline runs the same ledger on every merge to `main` and fails on a breached
-floor, so an unenforced floor surfaces within one merge.
+when claiming coverage floors; PR CI does not enforce full llvm-cov. The Coverage workflow runs the same ledger on Rust
+PRs (patch floor only) and on every merge to `main` (all floors).
 
 ```bash
 make pre-push-fast

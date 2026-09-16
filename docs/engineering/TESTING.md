@@ -11,9 +11,10 @@ has a wall-clock target, sheds work that is not required for its objective, and
 parallelizes the rest. Frequent publishing uses the **publish-track**, not a
 separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
-The **Coverage Baseline** workflow runs the same ledger once per merge to `main`
-and fails on a breached floor, so drift is caught within one merge rather than at
-release time. It is not a required PR status and cannot block a pull request.
+The **Coverage** workflow runs the same ledger in two roles. On a pull request
+that touches Rust it enforces the 90% patch floor on changed lines only, which is
+prevention. On a merge to `main` it enforces every floor and records the baseline,
+which is detection.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
@@ -28,7 +29,8 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 | `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
 | `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
-| Coverage Baseline | Floor drift detection | Every merge → `main` (post-merge) | ≤180m ceiling | Same ledger and floors as `make coverage-rust` | Blocking a PR; it runs after merge |
+| Coverage (PR) | Changed-line proof | PRs touching Rust paths | ≤180m ceiling | 90% patch floor on changed lines | Aggregate and per-crate floors |
+| Coverage (main) | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | — |
 | Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
 | **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
 | **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
@@ -202,12 +204,21 @@ PR CI does **not** enforce full `llvm-cov` floors, by design. Use
 loop is `make pre-push-fast`; run full `make coverage` / `make pre-push` when the
 changed surface needs coverage honesty.
 
-Because no PR gate enforces them, the floors are enforced after merge by the
-**Coverage Baseline** workflow (`.github/workflows/coverage-baseline.yml`), which
-runs the same ledger on every push to `main` and fails the workflow on a breached
-floor. Its patch total compares `HEAD` against the previous `main` commit rather
-than a merge base, so post-merge patch coverage measures the change that just
-landed.
+The floors are enforced by the **Coverage** workflow
+(`.github/workflows/coverage-baseline.yml`).
+
+On a pull request whose paths touch Rust, it enforces the 90% patch floor against
+the pull request base and nothing else. A pull request answers for the lines it
+changes, not for pre-existing gaps, so the aggregate, per-crate and adapter floors
+are set aside there.
+
+On a push to `main` it enforces every floor and records the baseline. Its patch
+total compares `HEAD` against the previous `main` commit rather than a merge base,
+because post-merge the merge base with `origin/main` is `HEAD` itself and would
+measure an empty patch.
+
+Pull request runs cancel on a new push; `main` runs never cancel, so a busy day
+cannot leave the baseline unmeasured.
 
 ### Rust coverage evidence
 
