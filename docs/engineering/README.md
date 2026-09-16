@@ -20,7 +20,20 @@ flowchart LR
 | [`TESTING.md`](TESTING.md) | How tests and CI prove the system before release |
 | [`PUBLISHING.md`](PUBLISHING.md) | How verified artifacts are versioned, promoted, and rolled back |
 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | How CI/release/user signals feed discovery |
-| [`adrs/`](adrs/) | ADR index (bodies in [`../adr/`](../adr/) `0001`–`0014`) |
+| [`adrs/`](adrs/) | ADR index (bodies in [`../adr/`](../adr/)) |
+
+## Analyst UX requirements
+
+The integrated product and architecture requirements define intended outcomes for
+[M11: Core Analyst UX for v0.6.0](https://github.com/CurateLabs/graphforge/milestone/11).
+They are requirements for implementation, not claims of shipped functionality.
+
+- [Analyst research experience](analyst-ux.md) — vocabulary, workflow, discovery,
+  evidence, and the contract for associated projects such as XYG and graphforge-nextjs.
+- [Research workspace semantics](../book/architecture/research-workspaces.md) —
+  Slice boundaries, Branch state, Versions, upstream updates, and integration.
+- [Acceptance scenarios](TESTING.md#analyst-ux-acceptance) — evidence required to
+  complete the combined specifications.
 
 ## Supporting documentation
 

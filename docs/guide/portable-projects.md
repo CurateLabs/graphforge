@@ -53,6 +53,16 @@ An ambiguous selector or missing dependency fails. GraphForge never widens a
 selection silently. Selective packages do not imply graph merge or ontology
 adoption; they require an explicit class-specific consumer.
 
+In the designed M11 research workflow, a Slice focuses content, a Branch
+preserves independent research, a Fork creates a separately governed Project,
+and a Proposal requests semantic integration. A portable subset is transport
+for selected content, not any of those lifecycle operations by itself.
+Research-aware export/import must preserve the selected Version and its
+required evidence/ontology/baseline closure and lineage metadata without
+silently including the complete ancestor. A genealogical reference does not
+guarantee historical expansion beyond retained content. Reproduction requires a
+compatible reader, not pre-v1 migration support. See [research workspace semantics](../book/architecture/research-workspaces.md).
+
 ```text
 graphforge portable preview --current --profile complete --strict
 graphforge portable export --current --profile complete \

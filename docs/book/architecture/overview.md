@@ -21,11 +21,19 @@ For an explicit whole-system comparison with a database-centered analytics platf
 the tradeoffs between canonical Arrow results and GDS `stream`/`stats`/`mutate`/`write` modes,
 see [GraphForge v0.5 and Neo4j with Graph Data Science](graphforge-vs-neo4j-gds.md).
 
-The project (not the graph) is the primary unit of work:
+The Project is the durable research universe. Its implemented v0.5 workspace
+contains the following assets:
 
 ```
 Project = Knowledge Graph + Documents + Provenance + Embeddings + Workflows + Artifacts + Sync State
 ```
+
+M11's [analyst research experience](../../engineering/analyst-ux.md) extends that
+workspace with explainable Slices, independent Branches, immutable Versions,
+Forks, and selective Proposals. This **Designed** research lifecycle supersedes
+the asset-list-only product model; it is not yet a shipped capability.
+[Research workspace semantics](research-workspaces.md) defines the contract
+for Core and associated UX projects such as XYG and graphforge-nextjs.
 
 Behavior lives in a **Rust core**. Python and Node are thin bindings over `graphforge-api` — never fallback
 engines. v0.5.0 exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as

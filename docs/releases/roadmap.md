@@ -42,6 +42,28 @@ incomplete v0.5.0 surface. Prefer v0.5.2 for new installs.
 
 ---
 
+## v0.6.0 — Analyst research lifecycle (Designed)
+
+The [analyst research experience](../engineering/analyst-ux.md) and
+[research workspace semantics](../book/architecture/research-workspaces.md)
+define the M11 work required before coordinated v0.6.0 release readiness.
+Deliver evidence/Artifact lineage, discoverable Project metadata, explainable
+Slices, independently evolving Branches, reproducible Versions, scoped
+canonical knowledge, semantic comparison, deliberate upstream updates,
+selective Proposals, and provenance-preserving acceptance and Forks.
+
+Rust owns these behaviors; Python, Node, and CLI expose them. Associated
+projects such as XYG and graphforge-nextjs, applications, and peer extensions
+own their interactive UX and hosting/access enforcement. They consume the
+Core contract without becoming Core dependencies.
+
+[M11 Analyst UX](https://github.com/CurateLabs/graphforge/milestone/11) precedes
+[M12 coordinated release](https://github.com/CurateLabs/graphforge/milestone/12).
+M3 architecture, M5 scale/interchange, and M10 benchmarks retain their existing
+release prerequisites. Documentation and issue creation do not establish
+implementation; [acceptance scenarios](../engineering/TESTING.md#analyst-ux-acceptance)
+must be proven before readiness.
+
 ## v0.5.0 — Rust core (shipped on `main`)
 
 GraphForge v0.5.0 is an embedded openCypher engine with a Rust core, Apache Arrow

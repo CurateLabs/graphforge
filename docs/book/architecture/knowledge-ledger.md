@@ -8,6 +8,49 @@ The knowledge layer deliberately does not place current belief, reasoning, super
 hypotheses, or valid-time interpretation in its rows. The shipped epistemic layer
 implements those concerns as additive records.
 
+## Evidence and research model (M11, Designed)
+
+The [analyst experience](../../engineering/analyst-ux.md) extends the existing
+ledger into an inspectable evidence/research lifecycle:
+
+| Concept | Required behavior beyond the current ledger primitives |
+| --- | --- |
+| Source | Stable identity for an acquired unit of evidence, distinct from its representations and from arbitrary caller-managed evidence UUIDs. |
+| Artifact | Independently identified raw or processed representation; preserve ordered derivation through scan, normalization, OCR, passage, and extraction. |
+| Extraction | Machine-authored result linked to exact inputs, processing run, outputs, and originating Version. |
+| Assertion | Inspectable claim with evidence, authorship, Branch origin, and append-only revision history. |
+| Interpretation / hypothesis | Analytical claims and larger supported constructs; alternatives can coexist and explicitly support, dispute, refine, or supersede each other. |
+| Canonicality | Acceptance within a Project/community context, including relationships and assertions; distinct from confidence, supported status, or objective truth. |
+
+“Show Lineage” must answer both where an object came from and what depends on
+it. Traverse backward from knowledge to processing and original evidence, and
+forward from Sources/passages to extraction, assertions, research Branches,
+theories, and accepted contributions. Preserve graph UUID references and bounded
+traversal; the analyst's four conceptual layers do not change crate ownership.
+
+Source improvements append new Artifacts and a preferred-representation event
+with date/reason. Old representations, processing runs, and derived knowledge
+remain inspectable. Report direct/transitive affected objects and let the
+analyst compare, retain, or deliberately adopt the new derivation.
+
+Research changes preserve immutable ledger rows. Corrected claims append
+successors and relationships rather than changing old bytes. Branch-local
+suppression and canonical status are scoped to research context; they cannot
+retract the parent implicitly. Suppressing graph content is an explicit
+workspace edit; epistemic filters remain explicit under ADR 0006.
+
+Integration and canonical promotion are separate explicit recorded decisions,
+even when one reviewed publication performs both. Integrating an alternative
+without promotion preserves destination canonical choices. Source canonicality
+is provenance, not destination authority. Atomic acceptance receipts identify
+the exact accepted contributions and their destination revisions, so partial
+acceptance and later proposals do not flatten competing interpretations or
+apply the same contribution twice.
+
+Current APIs below describe implemented records. First-class Source/Artifact
+lifecycle, contextual canonicality, research lineage, and selective integration
+must be implemented and validated before being described as shipped.
+
 ## Ownership and isolation
 
 Within `graphforge-knowledge`, private `algorithm_run` and `confidence` modules

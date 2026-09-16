@@ -65,3 +65,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0026 | Read plans bind resources in execution | Accepted | [`../../adr/0026-read-plan-resources.md`](../../adr/0026-read-plan-resources.md) |
 | 0027 | Native GraphForge execution boundary | Accepted | [`../../adr/0027-native-runtime-boundary.md`](../../adr/0027-native-runtime-boundary.md) |
 | 0031 | Reviewed source file size bounds | Accepted | [`../../adr/0031-source-size-policy.md`](../../adr/0031-source-size-policy.md) |
+| 0032 | Research Branches share Project publication authority | Accepted design (M11 implementation pending) | [`../../adr/0032-research-project-authority.md`](../../adr/0032-research-project-authority.md) |

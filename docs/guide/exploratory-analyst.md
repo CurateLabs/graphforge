@@ -187,7 +187,7 @@ Graph Database → Graph Analytics Engine → Knowledge Analysis Workbench
 
 GraphForge optimizes for analyst workflows, not storage workflows. Just as a physical workbench does not demand you know the final shape of an object before you pick up a tool, GraphForge does not require you to define your schema before you begin analysing data.
 
-The appropriate workflow is:
+Within exploration, ontology development follows:
 
 ```
 Observe → Collect → Explore → Understand → (Optionally) Formalise
@@ -200,6 +200,15 @@ Define Schema → Import Data → Query
 ```
 
 The ontology is a **destination**, not a prerequisite.
+
+For M11, the full intended research journey is
+**Explore → Focus → Branch → Analyze → Compare → Propose → Integrate**.
+The exploration/formalization stages below remain useful within that journey;
+they are no longer the complete product workflow. See
+[Analyst research experience](../engineering/analyst-ux.md) for the designed
+Slice/Branch/Version model and the contract consumed by associated UX projects.
+Those research lifecycle operations are planned requirements, not additional
+methods claimed by the examples on this page.
 
 ---
 

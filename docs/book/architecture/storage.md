@@ -194,6 +194,38 @@ complete generation; it never moves `CURRENT` backward. Active checkpoint
 references add explicit retention roots, while deletion releases only that
 root and cannot invalidate an already leased reader.
 
+**Research Version retention (M11, Designed).**
+
+The [research workspace contract](research-workspaces.md) adds semantic Branch,
+Version, and Proposal state above these generation/checkpoint primitives.
+A Branch's immutable base and every retained Version pin the selected graph,
+required ontology/local Artifact dependencies, and comparison baselines.
+Genealogy identifiers alone must not pin the entire ancestor; explicitly
+retaining a whole Project Version does. Child Branches, Proposals, and acceptance
+provenance retain their required closure across cleanup, compaction, and reopen
+with a compatible reader. Explicit deletion cannot invalidate that closure.
+
+External-only evidence preserves references and integrity metadata, with missing
+or unverifiable bytes disclosed. It does not gain an archival guarantee merely
+by appearing in a Version. A conceptual Branch overlay does not authorize an
+unmanifested state store or reads from a mutable parent. Reuse complete,
+authenticated publication and shared immutable payloads; do not duplicate a
+billion-edge Project to create a small Branch or pin its unrelated content
+indefinitely. Measure retained bytes after parent evolution and cleanup as well
+as copy cost; repack shared physical units when necessary to reclaim unrelated
+content. Historical expansion outside the retained closure can be unavailable.
+
+Branches share the Project container and its sole `CURRENT` authority. Parent
+integration and its acceptance receipt publish in the same generation; Branch
+acceptance status derives from that receipt, not a second commit. The existing
+ADR 0018 failure semantics remain authoritative: before linearization preserve
+prior state; after linearization reconcile/report committed state, never roll
+it back. Forks provide independent Project authority. M11 adds no pre-v1
+migration guarantee.
+
+The layout below documents current storage. M11 implementation must register
+and test any added participants and retention roots before claiming support.
+
 ```
 project/
 ├── FORMAT

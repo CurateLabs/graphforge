@@ -167,6 +167,75 @@ is refreshed explicitly with `pnpm docs:update-extension <full-commit-sha>`. Loc
 push when editing published pages. Docs green is part of merge readiness for
 docs surfaces; it does not prove runtime behavior.
 
+## Analyst UX acceptance
+
+M11's [product requirements](analyst-ux.md) and
+[workspace contract](../book/architecture/research-workspaces.md) integrate the
+Core Analyst UX specification (Core §§1–20) and Branch and Slice Semantics
+specification (Semantics §§1–36). They are **Designed**, not implemented merely
+because this matrix exists.
+
+Use a deterministic representative corpus with two stories, a shared character,
+scans/OCR and improved Artifacts, machine and analyst claims, competing
+interpretations, an ontology extension, and external references. Use larger
+generated selections to prove bounded behavior without treating illustrative
+corpus counts as benchmark thresholds.
+
+| Scenario / source coverage | Required observable outcome | Evidence |
+| --- | --- | --- |
+| Project discovery and vocabulary — Core §§1–4, 15, 17–20; Semantics §§1–2, 30–32, 36 | Metadata-only discovery, all specified entry-point categories, current/origin/Version context, and the four universal inspection questions; no Git ceremony required. | Rust facade + Python/Node/CLI parity; consumer contract review for XYG/graphforge-nextjs and other consumers. |
+| Source/Artifact lineage — Core §§2–3, 9–10, 16; Semantics §18 | Scan → OCR → extraction → claim → research is traversable in both directions; preference changes retain old bytes/history and identify affected research. | Domain validation, real facade traversal, durable reopen and source-replacement fixtures. |
+| Evidence, claims, canonicality — Core §§7–8, 16, 18–19; Semantics §§11–13, 17 | Evidence/extraction/interpretation/hypothesis are distinguishable; contextual canonical assertions/relationships and competing claims coexist; immutable records persist. | Domain/facade tests including statusless and conflicting cases; no implicit belief filtering of raw graph queries. |
+| Slice boundaries — Core §§3, 5; Semantics §§3–6, 30 | Explain inclusion, boundary references, dependency closure, expansion/contraction, and exact frozen membership; dynamic results may change, frozen results do not. | Facade queries/traversals, cancellation/resource limits, large-selection boundedness. |
+| Branch creation and identity — Core §§3, 6; Semantics §§7–10, 21–23 | Whole Project, Slice, Branch, and historical Version creation preserves object identity, exact base, evidence/ontology context, and parent genealogy. | Real facade creation/query/reopen; no full-corpus copy for a small Slice Branch. |
+| Local research — Core §§6–8, 14; Semantics §§11–13, 19–20 | Add/modify/suppress/replace/reclassify/challenge affect only selected research; Reference differs from Bring into Branch; local ontology changes do not alter parent. | Parent/Branch query and knowledge results, binding parity, pre-linearization refusal and post-linearization committed-state reconciliation. |
+| Versions and retention — Core §§3, 11, 19; Semantics §§8, 14, 23, 33 | Historical graph, evidence refs/local bytes, ontology, and research state survive parent changes, GC, compaction, restore, and reopen; external evidence limitations are explicit. | Supported-filesystem crash/recovery and retention tests, transitive Branch/Proposal pins, explicit-deletion rejection. |
+| Comparison and upstream updates — Core §§11–12; Semantics §§14–18, 24, 28 | Relevant changes and semantic diffs are complete; previews never mutate; only selected valid updates apply; competing interpretations can be retained. | Base/local/upstream conflict fixtures, stale-preview rejection, source/ontology changes, deterministic paged results. |
+| Proposals and acceptance — Core §13; Semantics §§25–27 | Proposal pins exact Version; selected/partial acceptance respects dependencies and preserves authorship/evidence; later edits do not mutate proposal or parent; Branch continues. | Atomic publication, idempotency, cancellation/fault tests, deferred-ontology dependency fixture, accepted-work divergence. |
+| Fork, sharing, and interchange — Core §§3, 14–15; Semantics §§21–23, 29, 34–36 | Fork gains independent Project governance; genealogy survives; current Branch and immutable Version references differ; round trip preserves research/evidence/ontology closure. | Rust and thin-surface export/verify/import/reopen; reject unsupported or incomplete packages before mutation. |
+| Complete journey — Core §§1–20; Semantics §§1–36 | Explore → Focus → Branch → Analyze → Compare → Propose → Integrate → continue research, with every decision and lineage visible from real operations. | Integrated Rust facade and Python/Node/CLI execution, deterministic outputs and failure cases; wrapper tests are insufficient. |
+
+Implementations must update the existing non-Cypher inventories and relevant
+domain/schema registries. Test permission-neutral Core behavior and keep
+credentials/source content out of diagnostics; policy metadata must not be
+represented as enforced access. Associated-project applications validate their
+own rendering and access enforcement and are not Core runtime dependencies.
+Ordinary changed-surface CI gates apply; M11 introduces no publication-only
+workflow requirement for individual implementation issue closure.
+
+Implementation ownership is recorded in
+[canonical #1347](https://github.com/CurateLabs/graphforge/issues/1347):
+Project discovery #1348; Source/Artifact lineage #1349; Version retention #1350;
+Slices #1351; Branches #1352; contextual claims #1353; semantic comparisons #1354;
+upstream updates #1355; Proposals #1356; Fork/interchange #1357; and integrated
+consumer/journey evidence #1358. Each implementation issue owns its direct tests;
+#1358 verifies composition rather than substituting for those tests.
+
+### M11 contract regression scenarios
+
+Quality regime: **A (contracts and deterministic fixtures)**, supplemented by
+consumer journey scenarios. These are Designed acceptance requirements, not
+claims that new runtime tests already exist. #1346 defines the early
+[consumer projections](../book/architecture/research-workspaces.md#consumer-interaction-contract);
+each owner implements and tests them before #1358's integrated certification.
+
+| Scenario / owner | Given / when / then | Required evidence |
+| --- | --- | --- |
+| Shared authority and publication failure — #1350, #1355, #1356 | Given Branches in one Project, when update or acceptance fails before `CURRENT` replacement, prior state is unchanged; after replacement the result is committed, not rolled back. Parent change and acceptance receipt always agree. | Failpoints on both sides of linearization; admitted-filesystem crash/reopen; exact retry returns the receipt, changed request with the same identity returns `GF_IDEMPOTENCY_CONFLICT` without mutation. |
+| Selective baselines — #1352, #1354, #1355 | Given `x=0, y=0`, incorporate only `x=1`, then compare against upstream `x=2, y=2`: `x=1` is incorporated, not a local edit; `y` retains baseline 0. A later local `x=3` conflicts with upstream 2. Local suppression plus upstream modification requires explicit resolution, never automatic resurrection. | Multi-round facade comparison/update fixtures; exact per-object/field provenance; unselected baseline equality; stale-preview rejection and pinned deterministic pagination. |
+| Partial acceptance across Versions — #1354, #1356 | Given accepted subsets from different Branch Versions, when research continues and is reproposed, exact accepted contributions remain distinguishable from new divergence; neither retry nor a new operation identity reapplies them. | Durable contribution-to-destination mappings; post-submit immutability; reopen and second-proposal tests; dependency-invalid subsets rejected before mutation. |
+| Selected retention closure — #1349, #1350, #1351, #1352, #1357 | Given a fixed Slice and increasing unrelated parent data, when the parent evolves and unrelated retention roots are released, selected graph/evidence/ontology/baselines survive cleanup while genealogy alone does not retain the complete ancestor. Expansion outside retained history reports unavailable unless separately retained. | Instrument creation work, peak materialization and retained payload bytes after GC/compaction; include shared physical files/repacking, child Branches, proposals, exact local Artifact equality and explicit whole-Project retention as a control. Selected export cannot widen to the ancestor. No duplicate billion-edge certification. |
+| Integration versus canonicality — #1353, #1356 | Given a canonical claim and an alternative, integrate the alternative without promotion, then explicitly promote it: two decisions are visible and integration alone preserves existing canonical choices. | Real facade and thin-surface outcomes; source canonical status cannot confer target authority; ordinary Cypher/algorithms remain independent of epistemic filters. |
+| Early consumer boundary — #1346 definitions; #1358 composition | Given the two-story fixture, inspect live and immutable references, shared-character boundaries, evidence limitations, and a partial review without unselected private annotations; consumers can render context and decisions from Core results. | Each implementation issue owns real Rust/Python/Node/CLI fixtures for its projections and errors. #1356 proves a bounded Branch-to-acceptance journey before dependent #1357 interchange; #1358 certifies the full workflow. No application deployment or access-enforcement implementation required. |
+
+Durability scenarios require an admitted filesystem and actual reopen/recovery;
+this VM's overlay-root admission failure is an environment limitation, not a
+passing test or permission to skip the acceptance outcome. Reproducibility uses
+a compatible reader; reject unsupported formats without mutation instead of
+claiming perpetual latest-reader compatibility or adding pre-v1 migration.
+Diagnostics expose bounded identity, phase, and commitment information, never
+credentials, raw source content, or private annotations.
+
 ## What counts as proof
 
 | Claim | Acceptable evidence | Not enough alone |

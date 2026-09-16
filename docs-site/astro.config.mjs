@@ -217,6 +217,17 @@ export default defineConfig({
           collapsed: true,
           items: [
             { label: 'Overview', slug: 'engineering' },
+            {
+              label: 'Planned Analyst UX',
+              collapsed: true,
+              items: [
+                { label: 'Analyst research experience', slug: 'engineering/analyst-ux' },
+                {
+                  label: 'Research workspace semantics',
+                  slug: 'book/architecture/research-workspaces',
+                },
+              ],
+            },
             { label: 'Architecture', slug: 'engineering/architecture' },
             { label: 'Testing', slug: 'engineering/testing' },
             { label: 'Publishing', slug: 'engineering/publishing' },
@@ -302,6 +313,7 @@ export default defineConfig({
                 { label: '0026 Read plan resources', slug: 'adr/0026-read-plan-resources' },
                 { label: '0027 Native runtime boundary', slug: 'adr/0027-native-runtime-boundary' },
                 { label: '0031 Source file size bounds', slug: 'adr/0031-source-size-policy' },
+                { label: '0032 Research Project authority', slug: 'adr/0032-research-project-authority' },
               ],
             },
           ],
