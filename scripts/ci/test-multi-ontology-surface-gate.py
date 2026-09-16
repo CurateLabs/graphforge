@@ -49,9 +49,9 @@ class SurfaceGateTests(unittest.TestCase):
             }
         )
         rust_source = "\n".join(f"pub fn {name}() {{}}" for name in rust_methods)
-        evidence_sources = {surface: [] for surface in GATE.SURFACES}
+        evidence_sources: dict[str, list[str]] = {}
         for refs in self.manifest["case_evidence"].values():
-            for surface, ref in refs.items():
+            for ref in refs.values():
                 marker_lines = "\n".join(f'let _ = "{marker}";' for marker in ref["markers"])
                 if ref["kind"] == "rust_test":
                     body = f"#[test]\nfn {ref['symbol']}() {{ {marker_lines} assert!(true); }}\n"
@@ -67,30 +67,21 @@ class SurfaceGateTests(unittest.TestCase):
                         f"const markers = {ref['markers']!r}; "
                         "assert.equal(markers.length, 2); });\n"
                     )
-                evidence_sources[surface].append(body)
-        rust_source += "\n" + "\n".join(evidence_sources["rust"])
+                evidence_sources.setdefault(ref["path"], []).append(body)
         self._write("crates/graphforge-api/src/multi_ontology.rs", rust_source)
         self._write(
             "crates/graphforge-bindings-py/src/lib.rs",
             "\n".join(f"fn {name}() {{}}" for name in python_methods),
         )
         self._write(
-            "crates/graphforge-bindings-py/tests/multi_ontology.py",
-            "\n".join(evidence_sources["python"]),
-        )
-        self._write(
             "crates/graphforge-bindings-node/src/lib.rs",
             "\n".join(f"pub fn {name}() {{}}" for name in node_methods),
         )
-        self._write(
-            "crates/graphforge-bindings-node/tests/multi-ontology.test.mjs",
-            "\n".join(evidence_sources["node"]),
-        )
         self._write("crates/graphforge-cli/src/ontology_cli.rs", " ".join(cli_segments))
-        self._write(
-            "crates/graphforge-cli/tests/multi_ontology.rs",
-            "\n".join(evidence_sources["cli"]),
-        )
+        for path, bodies in evidence_sources.items():
+            existing_path = self.root / path
+            existing = existing_path.read_text(encoding="utf-8") if existing_path.is_file() else ""
+            self._write(path, existing + "\n" + "\n".join(bodies))
         package_files: dict[str, list[str]] = {}
         for ref in self.manifest["packaged_artifacts"].values():
             package_files.setdefault(ref["workflow"], []).extend(ref["workflow_markers"])

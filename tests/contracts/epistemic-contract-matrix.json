@@ -38,9 +38,9 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_status_rejects_conflicts_missing_refs_and_direct_supersession"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "assertion_status_rejects_conflicts_missing_refs_and_direct_supersession"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/status.rs", "symbol": "round_trip_fingerprint_statusless_and_identical_time_order_are_stable"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/status.rs", "symbol": "every_nonterminal_transition_is_allowed_and_superseded_is_terminal"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_status"},
@@ -53,8 +53,8 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_rejects_dangling_cross_assertion_and_conflicting_replay"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs", "symbol": "reasoning_rejects_dangling_cross_assertion_and_conflicting_replay"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "amendment_branch_history_is_preserved_and_current_is_deterministic"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "self_cycle_missing_and_cross_assertion_predecessors_fail"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "payload_encoding_and_size_limits_are_sanitized"},
@@ -68,8 +68,8 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_rejects_self_links_cycles_dangling_refs_and_conflicts"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "supersession_rejects_self_links_cycles_dangling_refs_and_conflicts"},
         {"kind": "rust", "path": "crates/graphforge-knowledge/src/supersession.rs", "symbol": "chains_branches_order_round_trip_and_fingerprint_are_stable"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_supersessions"},
         {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertion-supersession.test.mjs", "symbol": "supersession atomically publishes Arrow relation and terminal status"}
@@ -140,8 +140,8 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "recovery"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
         {"kind": "rust", "path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
         {"kind": "rust", "path": "crates/graphforge-storage/src/project_recovery.rs", "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"},
         {"kind": "rust", "path": "crates/graphforge-storage/src/project_recovery.rs", "symbol": "injected_operation_errors_report_exact_commit_state"}

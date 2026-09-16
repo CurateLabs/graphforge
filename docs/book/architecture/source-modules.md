@@ -53,7 +53,7 @@ exemptions or unchanged-tree release certification are required.
   Cross-domain lowering tests and shared fixtures live in `expr/tests.rs` under
   the unchanged `expr::tests` module path. Every new file and the root fit 3,000 lines.
 
-- [#1301](https://github.com/CurateLabs/graphforge/issues/1301) groups portable
+- [#1309](https://github.com/CurateLabs/graphforge/pull/1309) merged #1301 portable
   storage ownership: `graph_projection/logical_fingerprint.rs` owns canonical
   logical encoding; `project_portable_v2/materialization.rs` and
   `semantic_validation.rs` own extraction and semantic checks; export's
@@ -62,12 +62,29 @@ exemptions or unchanged-tree release certification are required.
   export orchestration, final verification, leases, and platform admission.
   All moved tests retain their assertions; native workflow selectors stay in place.
 
-- [#1306](https://github.com/CurateLabs/graphforge/issues/1306) extracts the four
+- [#1316](https://github.com/CurateLabs/graphforge/pull/1316) merged #1306, extracting the four
   algorithm adapter roots together. Rank and clustering algorithms own individual
   modules and direct tests. Analysis families own matching/partition, coloring,
   paths/cycles/DAG, structural, and embedding adapters. Path flow/cut and Steiner
   adapters have separate owners. Existing kernels remain single-owned; parents
   retain registration, invocation controls, and shared projection helpers.
+
+- [#1308](https://github.com/CurateLabs/graphforge/issues/1308) completes six API
+  domain roots in one batch. Bulk `normalization` and `publication` keep shared
+  request types and membership admission in the parent. Knowledge `assertions`,
+  `supporting`, and `ledger` own operations and shared publication encoding.
+- Repository `configuration` owns definition/configuration validation; `skills`
+  owns bundle verification, installation, and recovery. Discovery, synchronization,
+  receipts, and shared durable filesystem helpers remain in the parent.
+- Checkpoint `view` owns the pinned read-only facade and `diff` owns logical-record
+  comparison and Arrow rendering. Lifecycle, revert validation, and shared paging
+  remain in the parent. The recovery gate selects `checkpoints::` so direct child
+  tests and retained integration tests all execute.
+- Multi-ontology `candidate` owns pure module/bridge transformations and
+  `diagnostics` owns bounded diagnostic projection. Composite `property_routes`
+  and `rebase` own routing and compatibility. Facade publication, locking,
+  reconciliation, and cross-domain tests remain with their existing coordinators.
+  Public paths remain explicit reexports; direct tests follow their domain owners.
 
 ## Remaining domain sequence
 
@@ -77,7 +94,6 @@ Follow live child dependencies and finish queued work before starting more.
 | --- | --- |
 | Relational plan lowering | Scans/property joins; traversal; nested/optional queries; writes |
 | IR binding | Patterns/paths; writes; projection/aggregation; expression/property binding |
-| API domains | Bulk normalization/publication; knowledge ledgers; repository definitions/skills; checkpoint views/diffs; ontology candidates; composite property routing/rebase |
 | Executor | CREATE; DELETE/SET/REMOVE; traversal/ordinal identity; optional/UNWIND; session/planner |
 | Write driver | CREATE/MERGE; property/label/delete phases |
 | UUID membership | Probing/snapshots; construction encoding; ordinal writers/publication; topology deltas; compaction; rebuild/maintenance |
@@ -91,17 +107,11 @@ Follow live child dependencies and finish queued work before starting more.
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1306; recompute before canonical
+This snapshot records the working tree during #1308; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
 | --- | ---: |
-| `crates/graphforge-api/src/bulk_construction.rs` | 4,646 |
-| `crates/graphforge-api/src/checkpoints.rs` | 3,807 |
-| `crates/graphforge-api/src/composite_publish.rs` | 3,188 |
-| `crates/graphforge-api/src/knowledge.rs` | 5,073 |
-| `crates/graphforge-api/src/multi_ontology.rs` | 3,226 |
-| `crates/graphforge-api/src/repository.rs` | 4,457 |
 | `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
 | `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
 | `crates/graphforge-exec/src/lib.rs` | 8,533 |

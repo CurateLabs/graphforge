@@ -159,11 +159,11 @@
       ],
       "test_refs": [
         {
-          "path": "crates/graphforge-api/src/repository.rs",
+          "path": "crates/graphforge-api/src/repository/configuration/tests.rs",
           "symbol": "checked_in_fixture_resolves_to_the_contract_golden"
         },
         {
-          "path": "crates/graphforge-api/src/repository.rs",
+          "path": "crates/graphforge-api/src/repository/configuration/tests.rs",
           "symbol": "target_semantics_fail_closed_before_state_or_secret_materialization"
         }
       ]
@@ -422,7 +422,7 @@
           "symbol": "checkpoint_view_inventory_covers_all_read_wrappers"
         },
         {
-          "path": "crates/graphforge-api/src/checkpoints.rs",
+          "path": "crates/graphforge-api/src/checkpoints/view/tests.rs",
           "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"
         },
         {
@@ -430,7 +430,7 @@
           "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"
         },
         {
@@ -442,19 +442,19 @@
           "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"
         },
         {
@@ -692,7 +692,7 @@
       ],
       "test_refs": [
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "assertion_publication_is_atomic_idempotent_and_reopenable"
         },
         {
@@ -704,15 +704,15 @@
           "symbol": "enabled_project_commits_graph_and_provenance_in_one_generation"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"
         },
         {
@@ -724,11 +724,11 @@
           "symbol": "populated_checkpoint_shapes_restore_real_domain_records"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"
         },
         {
@@ -736,7 +736,7 @@
           "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/supporting/tests.rs",
           "symbol": "assertion_with_evidence_is_one_atomic_idempotent_generation"
         },
         {
@@ -752,7 +752,7 @@
           "symbol": "invalid_composite_request_does_not_mutate"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"
         }
       ]
@@ -814,7 +814,7 @@
           "symbol": "recorded_dispatch_commits_start_and_completed_before_return"
         },
         {
-          "path": "crates/graphforge-api/src/knowledge.rs",
+          "path": "crates/graphforge-api/src/knowledge/assertions/tests.rs",
           "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"
         }
       ]

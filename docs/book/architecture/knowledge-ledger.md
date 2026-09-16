@@ -20,6 +20,12 @@ The crate boundary is part of the storage contract:
 | `graphforge-api` | public requests, cross-domain UUID validation, idempotency, and assembly of one atomic generation |
 | Python and Node bindings | thin projections of the Rust API and its Arrow results |
 
+The API keeps assertion/status/supersession operations in `knowledge/assertions.rs`,
+confidence/evidence/reasoning operations in `knowledge/supporting.rs`, and shared
+ledger encoding and publication assembly in `knowledge/ledger.rs`. Request types,
+cross-domain validation, and shared write-context policy remain in the parent.
+Each write retains its complete transaction and provenance ownership.
+
 Graph reads and neutral analyst-verb/find computation never open provenance or knowledge
 participants. An absent, corrupt, or future-version knowledge capability cannot
 change `execute`, `rank`, `cluster`, `paths`, `analyze`, `similar`, or `find`.
