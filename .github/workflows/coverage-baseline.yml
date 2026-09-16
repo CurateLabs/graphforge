@@ -1,0 +1,101 @@
+name: Coverage Baseline
+
+# Post-merge coverage ledger. PR CI deliberately does not run full llvm-cov
+# (see .github/workflows/README.md), so the Rust coverage floors had no
+# enforcement point on the merge path. This runs the same ledger `make
+# coverage-rust` produces, once per merge to main, and fails when a floor is
+# breached. It is not a required PR status and cannot block a pull request;
+# it detects drift within one merge instead of at release time.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-baseline
+  cancel-in-progress: true
+
+jobs:
+  rust-coverage-ledger:
+    name: Rust Coverage Ledger
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve patch coverage base
+        id: patch-base
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="${{ github.event.before }}"
+          if [[ -n "$before" && "$before" != "0000000000000000000000000000000000000000" ]] \
+            && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            base="$before"
+          else
+            base="$(git rev-parse HEAD~1)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "Patch coverage base: $base"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+          components: llvm-tools-preview
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Measure coverage and enforce floors
+        shell: bash
+        env:
+          COVERAGE_RUST_PATCH_BASE: ${{ steps.patch-base.outputs.base }}
+        run: make coverage-rust
+
+      - name: Upload coverage ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage-ledger-${{ github.sha }}
+          path: |
+            build/coverage-rust/ledger.json
+            build/coverage-rust/evidence.json
+            build/coverage-rust/summary.txt
+          if-no-files-found: warn
+          retention-days: 30

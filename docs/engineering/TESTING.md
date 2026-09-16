@@ -11,6 +11,9 @@ has a wall-clock target, sheds work that is not required for its objective, and
 parallelizes the rest. Frequent publishing uses the **publish-track**, not a
 separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
+The **Coverage Baseline** workflow runs the same ledger once per merge to `main`
+and fails on a breached floor, so drift is caught within one merge rather than at
+release time. It is not a required PR status and cannot block a pull request.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
@@ -24,7 +27,8 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 | --- | --- | --- | --- | --- | --- |
 | `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
-| `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default; CI enforcement |
+| `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
+| Coverage Baseline | Floor drift detection | Every merge → `main` (post-merge) | ≤180m ceiling | Same ledger and floors as `make coverage-rust` | Blocking a PR; it runs after merge |
 | Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
 | **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
 | **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
@@ -193,10 +197,17 @@ weakened assertions (`AGENTS.md`).
 
 ## Behavior coverage
 
-PR CI does **not** enforce full `llvm-cov` floors. Use `make coverage-rust`
-locally (or when claiming floor changes). Default maintainer loop is
-`make pre-push-fast`; run full `make coverage` / `make pre-push` when the changed
-surface needs coverage honesty.
+PR CI does **not** enforce full `llvm-cov` floors, by design. Use
+`make coverage-rust` locally (or when claiming floor changes). Default maintainer
+loop is `make pre-push-fast`; run full `make coverage` / `make pre-push` when the
+changed surface needs coverage honesty.
+
+Because no PR gate enforces them, the floors are enforced after merge by the
+**Coverage Baseline** workflow (`.github/workflows/coverage-baseline.yml`), which
+runs the same ledger on every push to `main` and fails the workflow on a breached
+floor. Its patch total compares `HEAD` against the previous `main` commit rather
+than a merge base, so post-merge patch coverage measures the change that just
+landed.
 
 ### Rust coverage evidence
 
@@ -213,8 +224,10 @@ matches the measured object.
 `build/coverage-rust/ledger.json` also binds the evidence to `HEAD`, the current
 `origin/main` merge base, and the LLVM toolchain. Missing, empty, malformed,
 stale, wrong-artifact, or wrong-SHA evidence fails before totals are accepted.
-Core has a 95% ratchet, every non-binding production crate has an independent
-80% floor, and changed executable Rust lines have a 90% floor. Each Rust
+Core has an 80% floor, every non-binding production crate has an independent
+80% floor, and changed executable Rust lines have a 90% floor. The floors are
+fixed values, not a ratchet: an aggregate floor set above the measured value
+cannot be met while the codebase grows faster than its marginal coverage rate. Each Rust
 binding adapter also retains its
 independent 80% floor; neither the merged workspace percentage nor a strong
 crate can average away a failed surface. Patch coverage uses executable lines
