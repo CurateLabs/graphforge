@@ -1158,6 +1158,25 @@ def main() -> None:
         assert "arm_cflags || ''" in workflow_text, (
             f"{workflow.name} must source target-scoped CFLAGS from its matrix entry"
         )
+        # `--use-napi-cross` unpacks its gcc toolchain with `@napi-rs/lzma`, whose
+        # native binding is an optional dependency gated on `engines.node`. pnpm
+        # silently omits it when the running Node is older, and the toolchain then
+        # fails with "Cannot find native binding", so pin the cross lane's build
+        # host ahead of the executing lanes rather than letting it inherit them.
+        arm_node_version = re.search(r'node_version: "(\d+)"', arm_entry)
+        assert arm_node_version is not None, (
+            f"{workflow.name} must pin an explicit Node build host on the ARM64 cross lane"
+        )
+        assert int(arm_node_version.group(1)) >= 22, (
+            f"{workflow.name} ARM64 cross lane needs Node >= 22 for the "
+            "@napi-rs/cross-toolchain decompressor's native binding"
+        )
+        assert all("node_version:" not in entry for entry in entries if entry != arm_entry), (
+            f"{workflow.name} must leave the executing Node lanes on the default runtime"
+        )
+        assert "node-version: ${{ matrix.node_version || '20' }}" in workflow_text, (
+            f"{workflow.name} must source the Node lane runtime from its matrix entry"
+        )
         assert workflow_text.count(ARTIFACT_COMMAND) == 2, (
             f"{workflow.name} must use the shared explicit napi artifact command"
         )
