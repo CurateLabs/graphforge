@@ -1,0 +1,22 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace portable_export_receipt -> Value with Default::default()
+@@ -291,18 +291,17 @@
+         command => {
+             return run_portable_without_graph(project_root, command, json, output, allocation);
+         }
+     }
+     Ok(())
+ }
+ 
+ fn portable_export_receipt(result: &graphforge_api::PortableV2ExportFacadeResult) -> Value {
+-    serde_json::to_value(result.receipt())
+-        .expect("portable receipt contains serializable scalar values")
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Project-free portable operations that must not hold a live `GraphForge` lock.
+ #[allow(
+     clippy::too_many_lines,
+     reason = "CLI dispatch keeps verify/import/OCI in one project-free portable table"
+ )]
+ pub(crate) fn run_portable_without_graph(

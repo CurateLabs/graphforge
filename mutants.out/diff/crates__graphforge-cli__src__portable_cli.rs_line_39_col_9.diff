@@ -1,0 +1,21 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ delete match arm (true, None) in selection_flag
+@@ -31,17 +31,17 @@
+     writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
+ }
+ 
+ fn selection_flag(
+     current: bool,
+     checkpoint: Option<String>,
+ ) -> Result<PortableSelection, graphforge_api::GfError> {
+     match (current, checkpoint) {
+-        (true, None) => Ok(PortableSelection::Current),
++         /* ~ changed by cargo-mutants ~ */
+         (false, Some(name)) => Ok(PortableSelection::Checkpoint(name)),
+         _ => Err(graphforge_api::GfError::Validation(
+             "exactly one of --current or --checkpoint is required".into(),
+         )),
+     }
+ }
+ 
+ #[derive(Subcommand)]

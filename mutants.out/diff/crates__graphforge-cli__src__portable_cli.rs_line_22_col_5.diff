@@ -1,0 +1,21 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace map_portable -> crate::CliRuntimeError with Default::default()
+@@ -14,17 +14,17 @@
+     ResultSinkOptions, publish_portable_v2_oci, pull_portable_v2_oci, verify_portable_v2,
+ };
+ use serde_json::Value;
+ use uuid::Uuid;
+ 
+ use crate::canonical_uuid;
+ 
+ fn map_portable(error: PortableV2Error) -> crate::CliRuntimeError {
+-    graphforge_api::MultiOntologyError::from(error).into()
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn write_json(
+     value: &impl serde::Serialize,
+     output: &mut dyn Write,
+ ) -> Result<(), graphforge_api::GfError> {
+     serde_json::to_writer(&mut *output, value)
+         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;

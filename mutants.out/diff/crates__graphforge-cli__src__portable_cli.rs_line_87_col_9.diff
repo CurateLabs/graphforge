@@ -1,0 +1,27 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace <impl From<PortableProfile> for PortableV2SelectionProfile>::from -> Self with Default::default()
+@@ -79,23 +79,17 @@
+     OntologyOnly,
+     DataComponents,
+     Artifacts,
+     Settings,
+ }
+ 
+ impl From<PortableProfile> for PortableV2SelectionProfile {
+     fn from(value: PortableProfile) -> Self {
+-        match value {
+-            PortableProfile::Complete => Self::Complete,
+-            PortableProfile::OntologyOnly => Self::OntologyOnly,
+-            PortableProfile::DataComponents => Self::DataComponents,
+-            PortableProfile::Artifacts => Self::Artifacts,
+-            PortableProfile::Settings => Self::Settings,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[derive(Clone, Copy, ValueEnum)]
+ enum PortableFormat {
+     Expanded,
+     Bundle,
+ }

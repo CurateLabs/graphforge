@@ -1,0 +1,24 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace <impl From<VerifyMode> for PortableV2Mode>::from -> Self with Default::default()
+@@ -112,20 +112,17 @@
+ #[derive(Clone, Copy, ValueEnum)]
+ enum VerifyMode {
+     Inspect,
+     Full,
+ }
+ 
+ impl From<VerifyMode> for PortableV2Mode {
+     fn from(value: VerifyMode) -> Self {
+-        match value {
+-            VerifyMode::Inspect => Self::StructureOnly,
+-            VerifyMode::Full => Self::Full,
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[derive(Args)]
+ pub(crate) struct PortablePreviewArgs {
+     #[arg(
+         long,
+         required_unless_present = "checkpoint",

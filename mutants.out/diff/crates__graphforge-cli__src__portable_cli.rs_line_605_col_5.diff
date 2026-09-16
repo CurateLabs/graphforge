@@ -1,0 +1,105 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace run_import_session -> Result<(), graphforge_api::GfError> with Ok(())
+@@ -597,101 +597,17 @@
+ }
+ 
+ pub(crate) fn run_import_session(
+     graph: &GraphForge,
+     command: ImportSessionCommand,
+     json: bool,
+     output: &mut dyn Write,
+ ) -> Result<(), graphforge_api::GfError> {
+-    match command {
+-        ImportSessionCommand::Begin(args) => {
+-            let session = graph.begin_import_session(
+-                OperationId(canonical_uuid(&args.operation_uuid)?),
+-                ImportSessionLimits::default(),
+-            )?;
+-            write_session_receipt(session.session_uuid(), "begun", json, output)
+-        }
+-        ImportSessionCommand::Resume(args) => {
+-            let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            write_session_receipt(session.session_uuid(), "resumed", json, output)
+-        }
+-        ImportSessionCommand::Status(args) => {
+-            let session_uuid = canonical_uuid(&args.session_uuid)?;
+-            let (phase, progress) = graph.import_session_status(session_uuid)?;
+-            write_progress(
+-                session_uuid,
+-                &format!("{phase:?}").to_ascii_lowercase(),
+-                &progress,
+-                None,
+-                json,
+-                output,
+-            )
+-        }
+-        ImportSessionCommand::RegisterParquet(args) => {
+-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            let kind = match args.kind {
+-                ImportSourceKindArg::Nodes => BulkInputKind::Node,
+-                ImportSourceKindArg::Edges => BulkInputKind::Edge,
+-            };
+-            session.register_parquet(kind, &args.path)?;
+-            write_session_receipt(session.session_uuid(), "registered", json, output)
+-        }
+-        ImportSessionCommand::Checkpoint(args) => {
+-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            let progress = session.checkpoint()?;
+-            write_progress(
+-                session.session_uuid(),
+-                "checkpointed",
+-                &progress,
+-                None,
+-                json,
+-                output,
+-            )
+-        }
+-        ImportSessionCommand::Validate(args) => {
+-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            let progress = session.validate(graph)?;
+-            write_progress(
+-                session.session_uuid(),
+-                "validated",
+-                &progress,
+-                Some(session.operation_timings()),
+-                json,
+-                output,
+-            )
+-        }
+-        ImportSessionCommand::Commit(args) => {
+-            let mut session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            let generation = session.commit(graph, None)?;
+-            write_import_commit(&session, generation, json, output)
+-        }
+-        ImportSessionCommand::Abort(args) => {
+-            let session = graph.resume_import_session(canonical_uuid(&args.session_uuid)?)?;
+-            let session_uuid = session.session_uuid();
+-            let progress = session.abort(graph)?;
+-            write_progress(session_uuid, "aborted", &progress, None, json, output)
+-        }
+-        ImportSessionCommand::Cleanup(args) => {
+-            let removed =
+-                graph.cleanup_stale_import_sessions(Duration::from_secs(args.max_age_secs))?;
+-            if json {
+-                write_json(
+-                    &serde_json::json!({
+-                        "contract": "graphforge-import-session-cleanup/1",
+-                        "removed": removed,
+-                    }),
+-                    output,
+-                )
+-            } else {
+-                writeln!(output, "removed {removed} stale import sessions")
+-                    .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
+-            }
+-        }
+-    }
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn write_import_commit(
+     session: &graphforge_api::GraphImportSession,
+     generation: Uuid,
+     json: bool,
+     output: &mut dyn Write,
+ ) -> Result<(), graphforge_api::GfError> {

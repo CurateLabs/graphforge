@@ -1,0 +1,27 @@
+--- crates/graphforge-cli/src/portable_cli.rs
++++ replace selection_flag -> Result<PortableSelection, graphforge_api::GfError> with Ok(Default::default())
+@@ -30,23 +30,17 @@
+         .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+     writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))
+ }
+ 
+ fn selection_flag(
+     current: bool,
+     checkpoint: Option<String>,
+ ) -> Result<PortableSelection, graphforge_api::GfError> {
+-    match (current, checkpoint) {
+-        (true, None) => Ok(PortableSelection::Current),
+-        (false, Some(name)) => Ok(PortableSelection::Checkpoint(name)),
+-        _ => Err(graphforge_api::GfError::Validation(
+-            "exactly one of --current or --checkpoint is required".into(),
+-        )),
+-    }
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[derive(Subcommand)]
+ pub(crate) enum PortableCommand {
+     /// Preview a content-free portable-v2 component selection.
+     Preview(PortablePreviewArgs),
+     /// Export an expanded or bundled portable-v2 package.
+     Export(PortableV2ExportArgs),
