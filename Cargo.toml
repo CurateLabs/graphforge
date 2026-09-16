@@ -44,7 +44,7 @@ serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
 sha2 = "0.11"
 unicode-normalization = "0.1"
 url = { version = "2", features = ["serde"] }
-ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
+ureq = { version = "=3.4.1", default-features = false, features = ["rustls"] }
 
 # Identifiers
 uuid = { version = "1", features = ["v5", "v7", "serde"] }
@@ -60,7 +60,7 @@ datafusion = "54"
 datafusion-datasource = "54"
 parquet = "58"
 thrift = "0.17"
-tantivy = { version = "=0.26.1", default-features = false, features = ["mmap", "lz4-compression"] }
+tantivy = { version = "=0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
 
 # Parser / lexer
 lalrpop-util = "0.23"
