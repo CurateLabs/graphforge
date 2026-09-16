@@ -11,10 +11,11 @@ has a wall-clock target, sheds work that is not required for its objective, and
 parallelizes the rest. Frequent publishing uses the **publish-track**, not a
 separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
 local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
-The **Coverage** workflow runs the same ledger in two roles. On a pull request
-that touches Rust it enforces the 90% patch floor on changed lines only, which is
-prevention. On a merge to `main` it enforces every floor and records the baseline,
-which is detection.
+The **Coverage** workflow runs the same ledger on every merge to `main` and fails
+on a breached floor, so drift surfaces within one merge rather than at release
+time. Repository policy keeps full `llvm-cov` out of pull-request CI, where its
+cost would be paid on every review cycle; `scripts/ci/test-coverage-rust.sh`
+enforces that and fails closed.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
@@ -29,8 +30,7 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 | `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
 | `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default |
-| Coverage (PR) | Changed-line proof | PRs touching Rust paths | ≤180m ceiling | 90% patch floor on changed lines | Aggregate and per-crate floors |
-| Coverage (main) | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | — |
+| Coverage | Floor drift detection | Every merge → `main` | ≤180m ceiling | Every floor, and the recorded baseline | Running on pull requests |
 | Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
 | **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
 | **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
@@ -207,18 +207,18 @@ changed surface needs coverage honesty.
 The floors are enforced by the **Coverage** workflow
 (`.github/workflows/coverage-baseline.yml`).
 
-On a pull request whose paths touch Rust, it enforces the 90% patch floor against
-the pull request base and nothing else. A pull request answers for the lines it
-changes, not for pre-existing gaps, so the aggregate, per-crate and adapter floors
-are set aside there.
+It runs on every push to `main`, enforces every floor, and records the baseline.
+Its patch total compares `HEAD` against the previous `main` commit rather than a
+merge base, because post-merge the merge base with `origin/main` is `HEAD` itself
+and would measure an empty patch.
 
-On a push to `main` it enforces every floor and records the baseline. Its patch
-total compares `HEAD` against the previous `main` commit rather than a merge base,
-because post-merge the merge base with `origin/main` is `HEAD` itself and would
-measure an empty patch.
+Runs never cancel. An earlier draft cancelled in-progress runs, which on a day
+with 21 merges would have left the baseline unmeasured entirely.
 
-Pull request runs cancel on a new push; `main` runs never cancel, so a busy day
-cannot leave the baseline unmeasured.
+Coverage does not run on pull requests. That is policy, not omission, and
+`scripts/ci/test-coverage-rust.sh` refuses any workflow a pull request can
+trigger that invokes it. The trade is deliberate: pull-request cycles stay fast,
+and the floors are enforced one merge later instead of never.
 
 ### Rust coverage evidence
 

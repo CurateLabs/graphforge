@@ -3,28 +3,14 @@ name: Coverage
 # Rust coverage enforcement. PR CI does not otherwise run llvm-cov, so the 90%
 # patch floor had no enforcement point on the merge path and did not hold.
 #
-# Two roles, one ledger:
-#   pull_request (Rust paths only) -- enforces the patch floor on changed lines.
-#     This is prevention. Aggregate and per-crate floors are not enforced here,
-#     because a PR is not responsible for pre-existing gaps.
-#   push to main -- enforces every floor and records the baseline. This is
-#     detection, and it is the authoritative gate registry entry.
+# Post-merge only. Repository policy keeps full llvm-cov out of pull-request CI,
+# where its cost would be paid on every review cycle; this pays it once per merge
+# and blocks nobody. It enforces every floor and records the baseline.
 #
 # Runs are never cancelled. An earlier draft cancelled in-progress runs, which
 # on a day with 21 merges meant no run ever completed.
 
 on:
-  pull_request:
-    branches: ["main"]
-    paths:
-      - "crates/**/*.rs"
-      - "crates/**/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "scripts/coverage-rust.sh"
-      - "scripts/coverage_rust_ledger.py"
-      - ".github/workflows/coverage-baseline.yml"
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -33,8 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: coverage-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: coverage-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   rust-coverage-ledger:
@@ -47,28 +33,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve patch base and floors
+      - name: Resolve patch base
         id: scope
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            # A pull request answers only for the lines it changes.
-            echo "core_floor=0" >> "$GITHUB_OUTPUT"
-            echo "crate_floor=0" >> "$GITHUB_OUTPUT"
-            echo "adapter_floor=0" >> "$GITHUB_OUTPUT"
+          before="${{ github.event.before }}"
+          if [[ -n "$before" && "$before" != "0000000000000000000000000000000000000000" ]] \
+            && git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            base="$before"
           else
-            before="${{ github.event.before }}"
-            if [[ -n "$before" && "$before" != "0000000000000000000000000000000000000000" ]] \
-              && git cat-file -e "${before}^{commit}" 2>/dev/null; then
-              base="$before"
-            else
-              base="$(git rev-parse HEAD~1)"
-            fi
-            echo "core_floor=80" >> "$GITHUB_OUTPUT"
-            echo "crate_floor=80" >> "$GITHUB_OUTPUT"
-            echo "adapter_floor=80" >> "$GITHUB_OUTPUT"
+            base="$(git rev-parse HEAD~1)"
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "Patch coverage base: $base"
@@ -114,11 +89,11 @@ jobs:
         shell: bash
         env:
           COVERAGE_RUST_PATCH_BASE: ${{ steps.scope.outputs.base }}
-          COVERAGE_FAIL_UNDER_RUST: ${{ steps.scope.outputs.core_floor }}
-          COVERAGE_FAIL_UNDER_RUST_CRATE: ${{ steps.scope.outputs.crate_floor }}
+          COVERAGE_FAIL_UNDER_RUST: "80"
+          COVERAGE_FAIL_UNDER_RUST_CRATE: "80"
           COVERAGE_FAIL_UNDER_RUST_PATCH: "90"
-          COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER: ${{ steps.scope.outputs.adapter_floor }}
-          COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER: ${{ steps.scope.outputs.adapter_floor }}
+          COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER: "80"
+          COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER: "80"
         run: make coverage-rust
 
       - name: Summarize

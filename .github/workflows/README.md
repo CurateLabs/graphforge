@@ -23,8 +23,8 @@ operational control plane.
 
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
 not required for their objective. The **Coverage** workflow runs
-`llvm-cov` only on PRs that touch Rust paths, where it enforces the patch floor on
-changed lines, and on every merge to `main`, where it enforces every floor.
+`llvm-cov` on every merge to `main` and enforces the floors there; a policy test
+refuses it in any pull-request-triggered workflow.
 Frequent publishing uses the **publish-track** (Binding RC → tag →
 `publish.yaml` on retained bytes). release-load, checkpoint, and knowledge/epistemic remain
 **human-close / milestone** evidence and are not publish-track blockers.
@@ -328,8 +328,8 @@ See [`docs/development/clean-environment-verification.md`](../../docs/developmen
 ## Local equivalents
 
 Default maintainer loop is `make pre-push-fast` (~30s). Run `make coverage-rust`
-when claiming coverage floors; PR CI does not enforce full llvm-cov. The Coverage workflow runs the same ledger on Rust
-PRs (patch floor only) and on every merge to `main` (all floors).
+when claiming coverage floors; PR CI does not enforce full llvm-cov. The Coverage workflow runs the same ledger on every
+merge to `main` and enforces all floors.
 
 ```bash
 make pre-push-fast
