@@ -155,6 +155,7 @@ EXPECTED_STICKY_KEYS = Counter(
         (
             "${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1"
         ): 1,
+        "${{ github.repository }}-bazel-disk-cache-v1": 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
@@ -575,6 +576,49 @@ def validate_required_run_negative_fixtures() -> None:
     assert job_run_contains(workflow_jobs(separated_jobs)["probe"], command)
 
 
+BAZEL_DISK_CACHE_KEYS = frozenset({"${{ github.repository }}-bazel-disk-cache-v1"})
+
+
+def assert_no_cargo_sticky(job_id: str, body: str) -> None:
+    """#4 retired per-PR Cargo target volumes, not Bazel's content-addressed cache.
+
+    Bazel serves the CI Gate authority that cutover established, and its disk
+    cache is content-addressed, so a stale entry is never read rather than
+    trusted. Cargo target volumes stay refused.
+    """
+    mounted, _ = sticky_contracts(body)
+    cargo = [key for key in mounted if key not in BAZEL_DISK_CACHE_KEYS]
+    assert not cargo, f"Test Suite job {job_id!r} must not mount Cargo sticky disks (#4): {cargo}"
+
+
+def validate_cargo_sticky_negative_fixtures() -> None:
+    """The narrowed rule still refuses every Cargo volume #4 retired."""
+
+    def fixture(key: str) -> str:
+        return f"""jobs:
+  probe:
+    steps:
+      - uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        with:
+          key: {key}
+          path: some/path
+"""
+
+    allowed = "${{ github.repository }}-bazel-disk-cache-v1"
+    assert_no_cargo_sticky("probe", workflow_jobs(fixture(allowed))["probe"])
+
+    for retired in (
+        "${{ github.repository }}-pr-rust-target-v1",
+        "${{ github.repository }}-binding-rc-linux-rust-1.96.0-release-target-v1",
+        "${{ github.repository }}-bazel-disk-cache-v2",
+    ):
+        try:
+            assert_no_cargo_sticky("probe", workflow_jobs(fixture(retired))["probe"])
+        except AssertionError:
+            continue
+        raise AssertionError(f"retired Cargo sticky disk {retired!r} must stay refused (#4)")
+
+
 def validate_ci_gate_cutover(text: str) -> None:
     """#4: Bazel authority under CI Gate; Cargo rust-test + PR sticky retired."""
     jobs = workflow_jobs(text)
@@ -585,8 +629,7 @@ def validate_ci_gate_cutover(text: str) -> None:
         assert job_scalar(body, "name") != "Rust Tests", (
             f"job {job_id!r} must not restore retired Cargo Rust Tests display name"
         )
-        sticky, _ = sticky_contracts(body)
-        assert not sticky, f"Test Suite job {job_id!r} must not mount Cargo sticky disks (#4)"
+        assert_no_cargo_sticky(job_id, body)
 
     authoritative = [
         job_id
@@ -657,6 +700,7 @@ def main() -> None:
     test_suite = texts[WORKFLOWS / "test.yml"]
     validate_test_suite_trigger(test_suite)
     validate_required_run_negative_fixtures()
+    validate_cargo_sticky_negative_fixtures()
     validate_operator_handoffs_have_no_artifacts()
     validate_ci_gate_cutover(test_suite)
     bazel_config = (ROOT / ".bazelrc").read_text().splitlines()
