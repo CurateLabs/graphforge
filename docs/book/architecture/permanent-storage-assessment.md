@@ -393,9 +393,9 @@ compression level; the shared builder establishes level 1.
 | --- | --- | --- |
 | `graph_construction_encoding::write_parquet` | Resumable topology, properties and controls | Existing bounded construction windows, cache advice and publication leases |
 | `graph_construction::intake::write_parquet_with_properties` | Privately shaped runtime catalog, then published unchanged | Permanent caller explicitly supplies policy; accepted construction batches remain private |
-| `writer::stream_replay_nodes` | Canonical replay and compaction nodes | Dictionaries off, row groups at most `max_batch_rows`; bounded decoder strategy below |
-| `writer::stream_replay_edges` | Canonical replay and compaction edge routes | Dictionaries off, same row-group bound, authenticated physical route/schema |
-| `writer::open_replay_property_fragment` | Immutable property/tombstone fragments | Dictionaries off, chunk flushes, same row-group bound, route/generation metadata |
+| `writer::replay_topology::stream_replay_nodes` | Canonical replay and compaction nodes | Dictionaries off, row groups at most `max_batch_rows`; bounded decoder strategy below |
+| `writer::replay_topology::stream_replay_edges` | Canonical replay and compaction edge routes | Dictionaries off, same row-group bound, authenticated physical route/schema |
+| `writer::replay_properties::open_replay_property_fragment` | Immutable property/tombstone fragments | Dictionaries off, chunk flushes, same row-group bound, route/generation metadata |
 | `staging::restage_append` | Mutation replacement later owned by `RewriteBatch` | 65,536-row groups; private file ownership and atomic replacement |
 | `staging::stage_parquet_temp` | Mutation and catalog replacement | Same row-group bound and publication lifecycle |
 | `staging::stage_parquet_batches_temp` | Streaming mutation replacement | Same row-group bound; separate reader/writer lifetime |

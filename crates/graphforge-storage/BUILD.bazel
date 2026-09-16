@@ -135,3 +135,14 @@ test_suite(
         ":storage_integration_tests",
     ],
 )
+
+# Source-backed property-overlay policy and mutation fixtures.
+filegroup(
+    name = "property_overlay_contract_sources",
+    srcs = glob([
+        "src/property_overlay.rs",
+        "src/property_overlay/**/*.rs",
+        "src/writer.rs",
+        "src/writer/**/*.rs",
+    ]),
+)

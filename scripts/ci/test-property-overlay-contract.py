@@ -7,6 +7,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
@@ -31,9 +32,105 @@ def write_contract(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def check_module_discovery(root: Path) -> None:
+    """Exercise admitted nested sources and exact root-visible exports."""
+    entry = Path("discovery/authority.rs")
+    directory = root / "discovery/authority"
+    (directory / "child").mkdir(parents=True)
+    files = {
+        root / entry: "mod child;\npub use child::{Authority, read};\n",
+        directory / "child.rs": "mod nested;\npub use nested::Authority;\npub fn read() {}\n",
+        directory / "child/nested.rs": (
+            "pub struct Authority {}\nimpl Authority {\n    pub fn snapshot() {}\n}\n"
+        ),
+    }
+    for path, source in files.items():
+        path.write_text(source, encoding="utf-8")
+
+    def check() -> None:
+        actual = GATE.module_public_symbols(GATE.module_sources(root, entry))
+        if actual != {"Authority", "read", "Authority::snapshot"}:
+            raise GATE.ContractError("fixture root exports changed")
+
+    check()
+    mutations = [
+        (root / entry, "mod child;", "// mod child;", "comment-only module"),
+        (
+            root / entry,
+            "pub use child::{Authority, read};",
+            "use child::{Authority, read};",
+            "private root export",
+        ),
+        (
+            root / entry,
+            "pub use child::{Authority, read};",
+            "// pub use child::{Authority, read};",
+            "comment-only root export",
+        ),
+        (
+            root / entry,
+            "pub use child::{Authority, read};",
+            "pub use child::{Authority, read};\npub use child::read;",
+            "duplicate root export",
+        ),
+        (directory / "child.rs", "pub fn read", "pub(super) fn read", "private defining symbol"),
+        (directory / "child/nested.rs", "pub fn snapshot", "fn snapshot", "lost moved method"),
+        (
+            directory / "child/nested.rs",
+            "pub struct Authority {}",
+            "pub struct Authority {}\npub struct Authority {}",
+            "duplicate authority definition",
+        ),
+    ]
+    for path, before, after, label in mutations:
+        source = files[path]
+        if before not in source:
+            raise AssertionError(f"missing mutation marker: {label}")
+        path.write_text(source.replace(before, after, 1), encoding="utf-8")
+        expect_failure(label, check)
+        path.write_text(source, encoding="utf-8")
+    child = directory / "child.rs"
+    child.unlink()
+    expect_failure("missing declared child", check)
+    child.write_text(files[child], encoding="utf-8")
+    # An orphan source must not repair a removed declaration, and literal
+    # declarations must not introduce an admitted child.
+    (directory / "orphan.rs").write_text("pub fn read() {}\n", encoding="utf-8")
+    child.write_text(
+        files[child] + 'const TEXT: &str = r#"mod absent; pub use absent::Ghost;"#;\n',
+        encoding="utf-8",
+    )
+    check()
+    child.write_text(files[child].replace("pub fn read() {}", ""), encoding="utf-8")
+    expect_failure("orphan cannot supply root authority", check)
+    child.write_text(files[child], encoding="utf-8")
+
+    # Bazel may expose each source as a separate symlink beneath real
+    # runfiles directories; containment follows the resolved authority root.
+    runfiles = root / "runfiles"
+    for source in files:
+        destination = runfiles / source.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.symlink_to(source)
+    actual = GATE.module_public_symbols(GATE.module_sources(runfiles, entry))
+    if actual != {"Authority", "read", "Authority::snapshot"}:
+        raise AssertionError("individual-file runfiles lost the public surface")
+    # A redirected declared child must still stay inside that resolved tree.
+    outside = root / "outside.rs"
+    outside.write_text(files[directory / "child/nested.rs"], encoding="utf-8")
+    linked_child = runfiles / "discovery/authority/child/nested.rs"
+    linked_child.unlink()
+    linked_child.symlink_to(outside)
+    expect_failure(
+        "runfiles child escapes resolved authority",
+        lambda: GATE.module_sources(runfiles, entry),
+    )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-property-overlay-contract-") as directory:
         root = Path(directory)
+        check_module_discovery(root)
         for relative in (
             "tests/contracts/property-overlay-v1.json",
             "crates/graphforge-storage/src/property_overlay.rs",
@@ -46,6 +143,11 @@ def main() -> None:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
+        for relative in (
+            "crates/graphforge-storage/src/property_overlay",
+            "crates/graphforge-storage/src/writer",
+        ):
+            shutil.copytree(ROOT / relative, root / relative)
         contract_path = root / "tests/contracts/property-overlay-v1.json"
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         for reference in contract["evidence"].values():
@@ -56,6 +158,22 @@ def main() -> None:
                 shutil.copy2(ROOT / relative, destination)
 
         GATE.validate(root, contract_path)
+
+        for relative, symbol in (
+            ("crates/graphforge-storage/src/property_overlay.rs", "PropertyTargetSnapshots"),
+            ("crates/graphforge-storage/src/writer.rs", "stage_set_node_properties_authenticated"),
+        ):
+            export_path = root / relative
+            export_source = export_path.read_text(encoding="utf-8")
+            pattern = rf"(?m)^pub use \w+::{symbol};\n|\b{symbol}\s*,"
+            mutated_source, count = re.subn(pattern, "", export_source, count=1)
+            if count != 1:
+                raise AssertionError(f"missing root reexport mutation: {symbol}")
+            export_path.write_text(mutated_source, encoding="utf-8")
+            expect_failure(
+                f"lost root reexport {symbol}", lambda: GATE.validate(root, contract_path)
+            )
+            export_path.write_text(export_source, encoding="utf-8")
 
         mutated = copy.deepcopy(contract)
         mutated["metrics"]["physical_rows"]["unit"] = "rows"
@@ -80,8 +198,10 @@ def main() -> None:
         expect_failure("zero-evidence platform", lambda: GATE.validate(root, contract_path))
         write_contract(contract_path, contract)
 
-        writer = root / "crates/graphforge-storage/src/writer.rs"
+        writer = root / "crates/graphforge-storage/src/writer/property_mutation.rs"
         writer_source = writer.read_text(encoding="utf-8")
+        if "read_authenticated_property_snapshots_for_inventory" not in writer_source:
+            raise AssertionError("staging fixture lost targeted reader")
         writer.write_text(
             writer_source.replace(
                 "read_authenticated_property_snapshots_for_inventory",
