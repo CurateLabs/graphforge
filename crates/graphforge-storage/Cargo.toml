@@ -40,7 +40,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 unicode-normalization = { workspace = true }
 uuid = { workspace = true }
-zstd = { version = "=0.13.3", default-features = false }
+zstd = { version = "=0.14.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

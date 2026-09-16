@@ -1,5 +1,5 @@
 {
-  "checksum": "60fd038cd8cdc8e3f4c2ae1283e42a762093f82c9441756c9fc3aac7348f3612",
+  "checksum": "d2015f65cded0384a0bca5a039355f4975114228f999cfcb520548db595ee7e5",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -14058,7 +14058,7 @@
               "target": "uuid"
             },
             {
-              "id": "zstd 0.13.3",
+              "id": "zstd 0.14.0",
               "target": "zstd"
             }
           ],
@@ -34248,6 +34248,53 @@
       ],
       "license_file": "LICENSE"
     },
+    "zstd 0.14.0": {
+      "name": "zstd",
+      "version": "0.14.0",
+      "package_url": "https://github.com/gyscos/zstd-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/zstd/0.14.0/download",
+          "sha256": "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "zstd",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "zstd",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "zstd-safe 8.0.0",
+              "target": "zstd_safe"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.14.0"
+      },
+      "license": "BSD-3-Clause",
+      "license_ids": [
+        "BSD-3-Clause"
+      ],
+      "license_file": "LICENSE"
+    },
     "zstd-safe 7.2.4": {
       "name": "zstd-safe",
       "version": "7.2.4",
@@ -34298,7 +34345,7 @@
         "deps": {
           "common": [
             {
-              "id": "zstd-sys 2.0.16+zstd.1.5.7",
+              "id": "zstd-sys 2.1.0+zstd.1.5.7",
               "target": "zstd_sys"
             }
           ],
@@ -34326,7 +34373,7 @@
         "link_deps": {
           "common": [
             {
-              "id": "zstd-sys 2.0.16+zstd.1.5.7",
+              "id": "zstd-sys 2.1.0+zstd.1.5.7",
               "target": "zstd_sys"
             }
           ],
@@ -34340,14 +34387,105 @@
       ],
       "license_file": "LICENSE"
     },
-    "zstd-sys 2.0.16+zstd.1.5.7": {
-      "name": "zstd-sys",
-      "version": "2.0.16+zstd.1.5.7",
+    "zstd-safe 8.0.0": {
+      "name": "zstd-safe",
+      "version": "8.0.0",
       "package_url": "https://github.com/gyscos/zstd-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/zstd-sys/2.0.16+zstd.1.5.7/download",
-          "sha256": "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+          "url": "https://static.crates.io/crates/zstd-safe/8.0.0/download",
+          "sha256": "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "zstd_safe",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "zstd_safe",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "std"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "zstd-sys 2.1.0+zstd.1.5.7",
+              "target": "zstd_sys"
+            }
+          ],
+          "selects": {}
+        },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "8.0.0"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ],
+        "link_deps": {
+          "common": [
+            {
+              "id": "zstd-sys 2.1.0+zstd.1.5.7",
+              "target": "zstd_sys"
+            }
+          ],
+          "selects": {}
+        }
+      },
+      "license": "BSD-3-Clause",
+      "license_ids": [
+        "BSD-3-Clause"
+      ],
+      "license_file": "LICENSE"
+    },
+    "zstd-sys 2.1.0+zstd.1.5.7": {
+      "name": "zstd-sys",
+      "version": "2.1.0+zstd.1.5.7",
+      "package_url": "https://github.com/gyscos/zstd-rs",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/zstd-sys/2.1.0+zstd.1.5.7/download",
+          "sha256": "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
         }
       },
       "targets": [
@@ -34394,7 +34532,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "2.0.16+zstd.1.5.7"
+        "version": "2.1.0+zstd.1.5.7"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -34421,10 +34559,9 @@
         },
         "links": "zstd"
       },
-      "license": "MIT/Apache-2.0",
+      "license": "BSD-3-Clause",
       "license_ids": [
-        "Apache-2.0",
-        "MIT"
+        "BSD-3-Clause"
       ],
       "license_file": "LICENSE"
     }
@@ -34687,7 +34824,7 @@
     "url 2.5.8",
     "uuid 1.26.1",
     "windows-sys 0.61.2",
-    "zstd 0.13.3"
+    "zstd 0.14.0"
   ],
   "direct_dev_deps": [
     "codspeed-divan-compat 5.0.1",

@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "048c5f67af77fb1caf74d75ed1cf57237ee80a6e76932460a72abd111b86da50",
+  "sha256": "59cee31940b775d6cd3787535e126395d5fec4a06a704df337dde60d164e7e31",
   "entries": [
     {
       "name": "graphforge-api",
@@ -2343,7 +2343,7 @@
         },
         {
           "name": "zstd",
-          "req": "=0.13.3",
+          "req": "=0.14.0",
           "features": [],
           "optional": false,
           "uses_default_features": false,
