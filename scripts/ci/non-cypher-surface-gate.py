@@ -43,7 +43,7 @@ def public_methods() -> set[str]:
     found: set[str] = set()
     impl_re = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+([A-Za-z_][\w:]*)[^{}]*\{")
     fn_re = re.compile(r"\bpub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>{}]*>)?\s*\(")
-    for path in sorted(API_SRC.glob("*.rs")):
+    for path in sorted(API_SRC.rglob("*.rs")):
         text = path.read_text()
         for function in re.findall(r"^pub\s+(?:async\s+)?fn\s+(\w+)\s*\(", text, re.M):
             found.add(f"crate.{function}")

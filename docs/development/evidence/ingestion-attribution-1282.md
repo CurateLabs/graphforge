@@ -108,6 +108,15 @@ All paths below are repository-relative. The CLI entry is
 | Publication | `import-session commit` → `GraphImportSession::commit` → `seal_and_publish` → `publish_canonical_with_cancellation`, including preauthentication, CAS installation and durable visibility. |
 | Synchronization | `StableDirectory`/storage-I/O capabilities and `sync_all_and_release` inside append, merges, encoding, control checkpoints and publication. It is nested work, not an additional disjoint phase. |
 
+Source ownership after [#1311](https://github.com/CurateLabs/graphforge/issues/1311):
+`graph_construction/intake.rs` owns append and chunk writing;
+`graph_construction/shape.rs` owns `shape_canonical_inner` and `run_record_bytes`;
+`graph_construction/recovery.rs` owns receipt authentication and cleanup; and
+`graph_construction/encoding_publication.rs` owns encoding/publication coordination.
+The existing `shaping_merge` and `supersession` owners remain in place. The table
+above and recommendations below retain the source locations from this measured
+study; public method paths and the recorded measurements are unchanged.
+
 ## Ordinary scaling baseline
 
 All nine selected lifecycles pass. The [machine-readable baseline](ingestion-attribution-1282-scaling.json)

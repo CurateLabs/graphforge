@@ -4,7 +4,7 @@
   "issue": 2481,
   "command_groups": {
     "rust-storage": "cargo test -p graphforge-storage --lib project_checkpoints::tests --no-fail-fast",
-    "rust-api": "cargo test -p graphforge-api --lib checkpoints::tests --no-fail-fast",
+    "rust-api": "cargo test -p graphforge-api --lib checkpoints:: --no-fail-fast",
     "python": "python crates/graphforge-bindings-py/tests/checkpoints.py",
     "node": "node --test crates/graphforge-bindings-node/tests/checkpoints.test.mjs",
     "cli": "cargo test -p graphforge-cli --no-fail-fast"
@@ -58,7 +58,7 @@
       "expected_columns": [],
       "expected_errors": ["GF_READ_ONLY_VIEW", "GF_CHECKPOINT_NOT_FOUND"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints/view/tests.rs", "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"}
       ]
     },
     {
@@ -70,8 +70,8 @@
       "expected_errors": ["GF_CANCELLED", "GF_PAGE_SNAPSHOT_GONE", "GF_VALIDATION"],
       "tests": [
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "list_and_summary_diff_are_arrow_ordered_and_page_bound"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "record_diff_uses_registered_logical_adapters"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "record_diff_pagination_cancellation_and_bounds"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints/diff/tests.rs", "symbol": "record_diff_uses_registered_logical_adapters"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints/diff/tests.rs", "symbol": "record_diff_pagination_cancellation_and_bounds"},
         {"kind": "node", "path": "crates/graphforge-bindings-node/tests/checkpoints.test.mjs", "symbol": "checkpoint pagination and diff cancellation use the shared adapter"}
       ]
     },

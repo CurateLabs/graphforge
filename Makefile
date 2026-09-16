@@ -203,7 +203,7 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 
 bazel-test:  ## Run authoritative Bazel Rust suite (//:ci_rust_tests); see docs/development/bazel.md
 	@command -v bazelisk >/dev/null || (echo "bazelisk is required on PATH; see docs/development/bazel.md"; exit 1)
-	bazelisk test //:ci_rust_tests
+	bazelisk test --config=correctness //:ci_rust_tests
 
 pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
 	@echo "━━━ Committed Python lock ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
