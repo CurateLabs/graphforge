@@ -27,6 +27,9 @@ jobs:
     name: Rust Coverage Ledger
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,6 +50,15 @@ jobs:
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "Patch coverage base: $base"
+
+      # Every run otherwise recompiles the whole workspace under instrumentation.
+      # `cargo llvm-cov clean --workspace` drops workspace-member artifacts only,
+      # so third-party dependencies stay warm on this volume between runs.
+      - name: Mount coverage build disk
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        with:
+          key: ${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05

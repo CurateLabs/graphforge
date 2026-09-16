@@ -152,6 +152,10 @@ EXPECTED_STICKY_KEYS = Counter(
             "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
         ): 1,
         "${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3": 1,
+        (
+            "${{ github.repository }}-coverage-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}-target-v1"
+        ): 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
