@@ -308,6 +308,15 @@ def check_clear() -> None:
         persistent.close()
 
 
+def _expect_lifecycle_error(call) -> None:
+    try:
+        call()
+    except g.LifecycleError as error:
+        assert error.code == "GF_LIFECYCLE", error.code
+        return
+    raise SystemExit("expected LifecycleError after close()")
+
+
 def check_close_releases_project_handles() -> None:
     # #1363 — an open persistent instance retains OS handles on the committed
     # generation it reads from; the authenticated property inventory holds a
@@ -324,6 +333,17 @@ def check_close_releases_project_handles() -> None:
         assert generations, "expected a published generation"
         assert any((entry / "graph").is_dir() for entry in generations), generations
         forge.close()
+
+        # The engine is gone, but the inert attributes still answer, and every
+        # native entry point — including the ones that guard before parsing
+        # their arguments — reports the closed lifecycle.
+        assert forge.path == str(project), forge.path
+        assert forge.ontology_mode == "exploratory", forge.ontology_mode
+        assert repr(forge) == f"GraphForge(path={project})", repr(forge)
+        _expect_lifecycle_error(lambda: forge.execute("MATCH (n) RETURN n"))
+        _expect_lifecycle_error(
+            lambda: forge.begin_transaction(operation_uuid="018f0f4e-7b8c-7000-8000-000000009363")
+        )
 
         # Released at close, not before: the committed generation still reopens.
         reopened = g.GraphForge(str(project))
