@@ -475,7 +475,7 @@ Used by:
 - nohash-hasher 0.2.0
 - parquet 58.4.0
 - tinyvec 1.12.0
-- ureq-proto 0.6.1
+- ureq-proto 0.6.3
 - utf8_iter 1.0.4
 - zeroize 1.9.0
 
@@ -2691,7 +2691,7 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- ureq 3.4.0
+- ureq 3.4.1
 
 ```
                                  Apache License
@@ -5126,7 +5126,7 @@ Used by:
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2
 - url 2.5.8
-- uuid 1.26.0
+- uuid 1.26.1
 - version_check 0.9.5
 - wasi 0.11.1+wasi-snapshot-preview1
 - wasip2 1.0.3+wasi-0.2.9
@@ -8011,7 +8011,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## MIT License
 
 Used by:
-- tantivy 0.26.1
+- tantivy 0.26.2
 
 ```
 Copyright (c) 2018 by the project authors, as listed in the AUTHORS file. 
@@ -8449,7 +8449,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- convert_case 0.11.0
+- convert_case 0.12.0
 
 ```
 MIT License
@@ -8481,11 +8481,11 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.12.2
-- napi-build 2.4.1
-- napi-derive 3.6.3
-- napi-derive-backend 6.1.2
-- napi-sys 3.3.0
+- napi 3.12.4
+- napi-build 2.4.2
+- napi-derive 3.6.6
+- napi-derive-backend 6.1.3
+- napi-sys 3.3.1
 - ownedbytes 0.9.0
 - tantivy-bitpacker 0.10.0
 - tantivy-columnar 0.7.0

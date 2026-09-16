@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "d85324710d0bc4777f9f1190964fa10edee108b2d686503ce118bcfcafd79a4d",
+  "sha256": "048c5f67af77fb1caf74d75ed1cf57237ee80a6e76932460a72abd111b86da50",
   "entries": [
     {
       "name": "graphforge-api",
@@ -710,7 +710,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.0",
+          "req": "=3.4.1",
           "features": [
             "rustls"
           ],
@@ -1465,7 +1465,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.0",
+          "req": "=3.4.1",
           "features": [
             "rustls"
           ],
@@ -1694,7 +1694,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.0",
+          "req": "=3.4.1",
           "features": [
             "rustls"
           ],
@@ -2012,7 +2012,7 @@
         },
         {
           "name": "tantivy",
-          "req": "=0.26.1",
+          "req": "=0.26.2",
           "features": [
             "lz4-compression",
             "mmap"
@@ -2033,7 +2033,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.0",
+          "req": "=3.4.1",
           "features": [
             "rustls"
           ],
