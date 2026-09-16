@@ -1,9 +1,24 @@
 // Minimal clean-build acceptance for the freshly built native addon.
 
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge, version } from "../index.js";
+
+const require = createRequire(import.meta.url);
+
+function checkModuleInterop() {
+  // #1360 — the built package must resolve through both module systems. The
+  // static named import above is the ESM half and fails at load time when the
+  // loader hides its exports from cjs-module-lexer; this is the CommonJS half.
+  const binding = require("../index.js");
+  assert.equal(typeof binding.GraphForge, "function", "missing CJS GraphForge");
+  assert.equal(binding.GraphForge, GraphForge, "CJS/ESM exports diverged");
+  assert.equal(typeof binding.version(), "string");
+  const forge = new binding.GraphForge();
+  forge.close();
+}
 
 function checkVersion() {
   const v = version();
@@ -307,6 +322,7 @@ function checkLifecycle() {
   throw new Error("expected LifecycleError after close()");
 }
 
+test("module interop", checkModuleInterop);
 test("version", checkVersion);
 test("construction", checkConstruction);
 test("construction error", checkConstructionError);

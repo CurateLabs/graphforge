@@ -1,0 +1,30 @@
+{
+  "comment": [
+    "Public runtime export surface of the napi addon (#1360).",
+    "The Bazel Binding RC lane never runs `napi build`, so it cannot read",
+    "napi's generated index.js/index.d.ts. scripts/ci/assemble_bazel_binding_packages.py",
+    "generates both from this file instead, emitting one literal",
+    "`module.exports.<name> = ...` per entry so Node's cjs-module-lexer can",
+    "resolve ESM named imports of the CommonJS loader.",
+    "tests/export-surface.test.mjs fails closed when this drifts from the",
+    "exports the napi-built addon actually has; regenerate it from",
+    "`Object.keys(require('./index.js'))` plus the kinds in index.d.ts."
+  ],
+  "exports": {
+    "CheckpointView": "class",
+    "EdgeHandle": "class",
+    "GraphForge": "class",
+    "GraphImportSession": "class",
+    "GraphTransaction": "class",
+    "InvocationDescriptor": "class",
+    "NodeHandle": "class",
+    "PlanHandle": "class",
+    "ResolvedBeliefProjection": "class",
+    "ResolvedBeliefSubjectOutput": "class",
+    "TelemetryRuntime": "class",
+    "runCli": "function",
+    "testAcquireWriterHold": "function",
+    "testReleaseWriterHold": "function",
+    "version": "function"
+  }
+}
