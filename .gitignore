@@ -54,6 +54,7 @@ coverage/
 *.lcov
 *.profraw
 .bazel-disk-cache/
+mutants.out*/
 
 # Translations
 *.mo
