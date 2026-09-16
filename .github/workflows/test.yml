@@ -1246,6 +1246,16 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The correctness-config test build reused only 34 of 2273 actions from the
+      # injected remote cache. This volume carries that configuration's outputs
+      # between runs; Bazel's disk cache is content-addressed, so a shared volume
+      # is safe and a stale entry is simply never read.
+      - name: Mount Bazel disk cache
+        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        with:
+          key: ${{ github.repository }}-bazel-disk-cache-v1
+          path: .bazel-disk-cache
+
       - name: Install Bazelisk
         run: |
           version=1.26.0
