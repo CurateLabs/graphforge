@@ -3,7 +3,7 @@
 use super::{
     AdjacencyGraph, Algorithm, AlgorithmCapability, AlgorithmControl, AlgorithmError,
     AlgorithmOutput, BUILTIN_REVIEW, ClusterAlgorithm, RustAlgorithm, community_output,
-    local_moves_from, normalized_communities,
+    local_moves_from, normalized_communities_with_progress,
 };
 
 pub(super) struct ModularityOptimization;
@@ -36,7 +36,15 @@ fn modularity_optimization_communities(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
 ) -> Result<Vec<usize>, AlgorithmError> {
-    let (weights, _) = normalized_communities(graph, control)?;
+    modularity_optimization_communities_with_progress(graph, control, |_| {})
+}
+
+fn modularity_optimization_communities_with_progress(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+    progress: impl FnMut(usize),
+) -> Result<Vec<usize>, AlgorithmError> {
+    let (weights, _) = normalized_communities_with_progress(graph, control, progress)?;
     local_moves_from(&weights, None, "Modularity optimization", control)
 }
 

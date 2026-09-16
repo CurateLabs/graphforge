@@ -112,15 +112,36 @@ fn modularity_optimization_uses_shared_controls_and_rust_registration() {
     let cancellation = AlgorithmCancellation::default();
     let cancel = cancellation.clone();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
-        modularity_optimization_communities(
-            &graph,
-            &AlgorithmControl::new(AlgorithmLimits::default(), cancellation),
-        )
+        let control = AlgorithmControl::new(AlgorithmLimits::default(), cancellation);
+        let mut rendezvous = Some((started_tx, resume_rx));
+        result_tx
+            .send(modularity_optimization_communities_with_progress(
+                &graph,
+                &control,
+                |observed| {
+                    if let Some((started, resume)) = rendezvous.take() {
+                        started.send(observed).unwrap();
+                        resume.recv().unwrap();
+                    }
+                },
+            ))
+            .unwrap();
     });
-    started_rx.recv().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(2));
+    // Pause after real adjacency work, immediately before the next existing
+    // cancellation checkpoint. No scheduler-speed assumption is needed.
+    assert_eq!(started_rx.recv().unwrap(), 16_384);
+    assert!(
+        matches!(
+            result_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "execution finished before cancellation"
+    );
     cancel.cancel();
-    assert_eq!(worker.join().unwrap(), Err(AlgorithmError::Cancelled));
+    resume_tx.send(()).unwrap();
+    assert_eq!(result_rx.recv().unwrap(), Err(AlgorithmError::Cancelled));
+    worker.join().unwrap();
 }
