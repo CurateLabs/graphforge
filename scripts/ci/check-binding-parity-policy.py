@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import runpy
 
 ROOT = Path(__file__).resolve().parents[2]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
@@ -21,6 +22,9 @@ def digest(values: set[str]) -> str:
 
 
 def main() -> None:
+    source_checks = runpy.run_path(str(PYTHON_GATE.with_name("test_native_sources.py")))
+    source_checks["check_discovery"]()
+
     manifest = json.loads(RUST_MANIFEST.read_text())
     release = {
         method_id

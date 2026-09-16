@@ -33,7 +33,7 @@ uuid = { workspace = true }
 # Maturin explicitly enables our extension-module feature for distribution.
 # `abi3-py310` builds a single stable-ABI wheel that installs on CPython 3.10+,
 # so one wheel per OS covers the whole py3.10–3.14 CI matrix.
-pyo3 = { workspace = true, features = ["abi3-py310"] }
+pyo3 = { workspace = true, features = ["abi3-py310", "multiple-pymethods"] }
 
 [lints]
 workspace = true

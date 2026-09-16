@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "f9b62cc0ac7943de81dcb2dc768bce66833a75ceea8d739640c5c178efcaa4c0",
+  "sha256": "d85324710d0bc4777f9f1190964fa10edee108b2d686503ce118bcfcafd79a4d",
   "entries": [
     {
       "name": "graphforge-api",
@@ -537,7 +537,8 @@
           "name": "pyo3",
           "req": "^0.28",
           "features": [
-            "abi3-py310"
+            "abi3-py310",
+            "multiple-pymethods"
           ],
           "optional": false,
           "uses_default_features": true,

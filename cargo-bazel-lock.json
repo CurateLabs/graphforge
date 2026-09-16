@@ -1,5 +1,5 @@
 {
-  "checksum": "4b33b0ec957be7243e5c68d59d42863c4a0d8132f2d574b0a365c0a587ed9702",
+  "checksum": "81f8c593643d341df042130f08457ed515a45719269117495002dec9dbd9e7e6",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -21486,13 +21486,19 @@
             "abi3-py313",
             "abi3-py314",
             "default",
+            "inventory",
             "macros",
+            "multiple-pymethods",
             "pyo3-macros"
           ],
           "selects": {}
         },
         "deps": {
           "common": [
+            {
+              "id": "inventory 0.3.24",
+              "target": "inventory"
+            },
             {
               "id": "libc 0.2.189",
               "target": "libc"
@@ -21814,6 +21820,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "multiple-pymethods"
+          ],
+          "selects": {}
+        },
         "deps": {
           "common": [
             {

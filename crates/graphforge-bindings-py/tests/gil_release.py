@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import runpy
 import threading
 
 from graphforge import _graphforge_rs as native
 
+production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.py")))[
+    "production_source"
+]
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "lib.rs"
 
 
@@ -108,7 +112,7 @@ def _borrowed_parameter_captures(source: str) -> list[str]:
 
 
 def check_native_call_inventory() -> None:
-    source = SOURCE.read_text(encoding="utf-8")
+    source = production_source(SOURCE)
     bodies = _detached_bodies(source)
     detached = "\n".join(bodies)
 
@@ -151,6 +155,15 @@ def check_native_call_inventory() -> None:
     assert any(capture.endswith(":query") for capture in _borrowed_parameter_captures(mutated)), (
         "borrowed-input mutation was not rejected"
     )
+
+    for parameter in ("composition_before", "migration_plan_digest"):
+        shadow = f"let {parameter} = {parameter}.to_owned();"
+        assert source.count(shadow) == 1, f"ambiguous certification ownership: {parameter}"
+        mutated = source.replace(shadow, "", 1)
+        assert any(
+            capture.startswith("certification_report:") and capture.endswith(f":{parameter}")
+            for capture in _borrowed_parameter_captures(mutated)
+        ), f"borrowed certification input mutation was not rejected: {parameter}"
 
 
 def check_python_progresses_during_native_work() -> None:

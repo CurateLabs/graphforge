@@ -432,12 +432,14 @@ pub(crate) fn certification_report(
     rows_scanned: u64,
 ) -> PyResult<Py<PyAny>> {
     forge.ensure_open()?;
+    let composition_before = composition_before.to_owned();
+    let migration_plan_digest = migration_plan_digest.to_owned();
     let result = py
         .detach(|| {
             forge.inner.multi_ontology_certification_report(
                 "python",
-                composition_before,
-                migration_plan_digest,
+                &composition_before,
+                &migration_plan_digest,
                 rows_scanned,
             )
         })
