@@ -10,6 +10,11 @@ implements those concerns as additive records.
 
 ## Ownership and isolation
 
+Within `graphforge-knowledge`, private `algorithm_run` and `confidence` modules
+own their ledger records, validation, Arrow codecs, and direct tests. The root
+retains shared schemas, registry, errors, Arrow readers, and numeric validation.
+Explicit root exports preserve the public type paths.
+
 The crate boundary is part of the storage contract:
 
 | Owner | Responsibility |

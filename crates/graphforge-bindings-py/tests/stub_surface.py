@@ -5,8 +5,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import re
+import runpy
 
 ROOT = Path(__file__).resolve().parents[3]
+production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.py")))[
+    "production_source"
+]
 SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
 STUB = ROOT / "crates/graphforge-bindings-py/python/graphforge/_graphforge_rs.pyi"
 
@@ -201,7 +205,7 @@ def check_mutation_sensitivity(source: str, stub: str) -> None:
 
 
 def main() -> None:
-    source = SOURCE.read_text()
+    source = production_source(SOURCE)
     stub = STUB.read_text()
     validate(source, stub)
     check_mutation_sensitivity(source, stub)

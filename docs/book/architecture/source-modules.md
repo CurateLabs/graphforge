@@ -141,8 +141,8 @@ exemptions or unchanged-tree release certification are required.
   `writer::property_mutation::tests::staged_property_mutation_conflicts_after_intervening_project_publication`;
   historical execution evidence keeps its recorded source revision and selector.
 
-- [#1313](https://github.com/CurateLabs/graphforge/issues/1313) extracts storage
-  lifecycle and filesystem ownership together. Object-store `manifest_tree`,
+- [#1327](https://github.com/CurateLabs/graphforge/pull/1327) merged #1313, extracting
+  storage lifecycle and filesystem ownership together. Object-store `manifest_tree`,
   `materialization`, `installation`, and `gc` own their operations and direct tests;
   the parent retains read/publication leases and lifecycle locks.
 - Publication `participants` owns validation/staging and `control` owns bounded
@@ -156,25 +156,37 @@ exemptions or unchanged-tree release certification are required.
   retain their interfaces and field/drop order. Windows backend admission and
   unsafe-code boundaries are unchanged. Direct tests follow their owners.
 
+- [#1314](https://github.com/CurateLabs/graphforge/issues/1314) extracts knowledge
+  ledgers and both native language surfaces together. Knowledge `algorithm_run`
+  and `confidence` own records, validation and direct tests; shared schema/reader
+  authority and registry remain in the root.
+- Python and Node each have private `conversions`, `assertions`, `epistemic`,
+  `recorded`, `analyst`, `ontology`, `providers`, `query`, `construction`, and
+  `lifecycle` owners. Complete annotated methods, wrappers and async tasks move
+  together. Facade identity, runtime ownership, constructors and registration stay
+  in the roots; public paths and field/drop order remain unchanged.
+- Pinned PyO3 uses `multiple-pymethods`, with Cargo/Bazel dependency state updated
+  together. Python stub, parity and GIL source checks follow declared production
+  modules. This corrects the old scanner's omission of eight already-registered
+  import-session members without changing the actual API or frozen Rust digests.
+  The expanded GIL check also requires two existing certification-report inputs
+  to become owned strings before the unchanged detached native call.
+
 ## Remaining domain sequence
 
 Follow live child dependencies and finish queued work before starting more.
 
-| Area | Remaining ownership extractions |
+| Area | Remaining completion work |
 | --- | --- |
-| Knowledge core | Algorithm-run and confidence ledgers |
-| Bindings | Conversions, domain methods/tasks/types, lifecycle/construction; preserve registration and signatures |
+| Size policy | Accepted ADR with two bounded exemptions; strict checker in Repository Policy and `make pre-push-fast`; clean merged inventory |
 
 ## Measured source inventory
 
-This snapshot records the working tree during #1313; recompute before canonical
+This snapshot records the working tree during #1314; recompute before canonical
 closure. Files above the default bound remain pending unless an accepted exemption applies.
 
 | Source | Physical lines |
 | --- | ---: |
-| `crates/graphforge-bindings-node/src/lib.rs` | 8,122 |
-| `crates/graphforge-bindings-py/src/lib.rs` | 7,070 |
-| `crates/graphforge-knowledge/src/lib.rs` | 3,442 |
 | `crates/graphforge-storage/src/adjacency.rs` | 3,017 |
 | `crates/graphforge-storage/src/project_generation.rs` | 3,014 |
 

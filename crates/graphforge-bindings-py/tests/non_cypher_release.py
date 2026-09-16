@@ -15,6 +15,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import re
+import runpy
 import socket
 import sys
 import tempfile
@@ -22,6 +23,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
+production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.py")))[
+    "production_source"
+]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
 EXPECTED_RUST_DIGEST = "3862aaa8a3f03efbf83a3360a97352a576611b94761af5d2a87891007fd41be6"
 EXPECTED_RELEASE_DIGEST = "b1356b7e0931bf1e71d8dc8f893e45303b3700f5153c649f68827f0a430a419c"
@@ -43,6 +47,8 @@ PYTHON_ONLY_METHODS = frozenset(
         "GraphForge.load_ontology",
         "GraphForge.ontology_mode",
         "GraphForge.path",
+        # Existing import-session identity getter has no Rust method inventory entry.
+        "GraphImportSession.session_uuid",
         "InvocationDescriptor.algorithm",
         "InvocationDescriptor.fingerprint",
         "InvocationDescriptor.projection_fingerprint",
@@ -218,7 +224,7 @@ def _matching_brace(text: str, opening: int) -> int:
 
 def _python_methods() -> set[str]:
     """Extract receiver-qualified methods from the compiled PyO3 surface."""
-    text = PYO3_SOURCE.read_text()
+    text = production_source(PYO3_SOURCE)
     receiver_names = {
         "GraphForge": "GraphForge",
         "PyCheckpointView": "CheckpointView",
