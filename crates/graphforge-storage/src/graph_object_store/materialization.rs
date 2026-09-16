@@ -23,6 +23,8 @@ use super::StableDirectory;
 use super::Uuid;
 use super::Write;
 use super::begin_graph_object_publication;
+#[cfg(windows)]
+use super::fs;
 use super::hex_digest;
 use super::read_graph_object_counted;
 use super::storage;

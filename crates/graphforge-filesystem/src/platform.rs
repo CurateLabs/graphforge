@@ -9,7 +9,7 @@ use std::path::Path;
 use super::file_identity;
 use super::{FileIdentity, FileSpaceUsage, ReplaceFileError, StableDirectory};
 #[cfg(windows)]
-use super::{path_identity, windows};
+use super::{create_private_directory, path_identity, windows};
 #[cfg(unix)]
 use super::{verify_regular_metadata, verify_space_usage_metadata};
 

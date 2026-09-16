@@ -3,15 +3,15 @@ use crate::graph_object_store::ACTIVE_DIR;
 use crate::graph_object_store::BTreeSet;
 use crate::graph_object_store::GRAPH_OBJECTS_DIR;
 use crate::graph_object_store::GfError;
+#[cfg(unix)]
 use crate::graph_object_store::GraphFilesInventory;
 use crate::graph_object_store::LIFECYCLE_LOCK;
-#[cfg(windows)]
-use crate::graph_object_store::OpenOptions;
 use crate::graph_object_store::ProjectErrorCode;
 use crate::graph_object_store::RETURNED_ERROR_BOUNDARY;
 use crate::graph_object_store::ReadOnlyCasRoot;
 use crate::graph_object_store::SHA256_DIR;
 use crate::graph_object_store::Sha256;
+#[cfg(unix)]
 use crate::graph_object_store::TEMP_DIR;
 use crate::graph_object_store::begin_graph_object_gc;
 use crate::graph_object_store::begin_graph_object_publication;
@@ -20,6 +20,7 @@ use crate::graph_object_store::graph_object_path;
 use crate::graph_object_store::graph_object_publication_is_live;
 use crate::graph_object_store::hex_digest;
 use crate::graph_object_store::install_graph_object_bytes;
+#[cfg(unix)]
 use crate::graph_object_store::materialize_graph_objects;
 use crate::graph_object_store::open_graph_object_by_digest;
 use crate::graph_object_store::read_graph_object;

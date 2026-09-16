@@ -1,6 +1,6 @@
-use super::super::tests::{
-    create_request, preserve_checkpoint_intent_after_lock_handoff, while_writer_lock_is_held,
-};
+#[cfg(unix)]
+use super::super::tests::while_writer_lock_is_held;
+use super::super::tests::{create_request, preserve_checkpoint_intent_after_lock_handoff};
 use super::super::*;
 use super::*;
 use std::process::Command;

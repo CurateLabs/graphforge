@@ -20,10 +20,12 @@ use crate::graph_object_store::corrupt_sealed_graph_object_for_test;
 use crate::graph_object_store::gc_graph_objects;
 use crate::graph_object_store::graph_object_path;
 use crate::graph_object_store::hex_digest;
+#[cfg(unix)]
 use crate::graph_object_store::open_graph_object_by_digest;
 use crate::graph_object_store::read_graph_object;
 use crate::graph_object_store::tests::assert_injected_error;
 use crate::graph_object_store::tests::inject_returned_error;
+#[cfg(unix)]
 use crate::graph_object_store::verify_file;
 use crate::graph_object_store::verify_graph_object;
 
