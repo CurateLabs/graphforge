@@ -448,7 +448,16 @@ jobs:
           mkdir -p artifacts
           cp "${addons[0]}" artifacts/
           pnpm exec napi create-npm-dirs
-          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+          # `napi artifacts` refuses to run unless an addon exists for every
+          # target in the manifest's `napi.targets`. This lane deliberately
+          # builds one target on a runner that cannot execute it, so point napi
+          # at a config declaring only that target. The release-candidate job
+          # runs the same command against the manifest, where all five addons
+          # have been collected, so the published set is still gated on the
+          # full target list.
+          printf '{"targets":["%s"]}\n' "$NODE_TARGET" > "$RUNNER_TEMP/napi-lane-target.json"
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm \
+            --config-path "$RUNNER_TEMP/napi-lane-target.json"
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json --target "$NODE_TARGET"
 

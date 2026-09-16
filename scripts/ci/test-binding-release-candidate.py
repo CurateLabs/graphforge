@@ -959,6 +959,14 @@ def main() -> None:
     validator_from_workspace = 'python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py"'
     assert "working-directory: crates/graphforge-bindings-node" in package_validation_step
     assert package_validation_step.count(validator_from_workspace) == 1
+    # `napi artifacts` fails unless every manifest target has an addon, and this
+    # lane builds exactly one, so it must narrow napi to the target it built.
+    assert '--config-path "$RUNNER_TEMP/napi-lane-target.json"' in package_validation_step, (
+        "the single-target cross lane must narrow napi artifacts to the target it built"
+    )
+    assert '{"targets":["%s"]}' in package_validation_step, (
+        "the cross lane's napi config must be generated from the matrix target"
+    )
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in package_validation_step
     assert (ROOT / "scripts/ci/validate-napi-artifacts.py").samefile(ARTIFACT_VALIDATOR)
 
@@ -968,6 +976,9 @@ def main() -> None:
     release_candidate_job = rc_workflow_text.split("  release_candidate:\n", 1)[1]
     assert 'node-version: "22"' in release_candidate_job
     assert validator_from_workspace in release_candidate_job
+    assert "--config-path" not in release_candidate_job, (
+        "the release-candidate job must collect artifacts against the full manifest target list"
+    )
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in release_candidate_job
     assert "--skip-optional-publish --no-gh-release" in release_candidate_job
     assert 'npm pack "./$package_dir"' in release_candidate_job
