@@ -39,11 +39,33 @@ use sha2::Digest;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};
 
-/// Per-spill write buffer. Every partition holds one open spill during the
-/// routing pass, so this is multiplied by the partition count: it is
-/// deliberately far below `BLOCK_BYTES`, which is sized for the handful of
-/// streams a merge group used to open.
+/// Per-spill write buffer for row (Arrow) partition spills. Every partition
+/// holds one open spill during the routing pass, so this is multiplied by the
+/// partition count: it is deliberately far below `BLOCK_BYTES`, which is sized
+/// for the handful of streams a merge group used to open.
 const SPILL_BLOCK_BYTES: usize = 64 * 1024;
+
+/// Per-spill write buffer for the one fixed-width family that is routed a
+/// record at a time, [`PartitionFamily::Resolved`] (#1443).
+///
+/// The other four fixed-width families arrive sorted by the key they are
+/// routed by, so [`FixedRangePartitioner::route_slice`] receives whole
+/// contiguous same-partition runs (kilobytes each at the ladder's chunk
+/// shape) and needs no buffer behind it. Resolved endpoints are re-keyed by
+/// edge UUID away from their node-UUID input order, so consecutive records
+/// land in unrelated partitions and every one of them reached the
+/// descriptor as its own `write(2)`: 33.6M calls for 840 MB at S20, against
+/// 93k for the whole shaping pass before #1440 removed the buffers, and the
+/// measured 23% ingest throughput regression that removal cost. This buffer
+/// restores the batching for exactly that family.
+///
+/// Sized so the bound is invisible in resident memory even at the partition
+/// ceiling: it is allocated lazily per open spill, only the Resolved family
+/// holds spills open while it is live (the staged families are sealed and
+/// finished before resolution starts), and 256 partitions cost 2 MiB at this
+/// size. 8 KiB already cuts the S20 call count to ~100k, so raising it buys
+/// nothing measurable (see the #1443 curve).
+const RESOLVED_SPILL_BUFFER_BYTES: usize = 8 * 1024;
 
 /// Canonical fixed-width partition families. The family name is part of the
 /// durable artifact grammar, so it is a closed set rather than a free string.
@@ -64,6 +86,16 @@ impl PartitionFamily {
             Self::EdgeDetails => "edge-details",
             Self::Endpoints => "endpoints",
             Self::Resolved => "resolved",
+        }
+    }
+
+    /// Bound on the per-partition write buffer a spill of this family holds
+    /// while open; zero writes every routed slice straight to the descriptor.
+    /// See [`RESOLVED_SPILL_BUFFER_BYTES`] for why only one family has one.
+    pub(super) const fn spill_buffer_bytes(self) -> usize {
+        match self {
+            Self::Resolved => RESOLVED_SPILL_BUFFER_BYTES,
+            Self::Identities | Self::NodeDetails | Self::EdgeDetails | Self::Endpoints => 0,
         }
     }
 
@@ -190,30 +222,40 @@ impl SpillWriter {
     }
 }
 
-/// One open, unsealed fixed-width partition spill (#1439 follow-up).
+/// One open, unsealed fixed-width partition spill (#1439 follow-up, #1443).
 ///
-/// Unlike [`SpillWriter`], this holds no per-partition write buffer. Every
-/// partition open at once during routing used to cost `SPILL_BLOCK_BYTES`
-/// (64 KiB) of resident buffer regardless of how much of it had actually
-/// been written; concurrent spill buffers across partitions and families
-/// were the dominant measured term in both the RSS and fsync growth #1439
-/// originally investigated. The staged runs routed through this are
-/// UUID-sorted and the partition function is monotone, so the caller can
-/// accumulate one contiguous same-partition run of wire bytes and write it
-/// in a single call -- see [`FixedRangePartitioner::route_slice`] -- rather
-/// than buffering to amortize many small per-record writes.
-struct UnbufferedSpillWriter {
+/// Unlike [`SpillWriter`], this holds no fixed-size per-partition block.
+/// Every partition open at once during routing used to cost
+/// `SPILL_BLOCK_BYTES` (64 KiB) of resident buffer regardless of how much of
+/// it had actually been written; concurrent spill buffers across partitions
+/// and families were the dominant measured term in both the RSS and fsync
+/// growth #1439 originally investigated. The staged runs routed through this
+/// are UUID-sorted and the partition function is monotone, so the caller
+/// accumulates one contiguous same-partition run of wire bytes and writes it
+/// in a single call -- see [`FixedRangePartitioner::route_slice`] -- and
+/// those families set `bound` to zero.
+///
+/// The one family whose input order does not match its routing key,
+/// [`PartitionFamily::Resolved`], sets a small `bound` instead: slices
+/// shorter than it are coalesced in `buffer` (grown lazily, never past the
+/// bound) and reach the descriptor in bound-sized writes; a slice at least
+/// as long as the bound bypasses the buffer. This is the batching the 64 KiB
+/// block used to provide, at a fraction of its residency.
+struct FixedSpillWriter {
     name: String,
     temporary: std::ffi::OsString,
     identity: FileIdentity,
     writer: HashingWriter,
+    buffer: Vec<u8>,
+    bound: usize,
 }
 
-impl UnbufferedSpillWriter {
+impl FixedSpillWriter {
     fn create(
         root: &StableDirectory,
         name: String,
         window: std::num::NonZeroU64,
+        bound: usize,
     ) -> Result<Self, GfError> {
         let temporary = artifact_temp(&name);
         let file = root
@@ -226,11 +268,34 @@ impl UnbufferedSpillWriter {
             temporary,
             identity,
             writer,
+            buffer: Vec::new(),
+            bound,
         })
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), GfError> {
-        self.writer.write_all(bytes).map_err(super::storage)
+        if self.bound == 0 {
+            return self.writer.write_all(bytes).map_err(super::storage);
+        }
+        if self.buffer.len() + bytes.len() > self.bound {
+            self.flush_buffer()?;
+        }
+        if bytes.len() >= self.bound {
+            self.writer.write_all(bytes).map_err(super::storage)
+        } else {
+            self.buffer.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    fn flush_buffer(&mut self) -> Result<(), GfError> {
+        if !self.buffer.is_empty() {
+            self.writer
+                .write_all(&self.buffer)
+                .map_err(super::storage)?;
+            self.buffer.clear();
+        }
+        Ok(())
     }
 
     /// Drop an unsealed spill and remove its temporary. See
@@ -252,6 +317,7 @@ impl UnbufferedSpillWriter {
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<ArtifactReceipt, GfError> {
+        self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
         self.writer
             .inner
@@ -303,7 +369,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     codec: Option<DetailCodec>,
     reject_duplicates: bool,
     window: std::num::NonZeroU64,
-    spills: Vec<Option<UnbufferedSpillWriter>>,
+    spills: Vec<Option<FixedSpillWriter>>,
     sealed: Vec<Option<ArtifactReceipt>>,
     balance: PartitionBalance,
     records: u64,
@@ -388,10 +454,11 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             .get_mut(partition)
             .ok_or_else(|| super::storage("routed partition is out of range"))?;
         if slot.is_none() {
-            *slot = Some(UnbufferedSpillWriter::create(
+            *slot = Some(FixedSpillWriter::create(
                 self.root,
                 fixed_spill_name(self.family, partition),
                 self.window,
+                self.family.spill_buffer_bytes(),
             )?);
         }
         slot.as_mut()
