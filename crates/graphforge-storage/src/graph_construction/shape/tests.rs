@@ -43,7 +43,7 @@ fn resolved_endpoint_windows_use_logarithmic_name_state_at_1x_2x_4x() {
                 .append(
                     ConstructionChunkKind::Edge,
                     &format!("edges-{offset}"),
-                    &edge_batch(10_000 + u128::from(offset), rows),
+                    &edge_batch(10_000 + u128::from(offset), 1, u128::from(nodes), rows),
                 )
                 .unwrap();
         }
@@ -150,7 +150,12 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
             .append(
                 ConstructionChunkKind::Edge,
                 "edges",
-                &edge_batch(10_000, chunks * EDGES_PER_CHUNK),
+                &edge_batch(
+                    10_000,
+                    1,
+                    (chunks * NODES_PER_CHUNK) as u128,
+                    chunks * EDGES_PER_CHUNK,
+                ),
             )
             .unwrap();
         session.seal().unwrap();
@@ -333,7 +338,11 @@ fn shaping_rejects_cross_kind_duplicates_and_missing_endpoints() {
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     duplicate
-        .append(ConstructionChunkKind::Edge, "edges", &edge_batch(1, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(1, 1, 2, 1),
+        )
         .unwrap();
     duplicate.seal().unwrap();
     assert!(
@@ -350,7 +359,11 @@ fn shaping_rejects_cross_kind_duplicates_and_missing_endpoints() {
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     missing
-        .append(ConstructionChunkKind::Edge, "edges", &edge_batch(20_000, 2))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(20_000, 1, 3, 2),
+        )
         .unwrap();
     missing.seal().unwrap();
     assert!(
@@ -642,5 +655,47 @@ fn fixed_merge_reader_rejects_truncation_and_self_loop_is_valid() {
     assert_eq!(
         resumed.shape_canonical_with_cancellation(|| false).unwrap(),
         shape
+    );
+}
+
+#[test]
+fn resolved_endpoints_never_cost_one_write_submission_each() {
+    // Resolved endpoints are re-keyed by edge UUID away from their node-UUID
+    // input order, so they are routed one record at a time. Without a bounded
+    // spill buffer behind that route every record reached the descriptor as
+    // its own write (#1440: 33.6M submissions for 840 MB at S20, the whole
+    // shaping pass having needed 93k before), and the ingest path lost ~23%
+    // of its throughput. Every other family is run-batched, so the shaping
+    // pass as a whole must submit far fewer writes than there are resolved
+    // endpoints.
+    const NODES: usize = 256;
+    const EDGES: usize = 8_192;
+    let root = TempDir::new().unwrap();
+    let mut session = GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(7_443),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, NODES))
+        .unwrap();
+    session
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(10_000, 1, NODES as u128, EDGES),
+        )
+        .unwrap();
+    session.seal().unwrap();
+    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+    assert_eq!(shape.edge_count, EDGES as u64);
+    assert!(shape.edge_endpoints.is_some());
+    let resolved_endpoints = 2 * EDGES as u64;
+    let submissions = session.evidence().merge_write_operations;
+    assert!(
+        submissions < resolved_endpoints,
+        "shaping submitted {submissions} writes for {resolved_endpoints} resolved endpoints"
     );
 }

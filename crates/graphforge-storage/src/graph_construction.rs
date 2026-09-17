@@ -822,6 +822,16 @@ struct ShapeIntent {
     /// partition writes a byte.
     #[serde(default)]
     splitters: Vec<String>,
+    /// Recorded range-partition splitters over the staged **node** identity
+    /// domain only (#1439), canonical lower hex, strictly increasing.
+    /// Endpoints, node details and node-kind rows are keyed by node UUID and
+    /// are routed with these instead of `splitters`: Graph500-shaped input
+    /// puts nodes and edges in disjoint UUID bands, so the joint splitters
+    /// above route almost every node-keyed record into a handful of
+    /// partitions. A pure function of the same recorded chunk receipts as
+    /// `splitters`, so R1 holds for this set too.
+    #[serde(default)]
+    node_splitters: Vec<String>,
     /// Measured identity rows per effective partition, in partition order.
     #[serde(default)]
     partition_identity_rows: Vec<u64>,

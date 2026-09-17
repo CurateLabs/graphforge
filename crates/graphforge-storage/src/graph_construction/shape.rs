@@ -81,12 +81,48 @@ impl GraphConstructionSession {
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PartitionPlan, GfError> {
+        self.sample_partition_plan(None, cancelled)
+    }
+
+    /// Barrier A0'. Choose splitters over only the staged **node** identity
+    /// domain (#1439).
+    ///
+    /// Endpoints, node details and node-kind rows are keyed by node UUID, but
+    /// the joint splitters above are sampled from the combined node+edge
+    /// domain. Graph500-shaped input is disjoint by kind in UUID-space
+    /// (namespace bit) and overwhelmingly edges, so almost every node UUID
+    /// falls inside a handful of the joint splitters' partitions: those
+    /// families were routed with the wrong splitters, and it is the
+    /// dominant term in ingest resident memory, not partition count.
+    ///
+    /// A second, node-only splitter set is a pure function of the same
+    /// recorded chunk receipts as the joint one, so it costs R1 nothing: it
+    /// is what actually matches the key distribution those families are
+    /// routed by.
+    fn choose_node_partition_plan(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PartitionPlan, GfError> {
+        self.sample_partition_plan(Some(ConstructionChunkKind::Node), cancelled)
+    }
+
+    /// Shared sampler behind [`Self::choose_partition_plan`] and
+    /// [`Self::choose_node_partition_plan`]: identical logic, restricted to
+    /// receipts of `kind_filter` when given.
+    fn sample_partition_plan(
+        &mut self,
+        kind_filter: Option<ConstructionChunkKind>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PartitionPlan, GfError> {
         let partition_count = self.checkpoint.budgets.partition_count;
         let mut extents = Vec::new();
         let mut total = 0_u64;
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(cancelled)?;
             let receipt = self.read_receipt(sequence)?;
+            if kind_filter.is_some_and(|kind| receipt.kind != kind) {
+                continue;
+            }
             if receipt.identities.bytes % IDENTITY_WIDTH as u64 != 0 {
                 return Err(storage("staged identity run is not record aligned"));
             }
@@ -96,6 +132,13 @@ impl GraphConstructionSession {
                 .checked_add(records)
                 .ok_or_else(|| storage("staged identity record count overflows"))?;
         }
+        // #1439 follow-up: sizing the node plan's cut from the *routed*
+        // population (endpoints + node details, which outnumber node
+        // identities by the graph's average degree) rather than this sample
+        // domain was tried and measured worse -- it drove the count past the
+        // empirically measured RSS-vs-buffer-overhead minimum into the
+        // buffer-dominated side of that curve. Reverted: the cut is sized
+        // from the sample domain here, same as the joint plan.
         let mut sampler = IdentitySampler::new(partition_count, total)?;
         let positions = sampler.positions().collect::<Vec<_>>();
         let mut cursor = 0_usize;
@@ -121,8 +164,15 @@ impl GraphConstructionSession {
             account_sequential_read(IDENTITY_WIDTH as u64, &mut self.checkpoint.evidence)?;
             sampler.admit(key)?;
         }
-        self.checkpoint.evidence.splitter_sample_records = sampler.sampled_records();
-        self.checkpoint.evidence.splitter_sampled_source_records = sampler.source_records();
+        if kind_filter.is_none() {
+            self.checkpoint.evidence.splitter_sample_records = sampler.sampled_records();
+            self.checkpoint.evidence.splitter_sampled_source_records = sampler.source_records();
+        } else {
+            self.checkpoint.evidence.node_splitter_sample_records = sampler.sampled_records();
+            self.checkpoint
+                .evidence
+                .node_splitter_sampled_source_records = sampler.source_records();
+        }
         sampler.into_plan(partition_count)
     }
 
@@ -194,6 +244,22 @@ impl GraphConstructionSession {
         let partitions = plan.partitions();
         self.checkpoint.evidence.shape_partitions = u64::try_from(partitions).map_err(storage)?;
         self.checkpoint.evidence.shape_partition_count = u64::from(plan.partition_count());
+        // Barrier A0'. A second splitter set over the node-only domain
+        // (#1439): endpoints, node details and node-kind rows are keyed by
+        // node UUID, and routing them with the joint `plan` above skews them
+        // badly once nodes and edges occupy disjoint UUID bands. `node_plan`
+        // has at most as many partitions as `plan` (its domain is a subset),
+        // so every family below is constructed with the partition count of
+        // whichever plan actually routes it. This matters beyond bounds
+        // safety: `PartitionBalance`'s mean is `total / partitions`, so
+        // sizing a node-keyed family's spill/balance vectors by the joint
+        // plan's (larger) partition count would silently dilute its mean
+        // with slots that routing through `node_plan` can never reach,
+        // making a perfectly balanced node-keyed family look skewed.
+        let node_plan = self.choose_node_partition_plan(&mut cancelled)?;
+        let node_partitions = node_plan.partitions();
+        self.checkpoint.evidence.shape_node_partitions =
+            u64::try_from(node_partitions).map_err(storage)?;
         let mut identities = FixedRangePartitioner::<BASE_IDENTITY_WIDTH>::new(
             &self.root,
             PartitionFamily::Identities,
@@ -204,7 +270,7 @@ impl GraphConstructionSession {
         let mut node_details = FixedRangePartitioner::<NODE_DETAIL_WIDTH>::new(
             &self.root,
             PartitionFamily::NodeDetails,
-            partitions,
+            node_partitions,
             Some(detail_codec),
             false,
         )?;
@@ -218,7 +284,7 @@ impl GraphConstructionSession {
         let mut endpoints = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
             &self.root,
             PartitionFamily::Endpoints,
-            partitions,
+            node_partitions,
             None,
             false,
         )?;
@@ -241,6 +307,7 @@ impl GraphConstructionSession {
             outputs: Vec::new(),
             shape_authority_sha256: None,
             splitters: encode_splitters(&plan),
+            node_splitters: encode_splitters(&node_plan),
             partition_identity_rows: Vec::new(),
         };
         install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
@@ -286,13 +353,24 @@ impl GraphConstructionSession {
             catalog_authority.update(receipt.schema_sha256.as_bytes());
             catalog_authority.update(receipt.parquet.sha256.as_bytes());
             let group = (kind, receipt.schema_sha256.clone());
+            // Row groups are keyed by their own kind's UUID (#1439): a
+            // node-kind schema group's rows are keyed by node UUID and must
+            // be routed by `node_plan`, matching node details and endpoints
+            // below -- sized to `node_partitions`, for the same balance-mean
+            // reason those two are. Edge-kind groups stay on the joint
+            // `plan`, which their key domain already matches well since
+            // edges dominate it.
+            let row_plan = match receipt.kind {
+                ConstructionChunkKind::Node => &node_plan,
+                ConstructionChunkKind::Edge => &plan,
+            };
             if !row_groups.contains_key(&group) {
                 row_groups.insert(
                     group.clone(),
                     RowRangePartitioner::new(
                         &self.root,
                         &format!("{kind}-{}", receipt.schema_sha256),
-                        partitions,
+                        row_plan.partitions(),
                     )?,
                 );
             }
@@ -300,7 +378,7 @@ impl GraphConstructionSession {
                 .get_mut(&group)
                 .ok_or_else(|| storage("row partitioner is absent"))?
                 .push(
-                    &plan,
+                    row_plan,
                     &receipt.parquet.name,
                     self.checkpoint.budgets.max_batch_rows,
                     &mut cancelled,
@@ -318,7 +396,7 @@ impl GraphConstructionSession {
                 ConstructionChunkKind::Node => {
                     route_fixed_run::<NODE_DETAIL_WIDTH>(
                         &self.root,
-                        &plan,
+                        &node_plan,
                         &receipt.details,
                         Some(detail_codec),
                         &mut node_details,
@@ -336,9 +414,14 @@ impl GraphConstructionSession {
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
                     )?;
+                    // Endpoints are keyed by the referenced *node*'s UUID at
+                    // this staged, pre-resolution stage (#1439) -- the later
+                    // resolved endpoints, re-keyed by edge UUID in
+                    // `resolve_endpoint_surrogates`, correctly keep using
+                    // `plan`.
                     route_fixed_run::<ENDPOINT_WIDTH>(
                         &self.root,
-                        &plan,
+                        &node_plan,
                         receipt
                             .endpoints
                             .as_ref()
@@ -584,6 +667,7 @@ impl GraphConstructionSession {
                 outputs,
                 shape_authority_sha256: Some(shape_authority_sha256),
                 splitters: shape_intent.splitters,
+                node_splitters: shape_intent.node_splitters,
                 partition_identity_rows,
             },
         )?;
@@ -618,6 +702,12 @@ pub(super) fn validate_shape_binding(
     PartitionPlan::from_recorded(
         checkpoint.budgets.partition_count,
         decode_splitters(&intent.splitters)?,
+    )?;
+    // The node-only splitters (#1439) are the same kind of authority, over
+    // the node-keyed families' own domain.
+    PartitionPlan::from_recorded(
+        checkpoint.budgets.partition_count,
+        decode_splitters(&intent.node_splitters)?,
     )?;
     Ok(())
 }
@@ -941,6 +1031,7 @@ pub(super) fn route_fixed_run<const N: usize>(
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let routed = (|| -> Result<(), GfError> {
+        let mut run = PartitionRun::new();
         while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
             let wire = run_record_bytes(&record, codec)?;
             digest.update(wire);
@@ -948,9 +1039,11 @@ pub(super) fn route_fixed_run<const N: usize>(
                 .checked_add(wire.len() as u64)
                 .ok_or_else(|| storage("partition source byte count overflows"))?;
             let key: [u8; 16] = record[..16].try_into().expect("fixed key prefix");
-            target.route(plan, &key, &record, evidence)?;
+            let partition = plan.partition_of(&key);
+            run.push(partition, wire, target, evidence)?;
             reject_cancelled(cancelled)?;
         }
+        run.flush(target, evidence)?;
         if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
             return Err(storage("construction partition source content changed"));
         }
@@ -958,6 +1051,64 @@ pub(super) fn route_fixed_run<const N: usize>(
     })();
     let released = release_counted_reader_cache(&mut reader, evidence);
     combine_cache_cleanup(routed, released, "construction partition source")
+}
+
+/// Accumulates one contiguous same-partition run of wire bytes so the
+/// caller writes it in a single call instead of once per record (#1439
+/// follow-up).
+///
+/// The staged runs routed through [`route_fixed_run`] and
+/// [`route_identity_run`] are UUID-sorted and the partition function is
+/// monotone, so consecutive same-partition records are always contiguous
+/// within one staged chunk. This is the same property
+/// [`RowRangePartitioner::route_batch`] already exploits for Arrow rows;
+/// this is its fixed-width-record equivalent.
+struct PartitionRun {
+    partition: Option<usize>,
+    bytes: Vec<u8>,
+    records: u64,
+}
+
+impl PartitionRun {
+    fn new() -> Self {
+        Self {
+            partition: None,
+            bytes: Vec::new(),
+            records: 0,
+        }
+    }
+
+    fn push<const N: usize>(
+        &mut self,
+        partition: usize,
+        wire: &[u8],
+        target: &mut FixedRangePartitioner<N>,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        if self.partition.is_some_and(|current| current != partition) {
+            self.flush(target, evidence)?;
+        }
+        self.partition = Some(partition);
+        self.bytes.extend_from_slice(wire);
+        self.records = self
+            .records
+            .checked_add(1)
+            .ok_or_else(|| storage("partition run record count overflows"))?;
+        Ok(())
+    }
+
+    fn flush<const N: usize>(
+        &mut self,
+        target: &mut FixedRangePartitioner<N>,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        if let Some(partition) = self.partition.take() {
+            target.route_slice(partition, &self.bytes, self.records, evidence)?;
+            self.bytes.clear();
+            self.records = 0;
+        }
+        Ok(())
+    }
 }
 
 /// Stream one staged identity run into its range partitions, widening each
@@ -1003,6 +1154,7 @@ fn route_identity_run(
     let mut digest = Sha256::new();
     let mut bytes = 0_u64;
     let routed = (|| -> Result<(), GfError> {
+        let mut run = PartitionRun::new();
         while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
             digest.update(uuid);
             bytes = bytes
@@ -1011,9 +1163,12 @@ fn route_identity_run(
             let mut record = [0_u8; BASE_IDENTITY_WIDTH];
             record[..16].copy_from_slice(&uuid);
             record[16] = kind;
-            target.route(plan, &uuid, &record, evidence)?;
+            let wire = run_record_bytes(&record, None)?;
+            let partition = plan.partition_of(&uuid);
+            run.push(partition, wire, target, evidence)?;
             reject_cancelled(cancelled)?;
         }
+        run.flush(target, evidence)?;
         if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
             return Err(storage(
                 "identity source content changed before partitioning",

@@ -27,6 +27,17 @@
 // That is a pre-existing durable-format defect, it is not introduced here, and
 // fixing it is a separate concern.
 //
+// The table above is a historical measurement on `13632d4b`, predating S5's
+// external-merge-tree deletion, not a pinned expectation: no test asserts
+// those literal values. Read it for what it demonstrates -- self-consistency
+// across two sessions -- not as a checksum to reproduce. It is stale for two
+// rows as of #1439's follow-up (per-family splitters): routing node-keyed
+// families with node-only splitters changes how edge details and edge
+// endpoints partition, so `edge details` and `edge endpoints` legitimately
+// produce different bytes now. `shaped-identities.run` and `node details`
+// are unchanged, because their routing did not change. The claim this file's
+// tests actually enforce -- stated precisely below -- still holds.
+//
 // So the claim these tests make is precise:
 //
 //   * **Within a fixed set of recorded session parameters** — the session clock
@@ -108,16 +119,25 @@ mod determinism {
         .unwrap()
     }
 
-    fn edge_rows(edges: &[[u8; 16]], nodes: &[[u8; 16]]) -> RecordBatch {
+    /// `start` is this window's offset into the full edge sequence (#1439).
+    /// Every call site passes one chunk at a time, and indexing `nodes` from
+    /// a per-call-local `0` on every chunk -- the previous behaviour --
+    /// referenced only the first `chunk`-many nodes as an endpoint no matter
+    /// how many nodes or chunks existed, concentrating every edge onto a
+    /// narrow node-UUID band. That was invisible while endpoints were routed
+    /// with the joint identity splitters, which never resolve node UUIDs
+    /// finely enough to notice; routing them with node-only splitters
+    /// surfaces it as a real (fixture-caused, not production) skew.
+    fn edge_rows(start: usize, edges: &[[u8; 16]], nodes: &[[u8; 16]]) -> RecordBatch {
         let src = edges
             .iter()
             .enumerate()
-            .map(|(index, _)| nodes[index % nodes.len()])
+            .map(|(index, _)| nodes[(start + index) % nodes.len()])
             .collect::<Vec<_>>();
         let dst = edges
             .iter()
             .enumerate()
-            .map(|(index, _)| nodes[(index + 1) % nodes.len()])
+            .map(|(index, _)| nodes[(start + index + 1) % nodes.len()])
             .collect::<Vec<_>>();
         RecordBatch::try_new(
             CONSTRUCTION_EDGE_SCHEMA.clone(),
@@ -200,7 +220,7 @@ mod determinism {
                 .append(
                     ConstructionChunkKind::Edge,
                     &format!("edges-{index}"),
-                    &edge_rows(window, nodes),
+                    &edge_rows(index * chunk, window, nodes),
                 )
                 .unwrap();
         }
@@ -451,7 +471,18 @@ mod determinism {
         let edges = edge_ids(1_024);
         let mut reference: Option<Fingerprint> = None;
         let mut observed = Vec::new();
-        for partition_count in [1_u32, 4, 64, 256] {
+        // #1439 extends the range up to MAX_PARTITION_COUNT, the new default
+        // ceiling: at this fixture's small record count both 256 and 4_096
+        // clip to the same recorded-count-bounded cut, so this proves raising
+        // the ceiling all the way to its new default introduces no
+        // logical-result variance either.
+        for partition_count in [
+            1_u32,
+            4,
+            64,
+            256,
+            crate::graph_construction::partition::MAX_PARTITION_COUNT,
+        ] {
             let root = TempDir::new().unwrap();
             let (fingerprint, layout) = ingest(&root, partition_count, &nodes, &edges, 128);
             assert_eq!(layout.recorded_partition_count, u64::from(partition_count));
@@ -482,19 +513,31 @@ mod determinism {
             }
         }
         // The layouts genuinely differ; the results do not.
-        // The cut is the recorded count bounded by the recorded record count, so
-        // that a small graph does not pay a large graph's durability price.
-        // 2048 identities admit at most 2048/16 = 128 partitions.
+        // The cut is bounded by the recorded record count on two independent
+        // terms, `min`-combined (#1439): a small-scale floor of
+        // `identities / 16` (unchanged since before #1439) and a data-driven
+        // target floored at `DEFAULT_PARTITION_COUNT`. 2048 identities admit
+        // at most 2048/16 = 128 partitions from the small-scale floor, which
+        // is far below the data-driven target's floor of 256, so the
+        // small-scale floor is what binds at this fixture's size for every
+        // requested count above it -- including the raised MAX_PARTITION_COUNT
+        // default.
         let partitions = observed
             .iter()
             .map(|(_, partitions, ..)| *partitions)
             .collect::<Vec<_>>();
         let identities = observed[0].3;
         assert_eq!(identities, (nodes.len() + edges.len()) as u64);
-        let expected = [1_u32, 4, 64, 256]
-            .into_iter()
-            .map(|requested| u64::from(requested).min(identities / 16))
-            .collect::<Vec<_>>();
+        let expected = [
+            1_u32,
+            4,
+            64,
+            256,
+            crate::graph_construction::partition::MAX_PARTITION_COUNT,
+        ]
+        .into_iter()
+        .map(|requested| u64::from(requested).min(identities / 16))
+        .collect::<Vec<_>>();
         assert_eq!(partitions, expected);
         let peaks = observed
             .iter()

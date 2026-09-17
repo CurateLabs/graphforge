@@ -75,7 +75,7 @@ mod compact_details {
                 )
                 .unwrap();
             session
-                .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+                .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1, 3, 2))
                 .unwrap();
             session.seal().unwrap();
             drop(session);
@@ -153,7 +153,7 @@ mod compact_details {
             )
             .unwrap();
         initial
-            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1, 3, 2))
             .unwrap();
         initial.seal().unwrap();
         let encoded = initial.prepare_canonical_encoding(1).unwrap();
@@ -295,7 +295,7 @@ mod compact_details {
                     .append(
                         ConstructionChunkKind::Edge,
                         &format!("edges-{chunk}"),
-                        &edge_batch(10_000 + chunk * 128, 128),
+                        &edge_batch(10_000 + chunk * 128, 1 + (chunk * 128) % 1024, 1024, 128),
                     )
                     .unwrap();
             }
@@ -410,12 +410,18 @@ mod compact_details {
                 record[17..23].copy_from_slice(b"Person");
                 expected.push(record);
             }
+            // src/dst walk the full 1024-node range across the 8 chunks and
+            // wrap modulo 1024 (#1439), rather than restarting at node 1 on
+            // every chunk: `edge_batch`'s `node_start` argument varies per
+            // chunk to match.
             for chunk in 0_u128..8 {
                 for row in 0_u128..128 {
                     let mut record = vec![0; EDGE_DETAIL_WIDTH];
                     record[..16].copy_from_slice(&(10_000 + chunk * 128 + row).to_be_bytes());
-                    record[16..32].copy_from_slice(&(row + 1).to_be_bytes());
-                    record[32..48].copy_from_slice(&(row + 2).to_be_bytes());
+                    let src = 1 + chunk * 128 + row;
+                    let dst = 1 + (chunk * 128 + row + 1) % 1024;
+                    record[16..32].copy_from_slice(&src.to_be_bytes());
+                    record[32..48].copy_from_slice(&dst.to_be_bytes());
                     record[48] = 1;
                     record[49] = b'R';
                     expected.push(record);
@@ -496,7 +502,7 @@ mod compact_details {
             .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
             .unwrap();
         session
-            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1))
+            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1, 2, 1))
             .unwrap();
         session.seal().unwrap();
         let encoded = session.prepare_canonical_encoding(1).unwrap();
@@ -567,7 +573,7 @@ mod compact_details {
                     }
                     if resumed.accepted_chunks() == 1 {
                         resumed
-                            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1))
+                            .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1, 2, 1))
                             .unwrap();
                     }
                     resumed.seal().unwrap();
