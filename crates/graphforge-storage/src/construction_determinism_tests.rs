@@ -395,9 +395,9 @@ mod determinism {
                 "{expected} is not among {published_index:?}"
             );
         }
-        assert!(encoding.evidence.adjacency_write_bytes > 0);
-        assert_eq!(encoding.evidence.adjacency_source_rows, edges.len() as u64);
-        assert!(encoding.evidence.adjacency_csr_shards >= 4);
+        assert!(encoding.evidence.adjacency.write_bytes > 0);
+        assert_eq!(encoding.evidence.adjacency.source_rows, edges.len() as u64);
+        assert!(encoding.evidence.adjacency.csr_shards >= 4);
 
         let published = session
             .publish_canonical(&encoding, Uuid::from_u128(0x71), Uuid::from_u128(0x72))
