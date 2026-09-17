@@ -40,6 +40,24 @@ assert mod.validate(
     versions={**versions, "skills": "0.5.3"},
 )
 
+# The npm dist-tag policy is derived, not configured, and refuses the unclassifiable.
+publisher_spec = importlib.util.spec_from_file_location(
+    "publish_npm_artifacts", ROOT / "scripts" / "publish_npm_artifacts.py"
+)
+assert publisher_spec is not None and publisher_spec.loader is not None
+publisher = importlib.util.module_from_spec(publisher_spec)
+publisher_spec.loader.exec_module(publisher)
+assert publisher.dist_tag_for("0.5.2") == "latest"
+assert publisher.dist_tag_for("0.6.0") == "latest"
+assert publisher.dist_tag_for("0.6.0-rc.1") == "next"
+assert publisher.dist_tag_for("0.6.0-dev") == "next"
+try:
+    publisher.dist_tag_for("0.6.0rc1")
+except publisher.DistTagError:
+    pass
+else:
+    raise AssertionError("an unclassifiable version must not reach npm")
+
 workflow = WORKFLOW.read_text(encoding="utf-8")
 assert "default: v0.5.2" not in workflow
 assert "recovery_overlay_sha:" in workflow
@@ -53,6 +71,8 @@ assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
 assert "scripts/set_release_version.py --check" in workflow
+assert "scripts/publish_npm_artifacts.py \\\n            --print-dist-tag" in workflow
+assert "npm_dist_tag: ${{ steps.source.outputs.npm_dist_tag }}" in workflow
 assert "waive_unreleased" not in workflow
 assert "allow-unreleased-entries" not in workflow
 assert "CHANGELOG" not in workflow
@@ -73,6 +93,9 @@ assert "--attempts-dir write-evidence/attempts" in preflight
 assert "--receipts-dir write-evidence/receipts" in preflight
 assert "offline-rehearsal.json" in preflight
 assert "secrets." not in preflight
+# The dist-tag is resolved once, before any lane can write to a registry.
+assert "--print-dist-tag" in preflight
+assert 'printf \'npm_dist_tag=%s\\n\' "$npm_dist_tag" >> "$GITHUB_OUTPUT"' in preflight
 
 pypi = workflow.split("  publish-pypi:\n", 1)[1].split("\n  npm-native:", 1)[0]
 native = workflow.split("  npm-native:\n", 1)[1].split("\n  npm-main:", 1)[0]
@@ -154,6 +177,11 @@ authorize_marker = (
     "--observations observations.json"
 )
 assert crates.index(observe_marker) < crates.index(authorize_marker)
+
+# Each npm lane asserts the preflight dist-tag; the publisher refuses a mismatch.
+for lane in (native, main, cli, skills):
+    assert "NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}" in lane
+    assert '--dist-tag "$NPM_DIST_TAG"' in lane
 
 for lane in (pypi, native, main, cli, skills, crates):
     assert "release_action.py" in lane
