@@ -1316,8 +1316,24 @@ pub fn materialize_replayed_graph_tree(
 ) -> Result<(crate::GraphFilesOpenEvidence, GraphDeltaReplayEvidence), GfError> {
     preflight_canonical_parquet(graph_root, inventory, limits)?;
     let runs = load_verified_delta_runs(graph_root, inventory, limits)?;
-    let (overlay, mut evidence) = build_replay_overlay(&runs, limits)?;
-    drop(runs);
+    materialize_replayed_graph_tree_with_runs(graph_root, inventory, target, limits, &runs)
+}
+
+/// Same as [`materialize_replayed_graph_tree`], but replays an already
+/// loaded and verified run sequence instead of reloading (and re-hashing)
+/// every run file from `graph_root` (#1401).
+///
+/// # Errors
+/// Fails closed before returning the workspace when inventory, Parquet, GFDR,
+/// typed-value, or replay-budget validation fails.
+fn materialize_replayed_graph_tree_with_runs(
+    graph_root: &Path,
+    inventory: &GraphFilesInventory,
+    target: &Path,
+    limits: GraphDeltaJournalLimits,
+    runs: &[GraphDeltaRun],
+) -> Result<(crate::GraphFilesOpenEvidence, GraphDeltaReplayEvidence), GfError> {
+    let (overlay, mut evidence) = build_replay_overlay(runs, limits)?;
     evidence.materialization_batch_row_bound = limits.max_batch_rows as u64;
     let open_evidence = crate::graph_files::materialize_graph_tree(graph_root, inventory, target)?;
     if evidence.runs_replayed == 0 {
@@ -1336,15 +1352,44 @@ pub fn materialize_replayed_graph_tree(
     Ok((open_evidence, evidence))
 }
 
+/// Top-level workspace prefixes `write_replay_overlay_streaming` may rewrite
+/// on every replay, regardless of which properties this specific overlay
+/// touches (it always re-streams topology and both property tables). Any
+/// other file the base copy step places in the materialized tree is
+/// byte-for-byte identical to `inventory`'s already-authenticated digest and
+/// does not need a second read+hash just to fingerprint it (#1401).
+const REPLAY_REWRITTEN_PATH_PREFIXES: [&str; 3] = ["topology/", "properties/", "edge_properties/"];
+
 fn bounded_materialized_fingerprint(
     graph_root: &Path,
     inventory: &GraphFilesInventory,
     limits: GraphDeltaJournalLimits,
+    runs: &[GraphDeltaRun],
 ) -> Result<[u8; 32], GfError> {
     let target = tempfile::tempdir()
         .map_err(|error| GfError::Storage(format!("create replay fingerprint view: {error}")))?;
-    materialize_replayed_graph_tree(graph_root, inventory, target.path(), limits)?;
-    let (materialized, _) = capture_graph_files(target.path())?;
+    preflight_canonical_parquet(graph_root, inventory, limits)?;
+    materialize_replayed_graph_tree_with_runs(graph_root, inventory, target.path(), limits, runs)?;
+    let mut known_unchanged = std::collections::HashMap::with_capacity(inventory.files.len());
+    for entry in &inventory.files {
+        if entry.relative_path.starts_with("deltas/")
+            || entry.relative_path == crate::route_component::TABLE_FILE
+            || REPLAY_REWRITTEN_PATH_PREFIXES
+                .iter()
+                .any(|prefix| entry.relative_path.starts_with(prefix))
+        {
+            // Either excluded from the fingerprint outright (deltas/), or a
+            // path the replay writer may have just rewritten — always
+            // re-hash those from `target` rather than trusting a stale copy.
+            continue;
+        }
+        known_unchanged.insert(
+            entry.relative_path.clone(),
+            (entry.byte_length, entry.content_sha256.clone()),
+        );
+    }
+    let (materialized, _) =
+        crate::graph_files::capture_graph_files_reusing_digests(target.path(), &known_unchanged)?;
     let mut hasher = Sha256::new();
     hasher.update(b"graphforge-materialized-graph-tree/1\n");
     for entry in materialized.files {
@@ -1417,14 +1462,21 @@ pub(crate) fn generation_with_replaced_graph(
 }
 
 impl DeltaReplaySource {
-    pub(crate) fn open(parent: &crate::ResolvedProjectGeneration) -> Result<Self, GfError> {
-        let inventory = parent
-            .graph_files_inventory()?
-            .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
+    /// Open a replay source for `parent`, authenticating against an inventory
+    /// the caller already fetched.
+    ///
+    /// Callers that have not already verified `parent`'s inventory should use
+    /// [`DeltaReplaySource::open`] instead. Passing an already-authenticated
+    /// inventory here avoids a second full content-addressed verification
+    /// sweep of the same base graph (#1401).
+    pub(crate) fn open_with_inventory(
+        parent: &crate::ResolvedProjectGeneration,
+        parent_inventory: &GraphFilesInventory,
+    ) -> Result<Self, GfError> {
         match parent.declared_graph_files_participant()? {
             Some(crate::GraphFilesParticipant::V1(_)) => Ok(Self {
                 root: parent.graph_tree_root(),
-                inventory,
+                inventory: parent_inventory.clone(),
                 workspace: None,
             }),
             Some(crate::GraphFilesParticipant::V2(_)) => {
@@ -1433,10 +1485,26 @@ impl DeltaReplaySource {
                 })?;
                 crate::materialize_graph_objects(
                     parent.container_root(),
-                    &inventory,
+                    parent_inventory,
                     workspace.path(),
                 )?;
-                let (inventory, _) = capture_graph_files(workspace.path())?;
+                // `materialize_graph_objects` already authenticated every byte
+                // it linked/copied against `parent_inventory`'s digests (#1384:
+                // digests name content-addressed objects, verified once at
+                // that boundary). For the mapped route layout, the file's
+                // relative path is carried through unchanged (only the raw
+                // legacy layout translates destinations), so the resulting
+                // workspace is byte-for-byte and path-for-path identical to
+                // `parent_inventory` and a second full-tree rehash here would
+                // just repeat work already done inside `materialize_graph_objects`.
+                let inventory = if parent_inventory.format_version
+                    == crate::GRAPH_FILES_MAPPED_RECORD_VERSION
+                {
+                    parent_inventory.clone()
+                } else {
+                    let (inventory, _) = capture_graph_files(workspace.path())?;
+                    inventory
+                };
                 Ok(Self {
                     root: workspace.path().to_owned(),
                     inventory,
@@ -1445,6 +1513,16 @@ impl DeltaReplaySource {
             }
             None => Err(validation("parent generation lacks graph/files inventory")),
         }
+    }
+
+    /// Open a replay source for `parent`, fetching and authenticating its
+    /// inventory. Prefer [`DeltaReplaySource::open_with_inventory`] when the
+    /// caller already holds a freshly authenticated inventory for `parent`.
+    pub(crate) fn open(parent: &crate::ResolvedProjectGeneration) -> Result<Self, GfError> {
+        let inventory = parent
+            .graph_files_inventory()?
+            .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
+        Self::open_with_inventory(parent, &inventory)
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -1487,6 +1565,7 @@ pub fn prepare_graph_delta_with_runtime_catalog(
     prepare_graph_delta_inner(parent, request, Some(catalog))
 }
 
+#[allow(clippy::too_many_lines)] // Inventory reuse (#1401) inlines what used to be one full rehash.
 fn prepare_graph_delta_inner(
     parent: &crate::ResolvedProjectGeneration,
     request: &GraphDeltaPublishRequest,
@@ -1500,10 +1579,14 @@ fn prepare_graph_delta_inner(
             ));
         }
     }
+    // Fetched once (#1401): the parent's content-addressed inventory names
+    // every base object by its verified SHA-256 digest, and that single
+    // authentication sweep is threaded into `DeltaReplaySource` below instead
+    // of being repeated.
     let parent_inventory = parent
         .graph_files_inventory()?
         .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
-    let source = DeltaReplaySource::open(parent)?;
+    let source = DeltaReplaySource::open_with_inventory(parent, &parent_inventory)?;
     let parent_tree = source.root();
     let source_inventory = &source.inventory;
     let parent_runs = load_verified_delta_runs(parent_tree, source_inventory, request.limits)?;
@@ -1533,12 +1616,67 @@ fn prepare_graph_delta_inner(
         &request.operations,
         request.limits,
     )?;
+    // Decoded once, in memory, from the bytes just encoded above — not
+    // re-read from disk and not re-verified against its own freshly computed
+    // digest. Paired with `parent_runs` (already loaded and verified once,
+    // above), this gives the fingerprint step below the full run sequence
+    // without replaying and re-hashing every prior run a second time (#1401).
+    let new_run = decode_delta_run(&run_bytes, Some(next_sequence), request.limits)?;
+    // Captured before `source` is consumed below. Every entry here was
+    // already authenticated exactly once (parent's `graph_files_inventory()`,
+    // or `materialize_graph_objects`'s own per-object digest check) — it does
+    // not need a second full-tree rehash just because we are about to write
+    // one more file next to it (#1401).
+    let base_format = source.inventory.format.clone();
+    let base_format_version = source.inventory.format_version;
+    let base_files = source.inventory.files.clone();
     let workspace = source.into_workspace()?;
     write_prepared_run(workspace.path(), next_sequence, &run_bytes)?;
+    let mut extended_files: BTreeMap<String, GraphFileEntry> = base_files
+        .into_iter()
+        .map(|entry| (entry.relative_path.clone(), entry))
+        .collect();
+    let run_relative_path = delta_run_relative_path(next_sequence);
+    let run_byte_length = u64::try_from(run_bytes.len())
+        .map_err(|_| resource_limit("graph delta run byte length exceeds u64"))?;
+    extended_files.insert(
+        run_relative_path.clone(),
+        GraphFileEntry {
+            relative_path: run_relative_path,
+            byte_length: run_byte_length,
+            // Hashed once, in memory, from the exact bytes just written
+            // (ADR 0019 record); no re-read of the file we just created.
+            content_sha256: hex_digest(Sha256::digest(&run_bytes).into()),
+            role: GraphFileRole::Delta,
+        },
+    );
     if let Some(catalog) = catalog {
         crate::runtime_entity_labels::persist_runtime_catalog(workspace.path(), catalog)?;
+        // Only the handful of catalog files just written are re-read and
+        // hashed here — not the rest of the (unmodified) workspace tree.
+        for relative in RUNTIME_CATALOG_RELATIVE_PATHS {
+            let entry = hash_workspace_relative_file(workspace.path(), relative)?;
+            extended_files.insert((*relative).to_string(), entry);
+        }
     }
-    let (inventory, mut files_participant) = capture_graph_files(workspace.path())?;
+    let files: Vec<GraphFileEntry> = extended_files.into_values().collect();
+    let total_byte_length = files.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.byte_length)
+            .ok_or_else(|| resource_limit("graph files total size overflow"))
+    })?;
+    let file_count = u64::try_from(files.len())
+        .map_err(|_| resource_limit("graph files count exceeds limit"))?;
+    let inventory = GraphFilesInventory {
+        format: base_format,
+        format_version: base_format_version,
+        file_count,
+        total_byte_length,
+        files,
+    };
+    let inventory_bytes = crate::graph_files::encode_inventory(&inventory)?;
+    let mut files_participant =
+        crate::graph_files::inventory_participant(inventory_bytes, inventory.file_count)?;
     let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory)?;
     let parent_base_count = count_base_files(&parent_inventory)?;
     let preserved_base_parquet_digests = base_parquet_digests_preserved(
@@ -1547,8 +1685,10 @@ fn prepare_graph_delta_inner(
         unchanged_base_files,
         parent_base_count,
     )?;
+    let mut all_runs = parent_runs;
+    all_runs.push(new_run);
     let state_fingerprint =
-        bounded_materialized_fingerprint(workspace.path(), &inventory, request.limits)?;
+        bounded_materialized_fingerprint(workspace.path(), &inventory, request.limits, &all_runs)?;
     let publication_lease = match parent.declared_graph_files_participant()? {
         Some(crate::GraphFilesParticipant::V2(root)) => {
             let lease = crate::begin_graph_object_publication(parent.container_root())?;
@@ -1605,6 +1745,33 @@ fn write_prepared_run(
     file.sync_all()
         .map_err(|error| storage("flush delta run", &new_path, error))?;
     Ok(())
+}
+
+/// Workspace-relative paths `persist_runtime_catalog` writes or overwrites.
+/// Only these are re-read and re-hashed after a catalog update (#1401);
+/// everything else in the workspace keeps its already-known digest.
+const RUNTIME_CATALOG_RELATIVE_PATHS: [&str; 2] = [
+    "topology/runtime_catalog.parquet",
+    "topology/runtime_entity_label_encoding.json",
+];
+
+/// Hash exactly one known workspace-relative file, in isolation from the rest
+/// of the tree.
+fn hash_workspace_relative_file(
+    workspace: &Path,
+    relative: &str,
+) -> Result<GraphFileEntry, GfError> {
+    let path = workspace.join(relative);
+    let bytes =
+        fs::read(&path).map_err(|error| storage("read graph workspace file", &path, error))?;
+    let byte_length = u64::try_from(bytes.len())
+        .map_err(|_| resource_limit("graph workspace file byte length exceeds u64"))?;
+    Ok(GraphFileEntry {
+        relative_path: relative.to_string(),
+        byte_length,
+        content_sha256: hex_digest(Sha256::digest(&bytes).into()),
+        role: crate::graph_files::infer_role(Path::new(relative)),
+    })
 }
 
 /// Publish one small-write generation that preserves unchanged base Parquet.
@@ -1672,9 +1839,16 @@ fn publish_graph_delta_after_prepare(
         let inventory = resolved
             .graph_files_inventory()?
             .ok_or_else(|| corrupt("published generation missing graph inventory"))?;
-        let source = DeltaReplaySource::open(&resolved)?;
-        let state_fingerprint =
-            bounded_materialized_fingerprint(source.root(), &source.inventory, request.limits)?;
+        // Reuses the inventory fetched just above instead of a second full
+        // content-addressed verification sweep of the same base graph (#1401).
+        let source = DeltaReplaySource::open_with_inventory(&resolved, &inventory)?;
+        let runs = load_verified_delta_runs(source.root(), &source.inventory, request.limits)?;
+        let state_fingerprint = bounded_materialized_fingerprint(
+            source.root(),
+            &source.inventory,
+            request.limits,
+            &runs,
+        )?;
         let run_sequence = list_delta_runs(&inventory, request.limits)?.len() as u64;
         return Ok(GraphDeltaPublicationReceipt {
             publication,
@@ -2385,6 +2559,135 @@ mod crash_oracle_tests {
                 .generation_uuid(),
             concurrent_generation
         );
+    }
+
+    fn publish_graph_base_v2(root: &Path) {
+        crate::open_or_initialize_project(root).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let node_uuid = Uuid::from_u128(1221).hyphenated().to_string();
+        let mut state = ReconstructedGraphState::default();
+        state
+            .nodes
+            .insert(node_uuid.clone(), vec![EntityTypeId::decode(1).unwrap()]);
+        state.node_primary_types.insert(
+            node_uuid.clone(),
+            PrimaryEntityTypeId::known(EntityTypeId::decode(1).unwrap()),
+        );
+        state.node_ids.insert(node_uuid.clone(), 1);
+        state.node_timestamps.insert(node_uuid, (1, 1));
+        crate::writer::write_reconstructed_graph(workspace.path(), &state).unwrap();
+        let (mapped_inventory, _) = capture_graph_files(workspace.path()).unwrap();
+        // GFDR replay (`write_replay_overlay_streaming`) requires the mapped
+        // route-table layout, so the genesis v2 root must be sealed as
+        // mapped too — mirroring how a mapped portable import promotes an
+        // owned tree into the object store (`project_portable_v2_import.rs`).
+        let paths = mapped_inventory
+            .files
+            .iter()
+            .map(|entry| PathBuf::from(&entry.relative_path))
+            .collect::<Vec<_>>();
+        let directory = graphforge_filesystem::StableDirectory::open(workspace.path()).unwrap();
+        let routes = crate::route_component::owned::read_owned_layout_table(&directory)
+            .unwrap()
+            .expect("write_reconstructed_graph installs a route table");
+        let lease = crate::begin_graph_object_publication(root).unwrap();
+        let (v2_root, _) = crate::graph_object_store::append_mapped_import_graph_files(
+            &lease,
+            workspace.path(),
+            &paths,
+            &routes,
+        )
+        .unwrap();
+        let files_participant = crate::graph_files::graph_files_root_participant(&v2_root).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files_participant);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root, &request, None).unwrap()
+        else {
+            panic!("v2 base publication unexpectedly replayed");
+        };
+        // The CAS lease must stay live through the final CURRENT swap.
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+    }
+
+    /// Exercises the content-addressed (V2) branch of `prepare_graph_delta_inner`
+    /// end to end — a genesis V2 generation, then a property mutation on top
+    /// of it — which had no direct coverage in this crate before #1401. This
+    /// is the branch `DeltaReplaySource::open_with_inventory` and the mapped
+    /// fast path in its V2 arm apply to.
+    #[test]
+    fn property_mutation_on_content_addressed_base_round_trips() {
+        let root = tempfile::tempdir().unwrap();
+        publish_graph_base_v2(root.path());
+        let resolved = resolve_project_generation(root.path()).unwrap();
+        assert!(matches!(
+            resolved.declared_graph_files_participant().unwrap(),
+            Some(crate::GraphFilesParticipant::V2(_))
+        ));
+
+        let receipt = publish_graph_delta(root.path(), &one_node_request()).unwrap();
+        assert_eq!(receipt.run_sequence, 1);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        assert!(matches!(
+            reopened.declared_graph_files_participant().unwrap(),
+            Some(crate::GraphFilesParticipant::V2(_))
+        ));
+        // A content-addressed generation has no generation-owned `graph/`
+        // directory to read Parquet from directly; go through the same
+        // authenticated materialization every real reader uses.
+        let source = DeltaReplaySource::open(&reopened).unwrap();
+        let (state, _) = reconstruct_graph_state(
+            source.root(),
+            &source.inventory,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            state
+                .node_properties
+                .contains_key(&(Uuid::from_u128(1221).to_string(), "score".to_string())),
+            "mutated property must be visible after replay on a content-addressed base"
+        );
+
+        // Cross-check: an independent, unoptimized replay of the full run
+        // chain must agree exactly with the optimized fingerprint returned by
+        // `publish_graph_delta` (#1401 changed how that fingerprint is
+        // computed, not what it must equal).
+        let runs = load_verified_delta_runs(
+            source.root(),
+            &source.inventory,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap();
+        let recomputed = bounded_materialized_fingerprint(
+            source.root(),
+            &source.inventory,
+            GraphDeltaJournalLimits::default(),
+            &runs,
+        )
+        .unwrap();
+        assert_eq!(recomputed, receipt.state_fingerprint);
     }
 }
 

@@ -713,7 +713,30 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
 }
 
 fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(source_root, false, None)
+    build_inventory_for_owned_layout(source_root, false, None, None)
+}
+
+/// Build a canonical inventory and participant from a private workspace root,
+/// like [`capture_graph_files`], but skip hashing any file whose relative
+/// path appears in `known` at the same byte length — reusing that entry's
+/// already-authenticated digest instead. Every other file (new, resized, or
+/// simply absent from `known`) is still walked, opened, and hashed exactly as
+/// `capture_graph_files` would. This never trusts a stat alone as proof of
+/// content: a reused digest is only ever one the caller already verified for
+/// that exact path (#1401 — avoids re-hashing a materialized tree's untouched
+/// files just to fingerprint the files that actually changed).
+///
+/// # Errors
+/// Rejects links, special files, unsafe relative paths, duplicates, and
+/// inventory size overflow.
+pub(crate) fn capture_graph_files_reusing_digests(
+    source_root: &Path,
+    known: &std::collections::HashMap<String, (u64, String)>,
+) -> Result<(GraphFilesInventory, ProjectParticipant), GfError> {
+    let (inventory, _) = build_inventory_for_owned_layout(source_root, false, None, Some(known))?;
+    let bytes = encode_inventory(&inventory)?;
+    let participant = inventory_participant(bytes, inventory.file_count)?;
+    Ok((inventory, participant))
 }
 
 /// Explicit mutable-workspace admission for migration. Published inventory
@@ -721,13 +744,14 @@ fn build_inventory(source_root: &Path) -> Result<(GraphFilesInventory, u64), GfE
 pub(crate) fn capture_owned_route_migration_inventory(
     source_root: &Path,
 ) -> Result<GraphFilesInventory, GfError> {
-    build_inventory_for_owned_layout(source_root, true, None).map(|(inventory, _)| inventory)
+    build_inventory_for_owned_layout(source_root, true, None, None).map(|(inventory, _)| inventory)
 }
 
 fn build_inventory_for_owned_layout(
     source_root: &Path,
     admit_raw_routes: bool,
     rewrite: Option<&crate::RewriteBatch>,
+    reuse: Option<&std::collections::HashMap<String, (u64, String)>>,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
     let mut paths = Vec::new();
     collect_source_files(source_root, &mut paths)?;
@@ -784,14 +808,24 @@ fn build_inventory_for_owned_layout(
         total = total
             .checked_add(byte_length)
             .ok_or_else(|| resource_limit("graph files total size overflow"))?;
-        let (digest, file_read_calls) = hash_file_counted(&path)?;
-        read_calls = read_calls
-            .checked_add(file_read_calls)
-            .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
+        let reused_digest = reuse.and_then(|known| known.get(&relative_text)).and_then(
+            |(known_length, known_digest)| {
+                (*known_length == byte_length).then(|| known_digest.clone())
+            },
+        );
+        let content_sha256 = if let Some(digest) = reused_digest {
+            digest
+        } else {
+            let (digest, file_read_calls) = hash_file_counted(&path)?;
+            read_calls = read_calls
+                .checked_add(file_read_calls)
+                .ok_or_else(|| resource_limit("graph files authentication read calls overflow"))?;
+            hex_digest(digest)
+        };
         files.push(GraphFileEntry {
             relative_path: relative_text,
             byte_length,
-            content_sha256: hex_digest(digest),
+            content_sha256,
             role: infer_role(relative),
         });
     }
@@ -845,7 +879,7 @@ pub(crate) fn capture_rewrite_baseline(
     root: &Path,
     rewrite: &crate::RewriteBatch,
 ) -> Result<(GraphFilesInventory, u64), GfError> {
-    build_inventory_for_owned_layout(root, false, Some(rewrite))
+    build_inventory_for_owned_layout(root, false, Some(rewrite), None)
 }
 
 #[cfg(test)]

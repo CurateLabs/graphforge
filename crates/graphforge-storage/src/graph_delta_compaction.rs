@@ -708,7 +708,10 @@ fn replay_compaction_receipt(
     let materialized = tempfile::tempdir().map_err(|error| {
         GfError::Storage(format!("create bounded compaction receipt view: {error}"))
     })?;
-    let source = crate::graph_delta_journal::DeltaReplaySource::open(&resolved)?;
+    // Reuses the inventory fetched just above instead of a second full
+    // content-addressed verification sweep of the same base graph (#1401).
+    let source =
+        crate::graph_delta_journal::DeltaReplaySource::open_with_inventory(&resolved, &inventory)?;
     let (_, evidence) = crate::graph_delta_journal::materialize_replayed_graph_tree(
         source.root(),
         &source.inventory,
