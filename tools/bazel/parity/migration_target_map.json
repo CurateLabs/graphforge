@@ -924,6 +924,16 @@
     },
     {
       "package": "graphforge-exec",
+      "target": "merge_scaling_bench",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/merge_scaling_bench.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:merge_scaling_bench",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
       "target": "optional_match",
       "class": "integration-test",
       "source": "crates/graphforge-exec/tests/optional_match.rs",
