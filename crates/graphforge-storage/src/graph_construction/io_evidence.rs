@@ -549,6 +549,9 @@ impl GraphConstructionEvidence {
 pub(super) struct HashingWriter {
     pub(super) inner: graphforge_filesystem::DurableFileCacheWriter,
     pub(super) digest: Sha256,
+    /// Inline corruption checksum over the same bytes, in the same pass. No
+    /// later pass reads the payload back in order to compute it (#1384).
+    pub(super) checksum: crate::corruption_checksum::Checksum,
     pub(super) bytes: u64,
     pub(super) operations: u64,
 }
@@ -722,6 +725,7 @@ impl HashingWriter {
             )
             .map_err(storage)?,
             digest: Sha256::new(),
+            checksum: crate::corruption_checksum::Checksum::new(),
             bytes: 0,
             operations: 0,
         })
@@ -732,6 +736,7 @@ impl Write for HashingWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(bytes)?;
         self.digest.update(&bytes[..written]);
+        self.checksum.update(&bytes[..written]);
         self.bytes = self
             .bytes
             .checked_add(written as u64)

@@ -63,12 +63,16 @@ impl GraphConstructionSession {
             account_encoding_cache_release(&work, &mut self.checkpoint.evidence)?;
             self.authenticate_retained_successors(&inventory, cancelled)?
         } else {
+            // The shape manifest is the successor authority here. Its retained
+            // payloads were verified at the replay/recovery boundary by
+            // `authenticate_shaped_output`, under exactly this condition
+            // (`encoding_inventory_sha256.is_none()`), before this runs. A
+            // second full re-read of the same bytes names no failure that the
+            // boundary check does not already refuse (#1384).
             read_completed_shape(&self.root, &self.checkpoint, false)?
                 .ok_or_else(|| storage("supersession shape is absent"))?;
             for receipt in read_completed_shape_outputs(&self.root, &self.checkpoint)? {
-                let work = authenticate_payload(&self.root, &receipt, cancelled)?;
-                self.record_supersession_reads(work.bytes, work.operations)?;
-                account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
+                authenticate_retained_identity(&self.root, &receipt)?;
             }
             None
         };
@@ -306,8 +310,19 @@ impl GraphConstructionSession {
                     return Err(storage("supersession retired predecessor reappeared"));
                 }
                 let identity = file_identity(&file).map_err(storage)?;
+                // Identity, link count and length, and nothing more. The only
+                // failure a full re-hash here uniquely catches is "a payload
+                // was mutated after it was consumed but before it was
+                // deleted", which cannot change any already-produced output
+                // and is invisible to the user. Every payload that is still
+                // *consumed* is authenticated at the boundary that consumes
+                // it: shape outputs by `authenticate_shaped_output`, encoded
+                // artifacts by `authenticate_inventory_payloads`, both of
+                // which run above before a single predecessor is unlinked
+                // (#1384; the corruption refusal itself is #1269 / #1392).
                 if !receipt.identity.matches(identity)
                     || file_link_count(&file).map_err(storage)? != 1
+                    || file.metadata().map_err(storage)?.len() != receipt.bytes
                 {
                     return Err(storage("supersession predecessor identity changed"));
                 }
@@ -317,9 +332,6 @@ impl GraphConstructionSession {
                     ));
                 }
                 drop(file);
-                let work = authenticate_payload(&self.root, receipt, cancelled)?;
-                self.record_supersession_reads(work.bytes, work.operations)?;
-                account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
                 supersession_boundary("supersession.before_unlink")?;
                 self.root
                     .unlink_child_if_identity(OsStr::new(&receipt.name), identity)
@@ -441,6 +453,27 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn set_returned_failure(point: Option<&str>) {
     RETURNED_FAILURE.with(|current| *current.borrow_mut() = point.map(str::to_owned));
+}
+
+/// Identity, link count and length of a retained payload that this session
+/// still owns. The payload's *content* is authenticated at the boundary that
+/// consumes it, not here; see the note in `retire_payload`.
+fn authenticate_retained_identity(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+) -> Result<(), GfError> {
+    let file = root
+        .open_child_file(OsStr::new(&receipt.name))
+        .map_err(storage)?;
+    if !receipt
+        .identity
+        .matches(file_identity(&file).map_err(storage)?)
+        || file_link_count(&file).map_err(storage)? != 1
+        || file.metadata().map_err(storage)?.len() != receipt.bytes
+    {
+        return Err(storage("supersession payload identity changed"));
+    }
+    Ok(())
 }
 
 pub(super) fn authenticate_payload(

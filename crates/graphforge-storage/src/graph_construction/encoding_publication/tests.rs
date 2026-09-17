@@ -957,6 +957,22 @@ fn canonical_encoder_rejects_same_inode_mutate_restore_during_spool() {
     assert_eq!(std::fs::read(source).unwrap()[0], original);
 }
 
+/// The encoder owns its spool, so a shaped source mutated **after** the pass
+/// that consumed it cannot change the encoded output.
+///
+/// This used to fail closed, but only incidentally: `retire_payload` computed a
+/// full SHA-256 of every superseded payload immediately before unlinking it,
+/// and tripped over the mutation on the way to deleting the file. That pass is
+/// removed under #1384. The failure it uniquely caught is "a payload was
+/// mutated after it was consumed but before it was deleted", which cannot
+/// change any already-produced output and has no user-visible consequence.
+///
+/// What still fails closed, and is asserted by
+/// `canonical_encoder_rejects_same_inode_mutate_restore_during_spool`, is a
+/// mutation that reaches the pass that *consumes* the bytes: the spool
+/// verifies the source digest over exactly what it read. So encoding
+/// succeeding here is itself the proof that the owned spool, not the mutated
+/// source, produced the output.
 #[test]
 fn canonical_encoder_uses_owned_spool_after_source_mutation() {
     let root = TempDir::new().unwrap();
@@ -987,20 +1003,25 @@ fn canonical_encoder_uses_owned_spool_after_source_mutation() {
             changed = true;
         }
     })));
-    let result = session.encode_canonical(&shape, 1);
-    crate::graph_construction_encoding::set_source_spool_hook(None);
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("supersession payload digest changed")
-    );
-    assert_ne!(std::fs::read(&source).unwrap()[0], original);
-    let mut bytes = std::fs::read(&source).unwrap();
-    bytes[0] = original;
-    std::fs::write(source, bytes).unwrap();
     let encoded = session.encode_canonical(&shape, 1).unwrap();
-    assert!(encoded.invocation.reused);
+    crate::graph_construction_encoding::set_source_spool_hook(None);
+    assert!(!encoded.invocation.reused);
+    // Every encoded artifact still authenticates against the inventory the
+    // encoder wrote, and the mutated source was retired rather than consumed.
+    let output = session
+        .root
+        .open_child_directory(OsStr::new("encoded-v1"))
+        .unwrap();
+    crate::graph_construction_encoding::authenticate_inventory_payloads(
+        &output,
+        &encoded,
+        &mut || false,
+    )
+    .unwrap();
+    assert!(!source.exists());
+    let replayed = session.encode_canonical(&shape, 1).unwrap();
+    assert!(replayed.invocation.reused);
+    assert_eq!(replayed.artifacts, encoded.artifacts);
 }
 
 #[test]

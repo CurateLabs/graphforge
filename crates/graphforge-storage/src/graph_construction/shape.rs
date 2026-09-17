@@ -7,19 +7,20 @@ use super::{
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, File, FixedMergeAccumulator, GfError,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
     IDENTITY_SURROGATE_OFFSET, NODE_DETAIL_WIDTH, OsStr, RESOLVED_ENDPOINT_WIDTH,
-    RESOLVED_SURROGATE_OFFSET, Read, RowMergeAccumulator, SHAPE_INTENT, Sha256, ShapeIntent,
-    StableDirectory, Uuid, UuidIndexKind, Write, account_cache_release,
+    RESOLVED_SURROGATE_OFFSET, Read, ReadWork, RowMergeAccumulator, SHAPE_INTENT, Sha256,
+    ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write, account_cache_release,
     account_fixed_read_operations, account_fixed_write_operations, account_merge_read,
     account_merge_write, account_probe_work, account_sequential_write, artifact_temp,
     authenticate_artifact, build_runtime_catalog, canonical_artifact_target, checked_evidence_sum,
     combine_cache_cleanup, compact_parent_surrogate_tails, construction_failpoint,
     convert_identity_run, copy_authenticated_run, copy_authenticated_run_with_codec,
     decode_bounded, decode_shape_intent, file_identity, file_link_count, hex, install_control,
-    is_canonical_lower_hex, is_canonical_sha256, open_counted_fixed_reader, receipt_for_existing,
-    receipt_for_existing_with_work, record_shape_artifact_install, reject_cancelled,
-    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
-    replace_control, sha256, shape_authority_sha256, shape_publication_failure, storage,
-    unlink_shape_artifact, validate_parquet_metadata, write_fixed_run,
+    is_canonical_lower_hex, is_canonical_sha256, merge_cache_release_evidence,
+    open_counted_fixed_reader, receipt_for_existing, receipt_for_existing_with_work,
+    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
+    release_counted_reader_cache, replace_checkpoint_control, replace_control, sha256,
+    shape_authority_sha256, shape_publication_failure, storage, unlink_shape_artifact,
+    validate_parquet_metadata, write_fixed_run,
 };
 
 impl GraphConstructionSession {
@@ -31,14 +32,13 @@ impl GraphConstructionSession {
         &mut self,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ConstructionShape, GfError> {
-        self.shape_canonical_inner(cancelled, true)
+        self.shape_canonical_inner(cancelled)
     }
 
     #[allow(clippy::too_many_lines)] // One authenticated external-shape lifecycle; ordering is the invariant.
     pub(super) fn shape_canonical_inner(
         &mut self,
         mut cancelled: impl FnMut() -> bool,
-        authenticate_completed_outputs: bool,
     ) -> Result<ConstructionShape, GfError> {
         #[cfg(any(test, feature = "test-support"))]
         let _diagnostic_scope = crate::graph_construction::diagnostics::Scope::start("shaping");
@@ -49,11 +49,30 @@ impl GraphConstructionSession {
             return Err(storage("only a sealed session can be shaped"));
         }
         reject_cancelled(&mut cancelled)?;
-        if let Some(shape) = read_completed_shape(
-            &self.root,
-            &self.checkpoint,
-            authenticate_completed_outputs && !self.has_encoding_successor(),
-        )? {
+        let authenticate_outputs = !self.has_encoding_successor() && !self.shape_outputs_verified;
+        if let Some((shape, work)) =
+            read_completed_shape(&self.root, &self.checkpoint, authenticate_outputs)?
+        {
+            self.shape_outputs_verified |= authenticate_outputs;
+            // The completed-shape replay boundary re-verifies the retained
+            // payloads (#1392). Charge that read where every other replay and
+            // recovery authentication is charged; `shaped_output_authentication_bytes`
+            // is bound to the shape-phase sum and is not a replay counter.
+            self.checkpoint.evidence.recovery_application_read_bytes = self
+                .checkpoint
+                .evidence
+                .recovery_application_read_bytes
+                .checked_add(work.bytes)
+                .ok_or_else(|| storage("shape replay authentication bytes overflow"))?;
+            self.checkpoint
+                .evidence
+                .recovery_application_read_operations = self
+                .checkpoint
+                .evidence
+                .recovery_application_read_operations
+                .checked_add(work.operations)
+                .ok_or_else(|| storage("shape replay authentication operations overflow"))?;
+            account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
             self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
             return Ok(shape);
         }
@@ -487,7 +506,7 @@ pub(super) fn read_completed_shape(
     root: &StableDirectory,
     checkpoint: &Checkpoint,
     authenticate_outputs: bool,
-) -> Result<Option<ConstructionShape>, GfError> {
+) -> Result<Option<(ConstructionShape, ReadWork)>, GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -498,9 +517,19 @@ pub(super) fn read_completed_shape(
     if !manifest.complete {
         return Err(storage("incomplete construction shape was not recovered"));
     }
+    let mut work = ReadWork::default();
     if authenticate_outputs {
         for output in &manifest.outputs {
-            authenticate_shaped_output(root, output)?;
+            let observed = authenticate_shaped_output(root, output)?;
+            work.bytes = work
+                .bytes
+                .checked_add(observed.bytes)
+                .ok_or_else(|| storage("shaped output authentication bytes overflow"))?;
+            work.operations = work
+                .operations
+                .checked_add(observed.operations)
+                .ok_or_else(|| storage("shaped output authentication operations overflow"))?;
+            merge_cache_release_evidence(&mut work.cache_release, observed.cache_release)?;
         }
     }
     let shape = manifest
@@ -512,7 +541,7 @@ pub(super) fn read_completed_shape(
     {
         return Err(storage("completed shape authority digest changed"));
     }
-    Ok(Some(shape))
+    Ok(Some((shape, work)))
 }
 
 pub(super) fn read_completed_shape_outputs(
@@ -595,7 +624,15 @@ pub(super) fn persist_shape_receipt(
     Ok(())
 }
 
-pub(super) fn authenticate_shaped_output(
+/// Identity-only authority check for a shaped output: name grammar, inode,
+/// link count, length and the recorded digest.
+///
+/// This establishes that the manifest still names *this* file. It cannot see a
+/// payload mutation that preserves inode and length, which is exactly the
+/// defect #1269 recorded, so it is used only where the artifact is about to be
+/// removed and its bytes are never consumed again. Every trust boundary that
+/// consumes or replays a shaped output uses [`authenticate_shaped_output`].
+pub(super) fn authenticate_shaped_output_identity(
     root: &StableDirectory,
     expected: &ArtifactReceipt,
 ) -> Result<(), GfError> {
@@ -610,6 +647,78 @@ pub(super) fn authenticate_shaped_output(
         return Err(storage("shape manifest output authentication changed"));
     }
     Ok(())
+}
+
+/// Authenticate a completed shape output at a trust boundary: the identity
+/// check above, **plus** the recorded payload checksum over the bytes that are
+/// on disk right now.
+///
+/// The writer-receipt fast path compares stored metadata, so on its own it
+/// accepts a same-inode, same-length payload mutation of a *completed* shape
+/// output (#1392, the same defect class as #1269). The refusal used to arrive
+/// incidentally, from the full SHA-256 that `retire_payload` performed just
+/// before unlinking a payload; that pass is removed under #1384, so the
+/// refusal is established here instead, deliberately and at the boundary.
+///
+/// The primitive is non-cryptographic on purpose. The threat is byte mutation,
+/// not a forged digest; see [`crate::corruption_checksum`] for the two
+/// assumptions that permits and what invalidates them.
+pub(super) fn authenticate_shaped_output(
+    root: &StableDirectory,
+    expected: &ArtifactReceipt,
+) -> Result<ReadWork, GfError> {
+    authenticate_shaped_output_identity(root, expected)?;
+    verify_payload_checksum(root, expected)
+}
+
+/// Stream a retained payload once and refuse it unless its length and
+/// corruption checksum match the receipt the writer produced.
+fn verify_payload_checksum(
+    root: &StableDirectory,
+    expected: &ArtifactReceipt,
+) -> Result<ReadWork, GfError> {
+    let file = root
+        .open_child_file(OsStr::new(&expected.name))
+        .map_err(storage)?;
+    let mut reader = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
+    let mut work = ReadWork::default();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
+    let mut block = vec![0_u8; BLOCK_BYTES];
+    let verified = (|| -> Result<(), GfError> {
+        loop {
+            let count = reader.read(&mut block).map_err(storage)?;
+            if count == 0 {
+                break;
+            }
+            checksum.update(&block[..count]);
+            work.bytes = work
+                .bytes
+                .checked_add(count as u64)
+                .ok_or_else(|| storage("shaped output size overflow"))?;
+            work.operations = work
+                .operations
+                .checked_add(1)
+                .ok_or_else(|| storage("shaped output read operation overflow"))?;
+        }
+        if work.bytes != expected.bytes
+            || crate::corruption_checksum::hex(checksum.finish()) != expected.xxh64
+        {
+            return Err(storage("shape manifest output payload changed"));
+        }
+        Ok(())
+    })();
+    let released = reader.finish().map_err(storage);
+    match (verified, released) {
+        (Ok(()), Ok(released)) => {
+            work.cache_release = released;
+            Ok(work)
+        }
+        (Err(primary), Ok(_)) => Err(primary),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(secondary)) => Err(storage(format!(
+            "{primary}; shaped output cache release failed: {secondary}"
+        ))),
+    }
 }
 
 pub(super) fn is_shape_artifact_name(name: &str) -> bool {
@@ -1003,6 +1112,7 @@ fn assign_surrogates(
             .map_err(storage)?
             .allocated_bytes,
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
+        xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
         fsync_operations: cache_release
