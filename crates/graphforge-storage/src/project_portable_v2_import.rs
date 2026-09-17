@@ -1431,8 +1431,10 @@ fn persist_import_adjacency(
         crate::generation::read_topology_generation(graph_tree).map_err(|error| storage(&error))?;
     let edge_files = import_edge_files(graph_tree)?;
     let spill_root = stage.join(IMPORT_ADJACENCY_SPILL_ROOT);
-    let mut options = crate::adjacency::AdjacencyBuildOptions::default();
-    options.spill_dir = Some(spill_root.clone());
+    let options = crate::adjacency::AdjacencyBuildOptions {
+        spill_dir: Some(spill_root.clone()),
+        ..crate::adjacency::AdjacencyBuildOptions::default()
+    };
     let built_at_micros = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX));

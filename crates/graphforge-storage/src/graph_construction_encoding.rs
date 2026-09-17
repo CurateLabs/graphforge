@@ -983,8 +983,10 @@ fn encode_adjacency(
     if spill_root.exists() {
         std::fs::remove_dir_all(&spill_root).map_err(storage)?;
     }
-    let mut options = crate::adjacency::AdjacencyBuildOptions::default();
-    options.spill_dir = Some(spill_root.clone());
+    let options = crate::adjacency::AdjacencyBuildOptions {
+        spill_dir: Some(spill_root.clone()),
+        ..crate::adjacency::AdjacencyBuildOptions::default()
+    };
     let (rows, metrics) = crate::adjacency::build_adjacency_index_for_edge_files(
         &graph_root,
         &edge_files,
