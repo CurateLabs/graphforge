@@ -1,4 +1,4 @@
-//! Authenticated, non-enumerating storage attribution for committed projects.
+//! Non-enumerating storage attribution over the manifest-authenticated inventory of a committed project.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -1028,13 +1028,9 @@ pub fn capture_storage_attribution(
             // as a logical reference before attributing its physical identity so
             // category reconciliation cannot report physical_objects without refs.
             for (digest, length) in manifest_objects {
-                let object = lease.open(&digest, length)?;
+                let object = lease.open_for_attribution(&digest, length)?;
                 accumulator.add_logical(ArtifactCategory::CatalogAndManifests, length)?;
-                accumulator.add_physical(
-                    ArtifactCategory::CatalogAndManifests,
-                    object.as_ref(),
-                    length,
-                )?;
+                accumulator.add_physical(ArtifactCategory::CatalogAndManifests, &object, length)?;
             }
             for entry in entries {
                 add_compact_entry(&mut accumulator, &lease, &entry)?;
@@ -1080,8 +1076,12 @@ fn add_compact_entry(
 ) -> Result<(), GfError> {
     let category = classify_graph_artifact(&entry.relative_path);
     accumulator.add_logical(category, entry.byte_length)?;
-    let object = lease.open(&entry.content_sha256, entry.byte_length)?;
-    accumulator.add_physical(category, object.as_ref(), entry.byte_length)
+    // Attribution reads identity and space usage from the descriptor; it never
+    // consumes payload bytes, so it does not re-hash the object. The graph open
+    // that precedes every attribution call authenticates the inventory, and
+    // `graphforge verify` is the explicit whole-store content check.
+    let object = lease.open_for_attribution(&entry.content_sha256, entry.byte_length)?;
+    accumulator.add_physical(category, &object, entry.byte_length)
 }
 
 struct Accumulator {
