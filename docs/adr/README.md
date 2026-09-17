@@ -36,6 +36,7 @@ are not retained in this tree.
 | 0031 | [Reviewed source file size bounds](0031-source-size-policy.md) | `0031-source-size-policy.md` |
 | 0032 | [Research Branches share Project publication authority](0032-research-project-authority.md) | `0032-research-project-authority.md` |
 | 0033 | [Prereleases share one version with per-ecosystem spelling](0033-prerelease-version-identity.md) | `0033-prerelease-version-identity.md` |
+| 0034 | [One canonical release-candidate spelling, `-rc.N`](0034-canonical-release-candidate-spelling.md) | `0034-canonical-release-candidate-spelling.md` |
 
 ## Numbering
 

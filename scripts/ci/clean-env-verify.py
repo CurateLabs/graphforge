@@ -25,6 +25,10 @@ from urllib.parse import urlparse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from release_candidate_manifest import python_spelling  # noqa: E402
+
 EVIDENCE_SCHEMA = "graphforge-clean-env-evidence-v1"
 RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
 RELEASE_CANDIDATE_SCHEMA = "graphforge-release-candidate-v2"
@@ -136,6 +140,12 @@ def require_version(version: str) -> str:
             f"refusing non-release version {version!r}; "
             "clean-env verification targets published release versions only"
         )
+    # A version whose Python spelling cannot be derived is not publishable, so
+    # refuse it here rather than probing registries with an unusable string.
+    try:
+        python_spelling(version)
+    except ValueError as exc:
+        raise VerifyError(f"refusing unusable release version {version!r}: {exc}") from exc
     return version
 
 
@@ -239,12 +249,24 @@ class Context:
     run_cmd: Callable[..., subprocess.CompletedProcess[str]]
     allow_network_install: bool = True
 
+    @property
+    def python_version(self) -> str:
+        """The root version in PEP 440 spelling; what PyPI and pip report."""
+        return python_spelling(self.version)
 
-def registry_urls(version: str, crates: tuple[str, ...], docs_base: str) -> dict[str, str]:
+
+def registry_urls(
+    version: str,
+    crates: tuple[str, ...],
+    docs_base: str,
+    python_version: str | None = None,
+) -> dict[str, str]:
     docs = docs_base.rstrip("/")
+    # PyPI answers under the PEP 440 spelling of the root version (ADR 0033).
+    pypi_version = python_version if python_version is not None else python_spelling(version)
     urls = {
-        "pypi_json": f"https://pypi.org/pypi/graphforge/{version}/json",
-        "pypi_project": f"https://pypi.org/project/graphforge/{version}/",
+        "pypi_json": f"https://pypi.org/pypi/graphforge/{pypi_version}/json",
+        "pypi_project": f"https://pypi.org/project/graphforge/{pypi_version}/",
         # Registry version documents are the anonymous, bot-reachable package
         # links. www.npmjs.com often 403s datacenter clients even for published
         # packages; human browsers still resolve the marketing pages.
@@ -275,7 +297,7 @@ def http_ok(ctx: Context, url: str, *, context: str) -> tuple[bytes, dict[str, s
 
 
 def probe_published(ctx: Context) -> dict[str, Any]:
-    urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base)
+    urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base, ctx.python_version)
     probes: dict[str, Any] = {}
     missing: list[str] = []
     for key in ("pypi_json", "npm_node", "npm_cli", "npm_skills"):
@@ -287,7 +309,7 @@ def probe_published(ctx: Context) -> dict[str, Any]:
             payload = parse_json(body, context=urls[key])
             info = payload.get("info") if isinstance(payload, dict) else None
             ver = info.get("version") if isinstance(info, dict) else None
-            if ver != ctx.version:
+            if ver != ctx.python_version:
                 missing.append(f"pypi version mismatch: {ver!r}")
     for crate in ctx.crates:
         key = f"crates_{crate}"
@@ -358,15 +380,15 @@ def lane_pip(ctx: Context) -> LaneResult:
     py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     result.commands.append(f"python3 -m venv {venv}")
     _run(ctx, [sys.executable, "-m", "venv", str(venv)])
-    result.commands.append(f"{py} -m pip install graphforge=={ctx.version}")
-    _run(ctx, [str(py), "-m", "pip", "install", f"graphforge=={ctx.version}"])
+    result.commands.append(f"{py} -m pip install graphforge=={ctx.python_version}")
+    _run(ctx, [str(py), "-m", "pip", "install", f"graphforge=={ctx.python_version}"])
     script = work / "quickstart.py"
     script.write_text(
         f"""
 from graphforge import GraphForge
 import graphforge
 
-assert graphforge.__version__.startswith({ctx.version!r}), graphforge.__version__
+assert graphforge.__version__.startswith({ctx.python_version!r}), graphforge.__version__
 forge = GraphForge()
 alice = forge.add_node("Person", name="Alice", age=30)
 bob = forge.add_node("Person", name="Bob", age=25)
@@ -403,8 +425,8 @@ def lane_reopen(ctx: Context) -> LaneResult:
     py = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     result.commands.append(f"python3 -m venv {venv}")
     _run(ctx, [sys.executable, "-m", "venv", str(venv)])
-    result.commands.append(f"{py} -m pip install graphforge=={ctx.version}")
-    _run(ctx, [str(py), "-m", "pip", "install", f"graphforge=={ctx.version}"])
+    result.commands.append(f"{py} -m pip install graphforge=={ctx.python_version}")
+    _run(ctx, [str(py), "-m", "pip", "install", f"graphforge=={ctx.python_version}"])
     project = work / "research"
     script = work / "reopen.py"
     script.write_text(
@@ -597,7 +619,7 @@ def lane_urls(ctx: Context) -> LaneResult:
     for the same package already resolved.
     """
     result = LaneResult(name="urls", issue=LANE_ISSUES["urls"], ok=False)
-    urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base)
+    urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base, ctx.python_version)
     required = [
         "docs_home",
         "docs_quickstart",
@@ -650,7 +672,7 @@ def lane_urls(ctx: Context) -> LaneResult:
 def _pypi_file_digests(ctx: Context) -> dict[str, str]:
     body, _ = http_ok(
         ctx,
-        f"https://pypi.org/pypi/graphforge/{ctx.version}/json",
+        f"https://pypi.org/pypi/graphforge/{ctx.python_version}/json",
         context="pypi digests",
     )
     payload = parse_json(body, context="pypi digests")

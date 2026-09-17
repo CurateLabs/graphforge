@@ -38,6 +38,8 @@ dependencies = [
 pandas = ["pandas>=2.0"]
 dev = [
     "jsonschema>=4.23",
+    # Release tooling derives the PEP 440 spelling of a prerelease (ADR 0033).
+    "packaging>=24.0",
     "pytest>=9.0.3",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.0",

@@ -10,17 +10,18 @@ import json
 from pathlib import Path
 import tempfile
 
-from release_candidate_manifest import CRATES, NATIVE_NPM_PACKAGES, NPM_PACKAGES
+from release_candidate_manifest import CRATES, NATIVE_NPM_PACKAGES, NPM_PACKAGES, python_spelling
 import release_registry as registry
 
 VERSION = "0.5.1"
+PRERELEASE = "0.6.0-rc.1"
 SHA = "a" * 40
 NOW = "2030-01-01T12:02:00+00:00"
 # One PyPI node, every npm package, and every crates.io crate (#1373).
 NODE_COUNT = 1 + len(NPM_PACKAGES) + len(CRATES)
 
 
-def artifact(path: str, group: str, surface: str, name: str, *, dependencies=None):
+def artifact(path: str, group: str, surface: str, name: str, *, dependencies=None, version=VERSION):
     data = name.encode()
     sha256 = hashlib.sha256(data).digest()
     sha512 = hashlib.sha512(data).digest()
@@ -30,7 +31,7 @@ def artifact(path: str, group: str, surface: str, name: str, *, dependencies=Non
         "group": group,
         "surface": surface,
         "name": name,
-        "version": VERSION,
+        "version": version,
         "filename": path.rsplit("/", 1)[-1],
         "sha256": digest,
         "integrity": "sha256-" + base64.b64encode(sha256).decode("ascii"),
@@ -41,25 +42,27 @@ def artifact(path: str, group: str, surface: str, name: str, *, dependencies=Non
         "archive": {
             "package": {
                 "name": name,
-                "version": VERSION,
+                "version": version,
                 "dependencies": dependencies or {},
             }
         },
     }
 
 
-def candidate() -> dict[str, object]:
+def candidate(version: str = VERSION) -> dict[str, object]:
+    # One logical version; Python artifacts carry its PEP 440 spelling (ADR 0033).
+    python_version = python_spelling(version)
     artifacts = []
     python_paths = []
     for filename in (
-        f"graphforge-{VERSION}-linux.whl",
-        f"graphforge-{VERSION}-macos.whl",
-        f"graphforge-{VERSION}-windows.whl",
-        f"graphforge-{VERSION}.tar.gz",
+        f"graphforge-{python_version}-linux.whl",
+        f"graphforge-{python_version}-macos.whl",
+        f"graphforge-{python_version}-windows.whl",
+        f"graphforge-{python_version}.tar.gz",
     ):
         path = f"python/{filename}"
         python_paths.append(path)
-        artifacts.append(artifact(path, "python", "pypi", "graphforge"))
+        artifacts.append(artifact(path, "python", "pypi", "graphforge", version=version))
     nodes = [
         {
             "id": "pypi:graphforge",
@@ -72,11 +75,13 @@ def candidate() -> dict[str, object]:
     for name in NPM_PACKAGES:
         package_dependencies = {}
         if name == "@curatelabs/graphforge":
-            package_dependencies = dict.fromkeys(NATIVE_NPM_PACKAGES, VERSION)
+            package_dependencies = dict.fromkeys(NATIVE_NPM_PACKAGES, version)
         elif name == "@curatelabs/graphforge-cli":
-            package_dependencies = {"@curatelabs/graphforge": VERSION}
-        path = f"npm/{name.removeprefix('@curatelabs/').replace('/', '-')}-{VERSION}.tgz"
-        artifacts.append(artifact(path, "npm", "npm", name, dependencies=package_dependencies))
+            package_dependencies = {"@curatelabs/graphforge": version}
+        path = f"npm/{name.removeprefix('@curatelabs/').replace('/', '-')}-{version}.tgz"
+        artifacts.append(
+            artifact(path, "npm", "npm", name, dependencies=package_dependencies, version=version)
+        )
         node_id = f"npm:{name}"
         nodes.append({"id": node_id, "registry": "npm", "name": name, "artifact_paths": [path]})
         for dependency in package_dependencies:
@@ -88,10 +93,12 @@ def candidate() -> dict[str, object]:
         }
     )
     for name in CRATES:
-        package_dependencies = {} if name == "graphforge-core" else {"graphforge-core": VERSION}
-        path = f"crates/{name}-{VERSION}.crate"
+        package_dependencies = {} if name == "graphforge-core" else {"graphforge-core": version}
+        path = f"crates/{name}-{version}.crate"
         artifacts.append(
-            artifact(path, "crates", "crates", name, dependencies=package_dependencies)
+            artifact(
+                path, "crates", "crates", name, dependencies=package_dependencies, version=version
+            )
         )
         node_id = f"crates:{name}"
         nodes.append({"id": node_id, "registry": "crates", "name": name, "artifact_paths": [path]})
@@ -99,8 +106,9 @@ def candidate() -> dict[str, object]:
             dependencies.append({"from": node_id, "requires": f"crates:{dependency}"})
     return {
         "schema": "graphforge-release-candidate-v2",
-        "version": VERSION,
-        "tag": f"v{VERSION}",
+        "version": version,
+        "python_version": python_version,
+        "tag": f"v{version}",
         "commit_sha": SHA,
         "recorded_at": "2029-12-31T12:00:00+00:00",
         "nodes": sorted(nodes, key=lambda item: item["id"]),
@@ -124,7 +132,11 @@ def response_for(manifest: dict[str, object], node_id: str) -> dict[str, object]
         return {
             "status": 200,
             "json": {
-                "info": {"name": node["name"], "version": VERSION, "license": "Apache-2.0"},
+                "info": {
+                    "name": node["name"],
+                    "version": expected["registry_version"],
+                    "license": "Apache-2.0",
+                },
                 "urls": [
                     {"filename": item["filename"], "digests": {"sha256": item["sha256"]}}
                     for item in expected["artifacts"]
@@ -135,7 +147,7 @@ def response_for(manifest: dict[str, object], node_id: str) -> dict[str, object]
         package = expected["artifacts"][0]["archive"]["package"]
         payload = {
             "name": node["name"],
-            "version": VERSION,
+            "version": expected["registry_version"],
             "license": "Apache-2.0",
             "dist": {"integrity": expected["artifacts"][0]["integrities"][1]},
         }
@@ -152,7 +164,7 @@ def response_for(manifest: dict[str, object], node_id: str) -> dict[str, object]
         "json": {
             "version": {
                 "crate": node["name"],
-                "num": VERSION,
+                "num": expected["registry_version"],
                 "checksum": expected["artifacts"][0]["sha256"],
                 "yanked": False,
                 "license": "Apache-2.0",
@@ -176,7 +188,7 @@ def observation_set(manifest):
     return {
         "schema": registry.OBSERVATION_SET_SCHEMA,
         "candidate_sha": SHA,
-        "version": VERSION,
+        "version": manifest["version"],
         "observations": [observed(manifest, node["id"]) for node in manifest["nodes"]],
     }
 
@@ -419,7 +431,54 @@ def main() -> None:
             == 0
         )
         assert json.loads(observation_path.read_text(encoding="utf-8"))["state"] == "verified"
+
+    prerelease_observers()
     print("release-registry tests: ok")
+
+
+def prerelease_observers() -> None:
+    """A prerelease is one version; PyPI alone answers in PEP 440 spelling."""
+    manifest = candidate(PRERELEASE)
+    assert manifest["version"] == "0.6.0-rc.1"
+    assert manifest["python_version"] == "0.6.0rc1"
+
+    pypi = registry._node_expected(manifest, "pypi:graphforge")
+    assert pypi["version"] == "0.6.0-rc.1"
+    assert pypi["registry_version"] == "0.6.0rc1"
+    npm = registry._node_expected(manifest, "npm:@curatelabs/graphforge")
+    assert npm["registry_version"] == "0.6.0-rc.1"
+    crates = registry._node_expected(manifest, "crates:graphforge-core")
+    assert crates["registry_version"] == "0.6.0-rc.1"
+
+    observation = observed(manifest, "pypi:graphforge")
+    assert observation["state"] == "verified", observation
+    # The observation records the one root version; only the endpoint normalizes.
+    assert observation["version"] == "0.6.0-rc.1"
+    assert observation["endpoint"] == "https://pypi.org/pypi/graphforge/0.6.0rc1/json"
+
+    # The cargo spelling from PyPI is a genuine conflict, not the expected answer.
+    raw = response_for(manifest, "pypi:graphforge")
+    raw["json"]["info"]["version"] = "0.6.0-rc.1"
+    conflict = observed(manifest, "pypi:graphforge", raw)
+    assert conflict["state"] == "conflict", conflict
+    assert conflict["reason"] == "pypi_identity_mismatch"
+
+    for node_id in ("npm:@curatelabs/graphforge", "crates:graphforge-core"):
+        assert observed(manifest, node_id)["state"] == "verified"
+
+    # A second, independently chosen Python version is refused outright.
+    forged = copy.deepcopy(manifest)
+    forged["python_version"] = "0.6.0"
+    try:
+        registry._node_expected(forged, "pypi:graphforge")
+    except registry.RegistryError as error:
+        assert "derived PEP 440 spelling" in str(error), error
+    else:
+        raise AssertionError("an overridden python_version was accepted")
+
+    plan_result = plan(manifest, observation_set(manifest))
+    assert plan_result["blockers"] == []
+    assert plan_result["summary"]["verified"] == NODE_COUNT
 
 
 if __name__ == "__main__":

@@ -40,6 +40,60 @@ assert mod.validate(
     versions={**versions, "skills": "0.5.3"},
 )
 
+# A prerelease tag starts publication, and each surface is held to its own
+# canonical spelling of the one root version (ADR 0033).
+assert mod.release_version("v0.6.0-rc.1") == "0.6.0-rc.1"
+prerelease = {
+    "cargo": "0.6.0-rc.1",
+    "python": "0.6.0rc1",
+    "node": "0.6.0-rc.1",
+    "cli": "0.6.0-rc.1",
+    "skills": "0.6.0-rc.1",
+}
+assert (
+    mod.validate(
+        tag="v0.6.0-rc.1",
+        expected_sha=sha,
+        actual_sha=sha,
+        versions=prerelease,
+    )
+    == []
+)
+# The cargo spelling on the Python surface is the silent-mismatch case; it fails.
+assert mod.validate(
+    tag="v0.6.0-rc.1",
+    expected_sha=sha,
+    actual_sha=sha,
+    versions={**prerelease, "python": "0.6.0-rc.1"},
+)
+assert mod.release_version("v0.6.0-rc.10") == "0.6.0-rc.10"
+# A development tag never publishes, however it is spelled, and a noncanonical
+# candidate spelling is not a GraphForge release identity at all: each of these
+# would project to the same PyPI version as v0.6.0-rc.1 (ADR 0034, issue #858).
+for rejected_tag in (
+    "v0.6.0-dev",
+    "v0.6.0.dev0",
+    "0.6.0",
+    "v0.6",
+    "v0.6.0-foo",
+    "v0.6.0-rc1",
+    "v0.6.0-RC.1",
+    "v0.6.0-rc.01",
+    "v0.6.0-beta.2",
+    "v0.6.0rc1",
+):
+    assert mod.validate(
+        tag=rejected_tag,
+        expected_sha=sha,
+        actual_sha=sha,
+        versions=prerelease,
+    ), rejected_tag
+
+# The tag pattern itself refuses a noncanonical candidate spelling, before any
+# surface comparison runs.
+for noncanonical in ("v0.6.0-rc1", "v0.6.0-RC.1", "v0.6.0-rc.01", "v0.6.0-beta.2"):
+    assert mod.release_version(noncanonical) is None, noncanonical
+
 # The npm dist-tag policy is derived, not configured, and refuses the unclassifiable.
 publisher_spec = importlib.util.spec_from_file_location(
     "publish_npm_artifacts", ROOT / "scripts" / "publish_npm_artifacts.py"
