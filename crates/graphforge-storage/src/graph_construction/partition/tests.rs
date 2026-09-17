@@ -202,37 +202,6 @@ fn the_cut_is_bounded_by_the_recorded_record_count() {
     }
 }
 
-/// #1439: past `DEFAULT_PARTITION_COUNT * 16` records the flat ceiling used
-/// to be the only bound, so partition *count* plateaued while partition
-/// *size* (and therefore resident memory) kept growing with data. Requesting
-/// the full `MAX_PARTITION_COUNT` ceiling -- production's new default --
-/// exercises the data-driven scaling term and must reproduce exactly the
-/// S18/S19/S20/S22 ladder-rung table from the issue: partition count doubles
-/// as record count doubles, holding rows-per-partition at
-/// `TARGET_ROWS_PER_PARTITION` (16,384) until the ceiling itself binds.
-#[test]
-fn the_cut_scales_with_data_once_past_the_flat_default_instead_of_plateauing() {
-    for (records, expected_partitions) in [
-        (4_194_304_u64, 256_u32), // S18: unchanged from the pre-#1439 default.
-        (8_388_608, 512),        // S19: partitions double as records double.
-        (16_777_216, 1_024),     // S20: partitions double again.
-        (67_108_864, 4_096),     // S22: exactly MAX_PARTITION_COUNT.
-    ] {
-        let sampler = IdentitySampler::new(MAX_PARTITION_COUNT, records).unwrap();
-        assert_eq!(sampler.cut(), expected_partitions, "records={records}");
-        assert_eq!(
-            records / u64::from(expected_partitions),
-            16_384,
-            "rows-per-partition must hold constant while the target is binding: records={records}"
-        );
-    }
-    // Beyond S22's record count the ceiling itself binds: rows-per-partition
-    // now grows with data again, but only past the point R1's cross-host
-    // determinism proof and the durability trade in #1439 accepted.
-    let far_beyond = IdentitySampler::new(MAX_PARTITION_COUNT, 1_000_000_000).unwrap();
-    assert_eq!(far_beyond.cut(), MAX_PARTITION_COUNT);
-}
-
 #[test]
 fn fewer_distinct_keys_than_partitions_collapse_rather_than_emptying_partitions() {
     let keys = ingest_keys(5);

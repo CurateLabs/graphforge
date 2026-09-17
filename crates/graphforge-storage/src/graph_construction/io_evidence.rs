@@ -346,6 +346,19 @@ pub struct GraphConstructionEvidence {
     /// Identity keys retained as splitter sample points.
     #[serde(default)]
     pub splitter_sample_records: u64,
+    /// Effective range partitions produced by the node-only splitter set
+    /// (#1439), used to route node-keyed families (node details, endpoints,
+    /// node rows) instead of the joint identity splitters.
+    #[serde(default)]
+    pub shape_node_partitions: u64,
+    /// Node identity records observed by the node-only splitter sampling
+    /// pass (#1439).
+    #[serde(default)]
+    pub node_splitter_sampled_source_records: u64,
+    /// Node identity keys retained as node-only splitter sample points
+    /// (#1439).
+    #[serde(default)]
+    pub node_splitter_sample_records: u64,
     /// Rows routed into the largest identity partition.
     #[serde(default)]
     pub max_partition_identity_rows: u64,

@@ -529,7 +529,7 @@ mod lifecycle_budget {
                         .append(
                             ConstructionChunkKind::Edge,
                             &format!("edges-{chunk}"),
-                            &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096),
+                            &edge_batch(1_000_000 + u128::from(chunk) * 4096, 1 + (u128::from(chunk) * 4096) % 8192, 8192, 4096),
                         )
                         .unwrap();
                 }
@@ -1079,7 +1079,7 @@ mod lifecycle_budget {
                     .append(
                         ConstructionChunkKind::Edge,
                         &format!("edges-{chunk}"),
-                        &edge_batch(1_000_000 + u128::from(chunk) * 4096, 4096),
+                        &edge_batch(1_000_000 + u128::from(chunk) * 4096, 1 + (u128::from(chunk) * 4096) % 8192, 8192, 4096),
                     )
                     .unwrap();
             }

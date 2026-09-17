@@ -57,14 +57,34 @@ fn distinct_label_batch(first: u128, rows: usize) -> RecordBatch {
     .unwrap()
 }
 
-pub(super) fn edge_batch(first: u128, rows: usize) -> RecordBatch {
+/// `first` is this batch's edge-UUID base. `node_start` and `node_count`
+/// (#1439) describe where this batch's src/dst references begin and how
+/// many nodes exist to reference, 1-indexed: every reference wraps modulo
+/// `node_count`, so it is always a valid node id regardless of chunk
+/// position. A caller with more than one chunk must vary `node_start` per
+/// chunk, or every chunk in the loop references the same low node-UUID band
+/// no matter how many nodes or chunks actually exist. That was invisible
+/// while endpoints were routed with the joint identity splitters, which
+/// never resolve node UUIDs finely enough to notice; routing them with
+/// node-only splitters surfaces it as a real (fixture-caused, not
+/// production) skew. Single-chunk callers keep passing `node_start: 1`,
+/// matching this function's previous fixed behaviour exactly whenever
+/// `rows <= node_count`.
+pub(super) fn edge_batch(
+    first: u128,
+    node_start: u128,
+    node_count: u128,
+    rows: usize,
+) -> RecordBatch {
     let edges = (first..first + rows as u128)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
-    let src = (1..=rows as u128)
+    let src = (0..rows as u128)
+        .map(|offset| 1 + (node_start - 1 + offset) % node_count)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
-    let dst = (2..=rows as u128 + 1)
+    let dst = (0..rows as u128)
+        .map(|offset| 1 + (node_start + offset) % node_count)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
     RecordBatch::try_new(
@@ -222,7 +242,11 @@ pub(super) fn nonempty_project_with_nodes(node_count: u64) -> TempDir {
         )
         .unwrap();
     session
-        .append(ConstructionChunkKind::Edge, "edge", &edge_batch(100, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edge",
+            &edge_batch(100, 1, u128::from(node_count), 1),
+        )
         .unwrap();
     session.seal().unwrap();
     let encoded = session.prepare_canonical_encoding(1).unwrap();
@@ -247,7 +271,11 @@ pub(super) fn nonempty_project_generation_two() -> TempDir {
         .append(ConstructionChunkKind::Node, "node", &node_batch(3, 1))
         .unwrap();
     session
-        .append(ConstructionChunkKind::Edge, "edge", &edge_batch(101, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edge",
+            &edge_batch(101, 1, 3, 1),
+        )
         .unwrap();
     session.seal().unwrap();
     let encoded = session.prepare_canonical_encoding(2).unwrap();
@@ -403,24 +431,18 @@ fn million_chunk_shaping_retains_name_state_bounded_by_the_partition_count() {
     // The online merge scheduler's logarithmic name state is gone: range
     // partitioning retains exactly one spill name per partition per family,
     // independent of how many chunks were staged.
-    //
-    // `budgets.partition_count` is a *ceiling* (#1439), defaulted to
-    // `MAX_PARTITION_COUNT` so the data-driven cut -- not an artificially low
-    // flat cap -- is what bounds production partition counts. Worst-case
-    // retained name state is therefore sized off the ceiling, not off the
-    // pre-#1439 flat default, and still stays a small fraction of max_chunks.
     let budgets = GraphConstructionBudgets::default();
     assert_eq!(budgets.max_chunks, 1_000_000);
     let families = super::partition_shaping::PartitionFamily::ALL.len() as u64;
     let slots = u64::from(budgets.partition_count) * families;
-    // Name state is a function of the recorded partition count ceiling and
-    // the family set, never of the staged chunk count.
-    assert_eq!(slots, 20_480, "retained slots: {slots}");
-    assert!(slots < budgets.max_chunks / 40, "retained slots: {slots}");
+    // Name state is a function of the recorded partition count and the family
+    // set, never of the staged chunk count.
+    assert_eq!(slots, 1_280, "retained slots: {slots}");
+    assert!(slots < budgets.max_chunks / 100, "retained slots: {slots}");
     assert_eq!(budgets.max_schema_groups, 256);
     assert_eq!(
         budgets.partition_count,
-        super::partition::MAX_PARTITION_COUNT
+        super::partition::DEFAULT_PARTITION_COUNT
     );
 }
 
@@ -597,7 +619,11 @@ fn node_after_edge_and_concurrent_same_process_open_fail_closed() {
         .is_err()
     );
     session
-        .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(100, 1, 2, 2),
+        )
         .unwrap();
     assert!(
         session

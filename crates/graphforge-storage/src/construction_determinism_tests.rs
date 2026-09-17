@@ -108,16 +108,25 @@ mod determinism {
         .unwrap()
     }
 
-    fn edge_rows(edges: &[[u8; 16]], nodes: &[[u8; 16]]) -> RecordBatch {
+    /// `start` is this window's offset into the full edge sequence (#1439).
+    /// Every call site passes one chunk at a time, and indexing `nodes` from
+    /// a per-call-local `0` on every chunk -- the previous behaviour --
+    /// referenced only the first `chunk`-many nodes as an endpoint no matter
+    /// how many nodes or chunks existed, concentrating every edge onto a
+    /// narrow node-UUID band. That was invisible while endpoints were routed
+    /// with the joint identity splitters, which never resolve node UUIDs
+    /// finely enough to notice; routing them with node-only splitters
+    /// surfaces it as a real (fixture-caused, not production) skew.
+    fn edge_rows(start: usize, edges: &[[u8; 16]], nodes: &[[u8; 16]]) -> RecordBatch {
         let src = edges
             .iter()
             .enumerate()
-            .map(|(index, _)| nodes[index % nodes.len()])
+            .map(|(index, _)| nodes[(start + index) % nodes.len()])
             .collect::<Vec<_>>();
         let dst = edges
             .iter()
             .enumerate()
-            .map(|(index, _)| nodes[(index + 1) % nodes.len()])
+            .map(|(index, _)| nodes[(start + index + 1) % nodes.len()])
             .collect::<Vec<_>>();
         RecordBatch::try_new(
             CONSTRUCTION_EDGE_SCHEMA.clone(),
@@ -200,7 +209,7 @@ mod determinism {
                 .append(
                     ConstructionChunkKind::Edge,
                     &format!("edges-{index}"),
-                    &edge_rows(window, nodes),
+                    &edge_rows(index * chunk, window, nodes),
                 )
                 .unwrap();
         }

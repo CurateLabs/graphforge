@@ -38,32 +38,10 @@ use graphforge_core::GfError;
 /// This is a recorded format parameter, never derived from the machine: it must
 /// not depend on `available_parallelism()` or on thread count, or the same
 /// logical input would stage differently on differently-sized hosts.
-///
-/// This is also the floor of the data-driven scaling target below
-/// [`TARGET_ROWS_PER_PARTITION`] (#1439): below that pivot, the effective cut
-/// is exactly this value, matching the operating point already proven at
-/// production's largest ladder rung before the scaling target engages.
 pub(crate) const DEFAULT_PARTITION_COUNT: u32 = 256;
 
 /// Upper bound on the recorded partition count.
 pub(crate) const MAX_PARTITION_COUNT: u32 = 4_096;
-
-/// Target rows materialized per partition once the data-driven scaling term
-/// is the binding constraint (#1439).
-///
-/// Each partition is materialized whole in memory and sorted, so resident
-/// partition memory is proportional to rows-per-partition, not to the
-/// partition *count*. A cut bounded only by a flat partition-count ceiling
-/// (the pre-#1439 behaviour) holds partition count constant past that
-/// ceiling and lets partition *size* grow with data instead, which is exactly
-/// what the RSS plateau gate exists to catch.
-///
-/// `4_194_304 / 16_384 == 256 == DEFAULT_PARTITION_COUNT`: this constant is
-/// chosen so the scaling term reproduces the already-proven 256-partition
-/// operating point at that record count and grows partitions proportionally
-/// with data beyond it, reaching exactly `MAX_PARTITION_COUNT` (4,096) at
-/// 67,108,864 records.
-const TARGET_ROWS_PER_PARTITION: u64 = 16_384;
 
 /// Sample points drawn per requested partition. Oversampling the quantile
 /// estimate is what keeps the partitions close to balanced; 64 points per
@@ -94,9 +72,8 @@ const BALANCE_MIN_MEAN_ROWS: u64 = 16;
 /// This does not make the partition count machine-dependent, which is the thing
 /// R1 forbids. The bound is a pure function of the staged record count recorded
 /// in the chunk receipts, so the same logical input cuts the same partitions on
-/// any host. This is a *small*-scale guard only: it is the binding constraint
-/// far below [`DEFAULT_PARTITION_COUNT`] records, and does nothing once the
-/// data-driven [`TARGET_ROWS_PER_PARTITION`] term takes over (#1439).
+/// any host. At production scale the recorded count is the binding constraint
+/// and this bound does nothing.
 const MIN_ROWS_PER_PARTITION: u64 = BALANCE_MIN_MEAN_ROWS;
 
 /// The recorded range-partition authority.
@@ -245,28 +222,8 @@ impl IdentitySampler {
     /// Returns an error when the requested partition count is out of range.
     pub(crate) fn new(partition_count: u32, total_records: u64) -> Result<Self, GfError> {
         validate_partition_count(partition_count)?;
-        // Two independent bounds, combined by `min`, so each stays a pure
-        // function of `total_records` and the requested ceiling never widens
-        // either of them (#1439):
-        //
-        // - `small_scale_floor`: below ~`DEFAULT_PARTITION_COUNT * 16` records
-        //   this is the binding term, exactly as before #1439. It keeps a
-        //   two-thousand-row graph from paying a large graph's durability
-        //   price.
-        // - `data_driven_target`: floored at `DEFAULT_PARTITION_COUNT`, so it
-        //   is inactive (equal to the floor) at and below the record count
-        //   that floor already covers, and grows partition count
-        //   proportionally with data beyond it. This is what keeps
-        //   rows-per-partition, and therefore resident partition memory,
-        //   roughly constant at scale instead of letting partition count
-        //   plateau while partition size keeps growing.
-        //
-        // The requested `partition_count` remains the hard ceiling over both.
-        let small_scale_floor = (total_records / MIN_ROWS_PER_PARTITION).max(1);
-        let data_driven_target = (total_records / TARGET_ROWS_PER_PARTITION)
-            .max(u64::from(DEFAULT_PARTITION_COUNT));
         let cut = u32::try_from(
-            u64::from(partition_count).min(small_scale_floor.min(data_driven_target)),
+            u64::from(partition_count).min((total_records / MIN_ROWS_PER_PARTITION).max(1)),
         )
         .map_err(storage)?;
         let target = u64::from(cut)
@@ -359,12 +316,23 @@ impl PartitionBalance {
     /// Returns an error when the partition is out of range or the count
     /// overflows.
     pub(crate) fn record(&mut self, partition: usize) -> Result<(), GfError> {
+        self.record_many(partition, 1)
+    }
+
+    /// Charge `count` rows to `partition` in one step (#1439 follow-up: the
+    /// caller batching a contiguous same-partition run charges it once
+    /// rather than once per record).
+    ///
+    /// # Errors
+    /// Returns an error when the partition is out of range or the count
+    /// overflows.
+    pub(crate) fn record_many(&mut self, partition: usize, count: u64) -> Result<(), GfError> {
         let slot = self
             .rows
             .get_mut(partition)
             .ok_or_else(|| storage("partition index is out of range"))?;
         *slot = slot
-            .checked_add(1)
+            .checked_add(count)
             .ok_or_else(|| storage("partition row count overflows"))?;
         Ok(())
     }
@@ -414,6 +382,58 @@ impl PartitionBalance {
                 "{context} range partitioning is skewed: largest partition holds {max} of \
                  {total} rows across {partitions} partitions, above the {BALANCE_TOLERANCE}x \
                  mean tolerance"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuse a partitioning whose largest partition exceeds
+    /// [`BALANCE_TOLERANCE`] times the mean, **unless** the excess is
+    /// explained by one repeated key.
+    ///
+    /// A range partition cannot split one key across partitions, so a hub --
+    /// one node referenced by a disproportionate number of edges, routing a
+    /// disproportionate number of endpoint records to the one partition that
+    /// owns it -- is not a splitter defect. `max_single_key_run` is the
+    /// largest number of records sharing one key observed anywhere in the
+    /// partitioning (computed after sorting, where identical keys are
+    /// contiguous). Discounting all but one of those occurrences from the
+    /// largest partition before comparing against the tolerance is what
+    /// distinguishes a genuine hub from a skewed splitter set: a bad splitter
+    /// set concentrates *distinct* keys into one partition, which this
+    /// discount does not hide.
+    ///
+    /// # Errors
+    /// Returns an error when the partitioning is skewed beyond the tolerance
+    /// even after that discount.
+    pub(crate) fn assert_balanced_with_hub_tolerance(
+        &self,
+        context: &str,
+        max_single_key_run: u64,
+    ) -> Result<(), GfError> {
+        let partitions = self.rows.len() as u64;
+        if partitions == 0 {
+            return Err(storage("partition balance has no partitions"));
+        }
+        let total = self.total();
+        if total / partitions < BALANCE_MIN_MEAN_ROWS {
+            return Ok(());
+        }
+        let max = self.max_rows();
+        let discount = max_single_key_run.saturating_sub(1);
+        let discounted = max.saturating_sub(discount);
+        let scaled = discounted
+            .checked_mul(partitions)
+            .ok_or_else(|| storage("partition balance ratio overflows"))?;
+        let budget = total
+            .checked_mul(BALANCE_TOLERANCE)
+            .ok_or_else(|| storage("partition balance budget overflows"))?;
+        if scaled > budget {
+            return Err(storage(format!(
+                "{context} range partitioning is skewed: largest partition holds {max} of \
+                 {total} rows across {partitions} partitions (largest single-key run \
+                 {max_single_key_run}), above the {BALANCE_TOLERANCE}x mean tolerance even after \
+                 discounting one hub key"
             )));
         }
         Ok(())

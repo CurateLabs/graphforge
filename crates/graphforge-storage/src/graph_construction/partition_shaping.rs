@@ -132,46 +132,13 @@ struct SpillWriter {
 }
 
 impl SpillWriter {
-    fn create(
-        root: &StableDirectory,
-        name: String,
-        window: std::num::NonZeroU64,
-    ) -> Result<Self, GfError> {
-        let temporary = artifact_temp(&name);
-        let file = root
-            .create_replaceable_child_file(temporary.as_os_str())
-            .map_err(super::storage)?;
-        let identity = file_identity(&file).map_err(super::storage)?;
-        let hashing = HashingWriter::with_cache_window(file, window)?;
-        Ok(Self {
-            name,
-            temporary,
-            identity,
-            writer: BufWriter::with_capacity(SPILL_BLOCK_BYTES, hashing),
-        })
-    }
-
-    fn write(&mut self, bytes: &[u8]) -> Result<(), GfError> {
-        self.writer.write_all(bytes).map_err(super::storage)
-    }
-
-    /// Drop an unsealed spill and remove its temporary.
-    ///
-    /// A shaping pass that fails part-way must not leave owned temporaries
-    /// behind: the identity-checked unlink here is the same one the session's
-    /// reopen cleanup would eventually perform, done immediately instead.
-    fn abandon(self, root: &StableDirectory) {
-        let Self {
-            temporary,
-            identity,
-            writer,
-            ..
-        } = self;
-        drop(writer);
-        let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
-        let _ = root.sync();
-    }
-
+    /// Constructed only from an already-sealed [`RowSpill`]'s buffered
+    /// writer (`RowRangePartitioner::seal`): row spills still buffer their
+    /// writes, because the Arrow IPC `StreamWriter` they hold does not offer
+    /// the record-boundary information [`FixedRangePartitioner::route_slice`]
+    /// needs to batch by contiguous partition run the way fixed-width
+    /// families do (#1439 follow-up). `create`/`write`/`abandon` accordingly
+    /// have no callers left after that change and are not reintroduced here.
     fn seal(
         mut self,
         root: &StableDirectory,
@@ -223,6 +190,111 @@ impl SpillWriter {
     }
 }
 
+/// One open, unsealed fixed-width partition spill (#1439 follow-up).
+///
+/// Unlike [`SpillWriter`], this holds no per-partition write buffer. Every
+/// partition open at once during routing used to cost `SPILL_BLOCK_BYTES`
+/// (64 KiB) of resident buffer regardless of how much of it had actually
+/// been written; concurrent spill buffers across partitions and families
+/// were the dominant measured term in both the RSS and fsync growth #1439
+/// originally investigated. The staged runs routed through this are
+/// UUID-sorted and the partition function is monotone, so the caller can
+/// accumulate one contiguous same-partition run of wire bytes and write it
+/// in a single call -- see [`FixedRangePartitioner::route_slice`] -- rather
+/// than buffering to amortize many small per-record writes.
+struct UnbufferedSpillWriter {
+    name: String,
+    temporary: std::ffi::OsString,
+    identity: FileIdentity,
+    writer: HashingWriter,
+}
+
+impl UnbufferedSpillWriter {
+    fn create(
+        root: &StableDirectory,
+        name: String,
+        window: std::num::NonZeroU64,
+    ) -> Result<Self, GfError> {
+        let temporary = artifact_temp(&name);
+        let file = root
+            .create_replaceable_child_file(temporary.as_os_str())
+            .map_err(super::storage)?;
+        let identity = file_identity(&file).map_err(super::storage)?;
+        let writer = HashingWriter::with_cache_window(file, window)?;
+        Ok(Self {
+            name,
+            temporary,
+            identity,
+            writer,
+        })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), GfError> {
+        self.writer.write_all(bytes).map_err(super::storage)
+    }
+
+    /// Drop an unsealed spill and remove its temporary. See
+    /// [`SpillWriter::abandon`]: same contract, same reason.
+    fn abandon(self, root: &StableDirectory) {
+        let Self {
+            temporary,
+            identity,
+            writer,
+            ..
+        } = self;
+        drop(writer);
+        let _ = root.unlink_child_if_identity(temporary.as_os_str(), identity);
+        let _ = root.sync();
+    }
+
+    fn seal(
+        mut self,
+        root: &StableDirectory,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<ArtifactReceipt, GfError> {
+        self.writer.flush().map_err(super::storage)?;
+        self.writer
+            .inner
+            .sync_all_and_release()
+            .map_err(super::storage)?;
+        let cache_release = self.writer.inner.evidence();
+        account_cache_release(cache_release, evidence)?;
+        account_sequential_write(self.writer.bytes, evidence)?;
+        let receipt = ArtifactReceipt {
+            name: self.name.clone(),
+            bytes: self.writer.bytes,
+            allocated_bytes: graphforge_filesystem::file_space_usage(self.writer.inner.file())
+                .map_err(super::storage)?
+                .allocated_bytes,
+            sha256: hex(&self.writer.digest.clone().finalize()),
+            xxh64: crate::corruption_checksum::hex(self.writer.checksum.finish()),
+            identity: self.identity.into(),
+            write_operations: self.writer.operations,
+            fsync_operations: cache_release
+                .sync_operations
+                .checked_add(1)
+                .ok_or_else(|| super::storage("artifact synchronization count overflows"))?,
+        };
+        drop(self.writer);
+        root.install_child(
+            self.temporary.as_os_str(),
+            self.identity,
+            OsStr::new(&self.name),
+        )
+        .map_err(super::storage)?;
+        root.sync().map_err(super::storage)?;
+        construction_failpoint("shape.partition_spill.after_install");
+        persist_shape_receipt(root, &receipt)?;
+        record_shape_artifact_install(evidence, &receipt)?;
+        account_fixed_write_operations(&receipt, evidence)?;
+        evidence.merge_fsync_operations = evidence
+            .merge_fsync_operations
+            .checked_add(receipt.fsync_operations)
+            .ok_or_else(|| super::storage("merge fsync operations overflows"))?;
+        Ok(receipt)
+    }
+}
+
 /// Routes fixed-width records into per-partition spills, then emits one sorted
 /// artifact by sorting each partition and concatenating them in index order.
 pub(super) struct FixedRangePartitioner<'a, const N: usize> {
@@ -231,7 +303,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     codec: Option<DetailCodec>,
     reject_duplicates: bool,
     window: std::num::NonZeroU64,
-    spills: Vec<Option<SpillWriter>>,
+    spills: Vec<Option<UnbufferedSpillWriter>>,
     sealed: Vec<Option<ArtifactReceipt>>,
     balance: PartitionBalance,
     records: u64,
@@ -274,6 +346,12 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     }
 
     /// Route one record into the partition owning `key`.
+    ///
+    /// Used only where the caller cannot establish a contiguous
+    /// same-partition run to batch (the post-resolution "Resolved" family is
+    /// re-keyed away from its input's sort order, so consecutive records are
+    /// not generally co-partitioned). Prefer [`Self::route_slice`] wherever
+    /// the input is sorted by the same key it is routed by.
     pub(super) fn route(
         &mut self,
         plan: &PartitionPlan,
@@ -282,27 +360,49 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<(), GfError> {
         let partition = plan.partition_of(key);
+        let wire = run_record_bytes(record, self.codec)?;
+        self.route_slice(partition, wire, 1, evidence)
+    }
+
+    /// Route one contiguous same-partition slice of wire bytes in a single
+    /// write (#1439 follow-up).
+    ///
+    /// `records` is the number of records the slice holds, charged to the
+    /// balance in one step. Callers whose input is sorted by the same key
+    /// they route by (identities, node/edge details, staged endpoints) can
+    /// accumulate a run of consecutive same-partition records and flush it
+    /// here instead of writing once per record through a held-open buffer.
+    pub(super) fn route_slice(
+        &mut self,
+        partition: usize,
+        wire: &[u8],
+        records: u64,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        if records == 0 {
+            debug_assert!(wire.is_empty());
+            return Ok(());
+        }
         let slot = self
             .spills
             .get_mut(partition)
             .ok_or_else(|| super::storage("routed partition is out of range"))?;
         if slot.is_none() {
-            *slot = Some(SpillWriter::create(
+            *slot = Some(UnbufferedSpillWriter::create(
                 self.root,
                 fixed_spill_name(self.family, partition),
                 self.window,
             )?);
         }
-        let wire = run_record_bytes(record, self.codec)?;
         slot.as_mut()
             .ok_or_else(|| super::storage("partition spill is absent"))?
             .write(wire)?;
         account_merge_read_bytes(evidence, wire.len() as u64)?;
         account_merge_write_bytes(evidence, wire.len() as u64)?;
-        self.balance.record(partition)?;
+        self.balance.record_many(partition, records)?;
         self.records = self
             .records
-            .checked_add(1)
+            .checked_add(records)
             .ok_or_else(|| super::storage("partition record count overflows"))?;
         Ok(())
     }
@@ -379,6 +479,15 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         let concatenated = (|| -> Result<u64, GfError> {
             let mut previous: Option<[u8; N]> = None;
             let mut written = 0_u64;
+            // Tracks the longest run of records sharing one key, across the
+            // whole concatenation. A range partition cannot split one key, so
+            // this is what tells a hub apart from a skewed splitter set
+            // (#1439) -- see `PartitionBalance::assert_balanced_with_hub_tolerance`.
+            // Keys are unique within a partition's sorted order without
+            // spanning partitions (the partition function is a function of
+            // the key), so accumulating this across the loop below is exact.
+            let mut current_run = 0_u64;
+            let mut max_single_key_run = 0_u64;
             for partition in 0..self.sealed.len() {
                 let Some(name) = self.sealed[partition]
                     .as_ref()
@@ -387,7 +496,8 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                     continue;
                 };
                 reject_cancelled(cancelled)?;
-                let records = self.load_partition(&name, evidence)?;
+                let expected = self.balance.rows().get(partition).copied();
+                let records = self.load_partition(&name, expected, evidence)?;
                 for record in &records {
                     // Partition order is key order, so the concatenation is the
                     // global order. Prove it rather than assume it: this is the
@@ -403,7 +513,15 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                                 "duplicate identity across construction runs",
                             ));
                         }
+                        current_run = if prior[..16] == record[..16] {
+                            current_run.saturating_add(1)
+                        } else {
+                            1
+                        };
+                    } else {
+                        current_run = 1;
                     }
+                    max_single_key_run = max_single_key_run.max(current_run);
                     let wire = run_record_bytes(record, self.codec)?;
                     writer.write_all(wire).map_err(super::storage)?;
                     account_merge_write_bytes(evidence, wire.len() as u64)?;
@@ -416,6 +534,13 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                     }
                 }
             }
+            // Load-bearing, not a nicety (#1439): a collapsed one-partition
+            // run is perfectly deterministic and passes every byte-equality
+            // test, so this is what tells a working range partition apart
+            // from a catastrophically skewed one for every fixed-width
+            // family, not only identities.
+            self.balance
+                .assert_balanced_with_hub_tolerance(self.family.as_str(), max_single_key_run)?;
             Ok(written)
         })();
         let written = match concatenated {
@@ -562,14 +687,23 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     /// This is the materialization the design's rule R4 requires: the sorted
     /// partition exists in full before any of it is written, so row-group and
     /// record boundaries are a pure function of row count, never of arrival.
+    ///
+    /// `expected_records`, when given, pre-sizes the returned `Vec` from the
+    /// row count the routing pass already recorded in `self.balance` (#1439),
+    /// removing the growth-by-doubling headroom `Vec::new()` would otherwise
+    /// carry at the moment a large partition is fully materialized.
     fn load_partition(
         &self,
         name: &str,
+        expected_records: Option<u64>,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<Vec<[u8; N]>, GfError> {
         let (mut reader, counter) = open_counted_fixed_reader(self.root, name, evidence)?;
         let loaded = (|| -> Result<Vec<[u8; N]>, GfError> {
-            let mut records = Vec::new();
+            let mut records = match expected_records.and_then(|count| usize::try_from(count).ok()) {
+                Some(count) => Vec::with_capacity(count),
+                None => Vec::new(),
+            };
             while let Some(record) = read_run_record::<N>(&mut reader, self.codec)? {
                 account_merge_read_bytes(
                     evidence,
@@ -888,6 +1022,11 @@ impl<'a> RowRangePartitioner<'a> {
                     evidence,
                 )?;
             }
+            // Every row is keyed by its own unique UUID (the loop above
+            // already refuses a duplicate), so no hub scenario exists here:
+            // a skewed row partitioning is always a splitter defect (#1439).
+            self.balance
+                .assert_balanced(&format!("row partition {}", self.namespace))?;
             Ok(written)
         })();
         let written = match written {

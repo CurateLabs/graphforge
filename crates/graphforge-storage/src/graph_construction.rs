@@ -470,20 +470,11 @@ pub struct GraphConstructionBudgets {
     pub max_catalog_decoded_bytes: usize,
     /// Maximum UTF-8 identifier bytes retained by the complete runtime catalog.
     pub max_catalog_identifier_bytes: usize,
-    /// Ceiling on the range partitions shaping cuts the identity key space
-    /// into.
+    /// Range partitions shaping cuts the identity key space into.
     ///
     /// This is a recorded format parameter, never derived from the machine. It
     /// must not be tied to `available_parallelism()` or to a thread count: the
     /// same logical input has to stage identically on hosts of different sizes.
-    ///
-    /// It is a ceiling, not the literal count used: the effective cut is a
-    /// pure function of the recorded staged record count, clamped to this
-    /// value (#1439). Defaulting it to [`partition::MAX_PARTITION_COUNT`]
-    /// means that data-driven cut, not an artificially low flat cap, is what
-    /// actually bounds the partition count in production; the cut formula's
-    /// own small-scale floor and data-driven target are what keep small and
-    /// medium inputs at the same partition counts as before.
     pub partition_count: u32,
 }
 
@@ -500,7 +491,7 @@ impl Default for GraphConstructionBudgets {
             max_catalog_entries: 1_000_000,
             max_catalog_decoded_bytes: 256 << 20,
             max_catalog_identifier_bytes: 64 << 20,
-            partition_count: partition::MAX_PARTITION_COUNT,
+            partition_count: partition::DEFAULT_PARTITION_COUNT,
         }
     }
 }
@@ -831,6 +822,16 @@ struct ShapeIntent {
     /// partition writes a byte.
     #[serde(default)]
     splitters: Vec<String>,
+    /// Recorded range-partition splitters over the staged **node** identity
+    /// domain only (#1439), canonical lower hex, strictly increasing.
+    /// Endpoints, node details and node-kind rows are keyed by node UUID and
+    /// are routed with these instead of `splitters`: Graph500-shaped input
+    /// puts nodes and edges in disjoint UUID bands, so the joint splitters
+    /// above route almost every node-keyed record into a handful of
+    /// partitions. A pure function of the same recorded chunk receipts as
+    /// `splitters`, so R1 holds for this set too.
+    #[serde(default)]
+    node_splitters: Vec<String>,
     /// Measured identity rows per effective partition, in partition order.
     #[serde(default)]
     partition_identity_rows: Vec<u64>,
