@@ -38,10 +38,32 @@ use graphforge_core::GfError;
 /// This is a recorded format parameter, never derived from the machine: it must
 /// not depend on `available_parallelism()` or on thread count, or the same
 /// logical input would stage differently on differently-sized hosts.
+///
+/// This is also the floor of the data-driven scaling target below
+/// [`TARGET_ROWS_PER_PARTITION`] (#1439): below that pivot, the effective cut
+/// is exactly this value, matching the operating point already proven at
+/// production's largest ladder rung before the scaling target engages.
 pub(crate) const DEFAULT_PARTITION_COUNT: u32 = 256;
 
 /// Upper bound on the recorded partition count.
 pub(crate) const MAX_PARTITION_COUNT: u32 = 4_096;
+
+/// Target rows materialized per partition once the data-driven scaling term
+/// is the binding constraint (#1439).
+///
+/// Each partition is materialized whole in memory and sorted, so resident
+/// partition memory is proportional to rows-per-partition, not to the
+/// partition *count*. A cut bounded only by a flat partition-count ceiling
+/// (the pre-#1439 behaviour) holds partition count constant past that
+/// ceiling and lets partition *size* grow with data instead, which is exactly
+/// what the RSS plateau gate exists to catch.
+///
+/// `4_194_304 / 16_384 == 256 == DEFAULT_PARTITION_COUNT`: this constant is
+/// chosen so the scaling term reproduces the already-proven 256-partition
+/// operating point at that record count and grows partitions proportionally
+/// with data beyond it, reaching exactly `MAX_PARTITION_COUNT` (4,096) at
+/// 67,108,864 records.
+const TARGET_ROWS_PER_PARTITION: u64 = 16_384;
 
 /// Sample points drawn per requested partition. Oversampling the quantile
 /// estimate is what keeps the partitions close to balanced; 64 points per
@@ -72,8 +94,9 @@ const BALANCE_MIN_MEAN_ROWS: u64 = 16;
 /// This does not make the partition count machine-dependent, which is the thing
 /// R1 forbids. The bound is a pure function of the staged record count recorded
 /// in the chunk receipts, so the same logical input cuts the same partitions on
-/// any host. At production scale the recorded count is the binding constraint
-/// and this bound does nothing.
+/// any host. This is a *small*-scale guard only: it is the binding constraint
+/// far below [`DEFAULT_PARTITION_COUNT`] records, and does nothing once the
+/// data-driven [`TARGET_ROWS_PER_PARTITION`] term takes over (#1439).
 const MIN_ROWS_PER_PARTITION: u64 = BALANCE_MIN_MEAN_ROWS;
 
 /// The recorded range-partition authority.
@@ -222,8 +245,28 @@ impl IdentitySampler {
     /// Returns an error when the requested partition count is out of range.
     pub(crate) fn new(partition_count: u32, total_records: u64) -> Result<Self, GfError> {
         validate_partition_count(partition_count)?;
+        // Two independent bounds, combined by `min`, so each stays a pure
+        // function of `total_records` and the requested ceiling never widens
+        // either of them (#1439):
+        //
+        // - `small_scale_floor`: below ~`DEFAULT_PARTITION_COUNT * 16` records
+        //   this is the binding term, exactly as before #1439. It keeps a
+        //   two-thousand-row graph from paying a large graph's durability
+        //   price.
+        // - `data_driven_target`: floored at `DEFAULT_PARTITION_COUNT`, so it
+        //   is inactive (equal to the floor) at and below the record count
+        //   that floor already covers, and grows partition count
+        //   proportionally with data beyond it. This is what keeps
+        //   rows-per-partition, and therefore resident partition memory,
+        //   roughly constant at scale instead of letting partition count
+        //   plateau while partition size keeps growing.
+        //
+        // The requested `partition_count` remains the hard ceiling over both.
+        let small_scale_floor = (total_records / MIN_ROWS_PER_PARTITION).max(1);
+        let data_driven_target = (total_records / TARGET_ROWS_PER_PARTITION)
+            .max(u64::from(DEFAULT_PARTITION_COUNT));
         let cut = u32::try_from(
-            u64::from(partition_count).min((total_records / MIN_ROWS_PER_PARTITION).max(1)),
+            u64::from(partition_count).min(small_scale_floor.min(data_driven_target)),
         )
         .map_err(storage)?;
         let target = u64::from(cut)

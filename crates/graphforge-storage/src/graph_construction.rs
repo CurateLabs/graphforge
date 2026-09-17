@@ -470,11 +470,20 @@ pub struct GraphConstructionBudgets {
     pub max_catalog_decoded_bytes: usize,
     /// Maximum UTF-8 identifier bytes retained by the complete runtime catalog.
     pub max_catalog_identifier_bytes: usize,
-    /// Range partitions shaping cuts the identity key space into.
+    /// Ceiling on the range partitions shaping cuts the identity key space
+    /// into.
     ///
     /// This is a recorded format parameter, never derived from the machine. It
     /// must not be tied to `available_parallelism()` or to a thread count: the
     /// same logical input has to stage identically on hosts of different sizes.
+    ///
+    /// It is a ceiling, not the literal count used: the effective cut is a
+    /// pure function of the recorded staged record count, clamped to this
+    /// value (#1439). Defaulting it to [`partition::MAX_PARTITION_COUNT`]
+    /// means that data-driven cut, not an artificially low flat cap, is what
+    /// actually bounds the partition count in production; the cut formula's
+    /// own small-scale floor and data-driven target are what keep small and
+    /// medium inputs at the same partition counts as before.
     pub partition_count: u32,
 }
 
@@ -491,7 +500,7 @@ impl Default for GraphConstructionBudgets {
             max_catalog_entries: 1_000_000,
             max_catalog_decoded_bytes: 256 << 20,
             max_catalog_identifier_bytes: 64 << 20,
-            partition_count: partition::DEFAULT_PARTITION_COUNT,
+            partition_count: partition::MAX_PARTITION_COUNT,
         }
     }
 }

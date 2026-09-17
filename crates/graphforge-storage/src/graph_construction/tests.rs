@@ -403,18 +403,24 @@ fn million_chunk_shaping_retains_name_state_bounded_by_the_partition_count() {
     // The online merge scheduler's logarithmic name state is gone: range
     // partitioning retains exactly one spill name per partition per family,
     // independent of how many chunks were staged.
+    //
+    // `budgets.partition_count` is a *ceiling* (#1439), defaulted to
+    // `MAX_PARTITION_COUNT` so the data-driven cut -- not an artificially low
+    // flat cap -- is what bounds production partition counts. Worst-case
+    // retained name state is therefore sized off the ceiling, not off the
+    // pre-#1439 flat default, and still stays a small fraction of max_chunks.
     let budgets = GraphConstructionBudgets::default();
     assert_eq!(budgets.max_chunks, 1_000_000);
     let families = super::partition_shaping::PartitionFamily::ALL.len() as u64;
     let slots = u64::from(budgets.partition_count) * families;
-    // Name state is a function of the recorded partition count and the family
-    // set, never of the staged chunk count.
-    assert_eq!(slots, 1_280, "retained slots: {slots}");
-    assert!(slots < budgets.max_chunks / 100, "retained slots: {slots}");
+    // Name state is a function of the recorded partition count ceiling and
+    // the family set, never of the staged chunk count.
+    assert_eq!(slots, 20_480, "retained slots: {slots}");
+    assert!(slots < budgets.max_chunks / 40, "retained slots: {slots}");
     assert_eq!(budgets.max_schema_groups, 256);
     assert_eq!(
         budgets.partition_count,
-        super::partition::DEFAULT_PARTITION_COUNT
+        super::partition::MAX_PARTITION_COUNT
     );
 }
 
