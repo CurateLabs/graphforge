@@ -404,7 +404,11 @@ fn compose_rows(
             .or_default();
         extra.extend(event.confidence_uuid);
         extra.extend(event.reasoning_uuid);
-        let candidate = (event.recorded_at_micros, event.status_event_uuid, event.status.as_str());
+        let candidate = (
+            event.recorded_at_micros,
+            event.status_event_uuid,
+            event.status.as_str(),
+        );
         current_status_by_assertion
             .entry(event.assertion_uuid)
             .and_modify(|existing| {
@@ -441,7 +445,9 @@ fn compose_rows(
             .entry(event.group_uuid)
             .or_default()
             .push(event.membership_event_uuid);
-        let state = membership_state_by_group.entry(event.group_uuid).or_default();
+        let state = membership_state_by_group
+            .entry(event.group_uuid)
+            .or_default();
         match event.action {
             HypothesisMembershipAction::Added => {
                 state.insert(event.assertion_uuid);
@@ -482,7 +488,8 @@ fn compose_rows(
             .cloned()
             .unwrap_or_default();
         let mut sources = BTreeSet::from([assertion.assertion_uuid]);
-        if let Some(status_event_uuids) = status_event_uuids_by_assertion.get(&assertion.assertion_uuid)
+        if let Some(status_event_uuids) =
+            status_event_uuids_by_assertion.get(&assertion.assertion_uuid)
         {
             sources.extend(status_event_uuids.iter().copied());
         }
@@ -490,7 +497,8 @@ fn compose_rows(
             sources.extend(extra.iter().copied());
         }
         sources.extend(history.iter().copied());
-        if let Some(supersession_uuids) = supersession_uuids_by_assertion.get(&assertion.assertion_uuid)
+        if let Some(supersession_uuids) =
+            supersession_uuids_by_assertion.get(&assertion.assertion_uuid)
         {
             sources.extend(supersession_uuids.iter().copied());
         }
@@ -522,7 +530,8 @@ fn compose_rows(
             .copied()
             .flatten();
         let mut sources = BTreeSet::from([group.group_uuid]);
-        if let Some(membership_event_uuids) = membership_event_uuids_by_group.get(&group.group_uuid) {
+        if let Some(membership_event_uuids) = membership_event_uuids_by_group.get(&group.group_uuid)
+        {
             sources.extend(membership_event_uuids.iter().copied());
         }
         if let Some(selection_event_uuids) = selection_event_uuids_by_group.get(&group.group_uuid) {
@@ -696,8 +705,7 @@ mod tests {
         RecordHypothesisSelectionRequest, RecordReasoningRequest, WriteContext,
     };
     use graphforge_knowledge::{
-        AssertionGraphRole, AssertionStatus, GraphObjectKind, ReasoningContentFormat,
-        ReasoningKind,
+        AssertionGraphRole, AssertionStatus, GraphObjectKind, ReasoningContentFormat, ReasoningKind,
     };
 
     fn uuid7(seed: u8) -> Uuid {
@@ -1079,8 +1087,12 @@ mod tests {
             let warm = warm_result.unwrap();
 
             assert_eq!(
-                cold.schema.metadata().get("graphforge.snapshot_fingerprint"),
-                warm.schema.metadata().get("graphforge.snapshot_fingerprint"),
+                cold.schema
+                    .metadata()
+                    .get("graphforge.snapshot_fingerprint"),
+                warm.schema
+                    .metadata()
+                    .get("graphforge.snapshot_fingerprint"),
                 "a cached read must fingerprint identically to the cold read"
             );
             assert_eq!(
