@@ -11,10 +11,17 @@ Four hand-maintained places have to agree with the ADR directory:
 ``docs-site/astro.config.mjs``       published site sidebar
 ==================================== ==========================================
 
-The last two are machine-consumed by the docs build and carry no human prose, so
-they are *generated* from the directory between marker comments rather than
-checked: drift is removed instead of detected. The two markdown tables carry
-hand-written titles and statuses, so they are checked.
+All four are *generated* from the directory itself, so drift is removed rather
+than detected. The docs-site files are rewritten between marker comments; the
+two markdown tables have their row bodies rewritten in place, leaving the
+header and separator alone.
+
+The markdown tables were hand-maintained until #1390: their titles and statuses
+were assumed to be human prose, but every cell is derivable from the ADR file
+(``# ADR NNNN: Title`` and ``**Status:**``). Hand-maintaining four copies of one
+fact produced exactly the drift this script exists to catch. ``check`` is kept
+and still fails closed, so a hand edit is reported rather than silently
+overwritten on the next run.
 
 Usage::
 
@@ -236,14 +243,89 @@ GENERATED = (
 )
 
 
+def _adr_readme_rows(records: list[Record]) -> tuple[list[str], list[str]]:
+    """Row bodies for the two tables in ``docs/adr/README.md``."""
+    live = [f"| {r.number} | [{r.title}]({r.relpath}) | `{r.relpath}` |" for r in active(records)]
+    dead = [
+        f"| {r.number} | [{r.title}]({r.relpath}) | ADR {r.superseded_by} | `{r.relpath}` |"
+        for r in superseded(records)
+    ]
+    return live, dead
+
+
+def _engineering_rows(records: list[Record]) -> tuple[list[str], list[str]]:
+    """Row bodies for the two tables in ``docs/engineering/adrs/README.md``."""
+
+    def row(r: Record) -> str:
+        path = f"../../adr/{r.relpath}"
+        return f"| {r.number} | {r.title} | {r.status} | [`{path}`]({path}) |"
+
+    return [row(r) for r in active(records)], [row(r) for r in superseded(records)]
+
+
+def _replace_table_body(path: Path, header: str, which: int, rows: list[str]) -> bool:
+    """Rewrite the ``which``-th body of the table headed by ``header``.
+
+    The header and its separator are left alone; only the row block between the
+    separator and the first non-row line is replaced. Returns True if the file
+    changed.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    seen = -1
+    for index, line in enumerate(lines):
+        if line.strip() != header:
+            continue
+        seen += 1
+        if seen != which:
+            continue
+        start = index + 2  # skip the header and the |---| separator
+        end = start
+        while end < len(lines) and lines[end].startswith("|"):
+            end += 1
+        if lines[start:end] == rows:
+            return False
+        lines[start:end] = rows
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    raise AdrError(f"{path.relative_to(ROOT)}: table {which} headed {header!r} not found")
+
+
+def write_markdown_indexes(records: list[Record]) -> list[Path]:
+    """Regenerate every row body in the two hand-readable ADR indexes."""
+    live, dead = _adr_readme_rows(records)
+    eng_live, eng_dead = _engineering_rows(records)
+    changed: list[Path] = []
+    for path, jobs in (
+        (
+            ADR_README,
+            (
+                (("| ADR | Title | File |"), 0, live),
+                ("| ADR | Title | Superseded by | File |", 0, dead),
+            ),
+        ),
+        (
+            ENGINEERING_README,
+            (
+                ("| ADR | Title | Status | Path |", 0, eng_live),
+                ("| ADR | Title | Status | Path |", 1, eng_dead),
+            ),
+        ),
+    ):
+        for header, which, rows in jobs:
+            if _replace_table_body(path, header, which, rows) and path not in changed:
+                changed.append(path)
+    return changed
+
+
 def generate(records: list[Record]) -> list[Path]:
-    """Rewrite the generated regions in place; return the files that changed."""
+    """Rewrite every generated region in place; return the files that changed."""
     changed: list[Path] = []
     for path, builder in GENERATED:
         wanted = render(path, builder(records))
         if path.read_text(encoding="utf-8") != wanted:
             path.write_text(wanted, encoding="utf-8")
             changed.append(path)
+    changed.extend(write_markdown_indexes(records))
     return changed
 
 
