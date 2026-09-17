@@ -604,16 +604,18 @@ where
         || checkpoint.borrow_mut()(),
     )?;
     match outcome {
-        SearchPublicationOutcome::Reused(_) => Ok(reused_prepared.into_inner().expect(
-            "a reused outcome is only returned once validate_current has recorded it",
-        )),
-        SearchPublicationOutcome::Published { artifact, .. } => Ok(match built_kind
-            .get()
-            .expect("a published outcome is only returned once build has recorded its kind")
-        {
-            TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
-            TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
-        }),
+        SearchPublicationOutcome::Reused(_) => Ok(reused_prepared
+            .into_inner()
+            .expect("a reused outcome is only returned once validate_current has recorded it")),
+        SearchPublicationOutcome::Published { artifact, .. } => Ok(
+            match built_kind
+                .get()
+                .expect("a published outcome is only returned once build has recorded its kind")
+            {
+                TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
+                TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
+            },
+        ),
     }
 }
 
@@ -1170,6 +1172,7 @@ mod tests {
     /// Writes `count` distinct `Person` nodes, each with a `name` string that
     /// shares one common searchable token, for scale measurements.
     fn write_people(project_dir: &Path, count: usize) {
+        const FLUSH_EVERY: usize = 5_000;
         let mut writer = GraphWriter::open_at(project_dir, OntologyMode::Strict, 1).unwrap();
         for index in 0..count {
             let node = bulk_uuid(index);
@@ -1189,6 +1192,10 @@ mod tests {
                     )]),
                 )
                 .unwrap();
+            if (index + 1) % FLUSH_EVERY == 0 {
+                writer.flush().unwrap();
+                writer = GraphWriter::open_at(project_dir, OntologyMode::Strict, 1).unwrap();
+            }
         }
         writer.flush().unwrap();
     }
