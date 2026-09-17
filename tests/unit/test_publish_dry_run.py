@@ -1,6 +1,7 @@
 """Tests for local publication dry-run helpers."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import yaml
@@ -47,6 +48,7 @@ def test_npm_dry_run_constructs_every_publication_command(monkeypatch) -> None:
         return _step(cmd)
 
     monkeypatch.setattr(publish_dry_run, "_run", fake_run)
+    monkeypatch.setattr(publish_dry_run, "npm_dist_tag", lambda _package_dir: "next")
     steps = publish_dry_run.dry_run_npm()
 
     assert len(steps) == 4
@@ -60,7 +62,7 @@ def test_npm_dry_run_constructs_every_publication_command(monkeypatch) -> None:
                 "--dry-run",
                 "--ignore-scripts",
                 "--tag",
-                "dry-run",
+                "next",
             ],
             publish_dry_run.NPM_PACKAGES[0],
         ),
@@ -71,7 +73,7 @@ def test_npm_dry_run_constructs_every_publication_command(monkeypatch) -> None:
                 "--dry-run",
                 "--no-git-checks",
                 "--tag",
-                "dry-run",
+                "next",
             ],
             publish_dry_run.NPM_PACKAGES[1],
         ),
@@ -82,11 +84,38 @@ def test_npm_dry_run_constructs_every_publication_command(monkeypatch) -> None:
                 "--dry-run",
                 "--ignore-scripts",
                 "--tag",
-                "dry-run",
+                "next",
             ],
             publish_dry_run.NPM_PACKAGES[2],
         ),
     ]
+
+
+def test_npm_dry_run_uses_the_publisher_dist_tag_policy() -> None:
+    """The dry run must show the tag a real publish would assign, not a placeholder."""
+    publisher = publish_dry_run._npm_publisher()
+    assert publisher.dist_tag_for("0.6.0") == "latest"
+    assert publisher.dist_tag_for("0.6.0-rc.1") == "next"
+    for package_dir in publish_dry_run.NPM_PACKAGES:
+        version = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))["version"]
+        assert publish_dry_run.npm_dist_tag(package_dir) == publisher.dist_tag_for(version)
+
+
+def test_npm_dry_run_fails_closed_on_an_unclassifiable_version(monkeypatch) -> None:
+    def fake_run(cmd: list[str], *, cwd: Path | None = None) -> dict[str, object]:
+        del cwd
+        return _step(cmd)
+
+    def unclassifiable(_package_dir: Path) -> str:
+        raise ValueError("cannot classify version '0.6.0rc1'")
+
+    monkeypatch.setattr(publish_dry_run, "_run", fake_run)
+    monkeypatch.setattr(publish_dry_run, "npm_dist_tag", unclassifiable)
+    steps = publish_dry_run.dry_run_npm()
+
+    assert len(steps) == 2
+    assert steps[-1]["ok"] is False
+    assert "cannot derive npm dist-tag" in steps[-1]["stderr_tail"]
 
 
 def test_npm_dry_run_stops_when_dependency_install_fails(monkeypatch) -> None:

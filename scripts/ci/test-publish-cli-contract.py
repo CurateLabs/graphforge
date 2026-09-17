@@ -29,7 +29,10 @@ def main() -> None:
     assert "npm:@curatelabs/graphforge" in main_job
     assert "npm:@curatelabs/graphforge-cli" in cli
     assert "npm:@curatelabs/graphforge-agent-skills" in skills
+    # No npm package may reach the registry without the version-derived dist-tag.
     for job in (native, main_job, cli, skills):
+        assert "NPM_DIST_TAG: ${{ needs.candidate-preflight.outputs.npm_dist_tag }}" in job
+        assert '--dist-tag "$NPM_DIST_TAG"' in job
         assert "--registry npm" in job
         assert job.count("release_action.py authorize") == 1
         assert job.count("scripts/publish_npm_artifacts.py") == 1

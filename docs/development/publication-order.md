@@ -104,6 +104,25 @@ five native packages (parallel)
 @curatelabs/graphforge-agent-skills
 ```
 
+### npm dist-tags
+
+npm assigns `latest` whenever `npm publish` runs without `--tag`, whether or not
+the version is a semver prerelease. cargo and PyPI exclude prereleases from
+default resolution by themselves; npm does not, so it fails open silently.
+
+`scripts/publish_npm_artifacts.py` therefore derives the dist-tag from the
+version it is publishing and passes it explicitly on every upload. A release
+version takes `latest`; any semver prerelease takes `next`; a version that is
+not valid npm semver is refused rather than defaulted. The rule applies to all
+eight packages, so an `npm install @curatelabs/graphforge@next` install resolves
+a coherent candidate while `npm install @curatelabs/graphforge` keeps resolving
+the last final release.
+
+`publish.yaml` resolves the tag once in `candidate-preflight`, records it in the
+job summary, and passes it back to each lane as an assertion. The publisher
+still derives the tag itself, so a caller cannot talk a prerelease onto
+`latest` by omitting or contradicting the flag.
+
 A successful upload response creates a sanitized accepted-write receipt. The
 lane performs exactly one immediate public observation. It never polls, sleeps,
 blindly retries, or repeats a pending write. If propagation has not completed,

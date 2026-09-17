@@ -4,7 +4,8 @@
 Surfaces:
 - cargo-package: ``cargo package --list --no-verify`` per crates.io plan order
 - cargo-publish: ``cargo publish --dry-run`` (heavy; optional)
-- npm: ``npm publish --dry-run`` for Node binding, CLI, and agent-skills
+- npm: ``npm publish --dry-run`` for Node binding, CLI, and agent-skills, under
+  the same version-derived dist-tag a real publish would use
 - docs: ``pnpm docs:build``
 - python: ``maturin sdist`` (local packaging; TestPyPI upload is separate/manual)
 
@@ -22,6 +23,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -32,6 +35,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATE_PLAN = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
+NPM_PUBLISHER = ROOT / "scripts" / "publish_npm_artifacts.py"
 
 # Fallback when crate-publish-plan.py is not on the branch yet (pre-#269).
 # Keep in sync with CRATES_IO_EXCLUDED there: no binding implementation crates.
@@ -59,6 +63,26 @@ NPM_PACKAGES = (
     ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
+
+
+@functools.cache
+def _npm_publisher() -> Any:
+    """Load the real npm publisher so the dry run shares its dist-tag policy."""
+    if str(ROOT / "scripts" / "ci") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    spec = importlib.util.spec_from_file_location("publish_npm_artifacts", NPM_PUBLISHER)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {NPM_PUBLISHER}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def npm_dist_tag(package_dir: Path) -> str:
+    """Return the dist-tag a real publish of ``package_dir`` would use."""
+    manifest = package_dir / "package.json"
+    version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
+    return _npm_publisher().dist_tag_for(version)
 
 
 def _git_sha() -> str:
@@ -164,12 +188,28 @@ def dry_run_cargo_publish() -> list[dict[str, Any]]:
 
 
 def dry_run_npm() -> list[dict[str, Any]]:
-    # Prerelease versions (e.g. 0.5.0-dev.0) require an explicit --tag; dry-run
-    # never publishes, so a disposable tag keeps the check green before freeze.
+    # The dist-tag is derived from each package version by the same classifier the
+    # real publisher uses, so the dry run shows the tag publication would assign.
+    # A version that cannot be classified fails the surface instead of defaulting.
     steps = [_run(["pnpm", "install", "--frozen-lockfile"])]
     if not steps[0]["ok"]:
         return steps
     for package_dir in NPM_PACKAGES:
+        try:
+            dist_tag = npm_dist_tag(package_dir)
+        except (OSError, ValueError, KeyError) as error:
+            steps.append(
+                {
+                    "cmd": ["npm-dist-tag", str(package_dir.relative_to(ROOT))],
+                    "cwd": str(package_dir.relative_to(ROOT)),
+                    "exit_code": 2,
+                    "seconds": 0,
+                    "stdout_tail": "",
+                    "stderr_tail": f"cannot derive npm dist-tag: {error}",
+                    "ok": False,
+                }
+            )
+            return steps
         if package_dir.name == "cli":
             command = [
                 "pnpm",
@@ -177,7 +217,7 @@ def dry_run_npm() -> list[dict[str, Any]]:
                 "--dry-run",
                 "--no-git-checks",
                 "--tag",
-                "dry-run",
+                dist_tag,
             ]
         else:
             command = [
@@ -186,7 +226,7 @@ def dry_run_npm() -> list[dict[str, Any]]:
                 "--dry-run",
                 "--ignore-scripts",
                 "--tag",
-                "dry-run",
+                dist_tag,
             ]
         steps.append(_run(command, cwd=package_dir))
     return steps

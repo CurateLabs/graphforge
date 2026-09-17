@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Publish recorded npm tarballs with checksum-safe resumability."""
+"""Publish recorded npm tarballs with checksum-safe resumability.
+
+npm assigns the ``latest`` dist-tag whenever ``npm publish`` is run without
+``--tag``, regardless of whether the version is a semver prerelease. cargo and
+PyPI exclude prereleases from default resolution on their own; npm does not, and
+it fails open silently. Every publication here therefore carries an explicit
+``--tag`` derived from the version being published, never from an opt-in flag:
+
+- release versions (``0.6.0``)          -> ``latest``
+- semver prereleases (``0.6.0-rc.1``)   -> ``next``
+- anything that is not semver           -> refuse to publish
+
+``next`` is the conventional npm prerelease channel, so one channel name covers
+every prerelease flavour (``-rc``, ``-beta``, ``-dev``) and ``npm install
+@curatelabs/graphforge@next`` resolves a coherent set across all eight packages.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +26,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -24,12 +40,43 @@ sys.path.insert(0, str(ROOT / "scripts" / "ci"))
 import release_action  # noqa: E402
 
 REGISTRY = "https://registry.npmjs.org"
+RELEASE_DIST_TAG = "latest"
+PRERELEASE_DIST_TAG = "next"
+# Official semver 2.0.0 grammar (semver.org); the prerelease group decides the tag.
+SEMVER = re.compile(
+    r"(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+(?P<build>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?"
+)
 USER_AGENT = "GraphForge npm publisher (github.com/CurateLabs/graphforge)"
 GROUPS = {
     "native": slice(0, 6),
     "cli": slice(6, 7),
     "skills": slice(7, 8),
 }
+
+
+class DistTagError(ValueError):
+    """The version cannot be classified, so no dist-tag may be assumed."""
+
+
+def dist_tag_for(version: str) -> str:
+    """Return the npm dist-tag for one version, refusing anything unclassifiable.
+
+    Fails closed: a version that is not valid semver raises instead of silently
+    inheriting npm's ``latest`` default.
+    """
+    if not isinstance(version, str):
+        raise DistTagError(f"version must be a string, got {type(version).__name__}")
+    candidate = version.strip()
+    match = SEMVER.fullmatch(candidate)
+    if match is None:
+        raise DistTagError(
+            f"cannot classify version {version!r} as a release or a prerelease; "
+            "refusing to let npm default it to 'latest'"
+        )
+    return PRERELEASE_DIST_TAG if match.group("prerelease") else RELEASE_DIST_TAG
 
 
 def load_candidate_module():
@@ -86,21 +133,37 @@ def archive_matches_integrity(path: Path, integrity: str) -> bool:
     return False
 
 
-def publish_archive(path: Path) -> None:
+def publish_archive(path: Path, dist_tag: str) -> None:
     """Publish one retained tarball via npm trusted publishing (OIDC) + provenance."""
     subprocess.run(
-        ["npm", "publish", str(path), "--access", "public", "--provenance"],
+        [
+            "npm",
+            "publish",
+            str(path),
+            "--access",
+            "public",
+            "--provenance",
+            "--tag",
+            dist_tag,
+        ],
         cwd=ROOT,
         check=True,
         env=os.environ.copy(),
     )
 
 
-def publish_one(item: dict[str, Any], artifacts_dir: Path) -> str:
+def publish_one(item: dict[str, Any], artifacts_dir: Path, dist_tag: str) -> str:
     name = item["name"]
     version = item["version"]
     expected = item["sha256"]
     path = artifacts_dir / item["path"]
+    # The tarball's own version decides the tag; a manifest entry that disagrees
+    # with the release version is a partition defect, not a publishable state.
+    if dist_tag_for(version) != dist_tag:
+        raise RuntimeError(
+            f"refusing to publish {name}@{version} under dist-tag {dist_tag!r}: "
+            f"its version derives {dist_tag_for(version)!r}"
+        )
     existing = published_integrity(name, version)
     if existing is not None:
         if not archive_matches_integrity(path, existing):
@@ -110,22 +173,63 @@ def publish_one(item: dict[str, Any], artifacts_dir: Path) -> str:
             )
         outcome = "already published; integrity matches"
     else:
-        publish_archive(path)
+        publish_archive(path, dist_tag)
         outcome = "accepted; public verification required"
-    print(f"{name}@{version}: {outcome}")
+    print(f"{name}@{version} (dist-tag {dist_tag}): {outcome}")
     return outcome
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--release-record", type=Path, required=True)
-    parser.add_argument("--artifacts-dir", type=Path, required=True)
-    parser.add_argument("--expected-sha", required=True)
+    parser.add_argument("--release-record", type=Path)
+    parser.add_argument("--artifacts-dir", type=Path)
+    parser.add_argument("--expected-sha")
     parser.add_argument("--version", required=True)
-    selection = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument(
+        "--dist-tag",
+        help="Assert the dist-tag derived from --version; it never overrides the derivation.",
+    )
+    parser.add_argument(
+        "--print-dist-tag",
+        action="store_true",
+        help="Print the dist-tag derived from --version and exit without publishing.",
+    )
+    selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--group", choices=tuple(GROUPS))
     selection.add_argument("--package")
     args = parser.parse_args(argv)
+
+    try:
+        dist_tag = dist_tag_for(args.version)
+    except DistTagError as error:
+        print(f"refusing to publish: {error}", file=sys.stderr)
+        return 2
+    if args.dist_tag is not None and args.dist_tag != dist_tag:
+        print(
+            f"refusing to publish: --dist-tag {args.dist_tag!r} contradicts dist-tag "
+            f"{dist_tag!r} derived from version {args.version!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.print_dist_tag:
+        print(dist_tag)
+        return 0
+
+    missing = [
+        flag
+        for flag, value in (
+            ("--release-record", args.release_record),
+            ("--artifacts-dir", args.artifacts_dir),
+            ("--expected-sha", args.expected_sha),
+        )
+        if value is None
+    ]
+    if missing:
+        print(f"publication requires {', '.join(missing)}", file=sys.stderr)
+        return 2
+    if args.group is None and args.package is None:
+        print("publication requires one of --group or --package", file=sys.stderr)
+        return 2
 
     candidate = load_candidate_module()
     try:
@@ -147,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         print("requested npm package is outside the candidate", file=sys.stderr)
         return 2
     for name in names:
-        publish_one(by_name[name], args.artifacts_dir)
+        publish_one(by_name[name], args.artifacts_dir, dist_tag)
     return 0
 
 
