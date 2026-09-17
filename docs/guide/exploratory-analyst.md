@@ -2,6 +2,14 @@
 
 GraphForge is designed for analysts who build knowledge from the ground up. This guide describes the **Exploratory Analyst** persona and the journey GraphForge supports from raw, uncertain data to structured, actionable knowledge.
 
+The core audience includes nontechnical analysts working with an agent. Direct
+notebook and API use is another entry path, and may be more complete in the
+initial v0.6.0 release. The full research vocabulary describes the system, not
+prerequisite knowledge for getting started. See the designed
+[entry journeys](../engineering/analyst-ux.md#audience-and-entry-journeys) and
+[questions each research step must answer](../engineering/analyst-ux.md#journey-questions-and-user-stories).
+Use the [quickstart](quickstart.md) for the current executable entry path.
+
 ---
 
 ## Who Is the Exploratory Analyst?
@@ -33,22 +41,24 @@ Exploratory analysis has a characteristic arc. GraphForge is designed to support
 The analyst begins with source data: documents, spreadsheets, open databases, scraped pages. They do not yet know what entity types exist.
 
 ```python
-forge = GraphForge.new("investigation-alpha/")
+from graphforge import GraphForge
+
+forge = GraphForge()  # in-memory; retain/export deliberately before session reset
 # No ontology required. GraphForge starts in exploratory mode.
 
 # Ingest whatever you have
-alice = forge.add_node(labels=["Person"], props={"name": "Alice", "source": "doc_001"})
-acme = forge.add_node(labels=["Organization"], props={"name": "Acme Corp"})
-doc = forge.add_node(labels=["Document"], props={"title": "Contract 2024"})
+alice = forge.add_node("Person", name="Alice", source="doc_001")
+acme = forge.add_node("Organization", name="Acme Corp")
+doc = forge.add_node("Document", title="Contract 2024")
 
 # Use whatever relationship type makes sense right now
-forge.add_edge(alice, acme, type="WORKS_AT", confidence=0.9)
-forge.add_edge(alice, doc, type="MENTIONED_IN")
+forge.add_edge(alice, "WORKS_AT", acme, confidence=0.9)
+forge.add_edge(alice, "MENTIONED_IN", doc)
 
 # Unknown entity types are fine too
 unknown_entity = forge.add_node(
-    labels=["UnknownEntity"],
-    props={"raw": "mysterious_string_from_data"}
+    "UnknownEntity",
+    raw="mysterious_string_from_data",
 )
 ```
 
@@ -138,7 +148,13 @@ configuration, or durable generation.
 
 Session load and project adoption are intentionally separate in every binding:
 
+The following is a separate durable-project example, requiring an admitted
+filesystem. Opening this directory does not transfer the earlier in-memory
+graph into it. The reopen guarantees below apply to this durable project;
+session-only notebook work must be retained or exported deliberately.
+
 ```python
+forge = GraphForge("investigation-alpha/")
 forge.load_ontology("ontology.yaml")  # only this live facade
 
 forge.adopt_ontology(
@@ -173,7 +189,7 @@ initialization or after `clear_ontology`):
 - **RuntimeCatalog** — tracks all observed labels, types, and properties
 - **Query support** — full Cypher query support over exploratory data
 - **Analysis verbs** — `forge.rank()`, `forge.cluster()`, `forge.find()` all work
-- **No validation errors** — the system never rejects data in exploratory mode
+- **No declared ontology required** — ordinary input, identity and storage validation still applies
 
 ---
 
