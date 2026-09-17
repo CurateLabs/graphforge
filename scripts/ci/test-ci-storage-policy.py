@@ -97,6 +97,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "native-oracle-macos-${{ github.sha }}": 1,
         "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
+        "ingest-floor-gate-${{ needs.nightly.outputs.sha }}": 1,
         "native-local-admission-${{ matrix.authority }}-${{ github.sha }}": 1,
     }
 )
@@ -309,6 +310,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "${{ runner.temp }}/durability-certification-evidence",
             "native/native-durability-aggregate.json",
             "replay-memory.txt\ncompaction-memory.txt",
+            "ingest-floor-gate.json",
             (
                 "${{ runner.temp }}/g500-certification-evidence.json\n"
                 "${{ runner.temp }}/g500-certification-phase-journal.json"

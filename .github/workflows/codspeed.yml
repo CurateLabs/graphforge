@@ -135,14 +135,18 @@ jobs:
           GF_INGEST_FLOOR_GATE: "1"
           GF_INGEST_FLOOR_GATE_JSON: ingest-floor-gate.json
         run: cargo bench -p graphforge-storage --bench m6_storage_io
+      # One-day transfer retention, matching the storage policy for a nightly
+      # measurement: this is neither a publication nor a certification artifact.
+      # The durable record of the numbers is the CodSpeed walltime series and
+      # the gate step's own log.
       - name: Record the ingest floor gate measurements
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ingest-floor-gate-${{ needs.nightly.outputs.sha }}
           path: ingest-floor-gate.json
-          if-no-files-found: warn
-          retention-days: 30
+          if-no-files-found: error
+          retention-days: 1
       - name: Build durable filesystem benchmarks only
         run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
       - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
