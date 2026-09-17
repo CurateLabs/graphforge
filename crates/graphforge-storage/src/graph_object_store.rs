@@ -1060,6 +1060,37 @@ impl GraphObjectReadLease {
     ) -> Result<AuthenticatedGraphObject, GfError> {
         open_graph_object_with_read_lease(self, digest, expected_length)
     }
+
+    /// Open one immutable CAS object for identity and space attribution only.
+    ///
+    /// This binds the descriptor the same way [`Self::open`] does — stable
+    /// no-follow CAS traversal, exact digest address, exact declared length,
+    /// read-only permission — but does not stream the payload through
+    /// SHA-256. Storage attribution never consumes object content; it reads
+    /// file identity and space usage from the descriptor. Content
+    /// re-authentication of the retained store is the explicit
+    /// `graphforge verify` command's job (`crate::verify_project_store`).
+    pub(crate) fn open_for_attribution(
+        &self,
+        digest: &str,
+        expected_length: u64,
+    ) -> Result<File, GfError> {
+        let file = self.cas.open_digest(digest)?;
+        let metadata = file.metadata().map_err(|error| {
+            storage(
+                "inspect stable graph object",
+                &self.cas.diagnostic_root,
+                error,
+            )
+        })?;
+        if !metadata.is_file()
+            || metadata.len() != expected_length
+            || !metadata.permissions().readonly()
+        {
+            return Err(validation("graph object authority changed"));
+        }
+        Ok(file)
+    }
 }
 
 impl std::fmt::Debug for AuthenticatedGraphObject {
