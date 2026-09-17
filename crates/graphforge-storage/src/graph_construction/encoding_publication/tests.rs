@@ -836,9 +836,10 @@ fn canonical_encoder_reuse_accounts_only_second_invocation_io() {
             .evidence()
             .cache_release_operations
             .saturating_sub(cache_after_first),
-        // Entry and exit successor authentication each read the same
-        // encoded payloads once, in addition to encoder reuse authentication.
-        3 * second.invocation.evidence.cache_release_operations
+        // Only the encoder's reuse authentication reads the encoded payloads.
+        // The entry and exit reclaim sweeps check identity, link count and
+        // length against the checkpoint ledger and release no cache.
+        second.invocation.evidence.cache_release_operations
     );
 }
 
@@ -902,12 +903,177 @@ fn canonical_encoder_cancellation_recovers_and_corruption_fails_closed() {
         .find(|artifact| artifact.path.starts_with("topology/nodes/"))
         .unwrap();
     std::fs::write(operation_root.join("graph").join(&victim.path), b"corrupt").unwrap();
+    // A same-inode length change is refused by the reclaim sweep's
+    // identity/link/length check, by its own message, before the encoder is
+    // reached. Same-inode, same-length content corruption is the CAS install's
+    // refusal; see `ladder_path_refuses_same_inode_encoded_corruption_at_cas_install`.
     let error = session.encode_canonical(&shape, 1).unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("canonical artifact differs from inventory")
+            .contains("supersession encoded artifact identity changed"),
+        "{error}"
     );
+}
+
+fn encoded_artifact_path(root: &TempDir, operation: Uuid, relative: &str) -> std::path::PathBuf {
+    construction_session_root(root, operation)
+        .join("encoded-v1")
+        .join("graph")
+        .join(relative)
+}
+
+/// Flip the first byte of `path` in place: same inode, same length.
+fn flip_first_byte_in_place(path: &std::path::Path) {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let length = std::fs::metadata(path).unwrap().len();
+    let identity = graphforge_filesystem::path_identity(path).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let mut first = [0_u8; 1];
+    file.read_exact(&mut first).unwrap();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.write_all(&[first[0] ^ 0xff]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(std::fs::metadata(path).unwrap().len(), length);
+    assert_eq!(graphforge_filesystem::path_identity(path).unwrap(), identity);
+}
+
+/// The reclaim sweep no longer re-reads encoded payloads (the #1392 pattern
+/// applied to the encoded-successor branch). This is the ladder's own path —
+/// `validate` ends with reclaim, `commit` reopens the session (reclaim),
+/// prepares the encoding (reclaim) and publishes — with a same-inode,
+/// same-length mutation between the two processes. The refusal must fire at
+/// the CAS install, by its own message, and the two reclaim sites must have
+/// charged no payload bytes to recovery on the way there.
+#[test]
+fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(9_450);
+    let session = encoded_publication_session(&root, operation);
+    let output = session
+        .root
+        .open_child_directory(OsStr::new("encoded-v1"))
+        .unwrap();
+    let encoded = crate::graph_construction_encoding::read_inventory(&output)
+        .unwrap()
+        .unwrap();
+    let encoded_bytes: u64 = encoded.artifacts.iter().map(|artifact| artifact.bytes).sum();
+    assert!(encoded_bytes > 0);
+    let before = session.evidence().clone();
+    drop(session);
+    flip_first_byte_in_place(&encoded_artifact_path(
+        &root,
+        operation,
+        "topology/surrogate_tails.parquet",
+    ));
+
+    // Site 2: session reopen. Site 3: prepare. Neither re-reads the payload.
+    let mut resumed = open(&root, 9_450);
+    let prepared = resumed.prepare_canonical_encoding(1).unwrap();
+    assert_eq!(prepared.artifacts, encoded.artifacts);
+    let after = resumed.evidence();
+    assert!(
+        after.recovery_application_read_bytes - before.recovery_application_read_bytes
+            < encoded_bytes,
+        "reclaim charged a full encoded re-read: {} bytes over {} encoded",
+        after.recovery_application_read_bytes - before.recovery_application_read_bytes,
+        encoded_bytes
+    );
+
+    // Site 4 is never reached: the CAS install owns the refusal.
+    let error = resumed
+        .publish_canonical(&prepared, Uuid::from_u128(9_451), Uuid::from_u128(9_452))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("graph object source digest or length changed during install"),
+        "expected the CAS install boundary to refuse the mutation, got: {error}"
+    );
+    assert_ne!(
+        resumed.checkpoint.publication_state,
+        Some(ConstructionPublicationState::Published)
+    );
+}
+
+/// The demoted check still owns identity: a byte-identical replacement under
+/// a new inode is refused at reclaim, by reclaim's own message.
+#[test]
+fn reclaim_refuses_encoded_artifact_inode_replacement() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(9_453);
+    let mut session = encoded_publication_session(&root, operation);
+    let path = encoded_artifact_path(&root, operation, "topology/surrogate_tails.parquet");
+    let body = std::fs::read(&path).unwrap();
+    let identity = graphforge_filesystem::path_identity(&path).unwrap();
+    let replacement = path.with_extension("parquet.replacement");
+    std::fs::write(&replacement, &body).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), body);
+    assert_ne!(graphforge_filesystem::path_identity(&path).unwrap(), identity);
+
+    let error = session
+        .reclaim_superseded_payloads_cancellable(&mut || false)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("supersession encoded artifact identity changed"),
+        "{error}"
+    );
+    drop(session);
+    let error = GraphConstructionSession::open(
+        root.path(),
+        operation,
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .err()
+    .expect("reopen must refuse the replaced inode");
+    assert!(
+        error
+            .to_string()
+            .contains("supersession encoded artifact identity changed"),
+        "{error}"
+    );
+}
+
+/// The demoted check still owns length and link count: a same-inode append
+/// and an extra hard link are each refused at reclaim, by its own message.
+#[test]
+fn reclaim_refuses_encoded_artifact_length_and_link_changes() {
+    for (case, mutate) in [
+        ("append", (|path: &std::path::Path| {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&[0]).unwrap();
+        }) as fn(&std::path::Path)),
+        ("link", |path: &std::path::Path| {
+            std::fs::hard_link(path, path.with_extension("parquet.link")).unwrap();
+        }),
+    ] {
+        let root = TempDir::new().unwrap();
+        let operation = Uuid::from_u128(9_454);
+        let mut session = encoded_publication_session(&root, operation);
+        let path = encoded_artifact_path(&root, operation, "topology/surrogate_tails.parquet");
+        let identity = graphforge_filesystem::path_identity(&path).unwrap();
+        mutate(&path);
+        assert_eq!(graphforge_filesystem::path_identity(&path).unwrap(), identity);
+        let error = session
+            .reclaim_superseded_payloads_cancellable(&mut || false)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("supersession encoded artifact identity changed"),
+            "{case}: {error}"
+        );
+    }
 }
 
 #[test]
