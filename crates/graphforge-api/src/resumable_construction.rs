@@ -576,6 +576,12 @@ mod tests {
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&object).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
         permissions.set_readonly(false);
         std::fs::set_permissions(&object, permissions).unwrap();
         let mut bytes = std::fs::read(&object).unwrap();

@@ -1204,7 +1204,7 @@ pub(crate) fn for_each_adjacency_edge_path(
         // An unreadable edge file must FAIL the build, not be skipped: a
         // manifest written without it would stamp the current generation and
         // make an index missing a relation's edges look fresh.
-        let _schema = match crate::catalog::discover_parquet_schema_detailed(&path) {
+        let _schema = match crate::catalog::discover_parquet_schema_detailed(path) {
             Ok(schema) => schema,
             Err(detail) => {
                 return Err(GfError::Storage(format!(

@@ -179,34 +179,32 @@ fn import_edge_files(graph_tree: &Path) -> Result<Vec<(String, PathBuf)>, Portab
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::AtomicBool;
 
+    use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
+    use arrow::record_batch::RecordBatch;
     use sha2::{Digest, Sha256};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     use super::super::tests::supported;
     use super::*;
     use crate::{PortableV2Limits, import_complete_portable_v2};
 
-    /// A complete package of a construction-published generation carries its
-    /// adjacency CSR, and the import must publish it unchanged rather than
-    /// building a second one (#1388).
-    #[test]
-    fn complete_import_publishes_the_derived_adjacency_index() {
-        use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
-        use arrow::record_batch::RecordBatch;
-        use std::sync::Arc;
+    fn fixed(ids: &[Uuid]) -> FixedSizeBinaryArray {
+        FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice())).unwrap()
+    }
 
+    /// An initial construction of 8 nodes and 24 `KNOWS` edges, published as
+    /// the project's current generation.
+    fn construction_published_project() -> tempfile::TempDir {
         let node_ids = (0..8_u128)
             .map(|index| Uuid::from_u128(0x1000 + index))
             .collect::<Vec<_>>();
         let edge_ids = (0..24_u128)
             .map(|index| Uuid::from_u128(0x2000 + index))
             .collect::<Vec<_>>();
-        let fixed = |ids: &[Uuid]| {
-            FixedSizeBinaryArray::try_from_iter(ids.iter().map(|id| id.as_bytes().as_slice()))
-                .unwrap()
-        };
         let nodes = RecordBatch::try_new(
             crate::CONSTRUCTION_NODE_SCHEMA.clone(),
             vec![
@@ -215,15 +213,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let sources = edge_ids
-            .iter()
-            .enumerate()
-            .map(|(index, _)| node_ids[index % node_ids.len()])
+        let sources = (0..edge_ids.len())
+            .map(|index| node_ids[index % node_ids.len()])
             .collect::<Vec<_>>();
-        let targets = edge_ids
-            .iter()
-            .enumerate()
-            .map(|(index, _)| node_ids[(index + 3) % node_ids.len()])
+        let targets = (0..edge_ids.len())
+            .map(|index| node_ids[(index + 3) % node_ids.len()])
             .collect::<Vec<_>>();
         let edges = RecordBatch::try_new(
             crate::CONSTRUCTION_EDGE_SCHEMA.clone(),
@@ -235,7 +229,6 @@ mod tests {
             ],
         )
         .unwrap();
-
         let source = tempfile::tempdir().unwrap();
         crate::open_or_initialize_project(source.path()).unwrap();
         let mut session = crate::GraphConstructionSession::open_with_mode(
@@ -258,19 +251,37 @@ mod tests {
         session
             .publish_canonical(&encoding, Uuid::from_u128(0x32), Uuid::from_u128(0x33))
             .unwrap();
-        drop(session);
-        let generation = crate::resolve_project_generation(source.path()).unwrap();
-        let index_entries = |inventory: &crate::GraphFilesInventory| {
-            inventory
-                .files
-                .iter()
-                .filter(|entry| entry.role == crate::GraphFileRole::Index)
-                .map(|entry| entry.relative_path.clone())
-                .collect::<Vec<_>>()
-        };
-        let source_index = index_entries(&generation.graph_files_inventory().unwrap().unwrap());
-        assert!(source_index.contains(&"indexes/adjacency/index_manifest.parquet".to_owned()));
+        source
+    }
 
+    fn index_entries(inventory: &crate::GraphFilesInventory) -> Vec<String> {
+        inventory
+            .files
+            .iter()
+            .filter(|entry| entry.role == crate::GraphFileRole::Index)
+            .map(|entry| entry.relative_path.clone())
+            .collect()
+    }
+
+    /// The materialized tree at `root` carries a manifest stamped with its own
+    /// topology generation and a CSR that validates against its topology.
+    fn assert_index_current(root: &Path) {
+        let topology_generation = crate::read_topology_generation(root).unwrap();
+        let rows = crate::adjacency::read_manifest(root).unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| row.topology_generation == topology_generation)
+        );
+        assert!(
+            crate::adjacency::validate_adjacency_index(root)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn export_complete(source: &Path) -> (tempfile::TempDir, std::path::PathBuf) {
+        let generation = crate::resolve_project_generation(source).unwrap();
         let package_parent = tempfile::tempdir().unwrap();
         let package = package_parent.path().join("adjacency.gfproject");
         let limits = crate::PortableV2ExportLimits::default();
@@ -284,6 +295,20 @@ mod tests {
             |_| {},
         )
         .unwrap();
+        (package_parent, package)
+    }
+
+    /// A complete package of a construction-published generation carries its
+    /// adjacency CSR, and the import must publish it unchanged rather than
+    /// building a second one (#1388).
+    #[test]
+    fn complete_import_publishes_the_derived_adjacency_index() {
+        let source = construction_published_project();
+        let generation = crate::resolve_project_generation(source.path()).unwrap();
+        let source_index = index_entries(&generation.graph_files_inventory().unwrap().unwrap());
+        assert!(source_index.contains(&"indexes/adjacency/index_manifest.parquet".to_owned()));
+
+        let (_package_parent, package) = export_complete(source.path());
         assert!(
             package
                 .join("data/components/graph-data/graph-tree/indexes/adjacency")
@@ -304,32 +329,25 @@ mod tests {
         .unwrap();
         let imported = crate::resolve_project_generation(target.path()).unwrap();
         let inventory = imported.graph_files_inventory().unwrap().unwrap();
-        let imported_index = index_entries(&inventory);
-        assert_eq!(imported_index, source_index);
-
+        assert_eq!(index_entries(&inventory), source_index);
         let workspace = tempfile::tempdir().unwrap();
         crate::materialize_graph_objects(imported.container_root(), &inventory, workspace.path())
             .unwrap();
-        let topology_generation = crate::read_topology_generation(workspace.path()).unwrap();
-        let rows = crate::adjacency::read_manifest(workspace.path()).unwrap();
-        assert!(!rows.is_empty());
-        assert!(
-            rows.iter()
-                .all(|row| row.topology_generation == topology_generation)
-        );
-        assert!(
-            crate::adjacency::validate_adjacency_index(workspace.path())
-                .unwrap()
-                .is_empty()
-        );
+        assert_index_current(workspace.path());
+    }
 
-        // A package without the index (a subset export, or one made before
-        // #1388) gets it built into the verified stage tree before the compact
-        // CAS append, so the imported generation still ships it.
+    /// A package without the index (a subset export, or one made before
+    /// #1388) gets it built into the verified stage tree before the compact
+    /// CAS append, so the imported generation still ships it.
+    #[test]
+    fn import_builds_the_index_a_package_lacks_and_never_twice() {
+        let source = construction_published_project();
+        let generation = crate::resolve_project_generation(source.path()).unwrap();
+        let inventory = generation.graph_files_inventory().unwrap().unwrap();
         let stage = tempfile::tempdir().unwrap();
         let tree = stage.path().join("graph-tree");
         fs::create_dir(&tree).unwrap();
-        crate::materialize_graph_objects(imported.container_root(), &inventory, &tree).unwrap();
+        crate::materialize_graph_objects(generation.container_root(), &inventory, &tree).unwrap();
         fs::remove_dir_all(tree.join("indexes")).unwrap();
         let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
             format: "graphforge-graph-files-root".into(),
@@ -346,19 +364,9 @@ mod tests {
             content_sha256: Sha256::digest(&placeholder.bytes).into(),
         }];
         let added = persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap();
-        assert_eq!(added, imported_index.len());
+        assert_eq!(added, index_entries(&inventory).len());
         assert!(!stage.path().join(IMPORT_ADJACENCY_SPILL_ROOT).exists());
-        let rows = crate::adjacency::read_manifest(&tree).unwrap();
-        assert!(
-            rows.iter()
-                .all(|row| row.topology_generation == topology_generation)
-        );
-        assert!(
-            crate::adjacency::validate_adjacency_index(&tree)
-                .unwrap()
-                .is_empty()
-        );
-        // Already present: nothing is added twice.
+        assert_index_current(&tree);
         assert_eq!(
             persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap(),
             0
