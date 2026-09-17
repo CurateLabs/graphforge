@@ -124,6 +124,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | `//crates/graphforge-cli:checkpoints` | `mapped` | #8 |
 | `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | `//crates/graphforge-cli:portable` | `mapped` | #8 |
 | `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | `//crates/graphforge-cli:repository` | `mapped` | #8 |
+| `graphforge-cli` | `verify` | `integration-test` | `crates/graphforge-cli/tests/verify.rs` | `//crates/graphforge-cli:verify` | `mapped` | #1384 explicit out-of-band project verify command |
 | `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | `//crates/graphforge-cli:graphforge_cli_build_script` | `mapped` | #7/#8; RT-cli-build-script closed |
 | `graphforge-core` | `graphforge_core` | `lib` | `crates/graphforge-core/src/lib.rs` | `//crates/graphforge-core:graphforge_core` | `mapped` | #10; unit tests `//crates/graphforge-core:graphforge_core_test` |
 | `graphforge-core` | `canonical` | `bench` | `crates/graphforge-core/benches/canonical.rs` | — | `exception` | RT-codspeed-bench; CodSpeed divan benchmark |

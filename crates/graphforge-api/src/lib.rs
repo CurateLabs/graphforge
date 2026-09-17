@@ -2446,6 +2446,17 @@ mod tests {
         assert!(!encoded.contains("sha256"));
         assert!(!encoded.contains(project.path().to_string_lossy().as_ref()));
     }
+
+    #[test]
+    fn public_verify_project_store_reports_a_clean_fresh_project() {
+        let project = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(project.path().to_str()).unwrap();
+        let report = graph.verify_project_store().unwrap();
+        assert!(report.ok);
+        assert_eq!(report.catalog_and_participants.objects_failed, 0);
+        assert_eq!(report.content_addressed_objects.objects_checked, 0);
+        assert_eq!(report.content_addressed_objects.objects_failed, 0);
+    }
 }
 
 mod portable_oci;
