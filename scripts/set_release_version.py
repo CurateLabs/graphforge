@@ -9,6 +9,10 @@ Surfaces:
 - NPX lifecycle CLI ``packages/cli/package.json``
 - NPX skills ``packages/agent-skills/package.json``
 - NPX skills ``packages/agent-skills/compatibility.json``
+- Bazel ``tools/bazel/gf_version.bzl`` (``WORKSPACE_VERSION``, cargo spelling;
+  see issue #1395 -- every Bazel target whose crate embeds
+  ``env!("CARGO_PKG_VERSION")`` loads this one constant instead of a
+  hand-typed ``version = "..."`` literal)
 
 Usage:
     python3 scripts/set_release_version.py --check
@@ -57,6 +61,7 @@ NODE_NPM_DIR = ROOT / "crates" / "graphforge-bindings-node" / "npm"
 CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
 SKILLS_COMPATIBILITY = ROOT / "packages" / "agent-skills" / "compatibility.json"
+BAZEL_VERSION_BZL = ROOT / "tools" / "bazel" / "gf_version.bzl"
 
 
 def native_npm_packages() -> list[Path]:
@@ -202,14 +207,21 @@ def read_current() -> dict[str, str]:
     node = json.loads(NODE_PACKAGE.read_text(encoding="utf-8"))["version"]
     cli = json.loads(CLI_PACKAGE.read_text(encoding="utf-8"))["version"]
     skills = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))["version"]
+    bazel = re.search(
+        r'(?m)^WORKSPACE_VERSION\s*=\s*"([^"]+)"',
+        BAZEL_VERSION_BZL.read_text(encoding="utf-8"),
+    )
     if not cargo or not py:
         raise ValueError("could not read Cargo or Python version")
+    if not bazel:
+        raise ValueError(f"could not read WORKSPACE_VERSION from {BAZEL_VERSION_BZL}")
     return {
         "cargo": cargo.group(1),
         "python": py.group(1),
         "node": node,
         "cli": cli,
         "skills": skills,
+        "bazel": bazel.group(1),
     }
 
 
@@ -220,6 +232,9 @@ def expected_for(base: str, *, dev: bool, pre: str | None = None) -> dict[str, s
         "node": npm_version(base, dev=dev, pre=pre),
         "cli": npm_version(base, dev=dev, pre=pre),
         "skills": npm_version(base, dev=dev, pre=pre),
+        # Bazel targets set `version = WORKSPACE_VERSION` to reach
+        # `env!("CARGO_PKG_VERSION")`, so it takes cargo's exact spelling.
+        "bazel": cargo_version(base, dev=dev, pre=pre),
     }
 
 
@@ -327,6 +342,16 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
     if n != 1:
         raise ValueError("failed to update Python pyproject version")
 
+    bazel_text = BAZEL_VERSION_BZL.read_text(encoding="utf-8")
+    bazel_text, n = re.subn(
+        r'(?m)^(WORKSPACE_VERSION\s*=\s*")[^"]+(")',
+        rf"\g<1>{expected['bazel']}\2",
+        bazel_text,
+        count=1,
+    )
+    if n != 1:
+        raise ValueError(f"failed to update {BAZEL_VERSION_BZL} WORKSPACE_VERSION")
+
     staged_packages: list[tuple[Path, dict]] = []
     for path, key in (
         (NODE_PACKAGE, "node"),
@@ -355,6 +380,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None
         path.write_text(updated, encoding="utf-8")
     CARGO_LOCK.write_text(lock_text, encoding="utf-8")
     PYPROJECT.write_text(py_text, encoding="utf-8")
+    BAZEL_VERSION_BZL.write_text(bazel_text, encoding="utf-8")
     for path, meta in staged_packages:
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     SKILLS_COMPATIBILITY.write_text(json.dumps(compatibility, indent=2) + "\n", encoding="utf-8")

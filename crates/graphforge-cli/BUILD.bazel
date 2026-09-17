@@ -12,6 +12,7 @@ load(
     "gf_rust_library",
     "gf_rust_test",
 )
+load("//tools/bazel:gf_version.bzl", "WORKSPACE_VERSION")
 
 exports_files(["Cargo.toml"])
 
@@ -64,7 +65,9 @@ gf_cargo_build_script(
         "//:project-skills/manifest.json",
     ],
     pkg_name = "graphforge-cli",
-    version = "0.5.2",
+    # Single-sourced from //tools/bazel:gf_version.bzl; do not hand-type a
+    # literal here, it will drift at the next version bump (#1395).
+    version = WORKSPACE_VERSION,
 )
 
 gf_rust_library(
