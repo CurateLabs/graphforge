@@ -972,10 +972,18 @@ fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
         "topology/surrogate_tails.parquet",
     ));
 
-    // Site 2: session reopen. Site 3: prepare. Neither re-reads the payload.
+    // Site 2: session reopen. Site 3: prepare. Neither re-reads the payload,
+    // and prepare — reclaim plus an inventory control read — charges the
+    // recovery phase exactly nothing.
     let mut resumed = open(&root, 9_450);
+    let after_open = resumed.evidence().recovery_application_read_bytes;
     let prepared = resumed.prepare_canonical_encoding(1).unwrap();
     assert_eq!(prepared.artifacts, encoded.artifacts);
+    assert_eq!(
+        resumed.evidence().recovery_application_read_bytes,
+        after_open,
+        "prepare_canonical_encoding charged recovery bytes"
+    );
     let after = resumed.evidence();
     assert!(
         after.recovery_application_read_bytes - before.recovery_application_read_bytes
