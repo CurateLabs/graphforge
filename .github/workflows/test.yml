@@ -119,6 +119,14 @@ jobs:
       - name: Test text checkout byte policy
         run: python3 scripts/ci/test-text-checkout-policy.py
 
+      - name: Validate ADR index integrity
+        # Unconditional: ADR bodies and both index tables are Markdown, which the
+        # policy-suite classifier treats as inert, so a conditional step would
+        # skip on exactly the change that drifts the indexes (#1390).
+        run: |
+          python3 scripts/ci/adr-index.py check
+          python3 scripts/ci/test-adr-index.py
+
       - name: Validate multi-ontology contract fixtures
         run: python3 scripts/ci/multi-ontology-contract-check.py
 

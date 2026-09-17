@@ -23,6 +23,11 @@ EXPECTED = {
         "reachability_scan",
         "garbage_collection",
         "spill_compaction",
+        # Continuous bulk-ingest throughput (#1387 workstream 6). Pinned here so
+        # it cannot be silently deleted: every storage gain the redesign wins is
+        # unprotected the moment this benchmark stops running.
+        "ingest_throughput",
+        "ingest_identifier_density",
     },
 }
 
@@ -45,7 +50,12 @@ if missing:
 walltime_source = (ROOT / "crates/graphforge-storage/benches/m6_storage_io.rs").read_text(
     encoding="utf-8"
 )
-for name in ("durable_commit", "spill_compaction"):
+for name in (
+    "durable_commit",
+    "spill_compaction",
+    "ingest_throughput",
+    "ingest_identifier_density",
+):
     function = re.search(
         rf"(?ms)^fn\s+{re.escape(name)}\s*\([^)]*\)\s*\{{(.*?)(?=^#\[divan::bench|\Z)",
         walltime_source,
@@ -77,4 +87,32 @@ if "runs-on: codspeed-macro" in simulation_job:
 if "mode: simulation" not in simulation_job:
     raise SystemExit("CPU benchmark job must use the simulation instrument")
 
-print(f"M6 benchmark inventory v1: {sum(map(len, EXPECTED.values()))} names verified")
+# Ingest does real durability work, so it belongs to the walltime instrument on
+# the isolated runner, and its floor gate must actually run. CodSpeed only
+# compares a run against the previous one; without this step a slow drift that
+# never regresses in a single step passes indefinitely.
+if 'GF_INGEST_FLOOR_GATE: "1"' not in walltime_job:
+    raise SystemExit("m6-walltime must run the ingest floor gate")
+
+INGEST_GATES = (
+    "INGEST_FLOOR_EDGES_PER_SECOND",
+    "INGEST_CEILING_BYTES_READ_PER_EDGE",
+    "INGEST_CEILING_CPU_MICROS_PER_EDGE",
+    "INGEST_MAX_READ_DEGRADATION_RATIO",
+)
+missing_gates = [
+    gate
+    for gate in INGEST_GATES
+    if re.search(rf"(?m)^const\s+{gate}\s*:\s*f64\s*=", walltime_source) is None
+]
+if missing_gates:
+    raise SystemExit("ingest floor gate is missing limits: " + ", ".join(missing_gates))
+
+# Two or more sizes, and the ratio between them, is the point of the benchmark:
+# a single size would report a flat healthy number while throughput degraded
+# underneath it.
+sweep = re.search(r"(?m)^const\s+INGEST_SWEEP_EDGES\s*:\s*\[u64;\s*(\d+)\]", walltime_source)
+if sweep is None or int(sweep.group(1)) < 2:
+    raise SystemExit("ingest_throughput must sweep at least two dataset sizes")
+
+print(f"M6 benchmark inventory v2: {sum(map(len, EXPECTED.values()))} names verified")

@@ -64,6 +64,46 @@ release prerequisites. Documentation and issue creation do not establish
 implementation; [acceptance scenarios](../engineering/TESTING.md#analyst-ux-acceptance)
 must be proven before readiness.
 
+### Analyst entry and coordinated delivery
+
+The core audience is a nontechnical analyst working with an agent; v0.6.0 may
+initially provide a more complete path for technical analysts and integrators.
+Develop both paths using the [entry journeys and research questions](../engineering/analyst-ux.md#audience-and-entry-journeys).
+The complete research vocabulary is not a first-use prerequisite.
+
+Release readiness includes simple candidate first use (#1209) and a review of
+the user-guide tree against the substantial changes since v0.5.2 (#1208).
+Organize the guides around VS Code with an agent, agent-led workflows, and
+Jupyter notebooks; qualify Kaggle/Colab rather than assume durable filesystem
+support. Keep current release instructions and candidate-only behavior explicit.
+
+Coordinate the product group through the
+[GraphForge Product Map](https://github.com/orgs/CurateLabs/projects/2), with
+issues and implementation ownership remaining in their repositories. Project
+access follows organization permissions; public issue links below remain the
+readable delivery references.
+
+| Repository / existing tracker                                                      | Coordinated outcome                                                                                                      |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| [GraphForge #1096 / #1095](https://github.com/CurateLabs/graphforge/issues/1096)   | Core candidate readiness, then immutable RC/final publication and clean public-consumer proof.                           |
+| [XYG #108 / #40](https://github.com/CurateLabs/xyg/issues/108)                     | Compatible visualization candidate artifacts and cross-host evidence, with exact version/ABI identities.                 |
+| [VS Code extension #82](https://github.com/CurateLabs/graphforge-vscode/issues/82) | Packaged editor/agent journey consuming the matching GraphForge and XYG surfaces.                                        |
+| [Website/Hub #19](https://github.com/CurateLabs/graphforge-nextjs/issues/19)       | Accurate entry pages and supported browse/clone delivery, with the website and data-plane revisions recorded separately. |
+
+Shared coordination does not make every application feature a Core release
+blocker or create a circular publication dependency. Prepare against retained
+candidate artifacts; verify public install paths after publication. Each surface
+states its actual support and open blockers before it is advertised as ready.
+
+After release, community work (#1210) includes a bounded seed collection of
+existing datasets and evidence-linked information-extraction projects delivered
+through [website/Hub content work](https://github.com/CurateLabs/graphforge-nextjs/issues/33).
+Select useful research questions and exact sources,
+record licenses, provenance, extraction limitations and reproducible examples,
+and verify discovery through a first useful result. Content delivery belongs to
+its owning application/data work; it does not require all future peer extensions
+or prove adoption. Independent pilots and promotion retain their own evidence.
+
 ## v0.5.0 — Rust core (shipped on `main`)
 
 GraphForge v0.5.0 is an embedded openCypher engine with a Rust core, Apache Arrow
@@ -144,5 +184,5 @@ The `0.x` series signals that the API is still maturing.
 - **Patch** (`0.5.y`): Bug fixes, small improvements, no intentional API breaks
 - **Minor** (`0.x.0`): New features; backwards-compatible where practical
 
-**v0.5.1** is the current coordinated release. A `v1.0` release will happen when
+**v0.5.2** is the current coordinated release. A `v1.0` release will happen when
 the API is stable enough to commit to long-term compatibility.

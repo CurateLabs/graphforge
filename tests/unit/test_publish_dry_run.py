@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "publish_dry_run.py"
@@ -26,6 +27,41 @@ def test_cargo_order_contains_complete_public_surface() -> None:
     assert order.index("graphforge-observability") < order.index("graphforge-api")
     assert "graphforge-bindings-py" not in order
     assert "graphforge-bindings-node" not in order
+
+
+def test_missing_crate_plan_is_a_hard_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1377: no fallback crate list; an absent plan fails instead of publishing a
+    different set."""
+    absent = publish_dry_run.ROOT / "scripts" / "ci" / "crate-publish-plan-absent.py"
+    monkeypatch.setattr(publish_dry_run, "CRATE_PLAN", absent)
+    with pytest.raises(publish_dry_run.CratePlanError) as raised:
+        publish_dry_run.cargo_publish_order()
+    assert "publish plan is missing" in str(raised.value)
+    assert not hasattr(publish_dry_run, "FALLBACK_CARGO_ORDER")
+
+
+def test_failing_crate_plan_is_a_hard_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Failed:
+        returncode = 3
+        stdout = ""
+        stderr = "plan exploded"
+
+    def failed_run(*_args: object, **_kwargs: object) -> Failed:
+        return Failed()
+
+    monkeypatch.setattr(publish_dry_run.subprocess, "run", failed_run)
+    with pytest.raises(publish_dry_run.CratePlanError) as raised:
+        publish_dry_run.cargo_publish_order()
+    assert "plan exploded" in str(raised.value)
+
+
+def test_cargo_surface_exits_nonzero_without_a_plan(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    absent = publish_dry_run.ROOT / "scripts" / "ci" / "crate-publish-plan-absent.py"
+    monkeypatch.setattr(publish_dry_run, "CRATE_PLAN", absent)
+    assert publish_dry_run.main(["--surface", "cargo-package"]) == 2
+    assert "publish plan is missing" in capsys.readouterr().err
 
 
 def _step(cmd: list[str], *, ok: bool = True) -> dict[str, object]:
