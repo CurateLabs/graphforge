@@ -1722,6 +1722,11 @@ fn read_bounded_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>, std::
     if bytes.len() as u64 > maximum {
         return Err(std::io::Error::other("file exceeds bounded read limit"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::PublicationPreauthentication,
+        bytes.len() as u64,
+        1,
+    );
     Ok(bytes)
 }
 
@@ -1766,6 +1771,7 @@ fn read_stable_graph_control(
     let mut bytes = Vec::with_capacity(capacity);
     let mut reader = file.take(expected_length.saturating_add(1));
     let mut buffer = vec![0; 64 * 1024];
+    let mut control_read_calls = 0_u64;
     loop {
         let count = reader
             .read(&mut buffer)
@@ -1781,11 +1787,19 @@ fn read_stable_graph_control(
             .read_calls
             .checked_add(1)
             .ok_or_else(|| corrupt("control read calls overflow"))?;
+        control_read_calls = control_read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("control read calls overflow"))?;
         bytes.extend_from_slice(&buffer[..count]);
     }
     if bytes.len() as u64 != expected_length {
         return Err(corrupt("selected graph control changed while reading"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        expected_length,
+        control_read_calls,
+    );
     directory
         .revalidate_named()
         .map_err(|_| corrupt("selected graph control parent identity changed"))?;
@@ -1810,6 +1824,11 @@ fn read_exact_participant(path: &Path, expected_length: u64) -> Result<Vec<u8>, 
     if u64::try_from(bytes.len()).ok() != Some(expected_length) {
         return Err(corrupt("participant byte length changed while reading"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::PublicationPreauthentication,
+        expected_length,
+        1,
+    );
     Ok(bytes)
 }
 

@@ -268,6 +268,9 @@ impl GraphForge {
             )),
             workspace_guard: Arc::clone(&self.workspace_guard),
             graph_open_evidence: self.graph_open_evidence.clone(),
+            // The worker handle shares this facade's open; it pays no open of
+            // its own, so it reports the same attribution rather than zero.
+            open_io_attribution: self.open_io_attribution.clone(),
             project_open_recovery: self.project_open_recovery.clone(),
             tempdir: self.tempdir.clone(),
             ontology: self.ontology.clone(),

@@ -36,6 +36,18 @@ def summarize(documents: dict[str, Any]) -> dict[str, Any]:
         "construction_application_io": documents["rung"]["storage_attribution"]["construction"][
             "application_io"
         ],
+        # Per-phase I/O for every other lifecycle phase, same shape (#1389).
+        # Absent for evidence recorded before that instrumentation existed, so
+        # reports derived from historical bundles stay byte-comparable.
+        **(
+            {"lifecycle_application_io": lifecycle_io}
+            if (
+                lifecycle_io := documents["rung"]["storage_attribution"].get(
+                    "lifecycle_application_io"
+                )
+            )
+            else {}
+        ),
         "metrics": documents["rung"]["metrics"],
     }
 

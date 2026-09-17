@@ -284,7 +284,11 @@ fn recover_project_on_open_admitted_with_allocation(
 ) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
     let started = Instant::now();
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
-    let work_detected = project_needs_recovery_pass(root)?;
+    let work_detected = {
+        let _phase =
+            crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::RecoveryReauthentication);
+        project_needs_recovery_pass(root)?
+    };
     if !work_detected {
         return Ok((
             selected.clone(),
@@ -303,7 +307,12 @@ fn recover_project_on_open_admitted_with_allocation(
         ));
     }
 
-    match recover_project_transactions_admitted_with_allocation(root, allocation) {
+    let recovered = {
+        let _phase =
+            crate::lifecycle_io::PhaseScope::enter(crate::StorageIoPhase::RecoveryReauthentication);
+        recover_project_transactions_admitted_with_allocation(root, allocation)
+    };
+    match recovered {
         Ok(report) => {
             let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
             Ok((

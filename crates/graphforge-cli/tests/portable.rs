@@ -431,8 +431,23 @@ fn portable_facade_and_same_binary_preserve_complete_receipts() {
                 limits: PortableV2Limits::default(),
             };
             let exported = graph.export_portable_v2(&request, None, |_| {}).unwrap();
+            // #1389 adds process-scoped per-phase I/O attribution to the CLI
+            // receipt. It is observability the package receipt does not model,
+            // so it is asserted separately and the package contract below stays
+            // exactly as strict: no package field invented, dropped or altered.
+            let mut cli_package = cli_export.clone();
+            let application_io = cli_package
+                .as_object_mut()
+                .unwrap()
+                .remove("application_io")
+                .expect("export receipt carries per-phase application I/O");
             assert_eq!(
-                cli_export,
+                application_io["phases"].as_object().unwrap().len(),
+                graphforge_api::StorageIoPhase::LIFECYCLE.len()
+            );
+            assert!(application_io["totals"]["read_bytes"].as_u64().unwrap() > 0);
+            assert_eq!(
+                cli_package,
                 serde_json::to_value(exported.receipt()).unwrap()
             );
             let denied = graph
