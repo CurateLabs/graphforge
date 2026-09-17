@@ -169,19 +169,16 @@ fn materialize_from_cas(
                         error,
                     )
                 })?;
-            let verified = verify_file_counted(
-                installed,
-                &entry.content_sha256,
+            let verified = verify_hardlinked_materialization(
+                &installed,
+                installed_identity,
+                source_identity,
                 entry.byte_length,
                 &cas.diagnostic_root,
             );
             match verified {
-                Ok(io) => {
-                    return Ok(MaterializeIoEvidence {
-                        read_bytes: io.bytes,
-                        read_calls: io.calls,
-                        ..MaterializeIoEvidence::default()
-                    });
+                Ok(()) => {
+                    return Ok(MaterializeIoEvidence::default());
                 }
                 Err(error) => {
                     let _ = parent.unlink_child_if_identity(name, installed_identity);
@@ -191,6 +188,59 @@ fn materialize_from_cas(
         }
     }
     Err(validation("materialization path has no final component"))
+}
+
+/// Authenticate a just-installed hardlink without re-reading its bytes.
+///
+/// `bucket.link_child_into` above already confirmed, via `file_identity`,
+/// that the newly-created directory entry resolves to the exact same inode
+/// as `source` (the CAS object whose bytes were authenticated once already —
+/// either by the writer that sealed this object into the CAS, or lazily on
+/// first real read via `open_graph_object_by_digest`/
+/// `read_graph_object_by_digest`). A hard link cannot install different
+/// bytes than the inode it points at: there is no operation between the
+/// link syscall and this check, within the same open, that could have
+/// altered them. Re-reading and re-hashing the whole object here (as the
+/// deleted `verify_file_counted` call used to) duplicates that
+/// authentication for the cost of an O(bytes) sweep, once per materialized
+/// object, every open. See #1388 design "Open path redesign" O2.
+///
+/// This keeps the checks that stay meaningful after the hardlink: identity
+/// (defense in depth — cheap, `stat`-only, even though `link_child_into`
+/// already enforced it), declared length (mirrors `verify_file_counted`'s
+/// own pre-hash guard, `graph_object_store.rs`'s `verify_file_counted`), and
+/// link count (confirms the destination really is a second name for the CAS
+/// inode rather than some other single-link file that happened to be
+/// substituted in the window between `link_child_into`'s internal checks and
+/// this one).
+fn verify_hardlinked_materialization(
+    installed: &File,
+    installed_identity: graphforge_filesystem::FileIdentity,
+    source_identity: graphforge_filesystem::FileIdentity,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<(), GfError> {
+    if installed_identity != source_identity {
+        return Err(validation(
+            "materialized graph object is not the hard-linked CAS object",
+        ));
+    }
+    let metadata = installed
+        .metadata()
+        .map_err(|error| storage("inspect materialized graph object", diagnostic, error))?;
+    if !metadata.is_file() || metadata.len() != expected_length {
+        return Err(validation(
+            "materialized graph object length does not match manifest",
+        ));
+    }
+    let link_count = graphforge_filesystem::file_link_count(installed)
+        .map_err(|error| storage("inspect materialized graph object links", diagnostic, error))?;
+    if link_count < 2 {
+        return Err(validation(
+            "materialized graph object was not hard-linked from the CAS store",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
