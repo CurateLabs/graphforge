@@ -68,7 +68,7 @@ test-unit:  ## Run unit tests in parallel
 	uv run pytest tests/unit -n $${PYTEST_WORKERS:-4}
 
 test-tck:  ## Run TCK compliance tests via Rust BDD runner
-	cargo test -p graphforge-core --test bdd
+	cargo test -p graphforge-api --test bdd
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
 COVERAGE_FAIL_UNDER_RUST ?= 80

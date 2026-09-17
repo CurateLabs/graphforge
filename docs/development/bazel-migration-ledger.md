@@ -367,7 +367,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `scripts/ci/test-binding-release-candidate.py` | 809 | `assert "exec napi build --platform --release" not in publish_text` |
 | `Makefile` | 39 | `publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)` |
 | `Makefile` | 41 | `publish-dry-run-cargo:  ## cargo package --list for all 16 crates.io packages in plan order` |
-| `Makefile` | 66 | `cargo test -p graphforge-core --test bdd` |
+| `Makefile` | 66 | `cargo test -p graphforge-api --test bdd` |
 | `Makefile` | 84 | `echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \` |
 | `Makefile` | 104 | `coverage-python:  ## Run unit tests with Python wrapper coverage (requires maturin develop)` |
 | `Makefile` | 250 | `cargo build --workspace` |
