@@ -9,10 +9,10 @@ use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(windows)]
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex};
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,15 @@ pub struct ResolvedProjectGeneration {
     manifest_sha256: [u8; 32],
     manifest: Arc<GenerationManifest>,
     _lease_handle: Arc<GenerationLease>,
+    /// Memoized result of [`Self::graph_files_inventory`]. A resolved
+    /// generation is immutable by construction (`CURRENT` is never
+    /// re-consulted after resolution, and generations are never mutated in
+    /// place), so the manifest-authenticated inventory this computes is the
+    /// same value on every call. `Arc<OnceLock<..>>` lets every clone of this
+    /// `ResolvedProjectGeneration` — and there are many, one per call site —
+    /// share one computation instead of independently re-running the full
+    /// per-entry admission sweep.
+    inventory_cache: Arc<OnceLock<Result<Option<Arc<crate::GraphFilesInventory>>, GfError>>>,
 }
 
 #[derive(Debug)]
@@ -320,6 +329,28 @@ impl ResolvedProjectGeneration {
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
     pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        // Memoized: a resolved generation never mutates and `CURRENT` is not
+        // re-consulted after resolution (see `inventory_cache`'s doc comment
+        // on the struct), so this admits the manifest-authenticated
+        // inventory at most once per generation, regardless of how many
+        // call sites or clones of this `ResolvedProjectGeneration` ask for
+        // it within a single open.
+        match self.inventory_cache.get_or_init(|| {
+            self.compute_graph_files_inventory()
+                .map(|opt| opt.map(Arc::new))
+        }) {
+            Ok(Some(inventory)) => Ok(Some((**inventory).clone())),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
+    /// the full manifest decode plus, for the V2/mapped-root participant, a
+    /// presence-and-length check and a full streamed SHA-256 admission per
+    /// declared graph payload object. Call only through the memoized public
+    /// method above.
+    fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
             return Ok(None);
         };
@@ -341,6 +372,22 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
+                // Presence and declared-length admission only (O(files), one
+                // `symlink_metadata` per declared object). This deliberately
+                // does not read or hash payload bytes — see #1388 design
+                // "Open path redesign" O3: a byte-for-byte SHA-256 sweep over
+                // every declared object here duplicated the authentication
+                // every real consumer already performs, lazily, the first
+                // time it actually reads an object's bytes, via
+                // `open_graph_object_by_digest`/`read_graph_object_by_digest`
+                // (`graph_object_store.rs`). Corruption in an object nothing
+                // in the session reads is no longer caught by open; it
+                // surfaces on first read, or via the administrative verify
+                // command. Maintainer-approved tradeoff (#1388): the verify
+                // command covers whole-store integrity, this path maximises
+                // usable open speed, and this is an analyst bench, not a
+                // forensic system. Mirrors the presence-only pattern already
+                // used by `ShardedCsrIndex::open` (`adjacency.rs`).
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -355,11 +402,6 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
-                    crate::verify_graph_object(
-                        self.container_root(),
-                        &entry.content_sha256,
-                        entry.byte_length,
-                    )?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
@@ -828,6 +870,7 @@ pub fn resolve_project_generation(
             manifest_sha256: actual_digest,
             manifest: Arc::new(manifest),
             _lease_handle: Arc::new(lease),
+            inventory_cache: Arc::new(OnceLock::new()),
         });
     }
 }
@@ -876,6 +919,7 @@ pub fn resolve_verified_generation(
         manifest_sha256: actual_digest,
         manifest: Arc::new(manifest),
         _lease_handle: Arc::new(lease),
+        inventory_cache: Arc::new(OnceLock::new()),
     })
 }
 
