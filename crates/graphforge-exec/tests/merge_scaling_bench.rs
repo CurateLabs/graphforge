@@ -24,9 +24,14 @@ use graphforge_core::OntologyMode;
 use graphforge_core::uuid::new_v7;
 use graphforge_exec::ExecutionSession;
 use graphforge_ir::{Binder, GraphPlan, RuntimeCatalog};
-use graphforge_storage::{GraphCatalog, GraphWriter};
+use graphforge_storage::{GraphCatalog, GraphWriter, io_stats};
 use graphforge_value::EntityTypeId;
 use tempfile::TempDir;
+
+/// Serializes tests in this file that reset/read the process-global
+/// [`io_stats`] counters (mirrors the pattern in `bench_traversal_scaling.rs`).
+/// An async-aware mutex, since the guard is held across `.await` points.
+static IO_STATS_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const TS: i64 = 1_700_000_000_000_000;
 const PERSON: EntityTypeId = match EntityTypeId::decode(0) {
@@ -102,17 +107,79 @@ async fn node_merge_does_not_scale_with_graph_size() {
     let large_elapsed = time_merge(large_dir.path(), &rt, ROWS).await;
 
     let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64().max(1e-9);
+    println!("MERGE {ROWS} rows over {SMALL} filler nodes: {small_elapsed:?}");
+    println!("MERGE {ROWS} rows over {LARGE} filler nodes: {large_elapsed:?}");
+    let graph_size_ratio = LARGE / SMALL;
+    println!("graph size ratio {graph_size_ratio}x, wall-clock ratio {ratio:.2}x");
+}
+
+/// Direct, noise-immune proof of the acceptance criterion: "a MERGE over N
+/// rows performs a bounded number of topology reads, not N." Counts actual
+/// `graphforge_storage::read_nodes` invocations via the process-global
+/// [`io_stats`] `node_full_reads` counter — unlike wall-clock timing, this is
+/// exact and unaffected by host contention or the (unchanged, and shared with
+/// the sibling edge-MERGE path) O(rows * graph_size) in-memory candidate scan.
+#[tokio::test]
+async fn node_merge_topology_read_count_is_bounded_not_per_row() {
+    let _guard = IO_STATS_GUARD.lock().await;
+    let rt = Arc::new(Mutex::new(RuntimeCatalog::new()));
+    let dir = TempDir::new().unwrap();
+    seed_filler_nodes(dir.path(), 500);
+
+    // Disjoint `uid` ranges so neither call matches the other's rows; the
+    // read count claim holds for both created and matched rows since they
+    // share the same hoisted read.
+    io_stats::reset();
+    // openCypher `range(start, end)` is inclusive of both ends, so
+    // `range(0, 0)` yields exactly one row and `range(1_000, 1_049)` yields
+    // exactly fifty.
+    let _ = time_merge_range(dir.path(), &rt, 0, 0).await;
+    let reads_for_one_row = io_stats::snapshot().node_full_reads;
+
+    io_stats::reset();
+    let _ = time_merge_range(dir.path(), &rt, 1_000, 1_049).await;
+    let reads_for_fifty_rows = io_stats::snapshot().node_full_reads;
+
+    // A statement also reads the topology once, unconditionally, in
+    // `StatementWriteContext::new` (to seed `known_labels`) — a separate,
+    // already-bounded read outside this issue's scope. The count here is
+    // whatever that fixed per-statement overhead is (currently 2), and the
+    // acceptance criterion this test exists to pin is that it stays fixed as
+    // the row count grows, rather than growing by one full topology read per
+    // additional MERGE row.
     println!(
-        "MERGE {ROWS} rows over {SMALL} filler nodes: {:?}",
-        small_elapsed
+        "node_full_reads: {reads_for_one_row} for a 1-row MERGE, {reads_for_fifty_rows} for a 50-row MERGE"
     );
-    println!(
-        "MERGE {ROWS} rows over {LARGE} filler nodes: {:?}",
-        large_elapsed
+    assert_eq!(
+        reads_for_fifty_rows, reads_for_one_row,
+        "MERGE topology reads must not scale with row count: a 1-row MERGE did \
+         {reads_for_one_row} read(s), a 50-row MERGE did {reads_for_fifty_rows}"
     );
-    println!(
-        "graph size ratio {}x, wall-clock ratio {:.2}x",
-        LARGE / SMALL,
-        ratio
-    );
+}
+
+/// Like [`time_merge`], but over an explicit `[start, end)` UNWIND range so
+/// two calls against the same graph can use disjoint `uid` values.
+async fn time_merge_range(
+    dir: &Path,
+    rt: &Arc<Mutex<RuntimeCatalog>>,
+    start: i64,
+    end: i64,
+) -> std::time::Duration {
+    let stmt =
+        format!("UNWIND range({start}, {end}) AS i MERGE (m:Merged {{uid: i}}) RETURN count(m)");
+    let plan = bind(&stmt, rt);
+    let catalog = GraphCatalog::open(dir, None, &rt.lock().unwrap()).expect("open catalog");
+    let session = ExecutionSession::new_with_target(
+        catalog,
+        None,
+        dir.to_path_buf(),
+        OntologyMode::Exploratory,
+    )
+    .expect("session");
+    let start_time = Instant::now();
+    session
+        .execute_write_statement(&plan)
+        .await
+        .unwrap_or_else(|e| panic!("merge failed: {e}"));
+    start_time.elapsed()
 }
