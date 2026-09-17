@@ -27,6 +27,17 @@
 // That is a pre-existing durable-format defect, it is not introduced here, and
 // fixing it is a separate concern.
 //
+// The table above is a historical measurement on `13632d4b`, predating S5's
+// external-merge-tree deletion, not a pinned expectation: no test asserts
+// those literal values. Read it for what it demonstrates -- self-consistency
+// across two sessions -- not as a checksum to reproduce. It is stale for two
+// rows as of #1439's follow-up (per-family splitters): routing node-keyed
+// families with node-only splitters changes how edge details and edge
+// endpoints partition, so `edge details` and `edge endpoints` legitimately
+// produce different bytes now. `shaped-identities.run` and `node details`
+// are unchanged, because their routing did not change. The claim this file's
+// tests actually enforce -- stated precisely below -- still holds.
+//
 // So the claim these tests make is precise:
 //
 //   * **Within a fixed set of recorded session parameters** — the session clock
