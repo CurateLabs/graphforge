@@ -1,6 +1,8 @@
 # ADR 0030: Portable OCI protocol boundary
 
-Status: Accepted for implementation under #1021.
+**Status:** Accepted
+**Implementation:** Accepted for implementation under #1021.
+**Related:** #1021, #1015
 
 ## Context
 

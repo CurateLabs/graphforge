@@ -1,6 +1,8 @@
 # ADR 0006: Append-only epistemic interpretation
 
-**Status:** Accepted and implemented (epistemic model)
+**Status:** Accepted
+
+**Implementation:** Implemented (epistemic model).
 
 **Date:** 2026-06-07
 

@@ -1,6 +1,8 @@
 # ADR 0032: Research Branches share Project publication authority
 
-**Status:** Accepted design; M11 implementation pending
+**Status:** Accepted
+
+**Implementation:** Accepted design; M11 implementation pending.
 
 **Date:** 2026-09-16
 

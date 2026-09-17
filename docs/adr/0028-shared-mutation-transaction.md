@@ -1,6 +1,8 @@
 # ADR 0028: One transaction owns graph mutation effects
 
-**Status:** Proposed
+**Status:** Accepted
+**Implementation:** Implemented in #1151, which closed #1010 and landed
+this record in the same change.
 **Date:** 2026-09-07
 **Related:** #1010; ADRs 0025 and 0026
 

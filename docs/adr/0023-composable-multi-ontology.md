@@ -1,6 +1,6 @@
 # ADR 0023: Composable ontology modules and semantic bridges
 
-**Status:** Accepted  
+**Status:** Accepted
 **Date:** 2026-08-19  
 **Build target:** v0.5.x (M9)  
 **Related:** #833, #834; portable representation decision #835

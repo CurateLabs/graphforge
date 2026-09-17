@@ -1,6 +1,7 @@
 # Stage error compatibility contract
 
-Issue #1018 and ADR 0027 define the v0.6.0 boundary. Core owns the existing
+Issue #1018 and [ADR 0035](../adr/0035-structured-stage-errors.md) define the
+v0.6.0 boundary. Core owns the existing
 `ParseError`, `BindError`, `LoweringError`, and `AlgorithmError` types; their
 originating crates re-export them. `GfError` retains complete diagnostic payloads
 and every supplied span. The Rust enum's source shape changes in v0.6.0.
