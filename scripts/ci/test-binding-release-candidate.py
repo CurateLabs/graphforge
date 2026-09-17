@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -31,6 +33,7 @@ README = ROOT / "README.md"
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish.yaml"
 ARTIFACT_VALIDATOR = ROOT / "scripts/ci/validate-napi-artifacts.py"
 WRAPPER_PREPARER = ROOT / "scripts/ci/prepare-rustc-wrapper.py"
+BAZEL_NATIVE = ROOT / "scripts/ci/binding_rc_bazel_native.py"
 STRICT_ADD_NODE = ROOT / "crates/graphforge-bindings-py/tests/strict_add_node.py"
 SHA = "a" * 40
 ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir npm"
@@ -38,6 +41,14 @@ ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir np
 
 def load_validator():
     spec = importlib.util.spec_from_file_location("binding_rc_validator", VALIDATOR)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_bazel_native():
+    spec = importlib.util.spec_from_file_location("binding_rc_bazel_native", BAZEL_NATIVE)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -702,6 +713,67 @@ def rejected_post_merge_source_policy(workflow_text: str, mutation: str) -> None
     raise AssertionError(f"workflow accepted non-main RC source drift: {mutation}")
 
 
+def validate_bazelisk_guard_scope() -> None:
+    """Only the subcommands that run `bazelisk build` may require it (#1372).
+
+    The release-candidate assembly job calls `emit-node-loaders` and installs no
+    bazelisk, so a guard above the subcommand dispatch fails that job for a tool
+    the command never invokes.
+    """
+    module = load_bazel_native()
+    assert set(module.BAZELISK_COMMANDS) == {"python", "node"}
+
+    with tempfile.TemporaryDirectory(prefix="gf-bazelisk-guard-") as tmp:
+        scratch = Path(tmp)
+        empty_bin = scratch / "bin"
+        empty_bin.mkdir()
+        assert shutil.which("bazelisk", path=str(empty_bin)) is None
+
+        addon = scratch / "graphforge.linux-x64-gnu.node"
+        addon.write_bytes(b"retained addon; the assembler only copies and hashes it")
+        out_dir = scratch / "loaders"
+
+        original_path = os.environ["PATH"]
+        os.environ["PATH"] = str(empty_bin)
+        try:
+            # emit-node-loaders shells out to the assembler only; it must run.
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = module.main(
+                    [
+                        "emit-node-loaders",
+                        "--addon",
+                        str(addon),
+                        "--out-dir",
+                        str(out_dir),
+                        "--platform-tag",
+                        "linux-x64-gnu",
+                    ]
+                )
+            assert exit_code == 0
+            evidence = json.loads(stdout.getvalue().strip().splitlines()[-1])
+            assert evidence == {"language": "node", "loaders": "emitted", "recompiled": "false"}
+            assert (out_dir / "index.js").is_file()
+            assert (out_dir / "index.d.ts").is_file()
+
+            # python/node still refuse, fail-closed, with the original message.
+            for command, extra in (
+                ("python", ["--out", str(scratch / "wheel")]),
+                ("node", ["--out-dir", str(scratch / "node")]),
+            ):
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        module.main([command, *extra])
+                except SystemExit as refusal:
+                    assert refusal.code == 2, command
+                else:
+                    raise AssertionError(f"{command} ran without bazelisk on PATH")
+                assert "bazelisk is required on PATH" in stderr.getvalue(), command
+        finally:
+            os.environ["PATH"] = original_path
+
+
 def main() -> None:
     rc_workflow_text = RC_WORKFLOW.read_text()
     readme_text = README.read_text()
@@ -989,6 +1061,26 @@ def main() -> None:
     ), "assemble must not recompile natives; emit loaders from retained addon"
     assert "binding_rc_bazel_native.py" in release_candidate_job
     assert "emit-node-loaders" in release_candidate_job
+    # The assembly job installs no bazelisk and must never need one (#1372).
+    assert "bazelisk" not in release_candidate_job
+    validate_bazelisk_guard_scope()
+    # Tarball guards must mean "exactly one existing file" (#1374). Without
+    # nullglob a non-matching pattern survives as a one-element array.
+    assert "shopt -s nullglob" in release_candidate_job
+    assert 'test "${#main_packages[@]}" -eq 1' not in release_candidate_job
+    for label in ("main", "cli", "native"):
+        assert f"require_exactly_one {label} " in release_candidate_job
+    # The main tarball is named exactly, so prerelease versions resolve (#1374).
+    assert 'path.name.count("-") == 2' not in release_candidate_job
+    assert (
+        "pack = npm_dir / f\"curatelabs-graphforge-{os.environ['RELEASE_VERSION']}.tgz\""
+        in release_candidate_job
+    )
+    # crate-publish-plan.py list must fail the step, not empty the arrays (#1374).
+    assert "done < <(python3 scripts/ci/crate-publish-plan.py list)" not in release_candidate_job
+    assert 'crate_plan="$(python3 scripts/ci/crate-publish-plan.py list)"' in release_candidate_job
+    assert 'done <<< "$crate_plan"' in release_candidate_job
+    assert '"${#crates[@]}" -eq 0' in release_candidate_job
     assert "test -f index.js" in release_candidate_job
     assert "test -f index.d.ts" in release_candidate_job
     assert "package/index.js" in release_candidate_job

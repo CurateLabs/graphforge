@@ -20,6 +20,10 @@ ASSEMBLE = ROOT / "scripts" / "ci" / "assemble_bazel_binding_packages.py"
 
 FORBIDDEN = ("maturin build", "napi build", "cargo build", "cargo rustc")
 
+# Subcommands that shell out to ``bazelisk``. ``emit-node-loaders`` only runs the
+# Python assembler over an already-built addon, so it must not require bazelisk.
+BAZELISK_COMMANDS = frozenset({"python", "node"})
+
 
 def _die(message: str, code: int = 2) -> None:
     print(f"binding_rc_bazel_native: {message}", file=sys.stderr)
@@ -182,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     emit.add_argument("--platform-tag", default=None)
 
     args = parser.parse_args(argv)
-    if not shutil.which("bazelisk"):
+    if args.command in BAZELISK_COMMANDS and not shutil.which("bazelisk"):
         _die("bazelisk is required on PATH; see docs/development/bazel.md")
 
     if args.command == "python":
