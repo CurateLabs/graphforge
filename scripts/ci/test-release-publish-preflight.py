@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("release-publish-preflight.py")
@@ -199,15 +200,10 @@ assert "NODE_AUTH_TOKEN" not in skills
 assert "needs: candidate-preflight" in crates
 assert "environment: release" in crates
 assert "timeout-minutes: 180" in crates
-assert "Use reviewed recovery-overlay SHA crates publisher" in crates
+assert "Overlay reviewed recovery publish-path scripts" in crates
 assert "RECOVERY_OVERLAY_SHA" in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/publish_crates.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_action.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/crate-authorize-refresh-nodes.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_registry.py"' in crates
 assert "refs/remotes/origin/main:scripts/publish_crates.py" not in crates
 assert "RECOVERY_OVERLAY_SHA" in preflight
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-publish-preflight.py"' in preflight
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
@@ -260,6 +256,18 @@ for job in (
 assert "release_rehearsal.py reconcile" in summary
 assert "Release-Reconciliation-${{ github.run_id }}" in summary
 assert ".complete == true and (.nodes | length) == 25" in summary
+
+# Recovery overlays one reviewed list for the whole publish path, never a
+# per-lane subset: scripts/ci/test-release-recovery-overlay.py owns the list, and
+# the only file any lane may fetch by hand is the runner that installs it.
+overlaid_by_hand = re.findall(r'git show "\$RECOVERY_OVERLAY_SHA:([^"]+)"', workflow)
+assert set(overlaid_by_hand) == {"scripts/ci/release-recovery-overlay.sh"}, overlaid_by_hand
+for lane in (preflight, pypi, native, main, cli, skills, crates, summary):
+    assert 'bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"' in lane
+assert len(overlaid_by_hand) == 8
+# The npm publisher is recoverable in every lane that can write to npm.
+for lane in (native, main, cli, skills):
+    assert "scripts/publish_npm_artifacts.py" in lane
 
 assert "sleep" not in workflow
 assert "continue-on-error" not in workflow

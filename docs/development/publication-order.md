@@ -201,6 +201,45 @@ write jobs require the GitHub Environment `release`. The new run re-observes
 the registries, skips verified nodes without downloading unrelated partitions,
 and schedules only eligible absent work.
 
+### What a recovery dispatch may overlay
+
+Recovery never rebuilds a byte. Every lane downloads the same retained
+partitions and revalidates them against the manifest attached to the release,
+so the scripts it runs decide only *whether* and *how* an already-certified
+byte reaches a registry. Every one of those scripts is overlayable, in one
+list, `OVERLAY_PATHS` in
+[`scripts/ci/release-recovery-overlay.sh`](../../scripts/ci/release-recovery-overlay.sh):
+
+- registry writers: `scripts/publish_npm_artifacts.py`,
+  `scripts/publish_crates.py`;
+- authorization, observation, and reconciliation:
+  `scripts/ci/release_action.py`, `scripts/ci/release_registry.py`,
+  `scripts/ci/release_rehearsal.py`,
+  `scripts/ci/crate-authorize-refresh-nodes.py`,
+  `scripts/ci/crate-publish-plan.py`,
+  `scripts/ci/download-release-write-evidence.sh`;
+- candidate and version identity: `scripts/ci/release-publish-preflight.py`,
+  `scripts/ci/release-candidate.py`,
+  `scripts/ci/release_candidate_manifest.py`,
+  `scripts/set_release_version.py`.
+
+The list is the transitive closure, not the set of command lines in the
+workflow: `publish_npm_artifacts.py` imports `release_action.py` and loads
+`release-candidate.py`, so overlaying only the publisher would leave it calling
+the tag's defective modules. Every job that runs any of them installs the
+reviewed runner from the same SHA and invokes it, so the overlaid script is the
+one that executes. `scripts/ci/test-release-recovery-overlay.py` fails closed
+when the list, the publish path, and the jobs disagree, so a new registry
+writer cannot join the publish path without a deliberate decision about its
+recoverability.
+
+Overlaying is a recovery affordance only: a `release` event always runs the tag
+as cut. Overlaying cannot change which bytes are published: they come from the
+retained candidate, the manifest that pins their digests is a release asset,
+and a publisher that finds a public version already present refuses to resume
+unless the registry's integrity matches the candidate. The reviewed SHA must be
+a full 40-character commit that is already an ancestor of `main`.
+
 Stop and require a human decision when:
 
 - an existing public identity has different bytes, metadata, dependency
