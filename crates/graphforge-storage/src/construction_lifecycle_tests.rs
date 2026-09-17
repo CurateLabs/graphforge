@@ -1512,4 +1512,34 @@ mod lifecycle_budget {
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
+
+    #[test]
+    fn encoded_inventory_reread_skip_eliminates_repeat_call_read_bytes() {
+        // #1417: measured at two node-count scales (64, 1024 — a 16x span).
+        // On unfixed code this second call re-reads and re-hashes the full
+        // encoded inventory: 16,096 bytes at 64 rows, 108,537 bytes at 1024
+        // rows. With the `shape_retired` gate, both are exactly 0.
+        for node_rows in [64usize, 1024usize] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let mut session = small_session(root.path());
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    "nodes",
+                    &node_property_batch(1, node_rows),
+                )
+                .unwrap();
+            session.seal().unwrap();
+            let _first = session.prepare_canonical_encoding(1).unwrap();
+            let before = session.evidence().recovery_application_read_bytes;
+            let _second = session.prepare_canonical_encoding(1).unwrap();
+            let after = session.evidence().recovery_application_read_bytes;
+            assert_eq!(
+                after - before,
+                0,
+                "node_rows={node_rows}: repeat call must not re-read the encoded inventory"
+            );
+        }
+    }
 }
