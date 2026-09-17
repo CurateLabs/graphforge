@@ -382,9 +382,7 @@ def scaled_lifecycle_application_io(copies: int) -> dict:
     }
     return {
         "phases": phases,
-        "totals": {
-            field: value * copies for field, value in one["totals"].items()
-        },
+        "totals": {field: value * copies for field, value in one["totals"].items()},
     }
 
 
@@ -413,9 +411,7 @@ def rung_storage_attribution(scale: int) -> dict:
             "transient_peak_allocated_bytes": 300,
         },
         "portable_package": {
-            key: value
-            for key, value in receipts["export"][0].items()
-            if key != "application_io"
+            key: value for key, value in receipts["export"][0].items() if key != "application_io"
         },
         "lifecycle": receipts["reopen_proof"][-1],
         "lifecycle_application_io": rung_lifecycle_application_io(),
@@ -735,9 +731,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         gf = graphforge(18, receipts)
         rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf))
         lifecycle_io = rung["storage_attribution"]["lifecycle_application_io"]
-        self.assertEqual(
-            set(lifecycle_io), set(LIFECYCLE_APPLICATION_IO_LADDER_PHASES)
-        )
+        self.assertEqual(set(lifecycle_io), set(LIFECYCLE_APPLICATION_IO_LADDER_PHASES))
         # Construction attribution keeps its closed nine-row inventory.
         self.assertEqual(
             set(rung["storage_attribution"]["construction"]["application_io"]["phases"]),
@@ -745,9 +739,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         )
         for phase, document in lifecycle_io.items():
             with self.subTest(phase=phase):
-                self.assertEqual(
-                    set(document["phases"]), set(LIFECYCLE_APPLICATION_IO_PHASES)
-                )
+                self.assertEqual(set(document["phases"]), set(LIFECYCLE_APPLICATION_IO_PHASES))
                 for field in APPLICATION_IO_FIELDS:
                     self.assertEqual(
                         document["totals"][field],
@@ -766,9 +758,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
                 for receipt in stripped[omitted]:
                     receipt.pop("application_io", None)
                 changed_gf = graphforge(18, stripped)
-                with self.assertRaisesRegex(
-                    ControllerError, "lifecycle application I/O is absent"
-                ):
+                with self.assertRaisesRegex(ControllerError, "lifecycle application I/O is absent"):
                     assemble_rung_evidence(
                         root=ROOT,
                         scale=18,
@@ -785,9 +775,7 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         historical_rung = assemble_rung_evidence(
             root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
         )
-        self.assertNotIn(
-            "lifecycle_application_io", historical_rung["storage_attribution"]
-        )
+        self.assertNotIn("lifecycle_application_io", historical_rung["storage_attribution"])
         self.assertEqual(
             set(historical_rung["storage_attribution"]["construction"]["application_io"]["phases"]),
             set(APPLICATION_IO_PHASES),

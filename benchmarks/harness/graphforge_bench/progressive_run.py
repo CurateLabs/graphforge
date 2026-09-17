@@ -1028,9 +1028,7 @@ def _lifecycle_application_io(graphforge: Mapping[str, Any]) -> dict[str, Any] |
     if not collected:
         return None
     if missing:
-        raise ControllerError(
-            "ordinary lifecycle application I/O is absent: " + ", ".join(missing)
-        )
+        raise ControllerError("ordinary lifecycle application I/O is absent: " + ", ".join(missing))
     return collected
 
 

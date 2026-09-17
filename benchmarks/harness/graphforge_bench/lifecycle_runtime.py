@@ -41,9 +41,11 @@ def summarize(documents: dict[str, Any]) -> dict[str, Any]:
         # reports derived from historical bundles stay byte-comparable.
         **(
             {"lifecycle_application_io": lifecycle_io}
-            if (lifecycle_io := documents["rung"]["storage_attribution"].get(
-                "lifecycle_application_io"
-            ))
+            if (
+                lifecycle_io := documents["rung"]["storage_attribution"].get(
+                    "lifecycle_application_io"
+                )
+            )
             else {}
         ),
         "metrics": documents["rung"]["metrics"],
