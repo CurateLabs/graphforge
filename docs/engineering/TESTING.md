@@ -289,7 +289,7 @@ weakened assertions (`AGENTS.md`).
 | --- | --- | --- |
 | Unit | Crate-local logic (parse, lower, storage helpers) | `cargo test` inline + crate `tests/` |
 | Integration / facade | Lifecycle, verbs, reopen, concurrency contracts | `graphforge-api` workspace tests |
-| Language compliance | openCypher semantics | `cargo test -p graphforge-core --test bdd` / `make test-tck` |
+| Language compliance | openCypher semantics | `cargo test -p graphforge-api --test bdd` / `make test-tck` |
 | Binding / IPC | Python & Node projections match Rust semantics | pytest, Node BDD, Arrow/IPC equality |
 | Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py`, surface-gate workflows |
 | Agent skills | Offline pack/install, compatibility, schema fail-closed | `pnpm test:agent-skills`, `pnpm smoke:agent-skills` |
