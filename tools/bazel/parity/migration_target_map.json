@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 127,
+  "cargo_target_count": 128,
   "targets": [
     {
       "package": "graphforge-api",
@@ -230,6 +230,16 @@
       "source": "crates/graphforge-api/tests/knowledge_isolation.rs",
       "status": "mapped",
       "bazel_label": "//crates/graphforge-api:knowledge_isolation",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "lifecycle_io_attribution",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/lifecycle_io_attribution.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:lifecycle_io_attribution",
       "exception_id": null,
       "notes": "#8"
     },
