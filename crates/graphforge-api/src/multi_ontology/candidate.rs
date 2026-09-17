@@ -27,7 +27,14 @@ pub(super) fn module_inventory(
         )
         .map_err(composition_error);
     }
-    OntologyInventory::reopen(InventorySnapshot {
+    // `composition` is always already-verified authority here: either loaded
+    // via `WorkspaceOntologyComposition::from_canonical_json` (which recompiles
+    // and fingerprint-checks on load) or freshly built via `from_compiled`, and
+    // never mutated in between. Re-verifying the fingerprint by recompiling
+    // every adopted module again on this call would just recompute a value
+    // already established and discard the recompiled Arrow output, so this
+    // uses the trusted reopen instead of `OntologyInventory::reopen`.
+    OntologyInventory::reopen_trusted(InventorySnapshot {
         schema_version: 1,
         generation: 0,
         profile_default: composition.profile_default,
@@ -103,7 +110,14 @@ pub(super) fn bridge_inventory(
         .filter(|record| record.scope == ActivationScope::Bridge && known.contains(&record.subject))
         .map(|record| record.subject.clone())
         .collect();
-    BridgeInventory::reopen(graphforge_ontology::BridgeSnapshot {
+    // `adopted` bridges here were just built straight from `compiled`/
+    // `composition`, which `composition.compile()` above already validated
+    // (document validity, authoritative-ness, identity, and dependency
+    // closure) via its own internal bridge inventory. Re-validating and
+    // re-digesting each one again on every call would recompute values
+    // already established, so this uses the trusted reopen instead of
+    // `BridgeInventory::reopen`.
+    BridgeInventory::reopen_trusted(graphforge_ontology::BridgeSnapshot {
         schema_version: 1,
         generation: 0,
         profile_default: composition.profile_default,

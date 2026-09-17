@@ -673,7 +673,60 @@ impl BridgeInventory {
     }
 
     /// Reopen durable authority from a snapshot (staging starts empty).
+    ///
+    /// Re-validates and re-digests every adopted bridge document and rejects
+    /// the snapshot if any computed identity, dependency projection, or
+    /// dependency closure disagrees with what is recorded. Use this whenever
+    /// the snapshot's integrity has not already been established by the
+    /// caller. When the caller already knows the snapshot is good — because
+    /// it just validated and identity-checked the same bridges itself —
+    /// prefer [`Self::reopen_trusted`], which skips the redundant
+    /// re-validation.
     pub fn reopen(snapshot: BridgeSnapshot) -> Result<Self, CompositionError> {
+        let inv = Self::reopen_structure(snapshot, |inv, bridge| {
+            inv.validate_document(&bridge.doc)?;
+            inv.require_authoritative(&bridge.doc)?;
+            let computed_id = inv.identity_for(&bridge.doc)?;
+            if bridge.id != computed_id || bridge.dependencies != bridge.doc.dependencies {
+                return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                    DiagnosticCode::InterchangeIntegrity,
+                    "snapshot bridge identity or dependency projection does not match its document",
+                    vec![bridge.id.display_ref(), computed_id.display_ref()],
+                    inv.diag_limit,
+                )));
+            }
+            Ok(())
+        })?;
+        // Re-validate the adopted dependency closure after every identity is loaded.
+        for record in inv.adopted.values() {
+            inv.require_bridge_dependencies(&record.dependencies)?;
+        }
+        Ok(inv)
+    }
+
+    /// Reopen durable authority from a snapshot whose adopted bridges are
+    /// already known-good.
+    ///
+    /// Rebuilds the same in-memory authority as [`Self::reopen`] but trusts
+    /// each `SnapshotBridge`'s recorded identity and dependencies instead of
+    /// re-validating and re-digesting every adopted bridge document just to
+    /// re-derive and compare values the caller already verified. Callers must
+    /// only use this when the snapshot's bridges were themselves validated
+    /// and identity-checked moments earlier from the same content (for
+    /// example, durable storage that already compiles and validates bridges
+    /// on load) — never for snapshots of unverified or untrusted origin.
+    pub fn reopen_trusted(snapshot: BridgeSnapshot) -> Result<Self, CompositionError> {
+        Self::reopen_structure(snapshot, |_inv, _bridge| Ok(()))
+    }
+
+    /// Shared structural rebuild used by both [`Self::reopen`] and
+    /// [`Self::reopen_trusted`]; `verify_bridge` is run once per adopted
+    /// bridge before it is inserted, and is the only place the two variants
+    /// differ.
+    fn reopen_structure(
+        snapshot: BridgeSnapshot,
+        verify_bridge: impl Fn(&Self, &SnapshotBridge) -> Result<(), CompositionError>,
+    ) -> Result<Self, CompositionError> {
         if snapshot.schema_version != 1 {
             return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
                 DiagnosticCode::InterchangeIntegrity,
@@ -697,17 +750,7 @@ impl BridgeInventory {
             });
         }
         for bridge in snapshot.adopted {
-            inv.validate_document(&bridge.doc)?;
-            inv.require_authoritative(&bridge.doc)?;
-            let computed_id = inv.identity_for(&bridge.doc)?;
-            if bridge.id != computed_id || bridge.dependencies != bridge.doc.dependencies {
-                return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                    DiagnosticCode::InterchangeIntegrity,
-                    "snapshot bridge identity or dependency projection does not match its document",
-                    vec![bridge.id.display_ref(), computed_id.display_ref()],
-                    inv.diag_limit,
-                )));
-            }
+            verify_bridge(&inv, &bridge)?;
             inv.adopted.insert(
                 bridge.id.display_ref(),
                 BridgeRecord {
@@ -720,10 +763,6 @@ impl BridgeInventory {
         }
         for receipt in snapshot.receipts {
             inv.receipts.insert(receipt.operation_id.clone(), receipt);
-        }
-        // Re-validate the adopted dependency closure after every identity is loaded.
-        for record in inv.adopted.values() {
-            inv.require_bridge_dependencies(&record.dependencies)?;
         }
         Ok(inv)
     }
