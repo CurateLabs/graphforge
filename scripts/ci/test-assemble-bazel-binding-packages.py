@@ -11,13 +11,17 @@ import unittest
 import zipfile
 
 from assemble_bazel_binding_packages import (
+    _NAPI_PLATFORM_TAGS,
     EXPORT_SURFACE_FILENAME,
     FORBIDDEN_RECOMPILE,
+    _napi_host_tag_map,
+    _napi_platform_tag,
     assemble_node,
     assemble_python,
     main,
     pep427_wheel_filename,
     read_node_export_surface,
+    read_node_package_identity,
     resolve_python_wheel_out,
     synthesize_node_index_dts,
     synthesize_node_index_js,
@@ -163,8 +167,13 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
         # `import { GraphForge } from '../index.js'` used to throw
         # `SyntaxError: Named export 'GraphForge' not found`.
         surface = {"GraphForge": "class", "runCli": "function", "version": "function"}
-        body = synthesize_node_index_js("graphforge.linux-x64-gnu.node", surface)
-        self.assertIn("const nativeBinding = require('./graphforge.linux-x64-gnu.node');", body)
+        body = synthesize_node_index_js(
+            "graphforge.linux-x64-gnu.node",
+            surface,
+            package_name="@curatelabs/graphforge",
+            binary_name="graphforge",
+        )
+        self.assertIn("addCandidate('./graphforge.linux-x64-gnu.node');", body)
         self.assertIn("module.exports = nativeBinding;", body)
         for name in surface:
             self.assertIn(f"module.exports.{name} = nativeBinding.{name};", body)
@@ -187,7 +196,12 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
             )
             index = pkg / "index.js"
             index.write_text(
-                synthesize_node_index_js("native-stub.js", surface),
+                synthesize_node_index_js(
+                    "native-stub.js",
+                    surface,
+                    package_name="@curatelabs/graphforge",
+                    binary_name="graphforge",
+                ),
                 encoding="utf-8",
             )
             # Static ESM named import — the form the Binding RC smoke contract uses.
@@ -225,6 +239,138 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.stdout, "0.0.0-test")
+
+    def test_synthesized_loader_resolves_the_optional_platform_package(self) -> None:
+        # #1369 — the published main package ships no addon: `files` excludes
+        # *.node and `napi artifacts` moves every addon into
+        # npm/<platformArchABI>/. A loader whose only candidate is the sibling
+        # file threw `Cannot find module './graphforge.<tag>.node'` on a clean
+        # consumer install.
+        surface = {"GraphForge": "class", "runCli": "function", "version": "function"}
+        host_tag = _napi_platform_tag()
+        addon_name = f"graphforge.{host_tag}.node"
+
+        def stub_body(marker: str) -> str:
+            return (
+                "module.exports = {\n"
+                "  GraphForge: class GraphForge {},\n"
+                "  runCli() { return 0; },\n"
+                f"  version() {{ return '{marker}'; }},\n"
+                "};\n"
+            )
+
+        def run(pkg: Path, source: str, body: str) -> subprocess.CompletedProcess[str]:
+            script = pkg / source
+            script.write_text(body, encoding="utf-8")
+            return subprocess.run(
+                ["node", str(script)],
+                cwd=pkg,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        esm = (
+            "import { GraphForge, runCli, version } from './index.js';\n"
+            "if (typeof GraphForge !== 'function') process.exit(2);\n"
+            "if (typeof runCli !== 'function') process.exit(3);\n"
+            "new GraphForge();\n"
+            "process.stdout.write(version());\n"
+        )
+        cjs = (
+            "const { GraphForge, runCli, version } = require('./index.js');\n"
+            "if (typeof GraphForge !== 'function') process.exit(2);\n"
+            "if (typeof runCli !== 'function') process.exit(3);\n"
+            "new GraphForge();\n"
+            "process.stdout.write(version());\n"
+        )
+
+        def make_platform_package(pkg: Path) -> None:
+            scoped = pkg / "node_modules" / "@curatelabs" / f"graphforge-{host_tag}"
+            scoped.mkdir(parents=True)
+            (scoped / "stub.cjs").write_text(stub_body("0.0.0-platform-package"), "utf-8")
+            (scoped / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": f"@curatelabs/graphforge-{host_tag}",
+                        "version": "0.0.0",
+                        "main": "stub.cjs",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        # Published install: no sibling addon, only the optional platform package.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp)
+            (pkg / "index.js").write_text(
+                synthesize_node_index_js(
+                    addon_name,
+                    surface,
+                    package_name="@curatelabs/graphforge",
+                    binary_name="graphforge",
+                ),
+                encoding="utf-8",
+            )
+            make_platform_package(pkg)
+            for source, body in (("named-import.mjs", esm), ("named-require.cjs", cjs)):
+                done = run(pkg, source, body)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout, "0.0.0-platform-package", source)
+
+        # Bazel lane: the addon staged beside index.js still wins, even when a
+        # platform package is also resolvable.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp)
+            (pkg / "native-stub.js").write_text(stub_body("0.0.0-sibling"), encoding="utf-8")
+            (pkg / "index.js").write_text(
+                synthesize_node_index_js(
+                    "native-stub.js",
+                    surface,
+                    package_name="@curatelabs/graphforge",
+                    binary_name="graphforge",
+                ),
+                encoding="utf-8",
+            )
+            make_platform_package(pkg)
+            for source, body in (("named-import.mjs", esm), ("named-require.cjs", cjs)):
+                done = run(pkg, source, body)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout, "0.0.0-sibling", source)
+
+        # Neither present: the failure names every candidate it tried.
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp)
+            (pkg / "index.js").write_text(
+                synthesize_node_index_js(
+                    addon_name,
+                    surface,
+                    package_name="@curatelabs/graphforge",
+                    binary_name="graphforge",
+                ),
+                encoding="utf-8",
+            )
+            done = run(pkg, "named-require.cjs", cjs)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn(f"@curatelabs/graphforge-{host_tag}", done.stderr)
+            self.assertIn(f"./{addon_name}", done.stderr)
+
+    def test_host_tag_map_covers_every_declared_platform(self) -> None:
+        # The loader dispatches on `${process.platform}-${process.arch}`, so
+        # every declared napi tag needs exactly one host key (#1369).
+        table = _napi_host_tag_map()
+        self.assertEqual(sorted(table.values()), sorted(_NAPI_PLATFORM_TAGS))
+        self.assertEqual(table["linux-x64"], "linux-x64-gnu")
+        self.assertEqual(table["win32-x64"], "win32-x64-msvc")
+        self.assertEqual(table["darwin-arm64"], "darwin-arm64")
+
+    def test_node_package_identity_matches_the_shipped_manifest(self) -> None:
+        # The loader names the optional platform packages after these (#1369).
+        package_name, binary_name = read_node_package_identity(
+            ROOT / "crates" / "graphforge-bindings-node"
+        )
+        self.assertEqual(package_name, "@curatelabs/graphforge")
+        self.assertEqual(binary_name, "graphforge")
 
     def test_assemble_node_zip_embeds_native_bytes(self) -> None:
         package_root = ROOT / "crates" / "graphforge-bindings-node"

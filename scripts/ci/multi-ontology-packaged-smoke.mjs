@@ -22,5 +22,10 @@ const cli = join(cliModule, "..", "..", "bin", "graphforge.js");
 const help = execFileSync(process.execPath, [cli, "ontology", "module", "list", "--help"], {
   encoding: "utf8",
 });
-assert.match(help, /ontology modules/i);
+// #1369 — `ontology module list` carries no clap `about`, so its own help
+// has never contained "ontology modules"; the phrase belongs to the parent
+// `ontology module` command. This job has not run since the four platform
+// lanes went red, so the stale assertion went unnoticed. Assert the usage
+// line the Rust CLI actually emits for the leaf command instead.
+assert.match(help, /Usage: graphforge ontology module list/i);
 console.log("multi-ontology packed Node package and CLI binary: PASS");
