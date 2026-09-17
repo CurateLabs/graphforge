@@ -8,8 +8,8 @@ Unmapped rows and stub retained-tool exceptions fail the gate.
 
 from __future__ import annotations
 
-import collections
 import argparse
+import collections
 import json
 from pathlib import Path
 import re
