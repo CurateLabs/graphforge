@@ -545,6 +545,11 @@ pub(crate) fn authenticate_route_table(
     {
         return Err(corrupt("semantic route authority changed during admission"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        entry.byte_length,
+        1,
+    );
     let table = crate::route_component::RouteTable::decode(
         &bytes,
         MAX_TABLE_BYTES,
@@ -586,6 +591,11 @@ pub(crate) fn read_route_table_counted(
         bytes.extend_from_slice(&buffer[..read]);
         calls += 1;
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        bytes.len() as u64,
+        calls,
+    );
     Ok((bytes, calls))
 }
 
@@ -1186,6 +1196,12 @@ fn copy_regular_file(source: &Path, destination: &Path) -> Result<CopyIoEvidence
     }
     let (digest, read_bytes, read_calls) = hash_file_io_counted(destination)?;
     sync_file(destination)?;
+    crate::lifecycle_io::record_write(
+        crate::StorageIoPhase::HydrationVerification,
+        copied,
+        u64::from(copied != 0),
+    );
+    crate::lifecycle_io::record_fsync(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(CopyIoEvidence {
         digest,
         read_bytes,
@@ -1217,6 +1233,8 @@ fn hash_file_io_counted(path: &Path) -> Result<([u8; 32], u64, u64), GfError> {
             .checked_add(1)
             .ok_or_else(|| validation("graph file hash call count overflows"))?;
     }
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, bytes, calls);
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok((digest.finalize().into(), bytes, calls))
 }
 

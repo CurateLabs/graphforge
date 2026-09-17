@@ -1090,6 +1090,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "allocation_logical_bytes",
                 "allocation_allocated_bytes",
                 "allocation_physical_objects",
+                "application_io",
             ],
         )
         .filter(|receipt| {
@@ -1100,7 +1101,9 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                     "allocation_allocated_bytes",
                     "allocation_physical_objects",
                 ],
-            )
+            ) && receipt
+                .get("application_io")
+                .is_none_or(sanitized_lifecycle_application_io)
         }),
         Some("graphforge-portable-import/2") => copy_selected_receipt(
             object,
@@ -1110,9 +1113,15 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "transport_digest",
                 "idempotent_replay",
                 "transient_peak_allocated_bytes",
+                "application_io",
             ],
         )
-        .filter(|receipt| sanitized_numeric_fields(receipt, &["transient_peak_allocated_bytes"])),
+        .filter(|receipt| {
+            sanitized_numeric_fields(receipt, &["transient_peak_allocated_bytes"])
+                && receipt
+                    .get("application_io")
+                    .is_none_or(sanitized_lifecycle_application_io)
+        }),
         Some(contract) if contract.starts_with("graphforge-portable-") => copy_selected_receipt(
             object,
             &[
@@ -1156,6 +1165,89 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
         }
         _ => None,
     }
+}
+
+/// Closed full-lifecycle phase inventory emitted by `application_io` on every
+/// non-ingest receipt (#1389). This is the construction inventory plus the
+/// read-path row construction never performs.
+const LIFECYCLE_IO_PHASES: [&str; 10] = [
+    "append_merge",
+    "cas_install_read_write",
+    "encode_write_postwrite_authentication",
+    "fsync_synchronization",
+    "hydration_verification",
+    "publication_preauthentication",
+    "read_path_scan",
+    "recovery_reauthentication",
+    "seal_authentication",
+    "shape_consume_reauthentication",
+];
+
+const LIFECYCLE_IO_COUNTERS: [&str; 7] = [
+    "block_count",
+    "fsync_calls",
+    "object_count",
+    "read_bytes",
+    "read_calls",
+    "write_bytes",
+    "write_calls",
+];
+
+/// Accept a lifecycle `application_io` document only when it is the complete
+/// closed inventory of numeric counters whose totals reconcile exactly.
+fn sanitized_lifecycle_application_io(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.len() != 2 {
+        return false;
+    }
+    let (Some(phases), Some(totals)) = (
+        object.get("phases").and_then(serde_json::Value::as_object),
+        object.get("totals").and_then(serde_json::Value::as_object),
+    ) else {
+        return false;
+    };
+    if phases.len() != LIFECYCLE_IO_PHASES.len()
+        || !LIFECYCLE_IO_PHASES
+            .iter()
+            .all(|phase| phases.contains_key(*phase))
+        || !sanitized_lifecycle_phase_totals(totals)
+    {
+        return false;
+    }
+    let mut reconciled = std::collections::BTreeMap::new();
+    for phase in LIFECYCLE_IO_PHASES {
+        let Some(row) = phases.get(phase).and_then(serde_json::Value::as_object) else {
+            return false;
+        };
+        if !sanitized_lifecycle_phase_totals(row) {
+            return false;
+        }
+        for counter in LIFECYCLE_IO_COUNTERS {
+            let Some(observed) = row.get(counter).and_then(serde_json::Value::as_u64) else {
+                return false;
+            };
+            let entry = reconciled.entry(counter).or_insert(0_u64);
+            let Some(next) = entry.checked_add(observed) else {
+                return false;
+            };
+            *entry = next;
+        }
+    }
+    LIFECYCLE_IO_COUNTERS.iter().all(|counter| {
+        totals.get(*counter).and_then(serde_json::Value::as_u64)
+            == reconciled.get(counter).copied()
+    })
+}
+
+fn sanitized_lifecycle_phase_totals(row: &serde_json::Map<String, serde_json::Value>) -> bool {
+    row.len() == LIFECYCLE_IO_COUNTERS.len()
+        && LIFECYCLE_IO_COUNTERS.iter().all(|counter| {
+            row.get(*counter)
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        })
 }
 
 fn sanitized_numeric_tree(value: &serde_json::Value) -> bool {
@@ -1229,14 +1321,20 @@ fn sanitized_numeric_fields(value: &serde_json::Value, keys: &[&str]) -> bool {
 fn sanitize_storage_command(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Value> {
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "contract" | "storage" | "reopen_agrees"))
-        || object
-            .get("reopen_agrees")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "contract" | "storage" | "reopen_agrees" | "application_io"
+        )
+    }) || object
+        .get("reopen_agrees")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
     {
+        return None;
+    }
+    let application_io = object.get("application_io")?;
+    if !sanitized_lifecycle_application_io(application_io) {
         return None;
     }
     let storage = object.get("storage")?.as_object()?;
@@ -1266,6 +1364,7 @@ fn sanitize_storage_command(
         "contract": "graphforge-storage-attribution-command/1",
         "storage": storage,
         "reopen_agrees": true,
+        "application_io": application_io,
     }))
 }
 
@@ -1303,7 +1402,7 @@ fn sanitize_legacy_result_sink(
 fn sanitize_result_sink(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Value> {
-    const KEYS: [&str; 10] = [
+    const KEYS: [&str; 11] = [
         "contract",
         "destination",
         "format",
@@ -1314,8 +1413,12 @@ fn sanitize_result_sink(
         "result_sha256",
         "scalar_u64",
         "query_evidence",
+        "application_io",
     ];
     let digest = object.get("result_sha256")?.as_str()?;
+    if !sanitized_lifecycle_application_io(object.get("application_io")?) {
+        return None;
+    }
     if object.keys().any(|key| !KEYS.contains(&key.as_str()))
         || !matches!(
             object.get("format").and_then(serde_json::Value::as_str),
@@ -1349,6 +1452,7 @@ fn sanitize_result_sink(
             "result_sha256",
             "scalar_u64",
             "query_evidence",
+            "application_io",
         ],
     )
 }
@@ -2018,6 +2122,57 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// Minimal valid full-lifecycle `application_io` document (#1389).
+    fn lifecycle_application_io() -> serde_json::Value {
+        let zero = serde_json::json!({
+            "read_bytes": 0, "write_bytes": 0, "read_calls": 0, "write_calls": 0,
+            "object_count": 0, "block_count": 0, "fsync_calls": 0
+        });
+        let mut phases = serde_json::Map::new();
+        for phase in super::LIFECYCLE_IO_PHASES {
+            phases.insert(phase.to_owned(), zero.clone());
+        }
+        phases.insert(
+            "hydration_verification".to_owned(),
+            serde_json::json!({
+                "read_bytes": 4_096, "write_bytes": 0, "read_calls": 2, "write_calls": 0,
+                "object_count": 1, "block_count": 0, "fsync_calls": 0
+            }),
+        );
+        serde_json::json!({
+            "phases": phases,
+            "totals": {
+                "read_bytes": 4_096, "write_bytes": 0, "read_calls": 2, "write_calls": 0,
+                "object_count": 1, "block_count": 0, "fsync_calls": 0
+            }
+        })
+    }
+
+    #[test]
+    fn lifecycle_application_io_is_closed_and_must_reconcile() {
+        assert!(super::sanitized_lifecycle_application_io(
+            &lifecycle_application_io()
+        ));
+        let mut unknown_phase = lifecycle_application_io();
+        unknown_phase["phases"]["invented_phase"] = serde_json::json!({
+            "read_bytes": 0, "write_bytes": 0, "read_calls": 0, "write_calls": 0,
+            "object_count": 0, "block_count": 0, "fsync_calls": 0
+        });
+        assert!(!super::sanitized_lifecycle_application_io(&unknown_phase));
+        let mut missing_phase = lifecycle_application_io();
+        missing_phase["phases"]
+            .as_object_mut()
+            .unwrap()
+            .remove("read_path_scan");
+        assert!(!super::sanitized_lifecycle_application_io(&missing_phase));
+        let mut unreconciled = lifecycle_application_io();
+        unreconciled["totals"]["read_bytes"] = serde_json::json!(4_097);
+        assert!(!super::sanitized_lifecycle_application_io(&unreconciled));
+        let mut leaked = lifecycle_application_io();
+        leaked["phases"]["read_path_scan"]["project_path"] = serde_json::json!("/secret");
+        assert!(!super::sanitized_lifecycle_application_io(&leaked));
+    }
+
     #[test]
     fn raw_owner_closure_refuses_unknown_zero_nonzero_and_alias_files() {
         for unknown in ["zero", "nonzero", "alias"] {
@@ -2134,6 +2289,7 @@ mod tests {
             "complete": true,
             "result_sha256": "a".repeat(64),
             "scalar_u64": 7,
+            "application_io": lifecycle_application_io(),
             "query_evidence": {
                 "contract": "graphforge-query-evidence/1",
                 "hops": [],
@@ -2183,6 +2339,7 @@ mod tests {
             "destination": "/private/query.arrow",
             "format": "ArrowIpc", "rows": 2, "batches": 1, "bytes": 64,
             "complete": true, "result_sha256": "a".repeat(64), "scalar_u64": null,
+            "application_io": lifecycle_application_io(),
             "query_evidence": {
                 "contract": "graphforge-query-evidence/1",
                 "hops": [{
@@ -2270,7 +2427,8 @@ mod tests {
                 "allocated_physical_bytes": 128,
                 "physical_objects": 1
             },
-            "reopen_agrees": true
+            "reopen_agrees": true,
+            "application_io": lifecycle_application_io()
         });
         let encoded = serde_json::to_vec(&receipt).expect("storage receipt JSON");
         let sanitized = parse_receipts(&encoded, true).expect("closed storage receipt");

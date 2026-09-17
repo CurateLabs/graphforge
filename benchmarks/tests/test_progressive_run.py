@@ -9,6 +9,10 @@ import unittest
 from unittest.mock import patch
 
 from graphforge_bench.progressive_run import (
+    APPLICATION_IO_FIELDS,
+    APPLICATION_IO_PHASES,
+    LIFECYCLE_APPLICATION_IO_LADDER_PHASES,
+    LIFECYCLE_APPLICATION_IO_PHASES,
     BenchExecRunError,
     ControllerError,
     Executables,
@@ -172,6 +176,7 @@ def sink(digest: str, *, rows: int, scalar: int | None = None) -> dict:
         "complete": True,
         "result_sha256": digest,
         "query_evidence": {"contract": "graphforge-query-evidence/1"},
+        "application_io": lifecycle_application_io(),
     }
     if scalar is not None:
         receipt["scalar_u64"] = scalar
@@ -208,6 +213,8 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
     ]
     source_storage = storage_receipt(100, 110)
     imported_storage = storage_receipt(120, 130)
+    source_storage["application_io"] = lifecycle_application_io()
+    imported_storage["application_io"] = lifecycle_application_io()
     nodes, edges = 1 << scale, 16 * (1 << scale)
     node_count = sink("a" * 64, rows=1, scalar=nodes)
     edge_count = sink("b" * 64, rows=1, scalar=edges)
@@ -224,6 +231,17 @@ def authoritative_receipts(scale: int) -> dict[str, list[dict]]:
                 "allocation_logical_bytes": 140,
                 "allocation_allocated_bytes": 150,
                 "allocation_physical_objects": 1,
+                "application_io": lifecycle_application_io(),
+            }
+        ],
+        "clean_import": [
+            {
+                "contract": "graphforge-portable-import/2",
+                "package_digest": f"sha256:{'e' * 64}",
+                "transport_digest": f"sha256:{'f' * 64}",
+                "idempotent_replay": False,
+                "transient_peak_allocated_bytes": 160,
+                "application_io": lifecycle_application_io(),
             }
         ],
         "reopen_proof": [
@@ -287,6 +305,40 @@ def storage_receipt(allocated: int, logical_eof: int) -> dict:
     }
 
 
+def lifecycle_application_io(**rows: dict) -> dict:
+    """Closed full-lifecycle inventory carried by every non-ingest receipt."""
+    fields = (
+        "read_bytes",
+        "write_bytes",
+        "read_calls",
+        "write_calls",
+        "object_count",
+        "block_count",
+        "fsync_calls",
+    )
+    names = (
+        "append_merge",
+        "seal_authentication",
+        "shape_consume_reauthentication",
+        "encode_write_postwrite_authentication",
+        "publication_preauthentication",
+        "cas_install_read_write",
+        "hydration_verification",
+        "fsync_synchronization",
+        "recovery_reauthentication",
+        "read_path_scan",
+    )
+    phases = {name: dict.fromkeys(fields, 0) for name in names}
+    phases["hydration_verification"].update(read_bytes=2_048, read_calls=4)
+    phases["read_path_scan"].update(read_bytes=512, read_calls=2)
+    for name, values in rows.items():
+        phases[name].update(values)
+    return {
+        "phases": phases,
+        "totals": {field: sum(phase[field] for phase in phases.values()) for field in fields},
+    }
+
+
 def application_io() -> dict:
     fields = (
         "read_bytes",
@@ -321,6 +373,32 @@ def application_io() -> dict:
     }
 
 
+def scaled_lifecycle_application_io(copies: int) -> dict:
+    """Sum `copies` identical per-process receipts, as the controller does."""
+    one = lifecycle_application_io()
+    phases = {
+        name: {field: value * copies for field, value in row.items()}
+        for name, row in one["phases"].items()
+    }
+    return {
+        "phases": phases,
+        "totals": {
+            field: value * copies for field, value in one["totals"].items()
+        },
+    }
+
+
+def rung_lifecycle_application_io() -> dict:
+    return {
+        "reopen": scaled_lifecycle_application_io(1),
+        "recount": scaled_lifecycle_application_io(2),
+        "query": scaled_lifecycle_application_io(2),
+        "export": scaled_lifecycle_application_io(1),
+        "clean_import": scaled_lifecycle_application_io(1),
+        "reopen_proof": scaled_lifecycle_application_io(5),
+    }
+
+
 def rung_storage_attribution(scale: int) -> dict:
     receipts = authoritative_receipts(scale)
     return {
@@ -334,8 +412,13 @@ def rung_storage_attribution(scale: int) -> dict:
             ],
             "transient_peak_allocated_bytes": 300,
         },
-        "portable_package": receipts["export"][0],
+        "portable_package": {
+            key: value
+            for key, value in receipts["export"][0].items()
+            if key != "application_io"
+        },
         "lifecycle": receipts["reopen_proof"][-1],
+        "lifecycle_application_io": rung_lifecycle_application_io(),
         "counts": {
             "source_nodes": 1 << scale,
             "source_edges": 16 * (1 << scale),
@@ -645,6 +728,87 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ControllerError, "VmHWM peak_rss_bytes is missing"):
             assemble_rung_evidence(
                 root=ROOT, scale=18, graphforge=missing, benchexec=benchexec(missing)
+            )
+
+    def test_lifecycle_application_io_is_carried_for_every_non_ingest_phase(self) -> None:
+        receipts = authoritative_receipts(18)
+        gf = graphforge(18, receipts)
+        rung = assemble_rung_evidence(root=ROOT, scale=18, graphforge=gf, benchexec=benchexec(gf))
+        lifecycle_io = rung["storage_attribution"]["lifecycle_application_io"]
+        self.assertEqual(
+            set(lifecycle_io), set(LIFECYCLE_APPLICATION_IO_LADDER_PHASES)
+        )
+        # Construction attribution keeps its closed nine-row inventory.
+        self.assertEqual(
+            set(rung["storage_attribution"]["construction"]["application_io"]["phases"]),
+            set(APPLICATION_IO_PHASES),
+        )
+        for phase, document in lifecycle_io.items():
+            with self.subTest(phase=phase):
+                self.assertEqual(
+                    set(document["phases"]), set(LIFECYCLE_APPLICATION_IO_PHASES)
+                )
+                for field in APPLICATION_IO_FIELDS:
+                    self.assertEqual(
+                        document["totals"][field],
+                        sum(row[field] for row in document["phases"].values()),
+                    )
+        # Two single-purpose processes per phase sum to twice one process.
+        self.assertEqual(
+            lifecycle_io["recount"]["totals"]["read_bytes"],
+            2 * lifecycle_io["reopen"]["totals"]["read_bytes"],
+        )
+        # A lifecycle phase whose receipts carry no attribution, while its
+        # siblings do, is a real gap and is refused.
+        for omitted in LIFECYCLE_APPLICATION_IO_LADDER_PHASES:
+            with self.subTest(omitted=omitted):
+                stripped = authoritative_receipts(18)
+                for receipt in stripped[omitted]:
+                    receipt.pop("application_io", None)
+                changed_gf = graphforge(18, stripped)
+                with self.assertRaisesRegex(
+                    ControllerError, "lifecycle application I/O is absent"
+                ):
+                    assemble_rung_evidence(
+                        root=ROOT,
+                        scale=18,
+                        graphforge=changed_gf,
+                        benchexec=benchexec(changed_gf),
+                    )
+        # Evidence recorded before #1389 carries it nowhere; that rung omits the
+        # field and stays comparable rather than being rejected.
+        historical = authoritative_receipts(18)
+        for phase in LIFECYCLE_APPLICATION_IO_LADDER_PHASES:
+            for receipt in historical[phase]:
+                receipt.pop("application_io", None)
+        changed_gf = graphforge(18, historical)
+        historical_rung = assemble_rung_evidence(
+            root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+        )
+        self.assertNotIn(
+            "lifecycle_application_io", historical_rung["storage_attribution"]
+        )
+        self.assertEqual(
+            set(historical_rung["storage_attribution"]["construction"]["application_io"]["phases"]),
+            set(APPLICATION_IO_PHASES),
+        )
+        # An unreconciled document is refused rather than carried.
+        unreconciled = authoritative_receipts(18)
+        unreconciled["query"][0]["application_io"]["totals"]["read_bytes"] += 1
+        changed_gf = graphforge(18, unreconciled)
+        with self.assertRaisesRegex(ControllerError, "totals do not reconcile"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
+            )
+        # An unknown phase name is refused: the inventory is closed.
+        invented = authoritative_receipts(18)
+        invented["query"][0]["application_io"]["phases"]["invented_phase"] = dict.fromkeys(
+            APPLICATION_IO_FIELDS, 0
+        )
+        changed_gf = graphforge(18, invented)
+        with self.assertRaisesRegex(ControllerError, "inventory is incomplete"):
+            assemble_rung_evidence(
+                root=ROOT, scale=18, graphforge=changed_gf, benchexec=benchexec(changed_gf)
             )
 
     def test_named_authorities_assemble_true_passed_evidence_and_refuse_gaps(self) -> None:

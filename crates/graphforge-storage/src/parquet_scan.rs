@@ -85,7 +85,9 @@ impl ParquetFragment {
 
 fn footer_num_rows(path: &Path) -> Option<usize> {
     let file = File::open(path).ok()?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            .ok()?;
     usize::try_from(builder.metadata().file_metadata().num_rows()).ok()
 }
 
@@ -428,9 +430,11 @@ fn read_fragment_batches(
             ));
         }
     };
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
-        DataFusionError::External(format!("corrupt or unreadable parquet: {e}").into())
-    })?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            .map_err(|e| {
+                DataFusionError::External(format!("corrupt or unreadable parquet: {e}").into())
+            })?;
 
     // Projection in the reader is only safe when we do not post-process columns
     // (topology normalize / union rel_type_name tagging need the full row first).

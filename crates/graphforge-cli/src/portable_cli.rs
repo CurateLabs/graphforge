@@ -279,7 +279,12 @@ pub(crate) fn run_portable(
                 )
                 .map_err(map_portable)?;
             if json {
-                write_json(&portable_export_receipt(&result), output)?;
+                let mut export_receipt = portable_export_receipt(&result);
+                export_receipt["application_io"] = serde_json::to_value(
+                    crate::storage_attribution_cli::lifecycle_application_io()?,
+                )
+                .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+                write_json(&export_receipt, output)?;
             } else {
                 writeln!(
                     output,
@@ -366,6 +371,7 @@ pub(crate) fn run_portable_without_graph(
                 write_json(
                     &serde_json::json!({
                         "contract": "graphforge-portable-import/2",
+                        "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
                         "package_digest": result.package_digest,
                         "transport_digest": result.transport_digest,
                         "generation_uuid": result.generation_uuid,
@@ -518,6 +524,7 @@ pub(crate) fn run_query(
         write_json(
             &serde_json::json!({
                 "contract": "graphforge-result-sink/2",
+                "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
                 "destination": receipt.sink.destination,
                 "format": format!("{:?}", receipt.sink.format),
                 "rows": receipt.sink.progress.rows,

@@ -1160,6 +1160,7 @@ fn open_graph_object_with_read_lease(
     }
     let mut hasher = Sha256::new();
     let mut block = vec![0_u8; 1 << 20];
+    let mut authenticated = ReadIoEvidence::default();
     loop {
         let count = file.read(&mut block).map_err(|error| {
             storage(
@@ -1171,11 +1172,25 @@ fn open_graph_object_with_read_lease(
         if count == 0 {
             break;
         }
+        authenticated.bytes = authenticated
+            .bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| validation("graph object lease read bytes overflow"))?;
+        authenticated.calls = authenticated
+            .calls
+            .checked_add(1)
+            .ok_or_else(|| validation("graph object lease read calls overflow"))?;
         hasher.update(&block[..count]);
     }
     if hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        authenticated.bytes,
+        authenticated.calls,
+    );
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     file.rewind()
         .map_err(|error| storage("rewind graph object", &lease.cas.diagnostic_root, error))?;
     Ok(AuthenticatedGraphObject {
@@ -1283,6 +1298,12 @@ fn read_graph_object_by_digest_file_counted(
     if hex_digest(Sha256::digest(&bytes).into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        io.bytes,
+        io.calls,
+    );
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok((bytes, io))
 }
 
@@ -1379,7 +1400,15 @@ fn verify_file_counted(
         )
     });
     match (verified, released) {
-        (Ok(()), Ok(_)) => Ok(io),
+        (Ok(()), Ok(_)) => {
+            crate::lifecycle_io::record_read(
+                crate::StorageIoPhase::HydrationVerification,
+                io.bytes,
+                io.calls,
+            );
+            crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
+            Ok(io)
+        }
         (Ok(()), Err(error)) => Err(error),
         (Err(primary), Ok(_)) => Err(primary),
         (Err(primary), Err(release)) => Err(storage(
@@ -1430,6 +1459,8 @@ fn verify_stream_counted(
     if total != expected_length || hex_digest(hasher.finalize().into()) != digest {
         return Err(validation("graph object digest does not match its address"));
     }
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::HydrationVerification, total, calls);
+    crate::lifecycle_io::record_objects(crate::StorageIoPhase::HydrationVerification, 1);
     Ok(ReadIoEvidence {
         bytes: total,
         calls,

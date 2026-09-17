@@ -28,6 +28,7 @@ pub mod hub_fixture_artifacts;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
+mod storage_attribution_cli;
 mod verify_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -322,57 +323,6 @@ enum Command {
     /// Explicitly re-authenticate the retained store on demand. Read-only;
     /// never runs as part of ingest.
     Verify,
-}
-
-#[derive(serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct StorageAttributionCommandReceipt {
-    contract: &'static str,
-    storage: graphforge_api::StorageAttributionReceipt,
-    reopen_agrees: bool,
-}
-
-fn run_storage_attribution(
-    graph: GraphForge,
-    path: &Path,
-    json: bool,
-    output: &mut dyn Write,
-    allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
-) -> Result<(), graphforge_api::GfError> {
-    let storage = graph.storage_attribution_receipt()?;
-    storage.validate_reconciliation()?;
-    drop(graph);
-    let path_text = path.to_str().ok_or_else(|| {
-        graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
-    })?;
-    let reopened = open_cli_graph(Path::new(path_text), allocation)?;
-    let reopened_storage = reopened.storage_attribution_receipt()?;
-    reopened_storage.validate_reconciliation()?;
-    if reopened_storage != storage {
-        return Err(graphforge_api::GfError::Validation(
-            "storage attribution changed across reopen".into(),
-        ));
-    }
-    if json {
-        serde_json::to_writer(
-            &mut *output,
-            &StorageAttributionCommandReceipt {
-                contract: "graphforge-storage-attribution-command/1",
-                storage,
-                reopen_agrees: true,
-            },
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-        writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    } else {
-        writeln!(
-            output,
-            "retained_logical_eof_bytes={} allocated_physical_bytes={} reopen_agrees=true",
-            storage.retained_logical_eof_bytes, storage.allocated_physical_bytes
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
-    }
-    Ok(())
 }
 
 #[derive(Args)]
@@ -1257,7 +1207,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     Ok(result)
 }
 
-fn open_cli_graph(
+pub(crate) fn open_cli_graph(
     path: &Path,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<GraphForge, graphforge_api::GfError> {
@@ -1379,9 +1329,11 @@ fn run_with_allocation(
                 .map_err(Into::into);
         }
         Command::StorageAttribution => {
-            return run_storage_attribution(graph, &path, cli.json, output, allocation)
-                .map(|()| 0)
-                .map_err(Into::into);
+            return storage_attribution_cli::run_storage_attribution(
+                graph, &path, cli.json, output, allocation,
+            )
+            .map(|()| 0)
+            .map_err(Into::into);
         }
         Command::Verify => {
             return verify_cli::run_verify(&graph, cli.json, output).map_err(Into::into);
@@ -2744,6 +2696,36 @@ mod tests {
             json["storage"]["categories"].as_object().unwrap().len(),
             graphforge_api::ArtifactCategory::ALL.len()
         );
+        // #1389: the reopen phase now carries its own closed per-phase I/O
+        // attribution, in the shape construction already emits.
+        let application_io = json["application_io"].as_object().unwrap();
+        assert_eq!(application_io.len(), 2);
+        let phases = application_io["phases"].as_object().unwrap();
+        assert_eq!(
+            phases.len(),
+            graphforge_api::StorageIoPhase::LIFECYCLE.len()
+        );
+        assert!(phases.contains_key("read_path_scan"));
+        assert!(phases.contains_key("hydration_verification"));
+        for field in [
+            "read_bytes",
+            "write_bytes",
+            "read_calls",
+            "write_calls",
+            "object_count",
+            "block_count",
+            "fsync_calls",
+        ] {
+            let expected: u64 = phases
+                .values()
+                .map(|row| row[field].as_u64().unwrap())
+                .sum();
+            assert_eq!(
+                application_io["totals"][field].as_u64().unwrap(),
+                expected,
+                "{field} does not reconcile"
+            );
+        }
         fn assert_sanitized(value: &serde_json::Value) {
             match value {
                 serde_json::Value::Object(object) => {

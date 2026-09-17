@@ -54,10 +54,22 @@ pub enum StorageIoPhase {
     FsyncSynchronization,
     /// Crash-recovery reauthentication.
     RecoveryReauthentication,
+    /// Committed read-path decode serving query, recount and export.
+    ///
+    /// Every other row in this inventory names write-side construction,
+    /// publication, or open-time hydration work. None of them describes
+    /// decoding already-committed topology or property data to answer a read
+    /// request, so the read path had no truthful home before this row existed.
+    /// It is deliberately excluded from [`StorageIoPhase::ALL`] so the closed
+    /// construction inventory, and every artifact derived from it, is
+    /// unchanged.
+    ReadPathScan,
 }
 
 impl StorageIoPhase {
-    /// Complete phase inventory, including phases with zero observations.
+    /// Closed construction-path inventory, including phases with zero
+    /// observations. [`ConstructionPhaseAttribution`] emits exactly these rows,
+    /// so the construction attribution contract is byte-stable.
     pub const ALL: [Self; 9] = [
         Self::AppendMerge,
         Self::SealAuthentication,
@@ -69,6 +81,38 @@ impl StorageIoPhase {
         Self::FsyncSynchronization,
         Self::RecoveryReauthentication,
     ];
+
+    /// Closed full-lifecycle inventory: [`Self::ALL`] plus the read path.
+    /// [`crate::lifecycle_io`] emits exactly these rows.
+    pub const LIFECYCLE: [Self; 10] = [
+        Self::AppendMerge,
+        Self::SealAuthentication,
+        Self::ShapeConsumeReauthentication,
+        Self::EncodeWritePostwriteAuthentication,
+        Self::PublicationPreauthentication,
+        Self::CasInstallReadWrite,
+        Self::HydrationVerification,
+        Self::FsyncSynchronization,
+        Self::RecoveryReauthentication,
+        Self::ReadPathScan,
+    ];
+
+    /// Dense index of this phase within [`Self::LIFECYCLE`].
+    #[must_use]
+    pub const fn lifecycle_index(self) -> usize {
+        match self {
+            Self::AppendMerge => 0,
+            Self::SealAuthentication => 1,
+            Self::ShapeConsumeReauthentication => 2,
+            Self::EncodeWritePostwriteAuthentication => 3,
+            Self::PublicationPreauthentication => 4,
+            Self::CasInstallReadWrite => 5,
+            Self::HydrationVerification => 6,
+            Self::FsyncSynchronization => 7,
+            Self::RecoveryReauthentication => 8,
+            Self::ReadPathScan => 9,
+        }
+    }
 }
 
 /// Exact application-I/O totals owned by one lifecycle phase.

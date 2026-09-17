@@ -274,6 +274,14 @@ pub use graphforge_storage::{
     GraphDirectedness, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
     WorkspaceOntologySourceFormat,
 };
+/// Per-phase application I/O attribution for the whole project lifecycle.
+///
+/// Same phase inventory, counters and `{phases, totals}` document as the
+/// construction attribution on an import receipt, extended to the phases that
+/// had none (#1389).
+pub use graphforge_storage::{
+    LifecyclePhaseAttribution, PhaseIoTotals, StorageIoPhase, lifecycle_io_snapshot,
+};
 // Query parameter literal type (for `execute_with_params`), re-exported so the
 // language bindings can build params without depending on `graphforge-ir` directly.
 pub use algorithm_runs::{
@@ -480,6 +488,8 @@ pub struct GraphForge {
     workspace_guard: Arc<RwLock<GraphWorkspace>>,
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
+    /// Per-phase application I/O this facade's own open performed (#1389).
+    open_io_attribution: graphforge_storage::LifecyclePhaseAttribution,
     /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
     project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
@@ -670,6 +680,7 @@ impl GraphForge {
         }
         // In-memory: exploratory, backed by a temp directory kept alive for the
         // engine's lifetime.
+        let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let tmp = tempfile::TempDir::new()
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
         let (resolved_generation, project_open_recovery) =
@@ -725,6 +736,8 @@ impl GraphForge {
                 _owner: workspace,
             })),
             graph_open_evidence,
+            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
+                .since(&open_io_before)?,
             project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
             ontology,
@@ -750,6 +763,18 @@ impl GraphForge {
         &self.graph_open_evidence
     }
 
+    /// Per-phase application I/O performed by this facade's own open.
+    ///
+    /// The document is the same shape the construction path already emits, so
+    /// the analysis written against construction attribution reads it without
+    /// new tooling. Process-global counters back it, so a facade opened
+    /// concurrently with unrelated storage work over-reports; the benchmark
+    /// ladder opens one project per process.
+    #[must_use]
+    pub const fn open_io_attribution(&self) -> &graphforge_storage::LifecyclePhaseAttribution {
+        &self.open_io_attribution
+    }
+
     /// Safe recovery-on-open summary for this facade instance.
     #[must_use]
     pub fn project_open_recovery(&self) -> &graphforge_storage::ProjectOpenRecoveryEvidence {
@@ -772,16 +797,22 @@ impl GraphForge {
             )));
         }
 
+        let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let (resolved_generation, project_open_recovery) =
             graphforge_storage::open_or_initialize_project_with_recovery(&dir)?;
-        Self::open_resolved_with_options(
+        let mut graph = Self::open_resolved_with_options(
             dir,
             resolved_generation,
             false,
             options,
             resource_policy,
             project_open_recovery,
-        )
+        )?;
+        // Report resolution and recovery-on-open alongside hydration: they are
+        // all work an open pays before the first query can run.
+        graph.open_io_attribution =
+            graphforge_storage::lifecycle_io_snapshot().since(&open_io_before)?;
+        Ok(graph)
     }
 
     fn open_resolved_with_lifecycle_mode(
@@ -823,6 +854,7 @@ impl GraphForge {
         project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
+        let open_io_before = graphforge_storage::lifecycle_io_snapshot();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
@@ -934,6 +966,8 @@ impl GraphForge {
                 _owner: workspace,
             })),
             graph_open_evidence,
+            open_io_attribution: graphforge_storage::lifecycle_io_snapshot()
+                .since(&open_io_before)?,
             project_open_recovery,
             tempdir: None,
             ontology,
