@@ -1,6 +1,7 @@
 """Bazel targets for graphforge-bindings-node napi-rs cdylib (#7)."""
 
 load("//tools/bazel:gf_rust.bzl", "gf_cargo_build_script", "gf_rust_shared_library")
+load("//tools/bazel:gf_version.bzl", "WORKSPACE_VERSION")
 
 exports_files(["Cargo.toml"])
 
@@ -29,7 +30,9 @@ gf_cargo_build_script(
     name = "graphforge_bindings_node_build_script",
     crate_name = "build_script_build",
     pkg_name = "graphforge-bindings-node",
-    version = "0.5.2",
+    # Single-sourced from //tools/bazel:gf_version.bzl; do not hand-type a
+    # literal here, it will drift at the next version bump (#1395).
+    version = WORKSPACE_VERSION,
 )
 
 gf_rust_shared_library(

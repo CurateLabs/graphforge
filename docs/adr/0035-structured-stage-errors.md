@@ -1,8 +1,13 @@
-# ADR 0027: Preserve stage diagnostics at public error boundaries
+# ADR 0035: Preserve stage diagnostics at public error boundaries
 
-## Status
+**Status:** Accepted
+**Build target:** v0.6.0
+**Implementation:** Accepted for the v0.6.0 implementation of #1018.
+**Related:** #1018
 
-Accepted for the v0.6.0 implementation of #1018.
+> Renumbered from ADR 0027. Two unrelated records were both filed as 0027;
+> [ADR 0027](0027-native-runtime-boundary.md) is the native GraphForge
+> execution boundary. This record's content is unchanged.
 
 ## Decision
 

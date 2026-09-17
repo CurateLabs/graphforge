@@ -96,6 +96,7 @@ def test_expected_mapping() -> None:
         "node": "0.5.0",
         "cli": "0.5.0",
         "skills": "0.5.0",
+        "bazel": "0.5.0",
     }
     dev = set_release_version.expected_for("0.5.0", dev=True)
     assert dev["cargo"] == "0.5.0-dev"
@@ -103,6 +104,9 @@ def test_expected_mapping() -> None:
     assert dev["node"] == "0.5.0-dev.0"
     assert dev["cli"] == "0.5.0-dev.0"
     assert dev["skills"] == "0.5.0-dev.0"
+    # Bazel targets feed `env!("CARGO_PKG_VERSION")` directly, so they take
+    # cargo's exact spelling (#1395), not npm's.
+    assert dev["bazel"] == "0.5.0-dev"
 
 
 def test_expected_mapping_prerelease() -> None:
@@ -114,6 +118,7 @@ def test_expected_mapping_prerelease() -> None:
         "node": "0.6.0-rc.1",
         "cli": "0.6.0-rc.1",
         "skills": "0.6.0-rc.1",
+        "bazel": "0.6.0-rc.1",
     }
 
 
@@ -207,6 +212,9 @@ def test_apply_prerelease_rewrites_every_surface(
     lock.write_text('name = "graphforge-core"\nversion = "0.5.0"\n', encoding="utf-8")
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nversion = "0.5.0"\n', encoding="utf-8")
+    bazel_version_bzl = tmp_path / "tools" / "bazel" / "gf_version.bzl"
+    bazel_version_bzl.parent.mkdir(parents=True)
+    bazel_version_bzl.write_text('WORKSPACE_VERSION = "0.5.0"\n', encoding="utf-8")
     crates = tmp_path / "crates"
     manifest = crates / "graphforge-api" / "Cargo.toml"
     manifest.parent.mkdir(parents=True)
@@ -236,6 +244,7 @@ def test_apply_prerelease_rewrites_every_surface(
     monkeypatch.setattr(set_release_version, "CARGO_TOML", cargo)
     monkeypatch.setattr(set_release_version, "CARGO_LOCK", lock)
     monkeypatch.setattr(set_release_version, "PYPROJECT", pyproject)
+    monkeypatch.setattr(set_release_version, "BAZEL_VERSION_BZL", bazel_version_bzl)
     monkeypatch.setattr(set_release_version, "NODE_PACKAGE", tmp_path / "node" / "package.json")
     monkeypatch.setattr(set_release_version, "CLI_PACKAGE", tmp_path / "cli" / "package.json")
     monkeypatch.setattr(set_release_version, "SKILLS_PACKAGE", tmp_path / "skills" / "package.json")
@@ -251,10 +260,12 @@ def test_apply_prerelease_rewrites_every_surface(
     mapping = set_release_version.apply_version(base, dev=dev, pre=pre, dry_run=False)
     assert mapping["cargo"] == "0.6.0-rc.1"
     assert mapping["python"] == "0.6.0rc1"
+    assert mapping["bazel"] == "0.6.0-rc.1"
 
     assert 'version = "0.6.0-rc.1"' in cargo.read_text(encoding="utf-8")
     assert 'version = "0.6.0-rc.1"' in lock.read_text(encoding="utf-8")
     assert 'version = "0.6.0rc1"' in pyproject.read_text(encoding="utf-8")
+    assert 'WORKSPACE_VERSION = "0.6.0-rc.1"' in bazel_version_bzl.read_text(encoding="utf-8")
     assert 'graphforge-core = { version = "0.6.0-rc.1"' in manifest.read_text(encoding="utf-8")
     assert json.loads(native.read_text(encoding="utf-8"))["version"] == "0.6.0-rc.1"
     for path in (
@@ -312,6 +323,9 @@ def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.Mo
     lock.write_text('name = "graphforge-core"\nversion = "0.5.0"\n', encoding="utf-8")
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nversion = "0.5.0"\n', encoding="utf-8")
+    bazel_version_bzl = tmp_path / "tools" / "bazel" / "gf_version.bzl"
+    bazel_version_bzl.parent.mkdir(parents=True)
+    bazel_version_bzl.write_text('WORKSPACE_VERSION = "0.5.0"\n', encoding="utf-8")
     crates = tmp_path / "crates"
     crates.mkdir()
     manifest = crates / "graphforge-api" / "Cargo.toml"
@@ -339,6 +353,7 @@ def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(set_release_version, "CARGO_TOML", cargo)
     monkeypatch.setattr(set_release_version, "CARGO_LOCK", lock)
     monkeypatch.setattr(set_release_version, "PYPROJECT", pyproject)
+    monkeypatch.setattr(set_release_version, "BAZEL_VERSION_BZL", bazel_version_bzl)
     monkeypatch.setattr(set_release_version, "NODE_PACKAGE", tmp_path / "node" / "package.json")
     monkeypatch.setattr(set_release_version, "CLI_PACKAGE", tmp_path / "cli" / "package.json")
     monkeypatch.setattr(set_release_version, "SKILLS_PACKAGE", tmp_path / "skills" / "package.json")
@@ -354,6 +369,7 @@ def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.Mo
     text = manifest.read_text(encoding="utf-8")
     assert 'version = "0.5.1"' in text
     assert 'version = "0.5.0"' not in text
+    assert 'WORKSPACE_VERSION = "0.5.1"' in bazel_version_bzl.read_text(encoding="utf-8")
 
 
 def test_apply_version_rejects_missing_pins_without_writes(

@@ -1,8 +1,11 @@
 # Architecture Decision Records
 
-Contiguous ADR sequence for decisions that remain part of the shipped / current
-GraphForge product architecture. Superseded tooling pins and roadmap-only ADRs
-are not retained in this tree.
+ADR sequence for the decisions that govern the shipped GraphForge product
+architecture. The table below is the active set: every record in it currently
+governs. Superseded records are not deleted — they move to
+[`superseded/`](superseded/) so their reasoning and their inbound links survive,
+and they are listed under [Superseded records](#superseded-records) below.
+Roadmap-only ADRs are not retained in this tree.
 
 | ADR | Title | File |
 | --- | --- | --- |
@@ -22,7 +25,6 @@ are not retained in this tree.
 | 0014 | [Complete-workspace checkpoints and generation-preserving revert](0014-workspace-checkpoints.md) | `0014-workspace-checkpoints.md` |
 | 0015 | [Three embedded project-write modes](0015-embedded-write-modes.md) | `0015-embedded-write-modes.md` |
 | 0016 | [Repository integration and deployment configuration boundary](0016-repository-integration-and-deployment-configuration.md) | `0016-repository-integration-and-deployment-configuration.md` |
-| 0017 | [One version across core and adapters](0017-unified-release-version.md) | `0017-unified-release-version.md` |
 | 0018 | [Acknowledged durability and isolation contract](0018-acknowledged-durability-isolation.md) | `0018-acknowledged-durability-isolation.md` |
 | 0019 | [Authoritative durable graph delta journal](0019-authoritative-graph-delta-journal.md) | `0019-authoritative-graph-delta-journal.md` |
 | 0020 | [NTFS write-through namespace durability](0020-ntfs-write-through-namespace-durability.md) | `0020-ntfs-write-through-namespace-durability.md` |
@@ -33,19 +35,59 @@ are not retained in this tree.
 | 0025 | [Storage values have a compiler-independent contract](0025-storage-value-contract.md) | `0025-storage-value-contract.md` |
 | 0026 | [Read plans bind resources in execution](0026-read-plan-resources.md) | `0026-read-plan-resources.md` |
 | 0027 | [Native GraphForge execution boundary](0027-native-runtime-boundary.md) | `0027-native-runtime-boundary.md` |
+| 0028 | [One transaction owns graph mutation effects](0028-shared-mutation-transaction.md) | `0028-shared-mutation-transaction.md` |
+| 0029 | [Compile against immutable schema and catalog data](0029-lowering-schema-snapshot.md) | `0029-lowering-schema-snapshot.md` |
+| 0030 | [Portable OCI protocol boundary](0030-portable-oci-boundary.md) | `0030-portable-oci-boundary.md` |
 | 0031 | [Reviewed source file size bounds](0031-source-size-policy.md) | `0031-source-size-policy.md` |
 | 0032 | [Research Branches share Project publication authority](0032-research-project-authority.md) | `0032-research-project-authority.md` |
-| 0033 | [Prereleases share one version with per-ecosystem spelling](0033-prerelease-version-identity.md) | `0033-prerelease-version-identity.md` |
-| 0034 | [One canonical release-candidate spelling, `-rc.N`](0034-canonical-release-candidate-spelling.md) | `0034-canonical-release-candidate-spelling.md` |
+| 0035 | [Preserve stage diagnostics at public error boundaries](0035-structured-stage-errors.md) | `0035-structured-stage-errors.md` |
+| 0036 | [The GraphForge release version contract](0036-release-version-contract.md) | `0036-release-version-contract.md` |
+
+## Superseded records
+
+Retained under [`superseded/`](superseded/). Each names the record that replaced
+it; nothing here governs.
+
+| ADR | Title | Superseded by | File |
+| --- | --- | --- | --- |
+| 0017 | [One version across core and adapters](superseded/0017-unified-release-version.md) | ADR 0036 | `superseded/0017-unified-release-version.md` |
+| 0033 | [Prereleases share one version with per-ecosystem spelling](superseded/0033-prerelease-version-identity.md) | ADR 0036 | `superseded/0033-prerelease-version-identity.md` |
+| 0034 | [One canonical release-candidate spelling, `-rc.N`](superseded/0034-canonical-release-candidate-spelling.md) | ADR 0036 | `superseded/0034-canonical-release-candidate-spelling.md` |
 
 ## Numbering
 
-ADRs are numbered `NNNN-slug.md` starting at `0001`. Accepted ADRs are immutable;
-a new ADR supersedes an old one rather than rewriting it.
+ADRs are numbered `NNNN-slug.md` starting at `0001`. A number is used once: it
+is never reassigned, and a record keeps its number when it is superseded and
+moved to `superseded/`. Accepted ADRs are immutable; a new ADR supersedes an old
+one rather than rewriting it.
+
+## Status vocabulary
+
+A record carries exactly one `**Status:**` line, immediately under its title,
+whose value is one of these four and nothing else:
+
+| Status | Meaning |
+| --- | --- |
+| `Proposed` | Under discussion. Not yet decided. |
+| `Accepted` | Decided and in effect. |
+| `Superseded by ADR NNNN` | Replaced by a later decision. The file lives under `superseded/`. |
+| `Deprecated` | No longer relevant, and not replaced. |
+
+Status records the state of the *decision*, not of the code. Where the state of
+the implementation is worth recording — shipped, pending, partial, or scoped to
+a milestone — it goes in an `**Implementation:**` field beneath the status, not
+in the status value. `docs/engineering/adrs/README.md` carries the same four
+values.
 
 ## Related navigation
 
-Published Starlight nav: **Engineering → Architecture Decision Records** (sidebar entries
-mirror this table). ADR bodies stay under `docs/adr/`; the public decision log at
-[`../engineering/adrs/`](../engineering/adrs/) links here and must not duplicate or
-renumber bodies. Do not fork a second ADR sequence.
+Published Starlight nav: **Engineering → Architecture Decision Records** (sidebar
+entries mirror the active table). ADR bodies stay under `docs/adr/`; the public
+decision log at [`../engineering/adrs/`](../engineering/adrs/) links here and must
+not duplicate or renumber bodies. Do not fork a second ADR sequence.
+
+Both indexes and this directory must agree, and so do the two docs-site files
+that the published build consumes. `scripts/ci/adr-index.py check` enforces all
+four in the Repository Policy job; the docs-site regions are generated, so run
+`python3 scripts/ci/adr-index.py generate` after adding or superseding a record
+rather than editing them by hand.

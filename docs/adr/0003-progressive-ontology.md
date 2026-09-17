@@ -1,6 +1,6 @@
 # ADR 0003: Progressive Ontology — Exploration First
 
-**Status:** Accepted  
+**Status:** Accepted
 **Date:** 2026-05-31  
 **Supersedes:** Implicit ontology-required assumption in ADR 0001
 

@@ -1,9 +1,8 @@
 # ADR 0022: Multi-ontology semantics in portable project v2
 
-- Status: Accepted
-- Date: 2026-08-19
-- Issue: #835
-- Supersedes: none
+**Status:** Accepted
+**Date:** 2026-08-19
+**Related:** #835
 
 ## Decision
 

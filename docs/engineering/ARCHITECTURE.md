@@ -173,8 +173,8 @@ The DocSlime index is [`adrs/README.md`](adrs/README.md) (links only; does not r
 | [0014](../adr/0014-workspace-checkpoints.md) | Complete-workspace checkpoints |
 | [0015](../adr/0015-embedded-write-modes.md) | Three embedded project-write modes |
 | [0016](../adr/0016-repository-integration-and-deployment-configuration.md) | Repository integration and deployment configuration boundary |
-| [0017](../adr/0017-unified-release-version.md) | One version across core and adapters |
 | [0018](../adr/0018-acknowledged-durability-isolation.md) | Acknowledged durability and isolation contract |
+| [0036](../adr/0036-release-version-contract.md) | The GraphForge release version contract (consolidates and supersedes 0017, 0033 and 0034) |
 
 ## Risks & trade-offs
 
