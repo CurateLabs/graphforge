@@ -372,22 +372,44 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
-                // Presence and declared-length admission only (O(files), one
-                // `symlink_metadata` per declared object). This deliberately
-                // does not read or hash payload bytes — see #1388 design
-                // "Open path redesign" O3: a byte-for-byte SHA-256 sweep over
-                // every declared object here duplicated the authentication
-                // every real consumer already performs, lazily, the first
-                // time it actually reads an object's bytes, via
+                // Full presence, length AND content admission, once per
+                // resolved generation. #1425/cd964b69 (O3) deleted the
+                // `verify_graph_object` call below on the theory that every
+                // real consumer re-authenticates lazily on first touch via
                 // `open_graph_object_by_digest`/`read_graph_object_by_digest`
-                // (`graph_object_store.rs`). Corruption in an object nothing
-                // in the session reads is no longer caught by open; it
-                // surfaces on first read, or via the administrative verify
-                // command. Maintainer-approved tradeoff (#1388): the verify
-                // command covers whole-store integrity, this path maximises
-                // usable open speed, and this is an analyst bench, not a
-                // forensic system. Mirrors the presence-only pattern already
-                // used by `ShardedCsrIndex::open` (`adjacency.rs`).
+                // (`graph_object_store.rs`). That is false for Topology-role
+                // objects: after hydration, the query engine
+                // (`PersistentAdjacencyProvider`, Parquet reads) opens the
+                // materialized workspace files by path, never by CAS digest
+                // lookup, so neither of those functions is ever called on
+                // the ordinary query path — confirmed empirically by
+                // `hardlinked_topology_payload_corruption_is_refused`
+                // (workspace_hydration/tests.rs), which flips one byte in a
+                // hardlinked `topology/nodes.parquet` (same inode, same
+                // length) and shows a fresh open plus an ordinary
+                // `MATCH (n) RETURN count(n)` both succeeding, silently,
+                // over the corrupted data, with O3 applied. Properties-role
+                // objects happened to stay covered only because
+                // `property_overlay::inventory` independently re-hashes
+                // every property/edge_properties route file on every open —
+                // a wholly separate mechanism this function does not call
+                // and that does not reach Topology.
+                //
+                // Restored: this is #1388's O1 (memoization, kept — see
+                // `graph_files_inventory`'s doc comment) doing the real work.
+                // Before O1, this full sweep ran 3-4 times per open because
+                // `hydrate_graph_workspace` and
+                // `property_and_graph_inventory_for_hydrated_generation`
+                // both called `graph_files_inventory()` independently. With
+                // O1, `get_or_init` means it runs exactly once per resolved
+                // generation regardless of how many call sites ask — the
+                // same reduction #1425 was chasing, achieved without
+                // deleting the only check that ever covered Topology data.
+                // `entry.content_sha256` is this object's content-addressed
+                // CAS lookup key, not merely a corruption checksum, so this
+                // stays a full cryptographic digest rather than becoming a
+                // fast checksum (that tradeoff, and the durable-format work
+                // it needs, belongs to #1417, not here).
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -402,6 +424,11 @@ impl ResolvedProjectGeneration {
                             "graph payload object length does not match manifest".into(),
                         ));
                     }
+                    crate::verify_graph_object(
+                        self.container_root(),
+                        &entry.content_sha256,
+                        entry.byte_length,
+                    )?;
                 }
                 crate::route_component::authenticate_manifest_routes(
                     root.format_version,
