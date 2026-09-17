@@ -10,9 +10,34 @@
 //! is monotone, that concatenation *is* the global order: there is nothing left
 //! to merge. Two passes over the data replace `1 + ceil(log_fanin(chunks))`.
 //!
-//! The partitions run sequentially here. Nothing in this module shares mutable
-//! state between partitions, which is what makes the concurrent step that
-//! follows a scheduling change rather than a correctness change.
+//! # Concurrency
+//!
+//! Loading and sorting a partition is independent of every other partition:
+//! nothing here shares mutable state between them. [`load_partitions_ordered`]
+//! exploits that by materializing partitions on a bounded worker pool while
+//! still delivering each sorted partition to the writer in ascending index
+//! order — the same order the sequential implementation visited them in, so
+//! concatenation, digests and evidence totals are unaffected by how many
+//! workers ran. Only the write side (`finish`/`finish_optional`) stays on one
+//! thread, because the writer's byte stream, not the loader, is what has to be
+//! ordered.
+//!
+//! The worker count is a scheduling decision, never a recorded format
+//! parameter (see [`shaping_worker_count`] and the partition-count note in
+//! [`super::partition`]): the same logical input produces the same partition
+//! plan and the same concatenated bytes no matter how many threads happened to
+//! load them.
+//!
+//! **Memory bound.** The channel between workers and the orchestrating thread
+//! is a rendezvous (capacity 0), so a worker's send blocks until the
+//! orchestrator receives it. A result that arrives out of turn waits in a
+//! reorder buffer; because there are only `threads` workers, at most
+//! `threads` results can be ahead of the one the orchestrator is waiting for.
+//! So at most `threads` partitions are being actively computed plus at most
+//! `threads` completed results are buffered awaiting their turn: peak
+//! resident partition memory is bounded by `2 * threads *
+//! max_partition_bytes`, a constant multiple of the worker count, never of
+//! the partition count.
 
 use super::partition::{PartitionBalance, PartitionPlan};
 use super::{
@@ -44,6 +69,187 @@ use std::io::{BufWriter, Write};
 /// deliberately far below `BLOCK_BYTES`, which is sized for the handful of
 /// streams a merge group used to open.
 const SPILL_BLOCK_BYTES: usize = 64 * 1024;
+
+/// Worker count for concurrently materializing sealed partitions.
+///
+/// Bounded by the host's available parallelism and by the number of
+/// partitions actually worth loading, never by `partition_count` itself
+/// (that stays a recorded format parameter; see [`super::partition`]).
+/// Deliberately not overridable by an environment variable: a resumed or
+/// re-run import must reproduce the same bytes on a differently-sized host,
+/// and this function only ever chooses *how many threads* load the same
+/// partitions in the same order, never *which* partitions exist.
+fn shaping_worker_count(work_items: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(work_items.max(1))
+}
+
+/// Merge one worker's partition-load evidence delta into the shared,
+/// sequentially-accumulated evidence.
+///
+/// Every field a partition load can touch is either a sum (`checked_add`,
+/// order-independent) or a running maximum (`max`, also order-independent),
+/// so the merged totals are identical to what the sequential loader would
+/// have produced, regardless of which worker finished first.
+fn merge_partition_load_evidence(
+    delta: &GraphConstructionEvidence,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    evidence.merge_read_records = evidence
+        .merge_read_records
+        .checked_add(delta.merge_read_records)
+        .ok_or_else(|| super::storage("merge read record count overflows"))?;
+    evidence.merge_read_bytes = evidence
+        .merge_read_bytes
+        .checked_add(delta.merge_read_bytes)
+        .ok_or_else(|| super::storage("merge read byte count overflows"))?;
+    evidence.merge_read_operations = evidence
+        .merge_read_operations
+        .checked_add(delta.merge_read_operations)
+        .ok_or_else(|| super::storage("merge read operation count overflows"))?;
+    evidence.parquet_read_bytes = evidence
+        .parquet_read_bytes
+        .checked_add(delta.parquet_read_bytes)
+        .ok_or_else(|| super::storage("Parquet read byte count overflows"))?;
+    evidence.parquet_read_operations = evidence
+        .parquet_read_operations
+        .checked_add(delta.parquet_read_operations)
+        .ok_or_else(|| super::storage("Parquet read operation count overflows"))?;
+    evidence.cache_release_operations = evidence
+        .cache_release_operations
+        .checked_add(delta.cache_release_operations)
+        .ok_or_else(|| super::storage("cache release operations overflows"))?;
+    evidence.cache_release_unsupported_operations = evidence
+        .cache_release_unsupported_operations
+        .checked_add(delta.cache_release_unsupported_operations)
+        .ok_or_else(|| super::storage("cache release unsupported operations overflows"))?;
+    evidence.cache_released_bytes = evidence
+        .cache_released_bytes
+        .checked_add(delta.cache_released_bytes)
+        .ok_or_else(|| super::storage("cache released bytes overflows"))?;
+    evidence.peak_cache_release_window_bytes = evidence
+        .peak_cache_release_window_bytes
+        .max(delta.peak_cache_release_window_bytes);
+    evidence.peak_partition_records = evidence
+        .peak_partition_records
+        .max(delta.peak_partition_records);
+    Ok(())
+}
+
+/// `(partition index, spill name)` for every sealed, non-empty partition, in
+/// ascending index order.
+fn sealed_items(sealed: &[Option<ArtifactReceipt>]) -> Vec<(usize, String)> {
+    sealed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| slot.as_ref().map(|receipt| (index, receipt.name.clone())))
+        .collect()
+}
+
+/// Materialize every `(index, name)` in `items` with `load`, on up to
+/// [`shaping_worker_count`] OS threads, and deliver each result to `consume`
+/// strictly in ascending partition-index order. See the module-level
+/// "Concurrency" section for the ordering and memory-bound argument.
+///
+/// `load` must be safe to call concurrently from multiple threads for
+/// distinct names; it is never called twice for the same name. `consume` runs
+/// only on the orchestrating thread, in index order, so it is free to hold
+/// `&mut` state (a writer, a running digest, an evidence accumulator) exactly
+/// as the sequential implementation did.
+fn load_partitions_ordered<T: Send>(
+    items: &[(usize, String)],
+    cancelled: &mut impl FnMut() -> bool,
+    load: impl Fn(&str) -> Result<(T, GraphConstructionEvidence), GfError> + Sync,
+    mut consume: impl FnMut(usize, T, &GraphConstructionEvidence) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let threads = shaping_worker_count(items.len());
+    if threads <= 1 {
+        for (index, name) in items {
+            reject_cancelled(cancelled)?;
+            let (value, delta) = load(name)?;
+            consume(*index, value, &delta)?;
+        }
+        return Ok(());
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let abort = std::sync::atomic::AtomicBool::new(false);
+    // Rendezvous channel: see the memory-bound argument in the module doc.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<(T, GraphConstructionEvidence), GfError>)>(0);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let load = &load;
+            let next = &next;
+            let abort = &abort;
+            scope.spawn(move || {
+                loop {
+                    if abort.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((index, name)) = items.get(slot) else {
+                        break;
+                    };
+                    let result = load(name);
+                    let failed = result.is_err();
+                    if tx.send((*index, result)).is_err() {
+                        break;
+                    }
+                    if failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        let mut pending_values: std::collections::BTreeMap<usize, T> =
+            std::collections::BTreeMap::new();
+        let mut pending_deltas: std::collections::BTreeMap<usize, GraphConstructionEvidence> =
+            std::collections::BTreeMap::new();
+        let mut wanted = items.iter().map(|(index, _)| *index);
+        let mut next_wanted = wanted.next();
+        let mut outcome: Result<(), GfError> = Ok(());
+        for (index, result) in &rx {
+            if outcome.is_err() {
+                // Keep draining so blocked senders can make progress and the
+                // scope can join, but stop doing any further work.
+                continue;
+            }
+            let value = match result {
+                Ok((value, delta)) => {
+                    pending_deltas.insert(index, delta);
+                    value
+                }
+                Err(error) => {
+                    outcome = Err(error);
+                    abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+            };
+            pending_values.insert(index, value);
+            while let Some(want) = next_wanted {
+                let (Some(value), Some(delta)) =
+                    (pending_values.remove(&want), pending_deltas.remove(&want))
+                else {
+                    break;
+                };
+                if let Err(error) =
+                    reject_cancelled(cancelled).and_then(|()| consume(want, value, &delta))
+                {
+                    outcome = Err(error);
+                    abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                next_wanted = wanted.next();
+            }
+        }
+        outcome
+    })
+}
 
 /// Canonical fixed-width partition families. The family name is part of the
 /// durable artifact grammar, so it is a closed set rather than a free string.
@@ -375,46 +581,49 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             let cleanup = cleanup_failed_shape_output(writer, &mut publication, evidence);
             return combine_secondary_cleanup(Err(primary), cleanup, "partition output cleanup");
         }
+        let items = sealed_items(&self.sealed);
+        let root = self.root;
+        let codec = self.codec;
+        let reject_duplicates = self.reject_duplicates;
         let concatenated = (|| -> Result<u64, GfError> {
             let mut previous: Option<[u8; N]> = None;
             let mut written = 0_u64;
-            for partition in 0..self.sealed.len() {
-                let Some(name) = self.sealed[partition]
-                    .as_ref()
-                    .map(|receipt| receipt.name.clone())
-                else {
-                    continue;
-                };
-                reject_cancelled(cancelled)?;
-                let records = self.load_partition(&name, evidence)?;
-                for record in &records {
-                    // Partition order is key order, so the concatenation is the
-                    // global order. Prove it rather than assume it: this is the
-                    // invariant the external merge's heap used to provide.
-                    if let Some(prior) = previous.as_ref() {
-                        if prior[..16] > record[..16] {
-                            return Err(super::storage(
-                                "range partition concatenation is not globally ordered",
-                            ));
+            load_partitions_ordered(
+                &items,
+                cancelled,
+                |name| Self::load_partition(root, codec, name),
+                |_index, records, delta| {
+                    merge_partition_load_evidence(delta, evidence)?;
+                    for record in &records {
+                        // Partition order is key order, so the concatenation is
+                        // the global order. Prove it rather than assume it: this
+                        // is the invariant the external merge's heap used to
+                        // provide, and it holds regardless of which worker
+                        // loaded which partition, because consumption here is
+                        // always in ascending partition-index order.
+                        if let Some(prior) = previous.as_ref() {
+                            if prior[..16] > record[..16] {
+                                return Err(super::storage(
+                                    "range partition concatenation is not globally ordered",
+                                ));
+                            }
+                            if reject_duplicates && prior[..16] == record[..16] {
+                                return Err(super::storage(
+                                    "duplicate identity across construction runs",
+                                ));
+                            }
                         }
-                        if self.reject_duplicates && prior[..16] == record[..16] {
-                            return Err(super::storage(
-                                "duplicate identity across construction runs",
-                            ));
-                        }
+                        let wire = run_record_bytes(record, codec)?;
+                        writer.write_all(wire).map_err(super::storage)?;
+                        account_merge_write_bytes(evidence, wire.len() as u64)?;
+                        previous = Some(*record);
+                        written = written.checked_add(1).ok_or_else(|| {
+                            super::storage("partition output record count overflows")
+                        })?;
                     }
-                    let wire = run_record_bytes(record, self.codec)?;
-                    writer.write_all(wire).map_err(super::storage)?;
-                    account_merge_write_bytes(evidence, wire.len() as u64)?;
-                    previous = Some(*record);
-                    written = written
-                        .checked_add(1)
-                        .ok_or_else(|| super::storage("partition output record count overflows"))?;
-                    if written.is_multiple_of(4096) {
-                        reject_cancelled(cancelled)?;
-                    }
-                }
-            }
+                    Ok(())
+                },
+            )?;
             Ok(written)
         })();
         let written = match concatenated {
@@ -560,32 +769,39 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     /// This is the materialization the design's rule R4 requires: the sorted
     /// partition exists in full before any of it is written, so row-group and
     /// record boundaries are a pure function of row count, never of arrival.
+    ///
+    /// Takes `root`/`codec` rather than `&self` so it can run on a worker
+    /// thread in [`load_partitions_ordered`]: it touches nothing but the
+    /// directory handle, the codec and its own freshly-zeroed evidence delta,
+    /// which the caller merges into the live evidence back on the
+    /// orchestrating thread.
     fn load_partition(
-        &self,
+        root: &StableDirectory,
+        codec: Option<DetailCodec>,
         name: &str,
-        evidence: &mut GraphConstructionEvidence,
-    ) -> Result<Vec<[u8; N]>, GfError> {
-        let (mut reader, counter) = open_counted_fixed_reader(self.root, name, evidence)?;
+    ) -> Result<(Vec<[u8; N]>, GraphConstructionEvidence), GfError> {
+        let mut evidence = GraphConstructionEvidence::default();
+        let (mut reader, counter) = open_counted_fixed_reader(root, name, &mut evidence)?;
         let loaded = (|| -> Result<Vec<[u8; N]>, GfError> {
             let mut records = Vec::new();
-            while let Some(record) = read_run_record::<N>(&mut reader, self.codec)? {
+            while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
                 account_merge_read_bytes(
-                    evidence,
-                    run_record_bytes(&record, self.codec)?.len() as u64,
+                    &mut evidence,
+                    run_record_bytes(&record, codec)?.len() as u64,
                 )?;
                 records.push(record);
             }
             Ok(records)
         })();
-        let released = release_counted_reader_cache(&mut reader, evidence);
+        let released = release_counted_reader_cache(&mut reader, &mut evidence);
         let mut records = combine_cache_cleanup(loaded, released, "partition spill")?;
-        account_fixed_read_operations(&counter, evidence)?;
+        account_fixed_read_operations(&counter, &mut evidence)?;
         evidence.peak_partition_records = evidence.peak_partition_records.max(records.len() as u64);
         // The sort key is the whole record, whose leading 16 bytes are the
         // UUID. Records are globally unique on that prefix, so this is a total
         // order and no stability assumption is needed.
         records.sort_unstable();
-        Ok(records)
+        Ok((records, evidence))
     }
 }
 
@@ -853,39 +1069,33 @@ impl<'a> RowRangePartitioner<'a> {
         )
         .map_err(super::storage)?;
         let mut previous: Option<[u8; 16]> = None;
+        let items = sealed_items(&self.sealed);
+        let root = self.root;
+        let window = self.window;
         let written = (|| -> Result<u64, GfError> {
             let mut written = 0_u64;
-            for partition in 0..self.sealed.len() {
-                let Some(name) = self.sealed[partition]
-                    .as_ref()
-                    .map(|receipt| receipt.name.clone())
-                else {
-                    continue;
-                };
-                reject_cancelled(cancelled)?;
-                let sorted = self.load_partition(&name, &schema, evidence)?;
-                let uuids = key_column(&sorted)?;
-                for row in 0..sorted.num_rows() {
-                    let uuid = uuid_value(uuids, row)?;
-                    if previous.is_some_and(|prior| prior >= uuid) {
-                        return Err(super::storage(
-                            "duplicate or unordered UUID in row partition",
-                        ));
+            load_partitions_ordered(
+                &items,
+                cancelled,
+                |name| Self::load_partition(root, window, name, &schema),
+                |_index, sorted, delta| {
+                    merge_partition_load_evidence(delta, evidence)?;
+                    let uuids = key_column(&sorted)?;
+                    for row in 0..sorted.num_rows() {
+                        let uuid = uuid_value(uuids, row)?;
+                        if previous.is_some_and(|prior| prior >= uuid) {
+                            return Err(super::storage(
+                                "duplicate or unordered UUID in row partition",
+                            ));
+                        }
+                        previous = Some(uuid);
                     }
-                    previous = Some(uuid);
-                }
-                written = written
-                    .checked_add(u64::try_from(sorted.num_rows()).map_err(super::storage)?)
-                    .ok_or_else(|| super::storage("row partition output count overflows"))?;
-                write_bounded_row_groups(
-                    &mut writer,
-                    &sorted,
-                    output_rows,
-                    output_bytes,
-                    cancelled,
-                    evidence,
-                )?;
-            }
+                    written = written
+                        .checked_add(u64::try_from(sorted.num_rows()).map_err(super::storage)?)
+                        .ok_or_else(|| super::storage("row partition output count overflows"))?;
+                    write_bounded_row_groups(&mut writer, &sorted, output_rows, output_bytes, evidence)
+                },
+            )?;
             Ok(written)
         })();
         let written = match written {
@@ -962,21 +1172,25 @@ impl<'a> RowRangePartitioner<'a> {
     }
 
     /// Read one row partition spill into memory and sort it by UUID.
+    ///
+    /// Takes `root`/`window`/`schema` rather than `&self` so it can run on a
+    /// worker thread in [`load_partitions_ordered`]: like the fixed-width
+    /// loader, it accumulates into its own freshly-zeroed evidence delta,
+    /// which the caller merges back into the live evidence on the
+    /// orchestrating thread.
     fn load_partition(
-        &self,
+        root: &StableDirectory,
+        window: std::num::NonZeroU64,
         name: &str,
         schema: &SchemaRef,
-        evidence: &mut GraphConstructionEvidence,
-    ) -> Result<RecordBatch, GfError> {
-        let file = self
-            .root
-            .open_child_file(OsStr::new(name))
-            .map_err(super::storage)?;
+    ) -> Result<(RecordBatch, GraphConstructionEvidence), GfError> {
+        let mut evidence = GraphConstructionEvidence::default();
+        let file = root.open_child_file(OsStr::new(name)).map_err(super::storage)?;
         let counter = IoCounter::default();
         let reader = super::CountingRead {
             inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
                 file,
-                self.window,
+                window,
                 graphforge_filesystem::FileCacheReleaseTracker::default(),
             )
             .map_err(super::storage)?,
@@ -1006,15 +1220,15 @@ impl<'a> RowRangePartitioner<'a> {
         })();
         let released = reader.get_mut().inner.finish().map_err(super::storage);
         let released = match released {
-            Ok(evidence_release) => account_cache_release(evidence_release, evidence),
+            Ok(evidence_release) => account_cache_release(evidence_release, &mut evidence),
             Err(error) => Err(error),
         };
         let sorted = combine_cache_cleanup(loaded, released, "row partition spill")?;
-        counter.add_to(evidence)?;
+        counter.add_to(&mut evidence)?;
         evidence.peak_partition_records = evidence
             .peak_partition_records
             .max(sorted.num_rows() as u64);
-        Ok(sorted)
+        Ok((sorted, evidence))
     }
 }
 
@@ -1023,12 +1237,18 @@ impl<'a> RowRangePartitioner<'a> {
 /// Boundaries are a pure function of the sorted row sequence, never of arrival
 /// order or buffer pressure, which is what keeps the produced bytes identical
 /// across runs.
+///
+/// Takes no cancellation callback: it is only ever called from inside
+/// [`load_partitions_ordered`]'s `consume`, which already checks cancellation
+/// once before every partition it hands over. That bounds the delay between
+/// a cancellation request and its observation by one partition's write, the
+/// same bound a formula-derived partition count already puts on partition
+/// size.
 fn write_bounded_row_groups<W: Write + Send>(
     writer: &mut ArrowWriter<W>,
     sorted: &RecordBatch,
     output_rows: usize,
     output_bytes: usize,
-    cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
     let mut start = 0;
@@ -1066,7 +1286,6 @@ fn write_bounded_row_groups<W: Write + Send>(
             .checked_add(length as u64)
             .ok_or_else(|| super::storage("merge written records overflows"))?;
         start += length;
-        reject_cancelled(cancelled)?;
     }
     Ok(())
 }
