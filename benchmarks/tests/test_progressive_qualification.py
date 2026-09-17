@@ -256,13 +256,24 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 [command[command.index("import-session") + 1] for command in ingest["commands"]],
                 ["begin", "register-parquet", "register-parquet", "validate", "commit"],
             )
+            # Each read phase is one process per project open: `storage-attribution
+            # --recovery` carries the reopen phase's two receipts, and one `gf query`
+            # carries every statement of recount, query, and the reopen proof.
             reopen = raw["phases"][3]["action"]["commands"]
             self.assertEqual(
-                [command[-1] for command in reopen], ["recovery", "storage-attribution"]
+                [command[-2:] for command in reopen], [["storage-attribution", "--recovery"]]
             )
+            for index, expected in ((4, 2), (5, 2)):
+                commands = raw["phases"][index]["action"]["commands"]
+                self.assertEqual(len(commands), 1)
+                self.assertIn("query", commands[0])
+                self.assertEqual(commands[0].count("--cypher"), expected)
+                self.assertEqual(commands[0].count("--output"), expected)
             reopen_proof = raw["phases"][-1]["action"]["commands"]
-            self.assertEqual(len(reopen_proof), 5)
-            self.assertTrue(all("query" in command for command in reopen_proof[:4]))
+            self.assertEqual(len(reopen_proof), 2)
+            self.assertIn("query", reopen_proof[0])
+            self.assertEqual(reopen_proof[0].count("--cypher"), 4)
+            self.assertEqual(reopen_proof[0].count("--output"), 4)
             self.assertEqual(reopen_proof[-1][-1], "storage-attribution")
             profile_uuids = {
                 argument

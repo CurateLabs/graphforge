@@ -142,7 +142,7 @@ class IngestionAttributionTests(unittest.TestCase):
                 (directory / "summary.json").write_text(json.dumps(value))
                 return REPORT.summarize(directory)
 
-            self.assertEqual(len(check(summary)["commands"]), 21)
+            self.assertEqual(len(check(summary)["commands"]), 15)
             complete = summary["completed_cases"][0]
             invalid_completions = [[], [complete, complete]]
             for field in complete:
@@ -218,9 +218,13 @@ class IngestionAttributionTests(unittest.TestCase):
         profile = json.loads((ROOT / "profiles/graph500/s18-local.json").read_text())
         selection = [{"name": "s16", "repetition": 0}, {"name": "s16", "repetition": 1}]
         commands = expected_commands(selection, profile, False)
-        self.assertEqual(len(commands), 42)
+        # 15 processes per lifecycle: one each for admission, generate, reopen,
+        # recount, query, export, verify, and clean_import; five for ingest; two
+        # for the reopen proof.
+        self.assertEqual(len(commands), 30)
         self.assertIn("s16-r0-ingest-3", commands)
-        self.assertIn("s16-r1-reopen_proof-4", commands)
+        self.assertIn("s16-r1-reopen_proof-1", commands)
+        self.assertNotIn("s16-r1-reopen_proof-2", commands)
         self.assertEqual(len(commands), len(set(commands)))
         boundary = expected_commands(selection, profile, True)
         self.assertIn("s16-r0-ingest", boundary)

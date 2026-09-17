@@ -4,9 +4,20 @@
 use std::io::Write;
 use std::path::Path;
 
+use clap::Args;
 use graphforge_api::GraphForge;
 
 use crate::open_cli_graph;
+
+#[derive(Args)]
+pub(crate) struct StorageAttributionArgs {
+    /// Also emit the recovery-on-open evidence of this command's first open as
+    /// its own receipt line, before the attribution receipt, so one process
+    /// carries both receipts of a reopen phase. The evidence is identical to a
+    /// separate `gf recovery`; the reopen-agreement comparison is unchanged.
+    #[arg(long)]
+    recovery: bool,
+}
 
 #[derive(serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -22,9 +33,10 @@ struct StorageAttributionCommandReceipt {
 /// Per-phase application I/O this process has performed so far.
 ///
 /// One `gf` invocation is one lifecycle phase, so the process-wide counters are
-/// exactly that phase's attribution. The document carries no paths, identifiers,
-/// query text or graph content — only the closed phase inventory and its
-/// counters.
+/// exactly that phase's attribution (`gf query` splits them per statement so
+/// its receipts still sum to the process). The document carries no paths,
+/// identifiers, query text or graph content — only the closed phase inventory
+/// and its counters.
 pub(crate) fn lifecycle_application_io()
 -> Result<graphforge_api::LifecyclePhaseAttribution, graphforge_api::GfError> {
     let attribution = graphforge_api::lifecycle_io_snapshot();
@@ -35,10 +47,14 @@ pub(crate) fn lifecycle_application_io()
 pub(crate) fn run_storage_attribution(
     graph: GraphForge,
     path: &Path,
+    args: &StorageAttributionArgs,
     json: bool,
     output: &mut dyn Write,
     allocation: Option<&graphforge_api::StorageAllocationDiagnostics>,
 ) -> Result<(), graphforge_api::GfError> {
+    if args.recovery {
+        crate::maintenance_cli::run_recovery(&graph, json, output)?;
+    }
     let storage = graph.storage_attribution_receipt()?;
     storage.validate_reconciliation()?;
     drop(graph);

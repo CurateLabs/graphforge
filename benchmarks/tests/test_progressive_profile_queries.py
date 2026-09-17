@@ -21,8 +21,11 @@ def _phase_cyphers(phase: dict) -> list[str]:
     for command in phase["action"]["commands"]:
         if "query" not in command:
             continue
-        index = command.index("--cypher")
-        values.append(command[index + 1])
+        # One `gf query` process carries every statement of a read phase as
+        # repeated `--cypher`/`--output` pairs, in statement order.
+        values.extend(
+            command[index + 1] for index, argument in enumerate(command) if argument == "--cypher"
+        )
     return values
 
 
