@@ -5,6 +5,12 @@ name: CodSpeed
 # CPU simulation instrument for pure kernels and CodSpeed Macro Runners for
 # durable I/O walltime. Cargo builds here are diagnostics-only: Bazel remains
 # the authoritative compile/test surface (see .github/workflows/README.md).
+#
+# CodSpeed compares each run against the previous one, which catches a step
+# regression and nothing else. The ingest floor gate in `m6-walltime` is the
+# other half: it fails when throughput falls below an absolute floor at any
+# measured size, so a slow drift that never regresses in a single step cannot
+# pass indefinitely (#1387).
 on:
   workflow_dispatch:
   schedule:
@@ -107,7 +113,9 @@ jobs:
     # Walltime comparisons require CodSpeed's isolated bare-metal runner.
     # Shared hosted runners are intentionally not a fallback.
     runs-on: codspeed-macro
-    timeout-minutes: 60
+    # Bulk ingest at 8.4M edges is minutes of real durability work, not the
+    # seconds the control-plane cases take.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,6 +126,23 @@ jobs:
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
         with:
           tool: cargo-codspeed@5.0.1
+      # Absolute floor, ceilings and the size-to-size ratio, checked before the
+      # measured run so a breach fails the nightly fast. The bench binary's
+      # `main` switches to the gate on this variable; the shared `bench` profile
+      # output is reused by the CodSpeed walltime build below.
+      - name: Enforce the ingest throughput floor
+        env:
+          GF_INGEST_FLOOR_GATE: "1"
+          GF_INGEST_FLOOR_GATE_JSON: ingest-floor-gate.json
+        run: cargo bench -p graphforge-storage --bench m6_storage_io
+      - name: Record the ingest floor gate measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ingest-floor-gate-${{ needs.nightly.outputs.sha }}
+          path: ingest-floor-gate.json
+          if-no-files-found: warn
+          retention-days: 30
       - name: Build durable filesystem benchmarks only
         run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
       - uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
