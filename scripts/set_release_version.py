@@ -15,10 +15,21 @@ Usage:
     python3 scripts/set_release_version.py 0.5.0 --dry-run
     python3 scripts/set_release_version.py 0.5.0
     python3 scripts/set_release_version.py 0.5.0-dev
+    python3 scripts/set_release_version.py 0.6.0-rc.1
 
-Dev forms:
-- Cargo / Node / skills: ``0.5.0-dev`` (Cargo) and ``0.5.0-dev.0`` (npm)
-- Python PEP 440: ``0.5.0.dev0``
+One release version, spelled in each ecosystem's canonical form (ADR 0033):
+
+============ ================ ================== ==================
+Surface      Release          Development        Prerelease
+============ ================ ================== ==================
+cargo        ``0.6.0``        ``0.6.0-dev``      ``0.6.0-rc.1``
+npm          ``0.6.0``        ``0.6.0-dev.0``    ``0.6.0-rc.1``
+Python       ``0.6.0``        ``0.6.0.dev0``     ``0.6.0rc1``
+============ ================ ================== ==================
+
+The Python prerelease spelling is whatever PEP 440 normalization produces from
+the root version. It is derived by ``packaging``, never written by hand, and it
+is not a second version.
 """
 
 from __future__ import annotations
@@ -74,8 +85,13 @@ def cargo_lock_versions() -> dict[str, str]:
     return dict(re.findall(r'(?m)^name = "(graphforge-[^"]+)"\nversion = "([^"]+)"$', text))
 
 
-def parse_base(version: str) -> tuple[str, bool]:
-    """Return (MAJOR.MINOR.PATCH, is_dev)."""
+RELEASE_RE = re.compile(r"\d+\.\d+\.\d+")
+# SemVer prerelease identifier: dot-separated alphanumerics after MAJOR.MINOR.PATCH.
+PRERELEASE_RE = re.compile(r"(\d+\.\d+\.\d+)-([0-9A-Za-z][0-9A-Za-z.-]*)")
+
+
+def parse_base(version: str) -> tuple[str, bool, str | None]:
+    """Return (MAJOR.MINOR.PATCH, is_dev, prerelease identifier or None)."""
     raw = version.strip()
     if not raw:
         raise ValueError("version must be non-empty")
@@ -83,21 +99,73 @@ def parse_base(version: str) -> tuple[str, bool]:
     if raw.endswith("-dev") or raw.endswith(".dev0") or re.search(r"-dev\.\d+$", raw):
         dev = True
         raw = re.sub(r"(-dev(\.\d+)?)|(\.dev0)$", "", raw)
-    if not re.fullmatch(r"\d+\.\d+\.\d+", raw):
-        raise ValueError(f"unsupported version '{version}' (expected X.Y.Z or X.Y.Z-dev)")
-    return raw, dev
+    if RELEASE_RE.fullmatch(raw):
+        return raw, dev, None
+    match = PRERELEASE_RE.fullmatch(raw)
+    if match is None or dev:
+        raise ValueError(
+            f"unsupported version '{version}' (expected X.Y.Z, X.Y.Z-dev, or X.Y.Z-PRERELEASE)"
+        )
+    base, prerelease = match.groups()
+    # Fail closed here rather than at a registry writer: a prerelease we cannot
+    # spell for PEP 440 is not a publishable GraphForge version (ADR 0033).
+    python_version(base, dev=False, pre=prerelease)
+    return base, dev, prerelease
 
 
-def cargo_version(base: str, *, dev: bool) -> str:
-    return f"{base}-dev" if dev else base
+def _pep440_prerelease(base: str, pre: str) -> str:
+    """Return the PEP 440 spelling of one prerelease, derived by ``packaging``.
+
+    ``packaging`` is imported lazily so that plain releases and development
+    versions -- the only shapes this tool supported before ADR 0033 -- never
+    depend on it.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment defect
+        raise ValueError(
+            "prerelease versions need the 'packaging' distribution to derive the "
+            "PEP 440 spelling; install it before setting a prerelease version"
+        ) from exc
+    raw = f"{base}-{pre}"
+    try:
+        parsed = Version(raw)
+    except InvalidVersion as exc:
+        raise ValueError(f"prerelease '{raw}' has no PEP 440 spelling") from exc
+    if (
+        parsed.base_version != base
+        or parsed.pre is None
+        or parsed.epoch
+        or parsed.dev is not None
+        or parsed.post is not None
+        or parsed.local is not None
+    ):
+        raise ValueError(f"prerelease '{raw}' is not a plain PEP 440 prerelease of {base}")
+    return str(parsed)
 
 
-def python_version(base: str, *, dev: bool) -> str:
-    return f"{base}.dev0" if dev else base
+def cargo_version(base: str, *, dev: bool, pre: str | None = None) -> str:
+    if dev:
+        return f"{base}-dev"
+    return f"{base}-{pre}" if pre else base
 
 
-def npm_version(base: str, *, dev: bool) -> str:
-    return f"{base}-dev.0" if dev else base
+def python_version(base: str, *, dev: bool, pre: str | None = None) -> str:
+    if dev:
+        return f"{base}.dev0"
+    return _pep440_prerelease(base, pre) if pre else base
+
+
+def npm_version(base: str, *, dev: bool, pre: str | None = None) -> str:
+    if dev:
+        return f"{base}-dev.0"
+    return f"{base}-{pre}" if pre else base
+
+
+def python_spelling(version: str) -> str:
+    """Return the PEP 440 spelling of one root release version (ADR 0033)."""
+    base, dev, pre = parse_base(version)
+    return python_version(base, dev=dev, pre=pre)
 
 
 def read_current() -> dict[str, str]:
@@ -123,13 +191,13 @@ def read_current() -> dict[str, str]:
     }
 
 
-def expected_for(base: str, *, dev: bool) -> dict[str, str]:
+def expected_for(base: str, *, dev: bool, pre: str | None = None) -> dict[str, str]:
     return {
-        "cargo": cargo_version(base, dev=dev),
-        "python": python_version(base, dev=dev),
-        "node": npm_version(base, dev=dev),
-        "cli": npm_version(base, dev=dev),
-        "skills": npm_version(base, dev=dev),
+        "cargo": cargo_version(base, dev=dev, pre=pre),
+        "python": python_version(base, dev=dev, pre=pre),
+        "node": npm_version(base, dev=dev, pre=pre),
+        "cli": npm_version(base, dev=dev, pre=pre),
+        "skills": npm_version(base, dev=dev, pre=pre),
     }
 
 
@@ -138,14 +206,15 @@ def check_aligned() -> list[str]:
     current = read_current()
     errors: list[str] = []
     try:
-        base, dev = parse_base(current["cargo"])
+        base, dev, pre = parse_base(current["cargo"])
     except ValueError as exc:
         return [f"cargo version unusable: {exc}"]
-    expected = expected_for(base, dev=dev)
+    expected = expected_for(base, dev=dev, pre=pre)
+    shape = f"cargo base {base} dev={dev}" + (f" pre={pre}" if pre else "")
     for key, want in expected.items():
         got = current[key]
         if got != want:
-            errors.append(f"{key}: got {got!r}, expected {want!r} for cargo base {base} dev={dev}")
+            errors.append(f"{key}: got {got!r}, expected {want!r} for {shape}")
     lock_versions = cargo_lock_versions()
     for package, got in sorted(lock_versions.items()):
         if got != expected["cargo"]:
@@ -184,8 +253,8 @@ def check_aligned() -> list[str]:
     return errors
 
 
-def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
-    expected = expected_for(base, dev=dev)
+def apply_version(base: str, *, dev: bool, dry_run: bool, pre: str | None = None) -> dict[str, str]:
+    expected = expected_for(base, dev=dev, pre=pre)
     if dry_run:
         return expected
 
@@ -276,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "version",
         nargs="?",
-        help="Target version (e.g. 0.5.0 or 0.5.0-dev)",
+        help="Target version (e.g. 0.5.0, 0.5.0-dev, or 0.6.0-rc.1)",
     )
     parser.add_argument(
         "--check",
@@ -307,8 +376,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("version is required unless --check")
 
     try:
-        base, dev = parse_base(args.version)
-        mapping = apply_version(base, dev=dev, dry_run=args.dry_run)
+        base, dev, pre = parse_base(args.version)
+        mapping = apply_version(base, dev=dev, pre=pre, dry_run=args.dry_run)
     except ValueError as exc:
         print(f"set-release-version: {exc}", file=sys.stderr)
         return 1

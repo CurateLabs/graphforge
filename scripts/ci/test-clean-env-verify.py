@@ -343,6 +343,69 @@ def test_cli_validate_release_record() -> None:
         assert completed.returncode == 0, completed.stderr
 
 
+def test_prerelease_probes_pypi_in_pep440_spelling() -> None:
+    """PyPI answers in PEP 440; npm and crates.io carry the root version (ADR 0033)."""
+    seen: list[str] = []
+
+    def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
+        seen.append(url)
+        if "pypi.org/pypi/graphforge/0.6.0rc1/json" in url:
+            return 200, json.dumps({"info": {"version": "0.6.0rc1"}}).encode(), {}
+        if "registry.npmjs.org/@curatelabs/graphforge" in url and "0.6.0-rc.1" in url:
+            return 200, b"{}", {}
+        if "crates.io/api/v1/crates/graphforge-api/0.6.0-rc.1" in url:
+            return 200, json.dumps({"version": {"num": "0.6.0-rc.1"}}).encode(), {}
+        return 404, b"", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.6.0-rc.1",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("graphforge-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        assert ctx.python_version == "0.6.0rc1"
+        result = cev.run_preflight(ctx)
+        assert result.ok is True, result.error
+        assert any("pypi.org/pypi/graphforge/0.6.0rc1/json" in url for url in seen), seen
+        assert not any("pypi.org/pypi/graphforge/0.6.0-rc.1" in url for url in seen), seen
+
+    # PyPI returning the cargo spelling is a mismatch, not the expected answer.
+    def cargo_spelling(url: str) -> tuple[int, bytes, dict[str, str]]:
+        if "pypi.org/pypi/graphforge/0.6.0rc1/json" in url:
+            return 200, json.dumps({"info": {"version": "0.6.0-rc.1"}}).encode(), {}
+        return 200, b"{}", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.6.0-rc.1",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=(),
+            release_record=None,
+            fetch=cargo_spelling,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.run_preflight(ctx)
+        assert result.ok is False
+        assert "pypi version mismatch" in (result.error or "")
+
+
+def test_require_version_refuses_unusable() -> None:
+    assert cev.require_version("0.6.0-rc.1") == "0.6.0-rc.1"
+    for bad in ("0.6.0-foo", "banana", "0.6"):
+        try:
+            cev.require_version(bad)
+        except cev.VerifyError:
+            continue
+        raise AssertionError(f"unusable version accepted: {bad}")
+
+
 def test_cli_run_refuses_without_lanes() -> None:
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "run", "--version", "0.5.0"],
@@ -366,6 +429,8 @@ def main() -> None:
     test_cli_lane_installs_and_executes_published_package()
     test_cli_validate_release_record()
     test_cli_run_refuses_without_lanes()
+    test_prerelease_probes_pypi_in_pep440_spelling()
+    test_require_version_refuses_unusable()
     print("clean-env-verify tests passed")
 
 

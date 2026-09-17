@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from release_candidate_manifest import GROUPS, PUBLICATION_STATES
+from release_candidate_manifest import GROUPS, PUBLICATION_STATES, python_spelling
 from release_candidate_manifest import SCHEMA as CANDIDATE_SCHEMA
 
 OBSERVATION_SCHEMA = "graphforge-registry-observation-v1"
@@ -65,6 +65,17 @@ def _manifest_indexes(
         raise RegistryError("candidate root version is missing")
     if not isinstance(commit_sha, str) or SHA_RE.fullmatch(commit_sha) is None:
         raise RegistryError("candidate commit SHA is invalid")
+    # One logical version, derived spellings (ADR 0033). The candidate may not
+    # carry a second, independently chosen Python version.
+    try:
+        derived = python_spelling(version)
+    except ValueError as error:
+        raise RegistryError(f"candidate root version has no Python spelling: {error}") from error
+    if manifest.get("python_version") != derived:
+        raise RegistryError(
+            "candidate python_version must be the derived PEP 440 spelling "
+            f"{derived!r}, got {manifest.get('python_version')!r}"
+        )
     nodes_raw = manifest.get("nodes")
     artifacts_raw = manifest.get("artifacts")
     groups_raw = manifest.get("artifact_groups")
@@ -113,6 +124,18 @@ def _manifest_indexes(
     return nodes, artifacts, path_to_group
 
 
+def registry_version(manifest: dict[str, Any], registry: str) -> str:
+    """Return the root version spelled the way ``registry`` publishes it.
+
+    PyPI normalizes under PEP 440; cargo and npm carry the root version
+    unchanged. Comparing a registry's answer to the wrong spelling is a silent
+    mismatch, so every registry-facing comparison resolves the spelling here.
+    """
+    if registry == "pypi":
+        return str(manifest["python_version"])
+    return str(manifest["version"])
+
+
 def _node_expected(manifest: dict[str, Any], node_id: str) -> dict[str, Any]:
     nodes, artifacts, _ = _manifest_indexes(manifest)
     try:
@@ -124,6 +147,7 @@ def _node_expected(manifest: dict[str, Any], node_id: str) -> dict[str, Any]:
         "node": node,
         "artifacts": selected,
         "version": manifest["version"],
+        "registry_version": registry_version(manifest, node["registry"]),
         "commit_sha": manifest["commit_sha"],
     }
 
@@ -203,7 +227,7 @@ def _pypi(
     version = info.get("version")
     if not isinstance(name, str) or not isinstance(version, str):
         return _pending_or_indeterminate(receipt, now, pending_reason="pypi_identity_pending")
-    if name != expected["node"]["name"] or version != expected["version"]:
+    if name != expected["node"]["name"] or version != expected["registry_version"]:
         return (
             "conflict",
             "pypi_identity_mismatch",
@@ -262,7 +286,7 @@ def _npm(
     version = payload.get("version")
     if not isinstance(name, str) or not isinstance(version, str):
         return _pending_or_indeterminate(receipt, now, pending_reason="npm_identity_pending")
-    if name != expected["node"]["name"] or version != expected["version"]:
+    if name != expected["node"]["name"] or version != expected["registry_version"]:
         return (
             "conflict",
             "npm_identity_mismatch",
@@ -339,7 +363,7 @@ def _crates(
     version = version_record.get("num")
     if not isinstance(name, str) or not isinstance(version, str):
         return _pending_or_indeterminate(receipt, now, pending_reason="crates_identity_pending")
-    if name != expected["node"]["name"] or version != expected["version"]:
+    if name != expected["node"]["name"] or version != expected["registry_version"]:
         return (
             "conflict",
             "crates_identity_mismatch",
@@ -439,7 +463,7 @@ def observe(
         "state": state,
         "reason": reason,
         "observed_at": now.isoformat(),
-        "endpoint": endpoint_for(node["registry"], node["name"], expected["version"]),
+        "endpoint": endpoint_for(node["registry"], node["name"], expected["registry_version"]),
         "evidence": evidence,
     }
     _assert_safe_output(observation)
@@ -527,7 +551,9 @@ def _observation_map(
             value.get("registry") != node["registry"]
             or value.get("name") != node["name"]
             or value.get("endpoint")
-            != endpoint_for(node["registry"], node["name"], manifest["version"])
+            != endpoint_for(
+                node["registry"], node["name"], registry_version(manifest, node["registry"])
+            )
         ):
             raise RegistryError(f"observation registry identity diverges: {node_id}")
         reason = value.get("reason")
@@ -736,7 +762,9 @@ def _transport(url: str) -> dict[str, Any]:
 def live_response(manifest: dict[str, Any], node_id: str) -> dict[str, Any]:
     expected = _node_expected(manifest, node_id)
     node = expected["node"]
-    response = _transport(endpoint_for(node["registry"], node["name"], expected["version"]))
+    response = _transport(
+        endpoint_for(node["registry"], node["name"], expected["registry_version"])
+    )
     if node["registry"] == "crates" and response.get("status") == 200:
         owners_url = (
             f"https://crates.io/api/v1/crates/{urllib.parse.quote(node['name'], safe='')}/owners"

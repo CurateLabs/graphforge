@@ -167,6 +167,41 @@ def test_artifact_rehearsal() -> None:
         rehearsal._python_consumer = original_python
 
 
+def test_python_consumer_expects_the_pep440_spelling() -> None:
+    """The clean Python consumer reports the normalized version, not the root one."""
+    original_run = rehearsal._run
+    original_wheel = rehearsal._compatible_wheel
+    manifest = {"version": "0.6.0-rc.1", "python_version": "0.6.0rc1", "artifacts": []}
+
+    def run_returning(value: str):
+        def fake_run(argv, cwd=None):  # noqa: ARG001 - mirrors rehearsal._run
+            return value if "-c" in argv else ""
+
+        return fake_run
+
+    rehearsal._compatible_wheel = lambda _artifacts: {"path": "python/fixture.whl"}
+    try:
+        with tempfile.TemporaryDirectory() as temporary:
+            rehearsal._run = run_returning("0.6.0rc1")
+            result = rehearsal._python_consumer(manifest, Path(temporary), Path(temporary))
+            assert result == {
+                "artifact": "python/fixture.whl",
+                "imported_version": "0.6.0rc1",
+                "status": "passed",
+            }
+
+            rehearsal._run = run_returning("0.6.0-rc.1")
+            try:
+                rehearsal._python_consumer(manifest, Path(temporary), Path(temporary))
+            except rehearsal.RehearsalError as error:
+                assert "expected 0.6.0rc1" in str(error), error
+            else:
+                raise AssertionError("a cargo-spelled Python import passed rehearsal")
+    finally:
+        rehearsal._run = original_run
+        rehearsal._compatible_wheel = original_wheel
+
+
 def test_sequential_reconciliation() -> None:
     manifest = registry_fixture.candidate()
     availability = _availability()
@@ -357,6 +392,7 @@ def test_compatible_native_npm_and_npm_errors() -> None:
 
 def main() -> None:
     test_artifact_rehearsal()
+    test_python_consumer_expects_the_pep440_spelling()
     test_sequential_reconciliation()
     test_compatible_native_npm_and_npm_errors()
     print("release-rehearsal tests: ok")

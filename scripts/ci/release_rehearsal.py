@@ -175,9 +175,12 @@ def _python_consumer(
         ],
         cwd=consumer_root,
     )
-    if output != manifest["version"]:
+    # pip and maturin write the PEP 440 spelling of the root version, so the
+    # imported ``__version__`` is normalized (ADR 0033).
+    expected_version = manifest["python_version"]
+    if output != expected_version:
         raise RehearsalError(
-            f"clean Python consumer loaded version {output!r}, expected {manifest['version']}"
+            f"clean Python consumer loaded version {output!r}, expected {expected_version}"
         )
     return {"artifact": wheel["path"], "imported_version": output, "status": "passed"}
 
@@ -333,7 +336,11 @@ def rehearse_artifacts(
                 "packages": [node["name"] for node in crate_nodes],
                 "status": "passed",
             },
-            "shared_version": {"root_version": version, "status": "passed"},
+            "shared_version": {
+                "root_version": version,
+                "python_version": manifest["python_version"],
+                "status": "passed",
+            },
         },
         "status": "passed",
     }

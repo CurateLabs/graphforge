@@ -44,8 +44,14 @@ def git_head() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+# A release tag carries one root version: MAJOR.MINOR.PATCH, optionally with a
+# SemVer prerelease identifier (ADR 0033). The version tooling decides whether
+# the identifier is publishable; this pattern only admits the shape.
+RELEASE_TAG = re.compile(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)")
+
+
 def release_version(tag: str) -> str | None:
-    match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
+    match = RELEASE_TAG.fullmatch(tag)
     return match.group(1) if match else None
 
 
@@ -97,15 +103,22 @@ def validate(
     errors: list[str] = []
     version = release_version(tag)
     if version is None:
-        return [f"release tag must be exactly vMAJOR.MINOR.PATCH, got {tag!r}"]
+        return [f"release tag must be exactly vMAJOR.MINOR.PATCH[-PRERELEASE], got {tag!r}"]
+
+    version_module = load_version_module()
+    try:
+        base, dev, pre = version_module.parse_base(version)
+    except ValueError as exc:
+        return [f"release tag {tag!r} is not a publishable version: {exc}"]
+    if dev:
+        return [f"release tag {tag!r} is a development version and must never publish"]
 
     if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
         errors.append("expected SHA must be a lowercase 40-character commit SHA")
     if actual_sha != expected_sha:
         errors.append(f"checked-out SHA {actual_sha!r} does not match event SHA {expected_sha!r}")
 
-    version_module = load_version_module()
-    wanted = version_module.expected_for(version, dev=False)
+    wanted = version_module.expected_for(base, dev=False, pre=pre)
     for surface, expected in wanted.items():
         actual = versions.get(surface)
         if actual != expected:
@@ -116,7 +129,7 @@ def validate(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True, help="Release tag, e.g. v0.5.0")
+    parser.add_argument("--tag", required=True, help="Release tag, e.g. v0.5.0 or v0.6.0-rc.1")
     parser.add_argument("--expected-sha", required=True, help="Release-event commit SHA")
     args = parser.parse_args(argv)
 
