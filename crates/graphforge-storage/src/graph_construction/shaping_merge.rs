@@ -185,6 +185,7 @@ pub(super) fn convert_identity_run(
                 .map_err(storage)?
                 .allocated_bytes,
             sha256: hex(&writer.get_ref().digest.clone().finalize()),
+            xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
             identity: identity.into(),
             write_operations: writer.get_ref().operations,
             fsync_operations: cache_release
@@ -409,6 +410,7 @@ pub(super) fn copy_authenticated_run_with_codec<const N: usize>(
             bytes,
             allocated_bytes,
             sha256: receipt.sha256.clone(),
+            xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
             identity: identity.into(),
             write_operations: writer.get_ref().operations,
             fsync_operations: cache_release
@@ -778,6 +780,7 @@ fn merge_fixed_group<const N: usize>(
             .map_err(storage)?
             .allocated_bytes,
         sha256: hex(&writer.get_ref().digest.clone().finalize()),
+        xxh64: crate::corruption_checksum::hex(writer.get_ref().checksum.finish()),
         identity: identity.into(),
         write_operations: writer.get_ref().operations,
         fsync_operations: cache_release
@@ -1114,6 +1117,7 @@ fn merge_row_group(
             .map_err(storage)?
             .allocated_bytes,
         sha256: hex(&hashing.digest.clone().finalize()),
+        xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
         identity: identity.into(),
         write_operations: hashing.operations,
         fsync_operations: cache_release

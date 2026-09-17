@@ -235,7 +235,9 @@ mod lifecycle_budget {
             let error = session.prepare_canonical_encoding(1).unwrap_err();
             assert!(
                 error.to_string().contains(match case {
-                    "shape" => "payload digest changed",
+                    // #1392: the completed-shape trust boundary refuses this
+                    // deliberately now, instead of incidentally at retirement.
+                    "shape" => "shape manifest output payload changed",
                     "encoding" => "canonical artifact differs",
                     "replacement" => "predecessor identity changed",
                     "receipt_chain" => "receipt tail changed",
@@ -824,6 +826,54 @@ mod lifecycle_budget {
                 }
             }
         }
+    }
+
+    /// #1392. The completed-shape trust boundary must refuse a same-inode,
+    /// same-length payload mutation **by itself**.
+    ///
+    /// Before this test existed the refusal arrived incidentally, from the full
+    /// SHA-256 that `retire_payload` performed just before unlinking a
+    /// superseded payload. That pass is removed under #1384, so a test that
+    /// only observes `open_with_mode` failing cannot distinguish the boundary
+    /// working from the retirement pass masking a hole. This test names the
+    /// boundary directly, and asserts in passing that the identity-only check
+    /// the boundary used to perform still accepts the corruption.
+    #[test]
+    fn completed_shape_boundary_refuses_same_inode_payload_corruption() {
+        let root = TempDir::new().unwrap();
+        let mut session = shaping_recovery_fixture(&root);
+        session.shape_canonical_with_cancellation(|| false).unwrap();
+        let outputs = read_completed_shape_outputs(&session.root, &session.checkpoint).unwrap();
+        let expected = outputs
+            .iter()
+            .find(|output| output.name == "shaped-identities.run")
+            .expect("completed shape retains its identity run")
+            .clone();
+
+        // The untouched payload authenticates.
+        let work = authenticate_shaped_output(&session.root, &expected).unwrap();
+        assert_eq!(work.bytes, expected.bytes);
+
+        let path = session.root.path().join(&expected.name);
+        let before = file_identity(&File::open(&path).unwrap()).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+
+        // Same inode, same link count, same length: precisely what a writer
+        // receipt cannot see.
+        assert_eq!(file_identity(&File::open(&path).unwrap()).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected.bytes);
+        authenticate_shaped_output_identity(&session.root, &expected)
+            .expect("the identity-only check accepts the corruption; that is the gap");
+
+        let error = authenticate_shaped_output(&session.root, &expected).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("shape manifest output payload changed"),
+            "{error}"
+        );
     }
 
     #[test]

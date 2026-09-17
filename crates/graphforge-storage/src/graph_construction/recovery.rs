@@ -9,14 +9,15 @@ use super::{
     GraphConstructionSession, HashingWriter, IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, INTENT,
     IoCounter, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH, OsStr, ParquetRecordBatchReaderBuilder,
     Read, ReceiptPointer, SHAPE_INTENT, Sha256, ShapeIntent, StableDirectory, Uuid, Write,
-    account_cache_release, artifact_stem, authenticate_shaped_output, checked_category_remove,
-    combine_cache_cleanup, combine_secondary_cleanup, construction_failpoint, copy_post_shape_io,
-    decode_bounded, decode_shape_intent, file_identity, file_link_count, hex, install_control,
-    is_canonical_sha256, is_shape_artifact_name, merge_cache_release_evidence, read_bounded_limit,
-    receipt_from_intent, receipt_name, record_active_identity_remove, replace_checkpoint_control,
-    sha256, shape_authority_sha256, shape_receipt_name, storage, supersession,
-    validate_artifact_name, validate_intent, validate_receipt_artifacts,
-    validate_receipt_semantics, validate_shape_binding, validate_sorted_run,
+    account_cache_release, artifact_stem, authenticate_shaped_output,
+    authenticate_shaped_output_identity, checked_category_remove, combine_cache_cleanup,
+    combine_secondary_cleanup, construction_failpoint, copy_post_shape_io, decode_bounded,
+    decode_shape_intent, file_identity, file_link_count, hex, install_control, is_canonical_sha256,
+    is_shape_artifact_name, merge_cache_release_evidence, read_bounded_limit, receipt_from_intent,
+    receipt_name, record_active_identity_remove, replace_checkpoint_control, sha256,
+    shape_authority_sha256, shape_receipt_name, storage, supersession, validate_artifact_name,
+    validate_intent, validate_receipt_artifacts, validate_receipt_semantics,
+    validate_shape_binding, validate_sorted_run,
 };
 
 impl GraphConstructionSession {
@@ -252,14 +253,17 @@ pub(super) fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<
     Ok(())
 }
 
+/// Returns the authentication work performed and whether the retained shape
+/// output payloads were verified, so the session does not repeat that pass at
+/// its next trust boundary (#1392).
 pub(super) fn recover_shape_intent(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
-) -> Result<ReadWork, GfError> {
+) -> Result<(ReadWork, bool), GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ReadWork::default());
+            return Ok((ReadWork::default(), false));
         }
         Err(error) => return Err(storage(error)),
     };
@@ -285,11 +289,15 @@ pub(super) fn recover_shape_intent(
         {
             return Err(storage("complete shape manifest inventory is incomplete"));
         }
-        if checkpoint.encoding_inventory_sha256.is_none() {
-            for output in &intent.outputs {
-                authenticate_shaped_output(root, output)?;
-            }
-        }
+        // Completed-shape replay is a trust boundary: the shape outputs are
+        // about to be consumed by encoding, so their payloads are verified
+        // here, not incidentally by a later retirement pass (#1392).
+        let verified = checkpoint.encoding_inventory_sha256.is_none();
+        let work = if verified {
+            authenticate_completed_shape_outputs(root, &intent.outputs)?
+        } else {
+            ReadWork::default()
+        };
         let expected_shape_authority = shape_authority_sha256(shape, &intent.outputs)?;
         if intent.shape_authority_sha256.as_deref() != Some(&expected_shape_authority) {
             return Err(storage(
@@ -307,7 +315,23 @@ pub(super) fn recover_shape_intent(
             final_evidence,
             expected_shape_authority,
         )?;
-        return Ok(ReadWork::default());
+        // Charged after the completed shape's own evidence is restored, and
+        // made durable by the supersession checkpoint the caller writes next,
+        // exactly where this read work was charged before it moved to the
+        // boundary. Returning it to the caller instead would cost an extra
+        // checkpoint barrier on every reopen.
+        checkpoint.evidence.recovery_application_read_bytes = checkpoint
+            .evidence
+            .recovery_application_read_bytes
+            .checked_add(work.bytes)
+            .ok_or_else(|| storage("shape recovery read bytes overflow"))?;
+        checkpoint.evidence.recovery_application_read_operations = checkpoint
+            .evidence
+            .recovery_application_read_operations
+            .checked_add(work.operations)
+            .ok_or_else(|| storage("shape recovery read operations overflow"))?;
+        account_cache_release(work.cache_release, &mut checkpoint.evidence)?;
+        return Ok((ReadWork::default(), verified));
     }
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
@@ -336,6 +360,29 @@ pub(super) fn recover_shape_intent(
         }
     }
     unlink_named(root, SHAPE_INTENT)?;
+    Ok((work, false))
+}
+
+/// Stream and checksum every retained payload of a completed shape, returning
+/// the read work performed. See [`authenticate_shaped_output`] for why this is
+/// the boundary that owns the refusal (#1392).
+fn authenticate_completed_shape_outputs(
+    root: &StableDirectory,
+    outputs: &[ArtifactReceipt],
+) -> Result<ReadWork, GfError> {
+    let mut work = ReadWork::default();
+    for output in outputs {
+        let observed = authenticate_shaped_output(root, output)?;
+        work.bytes = work
+            .bytes
+            .checked_add(observed.bytes)
+            .ok_or_else(|| storage("shape recovery authentication bytes overflow"))?;
+        work.operations = work
+            .operations
+            .checked_add(observed.operations)
+            .ok_or_else(|| storage("shape recovery authentication operations overflow"))?;
+        merge_cache_release_evidence(&mut work.cache_release, observed.cache_release)?;
+    }
     Ok(work)
 }
 
@@ -499,6 +546,7 @@ pub(super) fn receipt_for_existing_with_work(
     let identity = file_identity(&file).map_err(storage)?;
     let mut file = graphforge_filesystem::FileCacheReleasingReader::new(file).map_err(storage)?;
     let mut digest = Sha256::new();
+    let mut checksum = crate::corruption_checksum::Checksum::new();
     let mut bytes = 0_u64;
     let mut operations = 0_u64;
     let mut block = vec![0_u8; BLOCK_BYTES];
@@ -509,6 +557,7 @@ pub(super) fn receipt_for_existing_with_work(
                 break;
             }
             digest.update(&block[..count]);
+            checksum.update(&block[..count]);
             bytes = bytes
                 .checked_add(count as u64)
                 .ok_or_else(|| storage("bytes overflows"))?;
@@ -524,6 +573,7 @@ pub(super) fn receipt_for_existing_with_work(
                     .map_err(storage)?
                     .allocated_bytes,
                 sha256: hex(&digest.finalize()),
+                xxh64: crate::corruption_checksum::hex(checksum.finish()),
                 identity: identity.into(),
                 write_operations: 0,
                 fsync_operations: 0,
@@ -571,7 +621,9 @@ pub(super) fn unlink_writer_capability(
     {
         return Err(storage("writer capability differs from artifact authority"));
     }
-    authenticate_shaped_output(root, &receipt)?;
+    // This path removes the artifact; its bytes are never consumed again, so
+    // the identity-only authority check is the right one here.
+    authenticate_shaped_output_identity(root, &receipt)?;
     drop(file);
     root.unlink_child_if_identity(OsStr::new(&capability_name), identity)
         .map_err(storage)?;

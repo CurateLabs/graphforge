@@ -765,6 +765,7 @@ pub(super) fn write_parquet_with_properties(
             .map_err(storage)?
             .allocated_bytes,
         sha256: hex(&hashing.digest.clone().finalize()),
+        xxh64: crate::corruption_checksum::hex(hashing.checksum.finish()),
         identity: identity.into(),
         write_operations: hashing.operations,
         fsync_operations: cache_release
@@ -824,6 +825,7 @@ pub(super) fn write_run<const N: usize>(
             .map_err(storage)?
             .allocated_bytes,
         sha256: hex(&writer.digest.finalize()),
+        xxh64: crate::corruption_checksum::hex(writer.checksum.finish()),
         identity: identity.into(),
         write_operations: writer.operations,
         fsync_operations: cache_release

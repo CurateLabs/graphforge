@@ -221,6 +221,7 @@ impl GraphConstructionSession {
             return Err(storage("only a sealed session can be encoded"));
         }
         let completed = read_completed_shape(&self.root, &self.checkpoint, false)?
+            .map(|(shape, _)| shape)
             .ok_or_else(|| storage("canonical shape is not complete"))?;
         if &completed != shape {
             return Err(storage("encoder input differs from completed shape"));
@@ -676,7 +677,7 @@ impl GraphConstructionSession {
             }
             return Ok(inventory);
         }
-        let shape = self.shape_canonical_inner(&mut cancelled, false)?;
+        let shape = self.shape_canonical_inner(&mut cancelled)?;
         self.encode_canonical_with_cancellation(&shape, generation, cancelled)
     }
 
@@ -690,7 +691,7 @@ impl GraphConstructionSession {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GraphConstructionEncoding, GfError> {
         self.seal_inner(false)?;
-        let shape = self.shape_canonical_inner(&mut cancelled, false)?;
+        let shape = self.shape_canonical_inner(&mut cancelled)?;
         self.encode_canonical_with_cancellation(&shape, generation, cancelled)
     }
 }

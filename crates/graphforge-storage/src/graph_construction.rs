@@ -37,9 +37,9 @@ pub(crate) struct AuthenticatedShapeSource {
 
 mod shape;
 use shape::{
-    authenticate_shaped_output, is_shape_artifact_name, persist_shape_receipt,
-    read_completed_shape, read_completed_shape_outputs, read_fixed, run_record_bytes,
-    shape_receipt_name, validate_shape_binding, validate_sorted_run,
+    authenticate_shaped_output, authenticate_shaped_output_identity, is_shape_artifact_name,
+    persist_shape_receipt, read_completed_shape, read_completed_shape_outputs, read_fixed,
+    run_record_bytes, shape_receipt_name, validate_shape_binding, validate_sorted_run,
 };
 pub(crate) use shape::{open_authenticated_shape_source, shaped_output_sha256};
 mod encoding_publication;
@@ -657,7 +657,12 @@ pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
     allocated_bytes: u64,
+    /// The content-addressing digest. Cryptographic, and stays cryptographic.
     sha256: String,
+    /// Inline corruption checksum over the same payload, produced by the pass
+    /// that wrote the bytes. Non-cryptographic by design; see
+    /// [`crate::corruption_checksum`] for the two assumptions that permits.
+    xxh64: String,
     identity: IdentityRecord,
     write_operations: u64,
     fsync_operations: u64,
@@ -870,6 +875,12 @@ pub struct GraphConstructionSession {
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
+    /// Whether this process has already streamed and checksummed the retained
+    /// shape output payloads since it opened the session (#1392). The refusal
+    /// is once per process-open: nothing inside this process mutates those
+    /// bytes, and the threat model excludes an active same-identity adversary
+    /// racing it (ADR 0013, recorded in `crate::corruption_checksum`).
+    shape_outputs_verified: bool,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -1494,6 +1505,7 @@ impl GraphConstructionSession {
             parent_catalog,
             compact_parent,
             semantic_authority,
+            shape_outputs_verified: false,
             session_lock,
             _reservation: reservation,
         };
@@ -1523,7 +1535,9 @@ impl GraphConstructionSession {
                 .entry(category)
                 .or_default();
         }
-        let shape_recovery_work = recover_shape_intent(&session.root, &mut session.checkpoint)?;
+        let (shape_recovery_work, shape_outputs_verified) =
+            recover_shape_intent(&session.root, &mut session.checkpoint)?;
+        session.shape_outputs_verified = shape_outputs_verified;
         session.recover_intent()?;
         if session
             .checkpoint
