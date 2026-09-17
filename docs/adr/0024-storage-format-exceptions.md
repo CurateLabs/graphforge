@@ -1,7 +1,13 @@
+---
+title: "ADR 0024: Storage format exceptions for GFDR and compiled ontologies"
+adr: "0024"
+status: "Accepted"
+date: "2026-08-30"
+superseded_by: null
+---
+
 # ADR 0024: Storage format exceptions for GFDR and compiled ontologies
 
-**Status:** Accepted
-**Date:** 2026-08-30
 **Build target:** v0.5.x
 **Related:** ADR 0019 (authoritative graph delta journal), issue #1022
 

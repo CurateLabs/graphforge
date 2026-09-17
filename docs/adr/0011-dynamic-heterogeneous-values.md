@@ -1,7 +1,13 @@
+---
+title: "ADR 0011: Dynamic Heterogeneous Value Lists"
+adr: "0011"
+status: "Accepted"
+date: "2026-07-10"
+superseded_by: null
+---
+
 # ADR 0011: Dynamic Heterogeneous Value Lists
 
-**Status:** Accepted
-**Date:** 2026-07-10
 **Build target:** v0.5.0 (conformance hardening)
 **Related:** extends ADR 0008/0009; 
 

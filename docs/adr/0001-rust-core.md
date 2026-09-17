@@ -1,7 +1,13 @@
+---
+title: "ADR 0001: Rust Core"
+adr: "0001"
+status: "Accepted"
+date: "2026-05-25"
+superseded_by: null
+---
+
 # ADR 0001: Rust Core
 
-**Date:** 2026-05-25
-**Status:** Accepted
 **Build target:** v0.5.0
 
 ---

@@ -1,6 +1,12 @@
+---
+title: "ADR 0035: Preserve stage diagnostics at public error boundaries"
+adr: "0035"
+status: "Accepted"
+superseded_by: null
+---
+
 # ADR 0035: Preserve stage diagnostics at public error boundaries
 
-**Status:** Accepted
 **Build target:** v0.6.0
 **Implementation:** Accepted for the v0.6.0 implementation of #1018.
 **Related:** #1018

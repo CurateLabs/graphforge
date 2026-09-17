@@ -1,8 +1,12 @@
+---
+title: "ADR 0036: The GraphForge release version contract"
+adr: "0036"
+status: "Accepted"
+date: "2026-09-17"
+superseded_by: null
+---
+
 # ADR 0036: The GraphForge release version contract
-
-**Status:** Accepted
-
-**Date:** 2026-09-17
 
 **Build target:** v0.6.0-rc.1 and later
 

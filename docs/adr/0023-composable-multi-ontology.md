@@ -1,7 +1,13 @@
+---
+title: "ADR 0023: Composable ontology modules and semantic bridges"
+adr: "0023"
+status: "Accepted"
+date: "2026-08-19"
+superseded_by: null
+---
+
 # ADR 0023: Composable ontology modules and semantic bridges
 
-**Status:** Accepted
-**Date:** 2026-08-19  
 **Build target:** v0.5.x (M9)  
 **Related:** #833, #834; portable representation decision #835
 

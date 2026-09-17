@@ -1,7 +1,13 @@
+---
+title: "ADR 0014: Complete-workspace checkpoints and generation-preserving revert"
+adr: "0014"
+status: "Accepted"
+date: "2026-07-25"
+superseded_by: null
+---
+
 # ADR 0014: Complete-workspace checkpoints and generation-preserving revert
 
-**Status:** Accepted
-**Date:** 2026-07-25  
 **Build target:** v0.5.0  
 
 **Contract:** [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json)  

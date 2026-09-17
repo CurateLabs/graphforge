@@ -1,8 +1,14 @@
+---
+title: "ADR 0025: Storage values have a compiler-independent contract"
+adr: "0025"
+status: "Accepted"
+date: "2026-09-04"
+superseded_by: null
+---
+
 # ADR 0025: Storage values have a compiler-independent contract
 
-**Status:** Accepted
 **Implementation:** Decision only; extraction not yet implemented.
-**Date:** 2026-09-04
 **Build target:** v0.6.0
 **Related:** issues #1013, #1011, #1012; ADRs 0008–0011, 0013, 0024, 0036
 

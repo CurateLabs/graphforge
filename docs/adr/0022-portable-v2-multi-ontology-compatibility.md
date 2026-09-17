@@ -1,7 +1,13 @@
+---
+title: "ADR 0022: Multi-ontology semantics in portable project v2"
+adr: "0022"
+status: "Accepted"
+date: "2026-08-19"
+superseded_by: null
+---
+
 # ADR 0022: Multi-ontology semantics in portable project v2
 
-**Status:** Accepted
-**Date:** 2026-08-19
 **Related:** #835
 
 ## Decision

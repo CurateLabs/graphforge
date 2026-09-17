@@ -1,7 +1,13 @@
+---
+title: "ADR 0004: Graph-Native Adjacency Index"
+adr: "0004"
+status: "Accepted"
+date: "2026-06-07"
+superseded_by: null
+---
+
 # ADR 0004: Graph-Native Adjacency Index
 
-**Date:** 2026-06-07
-**Status:** Accepted
 **Build target:** v0.5.0
 
 ---

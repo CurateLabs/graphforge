@@ -1,7 +1,13 @@
+---
+title: "ADR 0005: Layered Architecture — Graph / Knowledge / Workbench"
+adr: "0005"
+status: "Accepted"
+date: "2026-06-07"
+superseded_by: null
+---
+
 # ADR 0005: Layered Architecture — Graph / Knowledge / Workbench
 
-**Status:** Accepted
-**Date:** 2026-06-07
 **Build target:** v0.5.0
 **Related:** ADR 0001 (Rust Core), ADR 0003 (Progressive Ontology), ADR 0004 (Adjacency Index), ADR 0006 (Epistemic Model), ADR 0012 (knowledge/epistemic Domain Ownership)
 

@@ -1,8 +1,12 @@
+---
+title: "ADR 0038: Determinism belongs at the publication boundary"
+adr: "0038"
+status: "Accepted"
+date: "2026-09-17"
+superseded_by: null
+---
+
 # ADR 0038: Determinism belongs at the publication boundary
-
-**Status:** Accepted
-
-**Date:** 2026-09-17
 
 **Build target:** v0.6.0 and later
 
