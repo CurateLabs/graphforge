@@ -324,7 +324,8 @@ mod compact_details {
             }
             session.seal().unwrap();
             let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-            assert!(session.evidence().merge_passes >= 3);
+            assert!(session.evidence().shape_partitions > 1);
+            assert!(session.evidence().partition_outputs >= 3);
             assert_eq!((shape.node_count, shape.edge_count), (1024, 1024));
             let outputs = [&shape.node_details, &shape.edge_details];
             let mut canonical = Vec::new();
@@ -591,7 +592,12 @@ mod compact_details {
         assert!(failed.is_empty(), "{failed:?}");
     }
     #[test]
-    fn detail_codec_current_format_cancel_corrupt_copy_and_retry() {
+    fn detail_codec_current_format_cancel_corrupt_route_and_retry() {
+        use crate::graph_construction::partition::PartitionPlan;
+        use crate::graph_construction::shape::route_fixed_run;
+        use crate::graph_construction::partition_shaping::{
+            FixedRangePartitioner, PartitionFamily,
+        };
         {
             let version = FORMAT_VERSION;
             let root = TempDir::new().unwrap();
@@ -610,49 +616,83 @@ mod compact_details {
             let original = std::fs::read(&path).unwrap();
             let current = std::fs::read(root.path().join("CURRENT")).unwrap();
             let codec = DetailCodec::from_version(version).unwrap();
-            let output = "merge-node-codec-retry.run";
-            let cancelled = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
-                &session.root,
-                &receipt,
-                output,
-                &mut || true,
-                &mut session.checkpoint.evidence,
-                Some(codec),
-            )
-            .unwrap_err();
-            assert!(cancelled.to_string().contains("construction cancelled"));
+            let output = "shaped-node-details.run";
+            let plan = PartitionPlan::single(1);
+            fn new_partitioner<'a>(
+                root: &'a crate::construction_directory::ConstructionDirectory,
+                codec: DetailCodec,
+            ) -> FixedRangePartitioner<'a, NODE_DETAIL_WIDTH> {
+                FixedRangePartitioner::<NODE_DETAIL_WIDTH>::new(
+                    root,
+                    PartitionFamily::NodeDetails,
+                    1,
+                    Some(codec),
+                    false,
+                )
+                .unwrap()
+            }
+            // Routing authenticates the staged run against its writer receipt
+            // while it streams, which is the check the deleted copy step used
+            // to perform. Cancellation must leave the source untouched, and an
+            // abandoned partitioner must leave no owned temporary behind.
+            {
+                let mut partitioner = new_partitioner(&session.root, codec);
+                let cancelled = route_fixed_run::<NODE_DETAIL_WIDTH>(
+                    &session.root,
+                    &plan,
+                    &receipt,
+                    Some(codec),
+                    &mut partitioner,
+                    &mut || true,
+                    &mut session.checkpoint.evidence,
+                )
+                .unwrap_err();
+                assert!(cancelled.to_string().contains("construction cancelled"));
+            }
             assert!(shape_temporary_names(&session.root).is_empty());
-            assert!(!session.root.path().join(output).exists());
             assert_eq!(std::fs::read(&path).unwrap(), original);
+
             let mut corrupt = original.clone();
             corrupt[17] = b'X'; // Still valid UTF-8 and ordering: digest must detect it.
             std::fs::write(&path, &corrupt).unwrap();
-            let corrupted = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
-                &session.root,
-                &receipt,
-                output,
-                &mut || false,
-                &mut session.checkpoint.evidence,
-                Some(codec),
-            )
-            .unwrap_err();
-            assert!(
-                corrupted.to_string().contains("source content changed"),
-                "{corrupted}"
-            );
+            {
+                let mut partitioner = new_partitioner(&session.root, codec);
+                let corrupted = route_fixed_run::<NODE_DETAIL_WIDTH>(
+                    &session.root,
+                    &plan,
+                    &receipt,
+                    Some(codec),
+                    &mut partitioner,
+                    &mut || false,
+                    &mut session.checkpoint.evidence,
+                )
+                .unwrap_err();
+                assert!(
+                    corrupted.to_string().contains("source content changed"),
+                    "{corrupted}"
+                );
+            }
             assert!(shape_temporary_names(&session.root).is_empty());
-            assert!(!session.root.path().join(output).exists());
             assert_eq!(std::fs::read(root.path().join("CURRENT")).unwrap(), current);
+
             std::fs::write(&path, &original).unwrap();
-            copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
+            let mut partitioner = new_partitioner(&session.root, codec);
+            route_fixed_run::<NODE_DETAIL_WIDTH>(
                 &session.root,
+                &plan,
                 &receipt,
-                output,
+                Some(codec),
+                &mut partitioner,
                 &mut || false,
                 &mut session.checkpoint.evidence,
-                Some(codec),
             )
             .unwrap();
+            partitioner
+                .finish_optional(output, &mut || false, &mut session.checkpoint.evidence)
+                .unwrap()
+                .unwrap();
+            // A single partition over an already sorted run reproduces the
+            // staged bytes exactly.
             assert_eq!(
                 std::fs::read(session.root.path().join(output)).unwrap(),
                 original

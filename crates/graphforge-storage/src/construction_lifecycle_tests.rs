@@ -2,6 +2,28 @@
 mod lifecycle_budget {
     use super::*;
 
+    /// Shaping produced its global order by range partitioning, and the
+    /// partitioning was balanced. A collapsed one-partition run would pass
+    /// every byte-equality check, so the balance is the load-bearing part.
+    fn assert_partitioned_shaping(evidence: &GraphConstructionEvidence) {
+        assert!(evidence.shape_partitions > 1, "{}", evidence.shape_partitions);
+        assert_eq!(
+            evidence.shape_partition_count,
+            u64::from(GraphConstructionBudgets::default().partition_count)
+        );
+        assert!(evidence.partition_outputs >= 3, "{}", evidence.partition_outputs);
+        assert!(evidence.splitter_sample_records > 0);
+        assert!(
+            evidence.max_partition_identity_rows * evidence.shape_partitions
+                <= evidence.partitioned_identity_rows * 4,
+            "max={} partitions={} total={}",
+            evidence.max_partition_identity_rows,
+            evidence.shape_partitions,
+            evidence.partitioned_identity_rows
+        );
+        assert_eq!(evidence.merge_passes, 0, "the external merge tree is gone");
+    }
+
     fn small_session(path: &Path) -> GraphConstructionSession {
         GraphConstructionSession::open_with_mode(
             path,
@@ -518,7 +540,7 @@ mod lifecycle_budget {
                     .evidence()
                     .storage_transient_peak_total_allocated_bytes;
                 assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
-                assert!(session.evidence().merge_passes >= 3);
+                assert_partitioned_shaping(session.evidence());
                 let shaped = census(session.root.path());
                 let encoding = session.encode_canonical(&shape, 1).unwrap();
                 let encoded = census(session.root.path());
@@ -656,7 +678,7 @@ mod lifecycle_budget {
         let mut ids = Vec::new();
         let mut receipts = Vec::new();
         for name in &shape.node_rows {
-            assert!(name.starts_with("merge-rows-"), "{name}");
+            assert!(name.starts_with("shaped-rows-"), "{name}");
             receipts.push(receipt_for_existing(&session.root, name).unwrap());
             let reader = ParquetRecordBatchReaderBuilder::try_new(
                 session.root.open_child_file(OsStr::new(name)).unwrap(),
@@ -697,7 +719,7 @@ mod lifecycle_budget {
     #[test]
     fn retained_row_roots_recover_crashes_and_reopen_without_reinstallation() {
         for failpoint in [
-            "shape.row_merge.after_install",
+            "shape.row_partition.after_install",
             "shape.after_complete_inventory",
             "shape.after_evidence_checkpoint",
         ] {
@@ -763,7 +785,7 @@ mod lifecycle_budget {
                             std::fs::read_dir(&directory).unwrap().any(|entry| {
                                 let name = entry.unwrap().file_name();
                                 let name = name.to_string_lossy();
-                                name.starts_with("merge-rows-") && name.ends_with(".parquet")
+                                name.starts_with("part-rows-") && name.ends_with(".arrow")
                             })
                         })
                         .unwrap_err();
@@ -774,7 +796,7 @@ mod lifecycle_budget {
                         .unwrap()
                         .into_iter()
                         .filter_map(|name| name.into_string().ok())
-                        .find(|name| name.starts_with("merge-rows-") && name.ends_with(".parquet"))
+                        .find(|name| name.starts_with("part-rows-") && name.ends_with(".arrow"))
                         .unwrap()
                 };
                 let path = directory.join(name);
@@ -1064,7 +1086,7 @@ mod lifecycle_budget {
             session.seal().unwrap();
             let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
             assert_eq!((shape.node_count, shape.edge_count), (8192, 32768 * scale));
-            assert!(session.evidence().merge_passes >= 3);
+            assert_partitioned_shaping(session.evidence());
             let baseline_peak = match scale {
                 1 => 20_873_216,
                 2 => 40_435_712,
@@ -1111,7 +1133,7 @@ mod lifecycle_budget {
                     "retained":session.evidence().storage_current,
                     "shape_reads":session.evidence().shape_application_read_bytes,
                     "merge_writes":session.evidence().merge_written_bytes,
-                    "merge_passes":session.evidence().merge_passes,
+                    "partition_outputs":session.evidence().partition_outputs,
                     "census":census(session.root.path()),
                 })
             );
@@ -1119,67 +1141,97 @@ mod lifecycle_budget {
     }
 
     #[test]
-    fn fixed_merge_work_is_exact_across_production_fan_in_boundaries() {
-        // Each input contains one distinct UUID. The expected work is the sum
-        // of records in actual merge groups, not a noisy elapsed-time ceiling.
-        // 272 and 1088 are the accepted S20/S22 construction chunk counts.
-        for (inputs, expected_records, expected_groups) in [
-            (31_u64, 31_u64, 1_u64),
-            (32, 32, 1),
-            (33, 65, 2),
-            (272, 544, 10),
-            (1023, 2046, 33),
-            (1024, 2048, 33),
-            (1025, 3073, 34),
-            (1088, 3264, 37),
-        ] {
+    fn range_partition_work_is_linear_across_production_chunk_counts() {
+        use crate::graph_construction::partition::{IdentitySampler, PartitionBalance};
+        use crate::graph_construction::partition_shaping::{
+            FixedRangePartitioner, PartitionFamily,
+        };
+
+        // The external merge tree charged `records * ceil(log_32(inputs))`
+        // reads and writes: 31 inputs cost 31 records of work, 1025 cost 3073.
+        // Range partitioning charges exactly two passes at every size — one to
+        // route, one to sort and concatenate — so the work is linear in records
+        // and independent of how many chunks were staged. 272 and 1088 are the
+        // accepted S20/S22 construction chunk counts.
+        //
+        // Each staged chunk contributes `RECORDS_PER_CHUNK` records, enough
+        // that the recorded cut (identities/16) yields the full requested 16
+        // partitions at every chunk count. Measuring linearity at one partition
+        // would measure nothing.
+        const RECORDS_PER_CHUNK: u64 = 16;
+        const REQUESTED_PARTITIONS: u32 = 16;
+        for chunks in [31_u64, 32, 33, 272, 1023, 1024, 1025, 1088] {
+            let records = chunks * RECORDS_PER_CHUNK;
             let root = TempDir::new().unwrap();
             crate::open_or_initialize_project(root.path()).unwrap();
             let session = small_session(root.path());
             let mut evidence = session.evidence().clone();
-            let mut merge = FixedMergeAccumulator::new("merge-runtime", 32, true);
-            for input in 0..inputs {
-                let name = format!("runtime-input-{input}");
-                write_run(
-                    &session.root,
-                    &name,
-                    &[u128::from(input + 1).to_be_bytes()],
-                    &mut evidence,
-                    None,
-                )
-                .unwrap();
-                merge
-                    .push::<16>(&session.root, name, &mut || false, &mut evidence)
-                    .unwrap();
-                assert!(merge.slot_count() <= online_merge_name_slot_bound(input + 1, 32) as usize);
+            let keys = (0..records)
+                .map(|index| u128::from(index + 1).to_be_bytes())
+                .collect::<Vec<_>>();
+            let mut sampler = IdentitySampler::new(16, records).unwrap();
+            let positions = sampler.positions().collect::<Vec<_>>();
+            for position in positions {
+                sampler.admit(keys[usize::try_from(position).unwrap()]).unwrap();
             }
-            let output = merge
-                .finish::<16>(&session.root, &mut || false, &mut evidence)
+            let plan = sampler.into_plan(16).unwrap();
+            assert!(plan.partitions() > 1, "{}", plan.partitions());
+            let mut partitioner = FixedRangePartitioner::<16>::new(
+                &session.root,
+                PartitionFamily::Identities,
+                plan.partitions(),
+                None,
+                true,
+            )
+            .unwrap();
+            for key in &keys {
+                partitioner.route(&plan, key, key, &mut evidence).unwrap();
+            }
+            let balance: PartitionBalance = partitioner.balance().clone();
+            balance.assert_balanced("linear work").unwrap();
+            let output = partitioner
+                .finish_optional("staged-identities.run", &mut || false, &mut evidence)
+                .unwrap()
                 .unwrap();
             let mut file = session.root.open_child_file(OsStr::new(&output)).unwrap();
-            for expected in 1..=inputs {
+            for expected in 1..=records {
                 assert_eq!(
                     read_fixed::<16>(&mut file).unwrap(),
                     Some(u128::from(expected).to_be_bytes())
                 );
             }
             assert_eq!(read_fixed::<16>(&mut file).unwrap(), None);
+            // Two passes: route-write plus concatenate-write, and the same on
+            // the read side. Never logarithmic in the chunk count.
+            assert_eq!(evidence.merge_read_records, records * 2, "chunks={chunks} records={records}");
             assert_eq!(
-                evidence.merge_read_records, expected_records,
-                "inputs={inputs}"
+                evidence.merge_written_records,
+                records * 2,
+                "chunks={chunks} records={records}"
             );
-            assert_eq!(
-                evidence.merge_written_records, expected_records,
-                "inputs={inputs}"
+            assert_eq!(evidence.merge_written_bytes, records * 16 * 2);
+            assert_eq!(evidence.partition_rows, records, "chunks={chunks} records={records}");
+            assert_eq!(evidence.merge_passes, 0, "chunks={chunks} records={records}");
+            assert_eq!(evidence.partition_outputs, 1, "chunks={chunks} records={records}");
+            assert!(
+                evidence.peak_partition_records * u64::try_from(plan.partitions()).unwrap()
+                    <= records * 4,
+                "chunks={chunks} peak={}",
+                evidence.peak_partition_records
             );
-            assert_eq!(evidence.merge_written_bytes, expected_records * 16);
-            assert_eq!(evidence.merge_groups, expected_groups, "inputs={inputs}");
-            assert!(evidence.peak_merge_inputs <= 32);
+            // Every spill is retired once its partition has been concatenated.
+            assert!(
+                shape_temporary_names(&session.root).is_empty(),
+                "chunks={chunks} records={records}"
+            );
             println!(
-                "RUNTIME_MERGE {}",
-                serde_json::json!({"inputs":inputs,"records_read":evidence.merge_read_records,
+                "RUNTIME_PARTITION {}",
+                serde_json::json!({"chunks":chunks,"records":records,
+                    "partitions":plan.partitions(),
+                    "records_read":evidence.merge_read_records,
                     "records_written":evidence.merge_written_records,
-                    "groups":evidence.merge_groups,"passes":evidence.merge_passes})
+                    "max_partition_rows":balance.max_rows(),
+                    "outputs":evidence.partition_outputs})
             );
         }
     }
@@ -1340,16 +1392,15 @@ mod lifecycle_budget {
                 let obsolete_exists = names.iter().any(|name| {
                     name.ends_with(".run")
                         && if endpoint_boundary {
-                            name.starts_with("merge-endpoint")
+                            name == "staged-endpoints.run"
                         } else {
-                            name.starts_with("merge-identities")
-                                || name.starts_with("merge-unified")
+                            name == "staged-identities.run"
                         }
                 });
                 let successor_exists = !endpoint_boundary
                     || names
                         .iter()
-                        .any(|name| name.starts_with("merge-resolved") && name.ends_with(".run"));
+                        .any(|name| name.starts_with("part-resolved-") && name.ends_with(".run"));
                 observed_boundary = !obsolete_exists && successor_exists;
                 observed_boundary
             });
@@ -1381,7 +1432,7 @@ mod lifecycle_budget {
                 .unwrap()
                 .into_iter()
                 .filter_map(|s| s.into_string().ok())
-                .find(|n| n.starts_with("merge-identities") && n.ends_with(".run"))
+                .find(|n| n == "staged-identities.run")
                 .unwrap();
             let path = session.root.path().join(&name);
             let held = root.path().join("held-original.run");
@@ -1461,13 +1512,14 @@ mod lifecycle_budget {
                     .storage_receipt_transient_peak_authorities
                     .insert(category, 0);
             }
+            let plan = crate::graph_construction::partition::PartitionPlan::single(1);
             let error = resolve_endpoint_surrogates(
                 &root,
+                &plan,
                 "identities.run",
                 Some("endpoints.run"),
                 None,
                 window_rows,
-                2,
                 &mut || false,
                 &mut evidence,
             )

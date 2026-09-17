@@ -56,57 +56,85 @@ fn shaping_cancellation_is_recovered_on_reopen() {
     resumed.shape_canonical_with_cancellation(|| false).unwrap();
 }
 
+/// A session with two staged identities routed into one partition, ready for
+/// the output publication under test.
+fn routed_partitioner<'a>(
+    root: &'a StableDirectory,
+    plan: &super::super::partition::PartitionPlan,
+    evidence: &mut GraphConstructionEvidence,
+) -> super::super::partition_shaping::FixedRangePartitioner<'a, 16> {
+    use super::super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    let keys = [1_u128.to_be_bytes(), 2_u128.to_be_bytes()];
+    let mut partitioner =
+        FixedRangePartitioner::<16>::new(root, PartitionFamily::Identities, 1, None, true).unwrap();
+    for key in &keys {
+        partitioner.route(plan, key, key, evidence).unwrap();
+    }
+    partitioner
+}
+
 #[test]
-fn shaping_copy_failures_finalize_release_and_remove_unpublished_outputs() {
+fn partition_output_failures_finalize_release_and_remove_unpublished_outputs() {
+    use super::super::partition::PartitionPlan;
+    let plan = PartitionPlan::single(1);
+
     let root = TempDir::new().unwrap();
     let mut session = open(&root, 8_031);
     session
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     session.seal().unwrap();
-    let receipt = session.read_receipt(0).unwrap();
-
-    let mut cancelled = || true;
-    let error = convert_identity_run(
-        &session.root,
-        &receipt,
-        "cancelled-identities.run",
-        &mut cancelled,
-        &mut session.checkpoint.evidence,
-    )
-    .unwrap_err()
-    .to_string();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let partitioner = routed_partitioner(session_root, &plan, &mut checkpoint.evidence);
+    let error = partitioner
+        .finish_optional(
+            "staged-identities.run",
+            &mut || true,
+            &mut checkpoint.evidence,
+        )
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("construction cancelled"), "{error}");
     assert!(!error.contains(root.path().to_string_lossy().as_ref()));
     assert!(shape_temporary_names(&session.root).is_empty());
     assert!(
         session
             .root
-            .open_child_file(OsStr::new("cancelled-identities.run"))
+            .open_child_file(OsStr::new("staged-identities.run"))
             .is_err()
     );
+    drop(session);
 
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_033);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let partitioner = routed_partitioner(session_root, &plan, &mut checkpoint.evidence);
     inject_shape_cleanup_failures(true, true);
-    let mut never_cancelled = || false;
-    let error = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
-        &session.root,
-        &receipt.details,
-        "failed-details.run",
-        &mut never_cancelled,
-        &mut session.checkpoint.evidence,
-        Some(DetailCodec::from_version(session.checkpoint.format_version).unwrap()),
-    )
-    .unwrap_err()
-    .to_string();
+    let error = partitioner
+        .finish_optional(
+            "staged-identities.run",
+            &mut || false,
+            &mut checkpoint.evidence,
+        )
+        .unwrap_err()
+        .to_string();
     let primary = error.find("injected shape input release failure").unwrap();
     let cleanup = error
-        .find("authenticated output cleanup also failed")
-        .unwrap();
+        .find("partition output cleanup also failed")
+        .unwrap_or_else(|| panic!("{error}"));
     assert!(primary < cleanup, "{error}");
-    assert!(
-        error.contains("authenticated output cleanup also failed"),
-        "{error}"
-    );
     assert!(
         error.contains("unpublished artifact cleanup finalization failed"),
         "{error}"
@@ -116,7 +144,7 @@ fn shaping_copy_failures_finalize_release_and_remove_unpublished_outputs() {
     assert!(
         session
             .root
-            .open_child_file(OsStr::new("failed-details.run"))
+            .open_child_file(OsStr::new("staged-identities.run"))
             .is_err()
     );
     #[cfg(target_os = "linux")]
@@ -124,14 +152,9 @@ fn shaping_copy_failures_finalize_release_and_remove_unpublished_outputs() {
 }
 
 #[test]
-fn shaping_publication_guard_covers_setup_and_post_rename_failures() {
-    let root = TempDir::new().unwrap();
-    let mut session = open(&root, 8_032);
-    session
-        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
-        .unwrap();
-    session.seal().unwrap();
-    let receipt = session.read_receipt(0).unwrap();
+fn partition_publication_guard_covers_setup_and_post_rename_failures() {
+    use super::super::partition::PartitionPlan;
+    let plan = PartitionPlan::single(1);
     let points = [
         "initial_file_identity",
         "writer_construction",
@@ -144,21 +167,28 @@ fn shaping_publication_guard_covers_setup_and_post_rename_failures() {
         "post_publication_metric_overflow",
         "manifest_update",
     ];
-    for point in points {
-        let output = format!("guard-identity-{point}.run");
+    for (index, point) in points.into_iter().enumerate() {
+        let output = "staged-identities.run";
+        let root = TempDir::new().unwrap();
+        let mut session = open(&root, 8_100 + index as u128);
+        session
+            .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+            .unwrap();
+        session.seal().unwrap();
+        let GraphConstructionSession {
+            root: session_root,
+            checkpoint,
+            ..
+        } = &mut session;
+        let partitioner = routed_partitioner(session_root, &plan, &mut checkpoint.evidence);
         if matches!(point, "initial_file_identity" | "writer_construction") {
             inject_shape_cleanup_failures(false, true);
         }
         inject_shape_publication_failure(point);
-        let error = convert_identity_run(
-            &session.root,
-            &receipt,
-            &output,
-            &mut || false,
-            &mut session.checkpoint.evidence,
-        )
-        .unwrap_err()
-        .to_string();
+        let error = partitioner
+            .finish_optional(output, &mut || false, &mut checkpoint.evidence)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains(&format!("injected shape publication failure at {point}")),
             "{error}"
@@ -172,37 +202,7 @@ fn shaping_publication_guard_covers_setup_and_post_rename_failures() {
         }
         assert!(!error.contains(root.path().to_string_lossy().as_ref()));
         assert!(shape_temporary_names(&session.root).is_empty());
-        assert!(session.root.open_child_file(OsStr::new(&output)).is_err());
-
-        let output = format!("guard-authenticated-{point}.run");
-        if matches!(point, "initial_file_identity" | "writer_construction") {
-            inject_shape_cleanup_failures(false, true);
-        }
-        inject_shape_publication_failure(point);
-        let error = copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
-            &session.root,
-            &receipt.details,
-            &output,
-            &mut || false,
-            &mut session.checkpoint.evidence,
-            Some(DetailCodec::from_version(session.checkpoint.format_version).unwrap()),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            error.contains(&format!("injected shape publication failure at {point}")),
-            "{error}"
-        );
-        if matches!(point, "initial_file_identity" | "writer_construction") {
-            let primary = error.find("injected shape publication failure").unwrap();
-            let cleanup = error
-                .find("unpublished artifact cleanup finalization failed")
-                .unwrap();
-            assert!(primary < cleanup, "{error}");
-        }
-        assert!(!error.contains(root.path().to_string_lossy().as_ref()));
-        assert!(shape_temporary_names(&session.root).is_empty());
-        assert!(session.root.open_child_file(OsStr::new(&output)).is_err());
+        assert!(session.root.open_child_file(OsStr::new(output)).is_err());
     }
 }
 

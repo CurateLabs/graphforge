@@ -1,11 +1,11 @@
 use super::controls::control_temp;
-use super::intake::write_run;
 use super::intake::{chunk_key_name, write_parquet};
 use super::recovery::inject_shape_publication_failure;
 use super::recovery::is_owned_artifact_temp;
 use super::shape::resolve_endpoint_surrogates;
 include!("../construction_detail_tests.rs");
 include!("../construction_lifecycle_tests.rs");
+include!("../construction_determinism_tests.rs");
 use std::sync::Arc;
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
@@ -399,11 +399,23 @@ fn catalog_shape_preserves_parent_ids_history_and_ignores_null_observations() {
 }
 
 #[test]
-fn million_chunk_online_scheduler_has_logarithmic_name_state() {
-    let slots = online_merge_name_slot_bound(1_000_000, 32);
-    assert!(slots <= 31 * 4, "retained slots: {slots}");
-    assert!(slots < 1_000_000 / 1_000);
-    assert_eq!(GraphConstructionBudgets::default().max_schema_groups, 256);
+fn million_chunk_shaping_retains_name_state_bounded_by_the_partition_count() {
+    // The online merge scheduler's logarithmic name state is gone: range
+    // partitioning retains exactly one spill name per partition per family,
+    // independent of how many chunks were staged.
+    let budgets = GraphConstructionBudgets::default();
+    assert_eq!(budgets.max_chunks, 1_000_000);
+    let families = super::partition_shaping::PartitionFamily::ALL.len() as u64;
+    let slots = u64::from(budgets.partition_count) * families;
+    // Name state is a function of the recorded partition count and the family
+    // set, never of the staged chunk count.
+    assert_eq!(slots, 1_280, "retained slots: {slots}");
+    assert!(slots < budgets.max_chunks / 100, "retained slots: {slots}");
+    assert_eq!(budgets.max_schema_groups, 256);
+    assert_eq!(
+        budgets.partition_count,
+        super::partition::DEFAULT_PARTITION_COUNT
+    );
 }
 
 #[test]
@@ -970,9 +982,9 @@ fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
     let expected = without_native_identities(reference.evidence().clone());
 
     for failpoint in [
-        "shape.fixed.after_install",
-        "shape.fixed_merge.after_install",
-        "shape.row_merge.after_install",
+        "shape.partition_spill.after_install",
+        "shape.partition_output.after_install",
+        "shape.row_partition.after_install",
         "shape.after_complete_inventory",
         "shape.after_evidence_checkpoint",
     ] {
