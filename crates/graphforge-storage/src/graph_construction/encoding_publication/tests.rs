@@ -836,9 +836,17 @@ fn canonical_encoder_reuse_accounts_only_second_invocation_io() {
             .evidence()
             .cache_release_operations
             .saturating_sub(cache_after_first),
-        // Entry and exit successor authentication each read the same
-        // encoded payloads once, in addition to encoder reuse authentication.
-        3 * second.invocation.evidence.cache_release_operations
+        // #1417: entry and exit successor authentication
+        // (`reclaim_superseded_payloads_cancellable`'s has_encoding_successor
+        // branch, in supersession.rs) no longer re-reads the encoded
+        // inventory payloads here once `shape_retired` is already true — the
+        // predecessor those reads existed to protect before deleting is
+        // already gone after the first `encode_canonical` call, and
+        // `publish_canonical`'s CAS install independently re-authenticates
+        // every encoded artifact's content before installing it, so nothing
+        // is left unguarded. Only encoder-reuse authentication inside
+        // `encode_canonical` itself still reads these payloads, once.
+        second.invocation.evidence.cache_release_operations
     );
 }
 

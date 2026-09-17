@@ -56,15 +56,52 @@ impl GraphConstructionSession {
             {
                 return Err(storage("supersession encoding authority changed"));
             }
-            let work = crate::graph_construction_encoding::authenticate_inventory_payloads(
-                &output, &inventory, cancelled,
-            )?;
-            self.record_supersession_reads(work.input_read_bytes, work.input_read_operations)?;
-            account_encoding_cache_release(&work, &mut self.checkpoint.evidence)?;
+            // `shape_retired` is durable checkpoint state: it is only ever
+            // set to `true` after `retire_shape_payloads` has already
+            // unlinked every shape-output payload, in this process or an
+            // earlier one (it survives a crash/reopen exactly like the rest
+            // of `Checkpoint`). Once it is true, every *newly written*
+            // artifact this call would otherwise re-read here is one that
+            // `publish_canonical`'s CAS install
+            // (`graph_object_store::append_authenticated_mapped_graph_files`,
+            // via `encode_canonical`'s `sealed_files`) independently
+            // re-reads and rejects on a digest/length mismatch before it is
+            // ever installed or published — proven by
+            // `probe_encoded_artifact_corruption_after_full_retirement_before_publish`,
+            // which corrupts a same-inode, same-length byte after
+            // `shape_retired` and gets refused at that later boundary with
+            // "graph object source digest or length changed during
+            // install", not at this one. So once `shape_retired` is true,
+            // re-authenticating those artifacts *here* is a redundant
+            // repeat of a check an always-on downstream boundary already
+            // owns; skip it. `authenticate_retained_successors` is NOT
+            // skipped: retained parent artifacts are referenced from the
+            // parent generation rather than freshly installed, so CAS
+            // install's digest check never touches them, and this remains
+            // the only check standing between a corrupted retained parent
+            // object and a published generation that silently references it.
+            if !self.checkpoint.shape_retired {
+                let work = crate::graph_construction_encoding::authenticate_inventory_payloads(
+                    &output, &inventory, cancelled,
+                )?;
+                self.record_supersession_reads(work.input_read_bytes, work.input_read_operations)?;
+                account_encoding_cache_release(&work, &mut self.checkpoint.evidence)?;
+            }
             self.authenticate_retained_successors(&inventory, cancelled)?
         } else {
             read_completed_shape(&self.root, &self.checkpoint, false)?
                 .ok_or_else(|| storage("supersession shape is absent"))?;
+            // Unlike the encoding-inventory branch above, shape outputs are
+            // never installed into content-addressed storage on their own —
+            // they are read directly as `encode_canonical`'s input — so
+            // nothing downstream re-authenticates their bytes against
+            // `receipt.sha256` before consuming them. This full read stays
+            // unconditional on every call, regardless of `inputs_retired`:
+            // `shaping_recovery_refuses_same_inode_payload_corruption` and
+            // `retained_row_roots_cancellation_recovers_and_corruption_fails_closed`
+            // both regress (a same-inode, same-length corruption is silently
+            // accepted, even across a fresh process reopen) if this is gated
+            // the same way.
             for receipt in read_completed_shape_outputs(&self.root, &self.checkpoint)? {
                 let work = authenticate_payload(&self.root, &receipt, cancelled)?;
                 self.record_supersession_reads(work.bytes, work.operations)?;

@@ -1430,4 +1430,86 @@ mod lifecycle_budget {
             assert_eq!(std::fs::read(path).unwrap(), malformed);
         }
     }
+
+    #[test]
+    fn encoded_inventory_reread_skip_still_refuses_corruption_at_cas_install() {
+        // #1417: reclaim_superseded_payloads_cancellable's encoding-inventory
+        // branch skips its own full re-read once `shape_retired` is already
+        // true (the predecessor it exists to protect is already gone). This
+        // proves two things about that demotion in one test:
+        //
+        //  1. The skip is real: a second `prepare_canonical_encoding` call,
+        //     made after `shape_retired` is already true, succeeds even
+        //     though the encoded artifact was corrupted (same inode, same
+        //     byte length) in between. Without the demotion, this call would
+        //     itself fail closed with "canonical artifact differs from
+        //     inventory" — so this assertion fails on unfixed code, which is
+        //     the mutation-test requirement.
+        //  2. Nothing is silently accepted end-to-end: the corruption is
+        //     still refused, at `publish_canonical`'s CAS install boundary
+        //     (`graph_object_store::append_authenticated_mapped_graph_files`,
+        //     reached via `sealed_files` built from `encoding.artifacts` in
+        //     `encoding_publication.rs`), which independently re-reads and
+        //     rejects a digest/length mismatch before anything is published.
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let mut session = small_session(root.path());
+        session
+            .append(
+                ConstructionChunkKind::Node,
+                "nodes",
+                &node_property_batch(1, 3),
+            )
+            .unwrap();
+        session.seal().unwrap();
+        let encoded = session.prepare_canonical_encoding(1).unwrap();
+        assert!(session.checkpoint.shape_retired);
+
+        let output = session
+            .root
+            .open_child_directory(OsStr::new("encoded-v1"))
+            .unwrap();
+        let inventory = crate::graph_construction_encoding::read_inventory(&output)
+            .unwrap()
+            .unwrap();
+        let path = output.path().join("graph").join(&inventory.artifacts[0].path);
+        let before_identity = file_identity(&File::open(&path).unwrap()).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            file_identity(&File::open(&path).unwrap()).unwrap(),
+            before_identity,
+            "mutation must preserve inode and length"
+        );
+
+        // (1) The skip is real: this call re-enters
+        // reclaim_superseded_payloads_cancellable's has_encoding_successor()
+        // branch with shape_retired already true, so it does not re-read the
+        // now-corrupted artifact and returns the same inventory successfully.
+        // `invocation` is diagnostic bookkeeping for *this* call (correctly
+        // `performed: false` here, since it took the reconstruct-from-disk
+        // path rather than re-running `encode()`) and is deliberately not
+        // compared.
+        let reencoded = session.prepare_canonical_encoding(1).unwrap();
+        assert!(!reencoded.invocation.performed);
+        assert_eq!(reencoded.artifacts, encoded.artifacts);
+        assert_eq!(
+            reencoded.shape_authority_sha256,
+            encoded.shape_authority_sha256
+        );
+
+        // (2) End-to-end refusal still holds: publication's CAS install owns
+        // the check now and refuses the mismatch before anything installs.
+        let error = session
+            .publish_canonical(&encoded, Uuid::from_u128(119_501), Uuid::from_u128(119_502))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("graph object source digest or length changed during install"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }
