@@ -22,7 +22,7 @@ use normalization::contract_metadata;
 use normalization::uuid_column;
 pub use publication::bulk_receipt_schema;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{
@@ -346,9 +346,9 @@ fn open_membership_index(
 
 fn existing_edge_context(
     graph: &GraphForge,
-    endpoint_candidates: &BTreeSet<Uuid>,
-    edge_candidates: Option<&BTreeSet<Uuid>>,
-) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), BulkValidationError> {
+    endpoint_candidates: &[Uuid],
+    edge_candidates: Option<&[Uuid]>,
+) -> Result<(HashSet<Uuid>, HashSet<Uuid>), BulkValidationError> {
     let mut index = open_membership_index(graph, BulkInputKind::Edge)?;
     let known_nodes = indexed_existing(
         index.as_mut(),
@@ -357,7 +357,7 @@ fn existing_edge_context(
         BulkInputKind::Edge,
     )?;
     let Some(edge_candidates) = edge_candidates else {
-        return Ok((known_nodes, BTreeSet::new()));
+        return Ok((known_nodes, HashSet::new()));
     };
     let mut existing = indexed_existing(
         index.as_mut(),
@@ -374,41 +374,47 @@ fn existing_edge_context(
     Ok((known_nodes, existing))
 }
 
+/// Probe `candidates` (sorted, deduplicated) and return the subset the index
+/// already holds. Membership only: callers never iterate the result.
 fn indexed_existing(
     index: Option<&mut graphforge_storage::UuidMembershipIndex>,
-    candidates: &BTreeSet<Uuid>,
+    candidates: &[Uuid],
     index_kind: graphforge_storage::UuidIndexKind,
     input_kind: BulkInputKind,
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+) -> Result<HashSet<Uuid>, BulkValidationError> {
     let Some(index) = index else {
-        return Ok(BTreeSet::new());
+        return Ok(HashSet::new());
     };
-    let requested = candidates.iter().copied().collect::<Vec<_>>();
-    let (found, _) = index.probe(index_kind, &requested).map_err(|error| {
+    let (found, _) = index.probe(index_kind, candidates).map_err(|error| {
         contract_error(
             input_kind,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
     })?;
-    Ok(requested
-        .into_iter()
+    Ok(candidates
+        .iter()
+        .copied()
         .zip(found)
         .filter_map(|(uuid, present)| present.then_some(uuid))
         .collect())
 }
 
+/// Non-null UUIDs of `field`, sorted and deduplicated: the same set, in the
+/// same order, the `BTreeSet` this replaced iterated, without one tree insert
+/// per row (measured at 6.7% of validate's CPU at S18 for the three edge
+/// candidate sets).
 fn candidate_uuids(
     batches: &[RecordBatch],
     kind: BulkInputKind,
     field: &str,
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let mut values = BTreeSet::new();
+) -> Result<Vec<Uuid>, BulkValidationError> {
+    let mut values = Vec::with_capacity(batches.iter().map(RecordBatch::num_rows).sum());
     for batch in batches {
         let uuids = uuid_column(batch, kind, field)?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
-                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|error| {
+                values.push(Uuid::from_slice(uuids.value(row)).map_err(|error| {
                     contract_error(
                         kind,
                         BulkValidationReason::SchemaMismatch,
@@ -418,18 +424,20 @@ fn candidate_uuids(
             }
         }
     }
+    values.sort_unstable();
+    values.dedup();
     Ok(values)
 }
 
-fn candidate_endpoint_uuids(
-    batches: &[RecordBatch],
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+fn candidate_endpoint_uuids(batches: &[RecordBatch]) -> Result<Vec<Uuid>, BulkValidationError> {
     let mut values = candidate_uuids(batches, BulkInputKind::Edge, "source_uuid")?;
     values.extend(candidate_uuids(
         batches,
         BulkInputKind::Edge,
         "target_uuid",
     )?);
+    values.sort_unstable();
+    values.dedup();
     Ok(values)
 }
 

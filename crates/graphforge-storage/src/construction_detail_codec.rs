@@ -44,7 +44,28 @@ impl DetailCodec {
         Ok(&record[..prefix + 1 + length])
     }
 
+    /// Wire bytes of a record that already passed [`Self::bytes`] or
+    /// [`Self::read`]: the length byte is bounds-checked, nothing else is
+    /// re-derived. Records in memory are built zero-padded by their producers
+    /// (`extract_runs`, `read`), so rescanning the padding on every routing,
+    /// sort and encode pass proved nothing about the wire and cost a 250-byte
+    /// scan per record per pass.
+    pub(crate) fn wire<const N: usize>(self, record: &[u8; N]) -> io::Result<&[u8]> {
+        let Self::Compact = self;
+        let prefix = prefix::<N>()?;
+        let length = usize::from(record[prefix]);
+        if length == 0 {
+            return Err(invalid("empty construction detail name"));
+        }
+        Ok(&record[..prefix + 1 + length])
+    }
+
     /// Return a bounded padded in-memory record, preserving existing consumers.
+    ///
+    /// The record is zero-initialised here and only `prefix + 1 + length`
+    /// bytes are filled from the reader, so the padding is zero by
+    /// construction; only the name is validated (non-empty, UTF-8), which is
+    /// exactly what [`Self::bytes`] checks on the wire-bearing bytes.
     pub(crate) fn read<const N: usize>(
         self,
         reader: &mut impl Read,
@@ -66,7 +87,8 @@ impl DetailCodec {
         }
         let end = prefix + 1 + length;
         reader.read_exact(&mut record[prefix + 1..end])?;
-        self.bytes(&record)?;
+        std::str::from_utf8(&record[prefix + 1..end])
+            .map_err(|_| invalid("construction detail name is not UTF-8"))?;
         Ok(Some(record))
     }
 }

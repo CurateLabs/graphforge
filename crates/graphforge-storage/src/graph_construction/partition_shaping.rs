@@ -28,9 +28,13 @@ use super::{
 };
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
-use arrow::array::{Array, RecordBatch, UInt32Array};
+use arrow::array::{
+    Array, ArrayRef, BinaryArray, LargeBinaryArray, LargeStringArray, RecordBatch, StringArray,
+    UInt32Array,
+};
+use arrow::buffer::NullBuffer;
 use arrow::compute::{concat_batches, take_record_batch};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, SchemaRef};
 use graphforge_core::GfError;
 use graphforge_filesystem::{FileIdentity, file_identity};
 use parquet::arrow::ArrowWriter;
@@ -1225,6 +1229,147 @@ impl<'a> RowRangePartitioner<'a> {
     }
 }
 
+/// Bytes one row of a column contributes to the row-group byte window.
+///
+/// This is exactly `column.slice(row, 1).to_data().get_slice_memory_size()`
+/// (arrow-data's per-buffer accounting for a one-row slice: fixed-width
+/// buffers contribute their width, a variable-width buffer contributes the
+/// value's bytes plus one offset, a present null buffer contributes one byte)
+/// computed without materialising a one-row `ArrayData` per row per column.
+/// That materialisation was four heap allocations per row per column: 52M of
+/// the 104M allocations `validate` made at S18, measured with heaptrack. Any
+/// type outside the enumerated fast paths still takes the exact arrow
+/// computation, so the boundaries, and therefore the shaped bytes, are
+/// unchanged for every schema.
+enum RowBytes<'a> {
+    Constant(usize),
+    Utf8(&'a StringArray, usize),
+    LargeUtf8(&'a LargeStringArray, usize),
+    Binary(&'a BinaryArray, usize),
+    LargeBinary(&'a LargeBinaryArray, usize),
+    Exact(&'a ArrayRef),
+}
+
+/// A column's row sizer plus its validity buffer, if any.
+struct RowSizer<'a> {
+    bytes: RowBytes<'a>,
+    nulls: Option<&'a NullBuffer>,
+}
+
+impl<'a> RowSizer<'a> {
+    fn of(column: &'a ArrayRef) -> Self {
+        Self {
+            bytes: RowBytes::of(column),
+            nulls: column.nulls(),
+        }
+    }
+
+    fn at(&self, row: usize) -> Result<usize, GfError> {
+        // `ArrayData` drops a validity buffer whose null count is zero, so a
+        // one-row slice carries one validity byte exactly when that row is
+        // null (arrow-data `ArrayDataBuilder::build`).
+        let null = usize::from(
+            !self.bytes.counts_validity() && self.nulls.is_some_and(|nulls| nulls.is_null(row)),
+        );
+        self.bytes
+            .at(row)?
+            .checked_add(null)
+            .ok_or_else(|| super::storage("partition row byte total overflows"))
+    }
+}
+
+impl<'a> RowBytes<'a> {
+    fn of(column: &'a ArrayRef) -> Self {
+        let any = column.as_any();
+        match column.data_type() {
+            DataType::FixedSizeBinary(width) => match usize::try_from(*width) {
+                Ok(width) => Self::Constant(width),
+                Err(_) => Self::Exact(column),
+            },
+            DataType::Boolean => Self::Constant(1),
+            DataType::Utf8 => match any.downcast_ref::<StringArray>() {
+                Some(array) => Self::Utf8(array, 4),
+                None => Self::Exact(column),
+            },
+            DataType::LargeUtf8 => match any.downcast_ref::<LargeStringArray>() {
+                Some(array) => Self::LargeUtf8(array, 8),
+                None => Self::Exact(column),
+            },
+            DataType::Binary => match any.downcast_ref::<BinaryArray>() {
+                Some(array) => Self::Binary(array, 4),
+                None => Self::Exact(column),
+            },
+            DataType::LargeBinary => match any.downcast_ref::<LargeBinaryArray>() {
+                Some(array) => Self::LargeBinary(array, 8),
+                None => Self::Exact(column),
+            },
+            primitive @ (DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Timestamp(_, _)
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Duration(_)
+            | DataType::Interval(_)
+            | DataType::Decimal32(_, _)
+            | DataType::Decimal64(_, _)
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)) => match primitive.primitive_width() {
+                Some(width) => Self::Constant(width),
+                None => Self::Exact(column),
+            },
+            _ => Self::Exact(column),
+        }
+    }
+
+    fn at(&self, row: usize) -> Result<usize, GfError> {
+        let value = |length: usize, base: usize| {
+            length
+                .checked_add(base)
+                .ok_or_else(|| super::storage("partition row byte total overflows"))
+        };
+        match self {
+            Self::Constant(bytes) => Ok(*bytes),
+            Self::Utf8(array, base) => value(
+                usize::try_from(array.value_length(row)).map_err(super::storage)?,
+                *base,
+            ),
+            Self::LargeUtf8(array, base) => value(
+                usize::try_from(array.value_length(row)).map_err(super::storage)?,
+                *base,
+            ),
+            Self::Binary(array, base) => value(
+                usize::try_from(array.value_length(row)).map_err(super::storage)?,
+                *base,
+            ),
+            Self::LargeBinary(array, base) => value(
+                usize::try_from(array.value_length(row)).map_err(super::storage)?,
+                *base,
+            ),
+            Self::Exact(column) => column
+                .slice(row, 1)
+                .to_data()
+                .get_slice_memory_size()
+                .map_err(super::storage),
+        }
+    }
+
+    /// Whether [`Self::at`] already includes the row's validity byte.
+    const fn counts_validity(&self) -> bool {
+        matches!(self, Self::Exact(_))
+    }
+}
+
 /// Write one sorted partition as row groups bounded by row count and bytes.
 ///
 /// Boundaries are a pure function of the sorted row sequence, never of arrival
@@ -1238,17 +1383,19 @@ fn write_bounded_row_groups<W: Write + Send>(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<(), GfError> {
+    let sizers = sorted
+        .columns()
+        .iter()
+        .map(RowSizer::of)
+        .collect::<Vec<_>>();
     let mut start = 0;
     while start < sorted.num_rows() {
         let mut length = 0;
         let mut bytes = 0_usize;
         while start + length < sorted.num_rows() && length < output_rows {
-            let row_bytes = sorted.columns().iter().try_fold(0_usize, |total, column| {
-                column
-                    .slice(start + length, 1)
-                    .to_data()
-                    .get_slice_memory_size()
-                    .map_err(super::storage)?
+            let row_bytes = sizers.iter().try_fold(0_usize, |total, sizer| {
+                sizer
+                    .at(start + length)?
                     .checked_add(total)
                     .ok_or_else(|| super::storage("partition row byte total overflows"))
             })?;
@@ -1276,4 +1423,94 @@ fn write_bounded_row_groups<W: Write + Send>(
         reject_cancelled(cancelled)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod row_bytes_tests {
+    use super::{RowBytes, RowSizer};
+    use arrow::array::{
+        Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array,
+        LargeStringArray, ListArray, StringArray,
+    };
+    use arrow::datatypes::{DataType, Field, Int32Type};
+    use std::sync::Arc;
+
+    fn exact(column: &ArrayRef, row: usize) -> usize {
+        column
+            .slice(row, 1)
+            .to_data()
+            .get_slice_memory_size()
+            .unwrap()
+    }
+
+    /// Every fast path must agree with arrow's own one-row accounting, with
+    /// and without a null buffer, or the row-group boundaries would move.
+    #[test]
+    fn row_bytes_match_arrow_slice_accounting_for_every_fast_path() {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter([[1_u8; 16], [2; 16], [3; 16]].into_iter())
+                    .unwrap(),
+            ),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    [Some([1_u8; 16]), None, Some([3; 16])].into_iter(),
+                    16,
+                )
+                .unwrap(),
+            ),
+            Arc::new(StringArray::from(vec![
+                "EDGE",
+                "",
+                "a much longer route name",
+            ])),
+            Arc::new(StringArray::from(vec![Some("x"), None, Some("yyy")])),
+            Arc::new(LargeStringArray::from(vec![Some("x"), None, Some("yyy")])),
+            Arc::new(BinaryArray::from(vec![
+                Some(&b"ab"[..]),
+                None,
+                Some(&b"abcd"[..]),
+            ])),
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(BooleanArray::from(vec![true, false, true])),
+            Arc::new(BooleanArray::from(vec![Some(true), None, Some(true)])),
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+                Some(vec![Some(1), Some(2)]),
+                None,
+                Some(vec![Some(3)]),
+            ])),
+        ];
+        for column in &columns {
+            assert!(matches!(
+                column.data_type(),
+                DataType::FixedSizeBinary(_)
+                    | DataType::Utf8
+                    | DataType::LargeUtf8
+                    | DataType::Binary
+                    | DataType::Int64
+                    | DataType::Float64
+                    | DataType::Boolean
+                    | DataType::List(_)
+            ));
+            let sizer = RowSizer::of(column);
+            for row in 0..column.len() {
+                assert_eq!(
+                    sizer.at(row).unwrap(),
+                    exact(column, row),
+                    "{:?} row {row}",
+                    column.data_type()
+                );
+            }
+        }
+        let list = columns.last().unwrap();
+        assert!(matches!(RowBytes::of(list), RowBytes::Exact(_)));
+        // A non-null row of a nullable column costs no validity byte; a null
+        // row costs one. Both are covered above; pin them explicitly.
+        let nullable: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None]));
+        assert_eq!(RowSizer::of(&nullable).at(0).unwrap(), 8);
+        assert_eq!(RowSizer::of(&nullable).at(1).unwrap(), 9);
+        let _ = Field::new("unused", DataType::Null, true);
+    }
 }
