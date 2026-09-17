@@ -28,6 +28,7 @@ pub mod hub_fixture_artifacts;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
+mod verify_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -318,6 +319,9 @@ enum Command {
     Recovery,
     /// Emit authenticated, identity-free retained storage attribution.
     StorageAttribution,
+    /// Explicitly re-authenticate the retained store on demand. Read-only;
+    /// never runs as part of ingest.
+    Verify,
 }
 
 #[derive(serde::Serialize)]
@@ -1378,6 +1382,9 @@ fn run_with_allocation(
             return run_storage_attribution(graph, &path, cli.json, output, allocation)
                 .map(|()| 0)
                 .map_err(Into::into);
+        }
+        Command::Verify => {
+            return verify_cli::run_verify(&graph, cli.json, output).map_err(Into::into);
         }
         Command::Transaction { command } => {
             return maintenance_cli::run_transaction(&graph, command, cli.json, output)

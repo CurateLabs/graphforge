@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "3862aaa8a3f03efbf83a3360a97352a576611b94761af5d2a87891007fd41be6",
+  "public_method_digest": "579ecfaa8ec837a88c55b6a5d7adb2e2d3b3f0ec1365e09b682048c2495d2f27",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -269,6 +269,7 @@
         "GraphForge.relationship_types",
         "GraphForge.storage_attribution",
         "GraphForge.storage_attribution_receipt",
+        "GraphForge.verify_project_store",
         "GraphForge.workspace_configuration",
         "GraphForge.workspace_ontology"
       ],
@@ -304,6 +305,10 @@
         {
           "path": "crates/graphforge-api/tests/permanent_storage_budgets.rs",
           "symbol": "ontology_promotion_cancellation_and_conflict_preserve_prior_view"
+        },
+        {
+          "path": "crates/graphforge-api/src/lib.rs",
+          "symbol": "public_verify_project_store_reports_a_clean_fresh_project"
         }
       ]
     },

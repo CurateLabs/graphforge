@@ -321,23 +321,18 @@ fn validate_revert_source(
     lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<(), GfError> {
     generation.validate_complete_participant_inventory()?;
-    let _workspace = crate::hydrate_graph_workspace(generation, true)?;
-    let _ontology = generation
-        .participant_snapshot(
-            graphforge_storage::WORKSPACE_CAPABILITY_ID,
-            graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY,
-        )?
-        .map(|snapshot| graphforge_storage::WorkspaceOntology::from_canonical_json(&snapshot.bytes))
-        .transpose()?;
-    let _configuration = generation
-        .participant_snapshot(
-            graphforge_storage::WORKSPACE_CAPABILITY_ID,
-            graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY,
-        )?
-        .map(|snapshot| {
-            graphforge_storage::WorkspaceConfiguration::from_canonical_json(&snapshot.bytes)
-        })
-        .transpose()?;
+    // The workspace tree walk (including any graph-delta replay
+    // materialization) and the ontology/configuration snapshot reads are not
+    // repeated here: `revert_to_checkpoint`'s caller runs
+    // `GraphForge::open_resolved_with_options` on this exact `generation`
+    // with the same `read_only = true` immediately after this function
+    // returns Ok, still inside the same pre-commit closure. That call
+    // performs `hydrate_graph_workspace` and `load_workspace_ontology`
+    // (which itself reads and parses both the ontology and configuration
+    // participants) against identical inputs, so it fails closed on the same
+    // corruption this would have caught, with the same error, before the
+    // revert can commit. Duplicating those reads here would recompile a
+    // value already about to be independently re-derived and verified.
     let _records = logical_records(
         generation,
         CheckpointDiffScope::All,
@@ -1900,5 +1895,49 @@ mod tests {
                 "failed revert must not advance CURRENT for {corrupt}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement for #1404, not part of the regular suite"]
+    fn measure_revert_wall_time() {
+        const ITERATIONS: u128 = 100;
+        let directory = tempdir().unwrap();
+        let mut graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        graph.execute("CREATE (:Stable {value: 1})").unwrap();
+        graph
+            .checkpoint(CheckpointRequest {
+                name: "Stable".into(),
+                description: None,
+                idempotency_key: operation(9_000),
+                actor_uuid: None,
+            })
+            .unwrap();
+
+        // Warm up (page cache, allocator).
+        graph
+            .revert_to_checkpoint(RevertCheckpointRequest {
+                name: "Stable".into(),
+                reason: "warmup".into(),
+                idempotency_key: operation(9_001),
+                actor_uuid: None,
+            })
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        for i in 0..ITERATIONS {
+            graph
+                .revert_to_checkpoint(RevertCheckpointRequest {
+                    name: "Stable".into(),
+                    reason: "measure".into(),
+                    idempotency_key: operation(9_100 + i),
+                    actor_uuid: None,
+                })
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "revert_to_checkpoint: iterations={ITERATIONS} total={elapsed:?} ({:?}/call)",
+            elapsed / u32::try_from(ITERATIONS).unwrap(),
+        );
     }
 }
