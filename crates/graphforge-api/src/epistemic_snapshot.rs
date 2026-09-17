@@ -1,6 +1,6 @@
 //! Deterministic transaction-time composition of append-only epistemic records.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 use arrow::array::{
@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_knowledge::{
     AssertionLedger, AssertionStatusLedger, AssertionSupersessionLedger, ConfidenceLedger,
-    HypothesisLedger, ReasoningLedger,
+    HypothesisLedger, HypothesisMembershipAction, ReasoningLedger,
 };
 use uuid::Uuid;
 
@@ -72,23 +72,121 @@ struct SnapshotRow {
     sources: Vec<Uuid>,
 }
 
+/// Decoded epistemic ledgers cached for one immutable read generation.
+///
+/// # What invalidates this cache
+///
+/// The key is `(generation_uuid, manifest_sha256)` from the
+/// [`graphforge_storage::ResolvedProjectGeneration`] the read was made against.
+/// A `ResolvedProjectGeneration` denotes one immutable, already-committed
+/// generation (see `graphforge_storage::project_generation`, "Resolution of
+/// the one committed immutable project generation") — its participant bytes
+/// never change after the generation is published, and every publish mints a
+/// fresh `generation_uuid` (`Uuid::now_v7()`). So:
+///
+/// - Two calls against the *same* generation are guaranteed byte-identical:
+///   a cache hit returns exactly what a fresh read would have returned.
+/// - A write that publishes a new generation between calls changes
+///   `current_generation_uuid`, so the next `generation_for_read()` resolves
+///   a different `ResolvedProjectGeneration` with a different
+///   `generation_uuid`. The lookup keys no longer match, it is a cache miss,
+///   and the six ledgers are re-read and re-decoded from the new generation.
+///
+/// There is no time-based or manual invalidation because none is needed: the
+/// key itself cannot alias two different sets of ledger bytes.
+pub(crate) struct EpistemicLedgerCache {
+    generation_uuid: Uuid,
+    manifest_sha256: [u8; 32],
+    assertions: AssertionLedger,
+    statuses: AssertionStatusLedger,
+    reasoning: ReasoningLedger,
+    supersessions: AssertionSupersessionLedger,
+    hypotheses: HypothesisLedger,
+    confidence: ConfidenceLedger,
+}
+
+#[allow(clippy::type_complexity)]
+fn read_ledgers_cached(
+    graph: &GraphForge,
+    generation: &graphforge_storage::ResolvedProjectGeneration,
+) -> Result<
+    (
+        AssertionLedger,
+        AssertionStatusLedger,
+        ReasoningLedger,
+        AssertionSupersessionLedger,
+        HypothesisLedger,
+        ConfidenceLedger,
+    ),
+    GfError,
+> {
+    let generation_uuid = generation.generation_uuid();
+    let manifest_sha256 = generation.manifest_sha256();
+    {
+        let cached = graph
+            .epistemic_ledger_cache
+            .lock()
+            .expect("epistemic ledger cache lock poisoned");
+        if let Some(entry) = cached.as_ref() {
+            if entry.generation_uuid == generation_uuid && entry.manifest_sha256 == manifest_sha256
+            {
+                return Ok((
+                    entry.assertions.clone(),
+                    entry.statuses.clone(),
+                    entry.reasoning.clone(),
+                    entry.supersessions.clone(),
+                    entry.hypotheses.clone(),
+                    entry.confidence.clone(),
+                ));
+            }
+        }
+    }
+    let assertions = crate::knowledge::read_ledger(generation)?;
+    let statuses = crate::knowledge::read_status_ledger(generation)?;
+    let reasoning = crate::knowledge::read_reasoning_ledger(generation)?;
+    let supersessions = crate::knowledge::read_supersession_ledger(generation)?;
+    let hypotheses = crate::hypotheses::read_ledger(generation)?;
+    let confidence = crate::knowledge::read_confidence_ledger(generation)?;
+    let mut cached = graph
+        .epistemic_ledger_cache
+        .lock()
+        .expect("epistemic ledger cache lock poisoned");
+    *cached = Some(EpistemicLedgerCache {
+        generation_uuid,
+        manifest_sha256,
+        assertions: assertions.clone(),
+        statuses: statuses.clone(),
+        reasoning: reasoning.clone(),
+        supersessions: supersessions.clone(),
+        hypotheses: hypotheses.clone(),
+        confidence: confidence.clone(),
+    });
+    Ok((
+        assertions,
+        statuses,
+        reasoning,
+        supersessions,
+        hypotheses,
+        confidence,
+    ))
+}
+
 impl GraphForge {
     /// Reconstruct one deterministic epistemic view at transaction-time `cutoff_micros`.
     ///
     /// The result contains one row per visible assertion followed by one row per
     /// visible hypothesis group. Statusless assertions and unselected/empty
-    /// groups remain explicit. No current-state cache participates.
+    /// groups remain explicit. No current-*state* cache participates: the
+    /// cutoff-filtered composition below is always recomputed. Only the raw,
+    /// unfiltered ledger reads are cached (see [`EpistemicLedgerCache`]),
+    /// since every cutoff over one generation reads the same underlying bytes.
     pub fn epistemic_snapshot(
         &self,
         cutoff_micros: i64,
     ) -> Result<graphforge_exec::ExecutionResult, GfError> {
         let generation = self.generation_for_read()?;
-        let assertions = crate::knowledge::read_ledger(&generation)?;
-        let statuses = crate::knowledge::read_status_ledger(&generation)?;
-        let reasoning = crate::knowledge::read_reasoning_ledger(&generation)?;
-        let supersessions = crate::knowledge::read_supersession_ledger(&generation)?;
-        let hypotheses = crate::hypotheses::read_ledger(&generation)?;
-        let confidence = crate::knowledge::read_confidence_ledger(&generation)?;
+        let (assertions, statuses, reasoning, supersessions, hypotheses, confidence) =
+            read_ledgers_cached(self, &generation)?;
         let rows = compose_rows(
             cutoff_micros,
             assertions,
@@ -271,66 +369,138 @@ fn compose_rows(
         }
     }
 
+    // Every quantity below is grouped by its owning assertion/group in one
+    // linear pass over its source ledger, instead of being recomputed with a
+    // fresh `O(ledger size)` scan for every assertion/group (which made the
+    // composition below quadratic: `O(assertions * (reasoning + statuses +
+    // supersessions))`). Each map lookup in the two loops further down is
+    // `O(1)` amortised, so the whole function is now linear in the total
+    // number of rows read across every ledger.
+    let mut history_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut superseded_reasoning_by_assertion: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+    for row in &reasoning.records {
+        history_by_assertion
+            .entry(row.assertion_uuid)
+            .or_default()
+            .push(row.reasoning_uuid);
+        if let Some(predecessor) = row.supersedes_reasoning_uuid {
+            superseded_reasoning_by_assertion
+                .entry(row.assertion_uuid)
+                .or_default()
+                .insert(predecessor);
+        }
+    }
+
+    let mut current_status_by_assertion: HashMap<Uuid, (i64, Uuid, &'static str)> = HashMap::new();
+    let mut status_event_uuids_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut status_extra_sources_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for event in &statuses.events {
+        status_event_uuids_by_assertion
+            .entry(event.assertion_uuid)
+            .or_default()
+            .push(event.status_event_uuid);
+        let extra = status_extra_sources_by_assertion
+            .entry(event.assertion_uuid)
+            .or_default();
+        extra.extend(event.confidence_uuid);
+        extra.extend(event.reasoning_uuid);
+        let candidate = (event.recorded_at_micros, event.status_event_uuid, event.status.as_str());
+        current_status_by_assertion
+            .entry(event.assertion_uuid)
+            .and_modify(|existing| {
+                if (candidate.0, candidate.1) >= (existing.0, existing.1) {
+                    *existing = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let mut superseded_by_prior: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut supersession_uuids_by_assertion: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for relation in supersessions.relations() {
+        superseded_by_prior
+            .entry(relation.prior_assertion_uuid)
+            .or_default()
+            .push(relation.replacement_assertion_uuid);
+        supersession_uuids_by_assertion
+            .entry(relation.prior_assertion_uuid)
+            .or_default()
+            .push(relation.supersession_uuid);
+        if relation.replacement_assertion_uuid != relation.prior_assertion_uuid {
+            supersession_uuids_by_assertion
+                .entry(relation.replacement_assertion_uuid)
+                .or_default()
+                .push(relation.supersession_uuid);
+        }
+    }
+
+    let mut membership_state_by_group: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
+    let mut membership_event_uuids_by_group: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for event in hypotheses.membership_events() {
+        membership_event_uuids_by_group
+            .entry(event.group_uuid)
+            .or_default()
+            .push(event.membership_event_uuid);
+        let state = membership_state_by_group.entry(event.group_uuid).or_default();
+        match event.action {
+            HypothesisMembershipAction::Added => {
+                state.insert(event.assertion_uuid);
+            }
+            HypothesisMembershipAction::Removed => {
+                state.remove(&event.assertion_uuid);
+            }
+        }
+    }
+
+    let mut current_selection_by_group: HashMap<Uuid, Option<Uuid>> = HashMap::new();
+    let mut selection_event_uuids_by_group: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for event in hypotheses.selection_events() {
+        selection_event_uuids_by_group
+            .entry(event.group_uuid)
+            .or_default()
+            .push(event.selection_event_uuid);
+        // Forward iteration + overwrite is exactly `Vec::rfind` from the end:
+        // the last match in original ledger order wins either way.
+        current_selection_by_group.insert(event.group_uuid, event.selected_assertion_uuid);
+    }
+
     let mut rows = Vec::with_capacity(assertions.assertions.len() + hypotheses.groups().len());
     for assertion in &assertions.assertions {
-        let status = statuses.current_for(assertion.assertion_uuid);
-        let history = reasoning
-            .records
-            .iter()
-            .filter(|row| row.assertion_uuid == assertion.assertion_uuid)
-            .map(|row| row.reasoning_uuid)
-            .collect::<Vec<_>>();
-        let superseded_reasoning = reasoning
-            .records
-            .iter()
-            .filter(|row| row.assertion_uuid == assertion.assertion_uuid)
-            .filter_map(|row| row.supersedes_reasoning_uuid)
-            .collect::<HashSet<_>>();
+        let status = current_status_by_assertion.get(&assertion.assertion_uuid);
+        let history = history_by_assertion
+            .get(&assertion.assertion_uuid)
+            .cloned()
+            .unwrap_or_default();
+        let superseded_reasoning = superseded_reasoning_by_assertion.get(&assertion.assertion_uuid);
         let leaves = history
             .iter()
-            .filter(|uuid| !superseded_reasoning.contains(uuid))
+            .filter(|uuid| !superseded_reasoning.is_some_and(|set| set.contains(uuid)))
             .copied()
             .collect::<Vec<_>>();
-        let superseded_by = supersessions
-            .relations()
-            .iter()
-            .filter(|row| row.prior_assertion_uuid == assertion.assertion_uuid)
-            .map(|row| row.replacement_assertion_uuid)
-            .collect::<Vec<_>>();
+        let superseded_by = superseded_by_prior
+            .get(&assertion.assertion_uuid)
+            .cloned()
+            .unwrap_or_default();
         let mut sources = BTreeSet::from([assertion.assertion_uuid]);
-        sources.extend(
-            statuses
-                .events
-                .iter()
-                .filter(|row| row.assertion_uuid == assertion.assertion_uuid)
-                .map(|row| row.status_event_uuid),
-        );
-        for event in statuses
-            .events
-            .iter()
-            .filter(|row| row.assertion_uuid == assertion.assertion_uuid)
+        if let Some(status_event_uuids) = status_event_uuids_by_assertion.get(&assertion.assertion_uuid)
         {
-            sources.extend(event.confidence_uuid);
-            sources.extend(event.reasoning_uuid);
+            sources.extend(status_event_uuids.iter().copied());
+        }
+        if let Some(extra) = status_extra_sources_by_assertion.get(&assertion.assertion_uuid) {
+            sources.extend(extra.iter().copied());
         }
         sources.extend(history.iter().copied());
-        sources.extend(
-            supersessions
-                .relations()
-                .iter()
-                .filter(|row| {
-                    row.prior_assertion_uuid == assertion.assertion_uuid
-                        || row.replacement_assertion_uuid == assertion.assertion_uuid
-                })
-                .map(|row| row.supersession_uuid),
-        );
+        if let Some(supersession_uuids) = supersession_uuids_by_assertion.get(&assertion.assertion_uuid)
+        {
+            sources.extend(supersession_uuids.iter().copied());
+        }
         rows.push(SnapshotRow {
             entity_kind: "assertion",
             assertion_uuid: Some(assertion.assertion_uuid),
             group_uuid: None,
             question_key: None,
-            status: status.map(|row| row.status.as_str()),
-            status_event_uuid: status.map(|row| row.status_event_uuid),
+            status: status.map(|(_, _, status_str)| *status_str),
+            status_event_uuid: status.map(|(_, status_event_uuid, _)| *status_event_uuid),
             reasoning_history: history,
             reasoning_leaves: leaves,
             superseded_by,
@@ -340,23 +510,24 @@ fn compose_rows(
         });
     }
     for group in hypotheses.groups() {
-        let members = hypotheses.current_members(group.group_uuid);
-        let selected = hypotheses.current_selection(group.group_uuid);
+        let mut members = membership_state_by_group
+            .get(&group.group_uuid)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<Vec<_>>();
+        members.sort_unstable();
+        let selected = current_selection_by_group
+            .get(&group.group_uuid)
+            .copied()
+            .flatten();
         let mut sources = BTreeSet::from([group.group_uuid]);
-        sources.extend(
-            hypotheses
-                .membership_events()
-                .iter()
-                .filter(|row| row.group_uuid == group.group_uuid)
-                .map(|row| row.membership_event_uuid),
-        );
-        sources.extend(
-            hypotheses
-                .selection_events()
-                .iter()
-                .filter(|row| row.group_uuid == group.group_uuid)
-                .map(|row| row.selection_event_uuid),
-        );
+        if let Some(membership_event_uuids) = membership_event_uuids_by_group.get(&group.group_uuid) {
+            sources.extend(membership_event_uuids.iter().copied());
+        }
+        if let Some(selection_event_uuids) = selection_event_uuids_by_group.get(&group.group_uuid) {
+            sources.extend(selection_event_uuids.iter().copied());
+        }
         rows.push(SnapshotRow {
             entity_kind: "hypothesis_group",
             assertion_uuid: None,
@@ -515,8 +686,6 @@ fn append_optional_uuid(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use arrow::array::{Array, FixedSizeBinaryArray, ListArray, StringArray};
 
     use super::*;
@@ -527,8 +696,8 @@ mod tests {
         RecordHypothesisSelectionRequest, RecordReasoningRequest, WriteContext,
     };
     use graphforge_knowledge::{
-        AssertionGraphRole, AssertionStatus, GraphObjectKind, HypothesisMembershipAction,
-        ReasoningContentFormat, ReasoningKind,
+        AssertionGraphRole, AssertionStatus, GraphObjectKind, ReasoningContentFormat,
+        ReasoningKind,
     };
 
     fn uuid7(seed: u8) -> Uuid {
@@ -772,5 +941,157 @@ mod tests {
                 .get("graphforge.snapshot_fingerprint")
         );
         assert_eq!(current.batches[0], reopened_current.batches[0]);
+    }
+
+    fn uuid7_from_u32(seed: u32) -> Uuid {
+        let word = seed.to_be_bytes();
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&word);
+        bytes[4..8].copy_from_slice(&word);
+        bytes[8..12].copy_from_slice(&word);
+        bytes[12..16].copy_from_slice(&word);
+        bytes[6] = (bytes[6] & 0x0f) | 0x70;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn context_u32(seed: u32) -> WriteContext {
+        WriteContext {
+            operation_uuid: OperationId(uuid7_from_u32(seed)),
+            actor_uuid: None,
+        }
+    }
+
+    /// Manual perf measurement for issue #1410. Not part of CI. Run with:
+    /// `cargo test -p graphforge-api --lib epistemic_snapshot::tests::measure_snapshot_cost --release -- --ignored --nocapture`
+    ///
+    /// Builds two epistemic graphs an order of magnitude apart in assertion
+    /// count. Every assertion carries one reasoning record and one status
+    /// event, so every ledger `epistemic_snapshot` reads grows with `n` —
+    /// the shape the issue describes as quadratic. For each size this times:
+    ///   - a "cold" call: the first `epistemic_snapshot` in the process
+    ///     against that generation, which must do real ledger reads;
+    ///   - four subsequent "warm" calls against the same, unchanged
+    ///     generation (reporting the minimum), which a per-generation ledger
+    ///     cache can serve without re-reading or re-decoding anything.
+    /// It also reports the exact on-disk byte size of every participant file
+    /// a full ledger read touches, using the same public
+    /// `participant_snapshot` the production read path calls, so the byte
+    /// count is measured, not estimated.
+    #[test]
+    #[ignore = "manual perf measurement, not part of CI"]
+    fn measure_snapshot_cost() {
+        const PARTICIPANTS: [(&str, &str); 10] = [
+            ("knowledge", "assertions"),
+            ("knowledge", "assertion_graph_refs"),
+            ("knowledge", "confidence_assessments"),
+            ("knowledge", "confidence_inputs"),
+            ("epistemic", "reasoning"),
+            ("epistemic", "assertion_status_events"),
+            ("epistemic", "assertion_supersessions"),
+            ("epistemic", "hypothesis_groups"),
+            ("epistemic", "hypothesis_membership_events"),
+            ("epistemic", "hypothesis_selection_events"),
+        ];
+
+        for &n in &[100u32, 3_000u32] {
+            let root = tempfile::tempdir().unwrap();
+            let graph = GraphForge::new(root.path().to_str()).unwrap();
+            graph.set_clock_for_test(|| Ok(10));
+            enable(&graph, CapabilityId::Provenance, 1);
+            enable(&graph, CapabilityId::Knowledge, 2);
+            enable(&graph, CapabilityId::Epistemic, 3);
+
+            let build_started = std::time::Instant::now();
+            for i in 0..n {
+                let base = i * 4;
+                let node = graph.add_node("Subject", &HashMap::new()).unwrap();
+                let assertion_uuid = uuid7_from_u32(base + 1);
+                let assertion = graph
+                    .create_assertion(CreateAssertionRequest {
+                        context: context_u32(base),
+                        assertion_uuid,
+                        claim: format!("perf claim {i}"),
+                        graph_refs: vec![AssertionGraphRefInput {
+                            graph_uuid: node.uuid,
+                            graph_kind: GraphObjectKind::Node,
+                            role: AssertionGraphRole::Subject,
+                            ordinal: 0,
+                        }],
+                    })
+                    .unwrap();
+                let provenance = assertion.batches[0]
+                    .column_by_name("provenance_uuid")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                let provenance_uuid = Uuid::from_slice(provenance.value(0)).unwrap();
+                let reasoning_uuid = uuid7_from_u32(base + 2);
+                graph
+                    .record_reasoning(RecordReasoningRequest {
+                        context: context_u32(base + 2),
+                        reasoning_uuid,
+                        assertion_uuid,
+                        kind: ReasoningKind::DecisionRationale,
+                        content_format: ReasoningContentFormat::TextPlain,
+                        content: b"perf".to_vec(),
+                        supersedes_reasoning_uuid: None,
+                        provenance_uuid,
+                    })
+                    .unwrap();
+                graph
+                    .record_assertion_status(RecordAssertionStatusRequest {
+                        context: context_u32(base + 3),
+                        status_event_uuid: uuid7_from_u32(base + 3),
+                        assertion_uuid,
+                        status: AssertionStatus::Hypothesis,
+                        confidence_uuid: None,
+                        reasoning_uuid: Some(reasoning_uuid),
+                        provenance_uuid,
+                    })
+                    .unwrap();
+            }
+            let build_elapsed = build_started.elapsed();
+
+            let generation = graph.generation_for_read().unwrap();
+            let mut total_bytes = 0usize;
+            for (capability, family) in PARTICIPANTS {
+                if let Some(snapshot) = generation.participant_snapshot(capability, family).unwrap()
+                {
+                    total_bytes += snapshot.bytes.len();
+                }
+            }
+
+            let cold_started = std::time::Instant::now();
+            let cold = graph.epistemic_snapshot(i64::MAX).unwrap();
+            let cold_elapsed = cold_started.elapsed();
+
+            let mut warm_min = std::time::Duration::MAX;
+            let mut warm_result = None;
+            for _ in 0..4 {
+                let warm_started = std::time::Instant::now();
+                let warm = graph.epistemic_snapshot(i64::MAX).unwrap();
+                let warm_elapsed = warm_started.elapsed();
+                warm_min = warm_min.min(warm_elapsed);
+                warm_result = Some(warm);
+            }
+            let warm = warm_result.unwrap();
+
+            assert_eq!(
+                cold.schema.metadata().get("graphforge.snapshot_fingerprint"),
+                warm.schema.metadata().get("graphforge.snapshot_fingerprint"),
+                "a cached read must fingerprint identically to the cold read"
+            );
+            assert_eq!(
+                cold.batches[0], warm.batches[0],
+                "a cached read must be byte-identical to the cold read"
+            );
+            assert_eq!(cold.batches[0].num_rows(), n as usize);
+
+            println!(
+                "n={n:>5} build={build_elapsed:>10.3?} participant_bytes={total_bytes:>10} cold_snapshot={cold_elapsed:>10.3?} warm_snapshot_min={warm_min:>10.3?}"
+            );
+        }
     }
 }
