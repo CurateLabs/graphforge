@@ -688,20 +688,19 @@ jobs:
           done
           npm pack . --ignore-scripts \
             --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
-          python3 - <<PY
+          python3 - <<'PY'
+          import os
           import tarfile
           from pathlib import Path
-          npm_dir = Path("$GITHUB_WORKSPACE") / "candidate" / "release-artifacts" / "npm"
-          packs = [
-              path
-              for path in sorted(npm_dir.glob("curatelabs-graphforge-*.tgz"))
-              if path.name.count("-") == 2  # curatelabs-graphforge-<version>.tgz
-          ]
-          assert len(packs) == 1, packs
-          with tarfile.open(packs[0], "r:gz") as archive:
+          npm_dir = Path(os.environ["GITHUB_WORKSPACE"]) / "candidate" / "release-artifacts" / "npm"
+          # Name the pack exactly. Counting hyphens mis-selects any prerelease
+          # version, e.g. curatelabs-graphforge-0.6.0-rc.1.tgz.
+          pack = npm_dir / f"curatelabs-graphforge-{os.environ['RELEASE_VERSION']}.tgz"
+          assert pack.is_file(), f"missing packed main tarball: {pack}"
+          with tarfile.open(pack, "r:gz") as archive:
               names = set(archive.getnames())
           missing = {"package/index.js", "package/index.d.ts"} - names
-          assert not missing, f"{packs[0].name} missing {sorted(missing)}"
+          assert not missing, f"{pack.name} missing {sorted(missing)}"
           PY
           popd
           wait "$cli_pack_pid"
@@ -715,12 +714,27 @@ jobs:
           cd "$package_root"
           npm init --yes
           npm_artifacts="$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          require_exactly_one() {
+            # Without nullglob a non-matching glob stays in the array as its own
+            # literal, so an unguarded "-eq 1" cannot tell one file from none.
+            local label="$1" pattern="$2" count="$3"
+            if [ "$count" -ne 1 ]; then
+              printf 'expected exactly one %s tarball at %s, found %s\n' \
+                "$label" "$npm_artifacts/$pattern" "$count" >&2
+              exit 1
+            fi
+          }
+          shopt -s nullglob
           main_packages=("$npm_artifacts"/curatelabs-graphforge-[0-9]*.tgz)
           cli_packages=("$npm_artifacts"/curatelabs-graphforge-cli-*.tgz)
           native_packages=("$npm_artifacts"/curatelabs-graphforge-linux-x64-gnu-*.tgz)
-          test "${#main_packages[@]}" -eq 1
-          test "${#cli_packages[@]}" -eq 1
-          test "${#native_packages[@]}" -eq 1
+          shopt -u nullglob
+          require_exactly_one main 'curatelabs-graphforge-[0-9]*.tgz' \
+            "${#main_packages[@]}"
+          require_exactly_one cli 'curatelabs-graphforge-cli-*.tgz' \
+            "${#cli_packages[@]}"
+          require_exactly_one native 'curatelabs-graphforge-linux-x64-gnu-*.tgz' \
+            "${#native_packages[@]}"
           npm install "${main_packages[0]}" "${cli_packages[0]}" "${native_packages[0]}"
           node "$GITHUB_WORKSPACE/scripts/ci/multi-ontology-packaged-smoke.mjs"
 
@@ -729,12 +743,20 @@ jobs:
         run: |
           mkdir -p candidate/release-artifacts/crates
           python3 scripts/ci/crate-publish-plan.py check
+          # Capture first: process substitution discards its exit status, so a
+          # failing plan would leave the arrays empty and package the workspace.
+          crate_plan="$(python3 scripts/ci/crate-publish-plan.py list)"
           crates=()
           package_args=()
           while IFS= read -r crate; do
+            [ -n "$crate" ] || continue
             crates+=("$crate")
             package_args+=("-p" "$crate")
-          done < <(python3 scripts/ci/crate-publish-plan.py list)
+          done <<< "$crate_plan"
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "crate-publish-plan.py list returned no crates" >&2
+            exit 1
+          fi
           cargo package "${package_args[@]}" --allow-dirty --no-verify
           for crate in "${crates[@]}"; do
             cp "target/package/${crate}-${RELEASE_VERSION}.crate" \
