@@ -75,14 +75,71 @@ const SPILL_BLOCK_BYTES: usize = 64 * 1024;
 /// Bounded by the host's available parallelism and by the number of
 /// partitions actually worth loading, never by `partition_count` itself
 /// (that stays a recorded format parameter; see [`super::partition`]).
-/// Deliberately not overridable by an environment variable: a resumed or
-/// re-run import must reproduce the same bytes on a differently-sized host,
-/// and this function only ever chooses *how many threads* load the same
-/// partitions in the same order, never *which* partitions exist.
+/// Deliberately not overridable by an environment variable in production: a
+/// resumed or re-run import must reproduce the same bytes on a
+/// differently-sized host, and this function only ever chooses *how many
+/// threads* load the same partitions in the same order, never *which*
+/// partitions exist. [`test_support::set_worker_count_override`] provides a
+/// test-only knob (compiled only under `cfg(test)`/`test-support`) so the
+/// determinism suite can force adverse thread counts without depending on
+/// the host's core count.
 fn shaping_worker_count(work_items: usize) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(threads) = test_support::worker_count_override() {
+        return threads.clamp(1, work_items.max(1));
+    }
     std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(work_items.max(1))
+}
+
+/// Whether the current partition load should sleep briefly before returning,
+/// scrambling completion order relative to partition index. Test-only: used
+/// to force adverse worker/writer interleaving in the determinism suite
+/// rather than relying on incidental scheduling luck.
+#[cfg(any(test, feature = "test-support"))]
+fn shaping_worker_jitter(index: usize) {
+    if test_support::jitter_enabled() {
+        // A deterministic, index-dependent stagger: partitions do not
+        // complete in index order, which is exactly the interleaving that
+        // would expose a broken reorder buffer.
+        std::thread::sleep(std::time::Duration::from_micros(((index * 37) % 900) as u64));
+    }
+}
+
+/// Test-only knobs for [`shaping_worker_count`] and [`shaping_worker_jitter`].
+///
+/// Both are thread-local so tests running concurrently (`cargo test` without
+/// `--test-threads=1`) do not interfere with each other, and both default to
+/// "no override" / "no jitter" so every path outside a test that explicitly
+/// sets them behaves exactly as production does.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WORKER_COUNT_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+        static JITTER_ENABLED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Force [`super::shaping_worker_count`] to return `threads` (clamped to
+    /// the item count) on the calling thread, until cleared with `None`.
+    pub(crate) fn set_worker_count_override(threads: Option<usize>) {
+        WORKER_COUNT_OVERRIDE.with(|cell| cell.set(threads));
+    }
+
+    pub(super) fn worker_count_override() -> Option<usize> {
+        WORKER_COUNT_OVERRIDE.with(Cell::get)
+    }
+
+    /// Enable or disable the completion-order jitter on the calling thread.
+    pub(crate) fn set_jitter_enabled(enabled: bool) {
+        JITTER_ENABLED.with(|cell| cell.set(enabled));
+    }
+
+    pub(super) fn jitter_enabled() -> bool {
+        JITTER_ENABLED.with(Cell::get)
+    }
 }
 
 /// Merge one worker's partition-load evidence delta into the shared,
