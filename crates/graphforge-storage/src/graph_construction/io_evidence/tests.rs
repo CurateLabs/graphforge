@@ -1,3 +1,4 @@
+use super::super::intake::write_fixed_run;
 use super::super::tests::{node_batch, open, tree_has_no_temps};
 use super::super::*;
 use super::*;

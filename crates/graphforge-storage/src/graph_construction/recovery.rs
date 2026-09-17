@@ -243,10 +243,17 @@ pub(super) fn remove_owned_directory_tree(
         .map_err(storage)
 }
 
+/// Every name reserved by the shaping path: the shaped domains, the staged
+/// domains that feed surrogate assignment and endpoint resolution, and the
+/// per-partition spills.
+pub(super) fn is_shape_scoped_name(name: &str) -> bool {
+    name.starts_with("shaped-") || name.starts_with("staged-") || name.starts_with("part-")
+}
+
 pub(super) fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<(), GfError> {
     for name in root.child_names().map_err(storage)? {
         let Some(name) = name.to_str() else { continue };
-        if name.starts_with("merge-") || name.starts_with("shaped-") {
+        if is_shape_scoped_name(name) {
             return Err(storage("unowned construction shaping artifact exists"));
         }
     }
@@ -344,7 +351,7 @@ pub(super) fn recover_shape_intent(
     let work = cleanup_incomplete_shape_capabilities(root)?;
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
-        if !name.starts_with("merge-") && !name.starts_with("shaped-") {
+        if !is_shape_scoped_name(name) {
             continue;
         }
         match root.open_child_file(OsStr::new(name)) {

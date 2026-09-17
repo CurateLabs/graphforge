@@ -1,29 +1,131 @@
 //! Shape for graph construction.
 
+use super::partition::{IdentitySampler, PartitionPlan};
+use super::partition_shaping::{
+    FixedRangePartitioner, PartitionFamily, RowRangePartitioner, is_partition_artifact_name,
+};
 use super::{
     ArtifactReceipt, AuthenticatedShapeSource, AuthenticatedUuidIndexSnapshot, BASE_IDENTITY_WIDTH,
-    BLOCK_BYTES, BTreeMap, BufRead, BufReader, BufWriter, Checkpoint, ConstructionChunkKind,
-    ConstructionPublicationState, ConstructionShape, DetailCodec, DetailValidator, Digest,
-    EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, File, FixedMergeAccumulator, GfError,
+    BLOCK_BYTES, BTreeMap, BufReader, BufWriter, Checkpoint, ConstructionChunkKind,
+    ConstructionChunkReceipt, ConstructionPublicationState, ConstructionShape, CountingRead,
+    DetailCodec, DetailValidator, Digest, EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, File, GfError,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
-    IDENTITY_SURROGATE_OFFSET, NODE_DETAIL_WIDTH, OsStr, RESOLVED_ENDPOINT_WIDTH,
-    RESOLVED_SURROGATE_OFFSET, Read, ReadWork, RowMergeAccumulator, SHAPE_INTENT, Sha256,
+    IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, IoCounter, NODE_DETAIL_WIDTH, OsStr,
+    RESOLVED_ENDPOINT_WIDTH, RESOLVED_SURROGATE_OFFSET, Read, ReadWork, SHAPE_INTENT, Sha256,
     ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write, account_cache_release,
     account_fixed_read_operations, account_fixed_write_operations, account_merge_read,
-    account_merge_write, account_probe_work, account_sequential_write, artifact_temp,
-    authenticate_artifact, build_runtime_catalog, canonical_artifact_target, checked_evidence_sum,
-    combine_cache_cleanup, compact_parent_surrogate_tails, construction_failpoint,
-    convert_identity_run, copy_authenticated_run, copy_authenticated_run_with_codec,
-    decode_bounded, decode_shape_intent, file_identity, file_link_count, hex, install_control,
-    is_canonical_lower_hex, is_canonical_sha256, merge_cache_release_evidence,
-    open_counted_fixed_reader, receipt_for_existing, receipt_for_existing_with_work,
-    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
-    release_counted_reader_cache, replace_checkpoint_control, replace_control, sha256,
-    shape_authority_sha256, shape_publication_failure, storage, unlink_shape_artifact,
-    validate_parquet_metadata, write_fixed_run,
+    account_merge_write, account_probe_work, account_sequential_read, account_sequential_write,
+    artifact_temp, authenticate_artifact, build_runtime_catalog, canonical_artifact_target,
+    checked_evidence_sum, combine_cache_cleanup, compact_parent_surrogate_tails,
+    construction_failpoint, decode_bounded, decode_shape_intent, file_identity, file_link_count,
+    hex, install_control, is_canonical_lower_hex, is_canonical_sha256,
+    merge_cache_release_evidence, open_counted_fixed_reader, read_run_record, receipt_for_existing,
+    receipt_for_existing_with_work, record_shape_artifact_install, reject_cancelled,
+    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
+    replace_control, sha256, shape_authority_sha256, shape_publication_failure, storage,
+    unlink_shape_artifact, validate_parquet_metadata,
 };
+use std::io::Seek;
+
+/// Pre-surrogate identity domain, produced by concatenating sorted partitions.
+pub(super) const STAGED_IDENTITIES: &str = "staged-identities.run";
+/// Pre-resolution endpoint domain, produced by concatenating sorted partitions.
+pub(super) const STAGED_ENDPOINTS: &str = "staged-endpoints.run";
+/// Shaped node detail domain.
+pub(super) const SHAPED_NODE_DETAILS: &str = "shaped-node-details.run";
+/// Shaped edge detail domain.
+pub(super) const SHAPED_EDGE_DETAILS: &str = "shaped-edge-details.run";
+/// Shaped, surrogate-resolved edge endpoint domain.
+pub(super) const SHAPED_EDGE_ENDPOINTS: &str = "shaped-edge-endpoints.run";
+/// Surrogate-assigned identity domain.
+pub(super) const SHAPED_IDENTITIES: &str = "shaped-identities.run";
+/// Runtime catalog artifact.
+pub(super) const SHAPED_RUNTIME_CATALOG: &str = "shaped-runtime-catalog.parquet";
+
+/// Encode recorded splitters as canonical lower-hex, for the durable intent.
+pub(super) fn encode_splitters(plan: &PartitionPlan) -> Vec<String> {
+    plan.splitters().iter().map(|key| hex(key)).collect()
+}
+
+/// Decode recorded splitters from the durable intent.
+///
+/// # Errors
+/// Returns an error when a recorded splitter is not canonical 32-character
+/// lower-case hex.
+pub(super) fn decode_splitters(recorded: &[String]) -> Result<Vec<[u8; 16]>, GfError> {
+    recorded
+        .iter()
+        .map(|encoded| {
+            if !is_canonical_lower_hex(encoded, 32) {
+                return Err(storage("recorded partition splitter is not canonical"));
+            }
+            let mut key = [0_u8; 16];
+            for (index, slot) in key.iter_mut().enumerate() {
+                *slot = u8::from_str_radix(&encoded[index * 2..index * 2 + 2], 16)
+                    .map_err(|_| storage("recorded partition splitter is not canonical"))?;
+            }
+            Ok(key)
+        })
+        .collect()
+}
 
 impl GraphConstructionSession {
+    /// Barrier A0: choose the range-partition splitters for this shaping run.
+    ///
+    /// The stride is derived from the recorded chunk receipts, so the sampled
+    /// positions are fixed before a byte is read and the pass seeks directly to
+    /// them. Sampling therefore costs `O(partition_count)` reads rather than a
+    /// scan of the identity domain, and the result is a pure function of the
+    /// staged input and the recorded partition count.
+    fn choose_partition_plan(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PartitionPlan, GfError> {
+        let partition_count = self.checkpoint.budgets.partition_count;
+        let mut extents = Vec::new();
+        let mut total = 0_u64;
+        for sequence in 0..self.checkpoint.next_sequence {
+            reject_cancelled(cancelled)?;
+            let receipt = self.read_receipt(sequence)?;
+            if receipt.identities.bytes % IDENTITY_WIDTH as u64 != 0 {
+                return Err(storage("staged identity run is not record aligned"));
+            }
+            let records = receipt.identities.bytes / IDENTITY_WIDTH as u64;
+            extents.push((receipt.identities.name.clone(), total, records));
+            total = total
+                .checked_add(records)
+                .ok_or_else(|| storage("staged identity record count overflows"))?;
+        }
+        let mut sampler = IdentitySampler::new(partition_count, total)?;
+        let positions = sampler.positions().collect::<Vec<_>>();
+        let mut cursor = 0_usize;
+        for position in positions {
+            while cursor < extents.len() && position >= extents[cursor].1 + extents[cursor].2 {
+                cursor += 1;
+            }
+            let (name, base, _) = extents
+                .get(cursor)
+                .ok_or_else(|| storage("identity sample position is out of range"))?;
+            let mut file = self
+                .root
+                .open_child_file(OsStr::new(name))
+                .map_err(storage)?;
+            file.seek(std::io::SeekFrom::Start(
+                (position - base)
+                    .checked_mul(IDENTITY_WIDTH as u64)
+                    .ok_or_else(|| storage("identity sample offset overflows"))?,
+            ))
+            .map_err(storage)?;
+            let mut key = [0_u8; IDENTITY_WIDTH];
+            file.read_exact(&mut key).map_err(storage)?;
+            account_sequential_read(IDENTITY_WIDTH as u64, &mut self.checkpoint.evidence)?;
+            sampler.admit(key)?;
+        }
+        self.checkpoint.evidence.splitter_sample_records = sampler.sampled_records();
+        self.checkpoint.evidence.splitter_sampled_source_records = sampler.source_records();
+        sampler.into_plan(partition_count)
+    }
+
     /// Validate the sealed identity domains and produce deterministic,
     /// UUID-sorted canonical construction runs.  This is deliberately still
     /// private staging: the generation-last publisher owns Parquet and CURRENT.
@@ -78,16 +180,49 @@ impl GraphConstructionSession {
         }
         reject_existing_merge_artifacts(&self.root)?;
 
-        let fan_in = self.checkpoint.budgets.merge_fan_in;
-        let mut unified = FixedMergeAccumulator::new("merge-identities", fan_in, true);
+        // Snapshot the committed evidence before any shaping work, including the
+        // splitter sampling pass: the shape intent's baseline must match what a
+        // reopen reads back from the checkpoint on disk.
+        let baseline_evidence = self.checkpoint.evidence.clone();
         let detail_codec =
             DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?;
-        let mut node_details = FixedMergeAccumulator::new("merge-node-details", fan_in, true)
-            .with_detail_codec(detail_codec);
-        let mut edge_details = FixedMergeAccumulator::new("merge-edge-details", fan_in, true)
-            .with_detail_codec(detail_codec);
-        let mut endpoints = FixedMergeAccumulator::new("merge-endpoints", fan_in, false);
-        let mut row_groups: BTreeMap<(u8, String), RowMergeAccumulator> = BTreeMap::new();
+        // Barrier A0. Choose the range-partition splitters from a deterministic
+        // sample of the staged identity domain, and record them before any
+        // partition writes a byte. `super::partition` records why a formula
+        // over the key's high bits is not an option for UUIDv7 identities.
+        let plan = self.choose_partition_plan(&mut cancelled)?;
+        let partitions = plan.partitions();
+        self.checkpoint.evidence.shape_partitions = u64::try_from(partitions).map_err(storage)?;
+        self.checkpoint.evidence.shape_partition_count = u64::from(plan.partition_count());
+        let mut identities = FixedRangePartitioner::<BASE_IDENTITY_WIDTH>::new(
+            &self.root,
+            PartitionFamily::Identities,
+            partitions,
+            None,
+            true,
+        )?;
+        let mut node_details = FixedRangePartitioner::<NODE_DETAIL_WIDTH>::new(
+            &self.root,
+            PartitionFamily::NodeDetails,
+            partitions,
+            Some(detail_codec),
+            false,
+        )?;
+        let mut edge_details = FixedRangePartitioner::<EDGE_DETAIL_WIDTH>::new(
+            &self.root,
+            PartitionFamily::EdgeDetails,
+            partitions,
+            Some(detail_codec),
+            false,
+        )?;
+        let mut endpoints = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
+            &self.root,
+            PartitionFamily::Endpoints,
+            partitions,
+            None,
+            false,
+        )?;
+        let mut row_groups: BTreeMap<(u8, String), RowRangePartitioner> = BTreeMap::new();
         let mut catalog_authority = Sha256::new();
         let shape_intent = ShapeIntent {
             format_version: self.checkpoint.format_version,
@@ -99,19 +234,21 @@ impl GraphConstructionSession {
             semantic_authority_sha256: self.checkpoint.semantic_authority_sha256.clone(),
             budgets: self.checkpoint.budgets,
             last_receipt_sha256: self.checkpoint.last_receipt_sha256.clone(),
-            baseline_evidence: self.checkpoint.evidence.clone(),
+            baseline_evidence,
             final_evidence: None,
             complete: false,
             shape: None,
             outputs: Vec::new(),
             shape_authority_sha256: None,
+            splitters: encode_splitters(&plan),
+            partition_identity_rows: Vec::new(),
         };
         install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
             // Fixed-width inputs authenticate their exact inode, length and
-            // digest in the merge consumers below. Parquet's range-oriented
+            // digest in the partition routers below. Parquet's range-oriented
             // decoder cannot establish a whole-file digest, so retain exactly
             // one explicit whole-file authentication pass for that artifact.
             let mut work = authenticate_artifact(
@@ -148,124 +285,99 @@ impl GraphConstructionSession {
             catalog_authority.update([kind]);
             catalog_authority.update(receipt.schema_sha256.as_bytes());
             catalog_authority.update(receipt.parquet.sha256.as_bytes());
+            let group = (kind, receipt.schema_sha256.clone());
+            if !row_groups.contains_key(&group) {
+                row_groups.insert(
+                    group.clone(),
+                    RowRangePartitioner::new(
+                        &self.root,
+                        &format!("{kind}-{}", receipt.schema_sha256),
+                        partitions,
+                    )?,
+                );
+            }
             row_groups
-                .entry((kind, receipt.schema_sha256.clone()))
-                .or_insert_with(|| {
-                    RowMergeAccumulator::new(fan_in, &format!("{kind}-{}", receipt.schema_sha256))
-                })
+                .get_mut(&group)
+                .ok_or_else(|| storage("row partitioner is absent"))?
                 .push(
-                    &self.root,
-                    receipt.parquet.name.clone(),
+                    &plan,
+                    &receipt.parquet.name,
                     self.checkpoint.budgets.max_batch_rows,
-                    self.checkpoint.budgets.max_batch_bytes,
                     &mut cancelled,
                     &mut self.checkpoint.evidence,
                 )?;
-            let name = format!("merge-unified-{sequence:020}.run");
-            convert_identity_run(
+            route_identity_run(
                 &self.root,
+                &plan,
                 &receipt,
-                &name,
-                &mut cancelled,
-                &mut self.checkpoint.evidence,
-            )?;
-            unified.push::<BASE_IDENTITY_WIDTH>(
-                &self.root,
-                name,
+                &mut identities,
                 &mut cancelled,
                 &mut self.checkpoint.evidence,
             )?;
             match receipt.kind {
                 ConstructionChunkKind::Node => {
-                    let name = format!("merge-node-source-{sequence:020}.run");
-                    copy_authenticated_run_with_codec::<NODE_DETAIL_WIDTH>(
+                    route_fixed_run::<NODE_DETAIL_WIDTH>(
                         &self.root,
+                        &plan,
                         &receipt.details,
-                        &name,
-                        &mut cancelled,
-                        &mut self.checkpoint.evidence,
                         Some(detail_codec),
-                    )?;
-                    node_details.push::<NODE_DETAIL_WIDTH>(
-                        &self.root,
-                        name,
+                        &mut node_details,
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
                     )?;
                 }
                 ConstructionChunkKind::Edge => {
-                    let detail = format!("merge-edge-source-{sequence:020}.run");
-                    copy_authenticated_run_with_codec::<EDGE_DETAIL_WIDTH>(
+                    route_fixed_run::<EDGE_DETAIL_WIDTH>(
                         &self.root,
+                        &plan,
                         &receipt.details,
-                        &detail,
-                        &mut cancelled,
-                        &mut self.checkpoint.evidence,
                         Some(detail_codec),
-                    )?;
-                    edge_details.push::<EDGE_DETAIL_WIDTH>(
-                        &self.root,
-                        detail,
+                        &mut edge_details,
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
                     )?;
-                    let endpoint = format!("merge-endpoint-source-{sequence:020}.run");
-                    copy_authenticated_run::<ENDPOINT_WIDTH>(
+                    route_fixed_run::<ENDPOINT_WIDTH>(
                         &self.root,
+                        &plan,
                         receipt
                             .endpoints
                             .as_ref()
                             .ok_or_else(|| storage("edge receipt lacks endpoint run"))?,
-                        &endpoint,
-                        &mut cancelled,
-                        &mut self.checkpoint.evidence,
-                    )?;
-                    endpoints.push::<ENDPOINT_WIDTH>(
-                        &self.root,
-                        endpoint,
+                        None,
+                        &mut endpoints,
                         &mut cancelled,
                         &mut self.checkpoint.evidence,
                     )?;
                 }
             }
-            let row_group_names = row_groups
-                .values()
-                .try_fold(0_usize, |count, group| {
-                    count.checked_add(group.slot_count())
-                })
-                .ok_or_else(|| storage("row-group name-slot count overflow"))?;
-            let retained_names = unified
-                .slot_count()
-                .checked_add(node_details.slot_count())
-                .and_then(|count| count.checked_add(edge_details.slot_count()))
-                .and_then(|count| count.checked_add(endpoints.slot_count()))
-                .and_then(|count| count.checked_add(row_group_names))
-                .ok_or_else(|| storage("merge name-slot count overflow"))?;
-            self.checkpoint.evidence.peak_merge_name_slots = self
-                .checkpoint
-                .evidence
-                .peak_merge_name_slots
-                .max(u64::try_from(retained_names).map_err(storage)?);
         }
-        let staged_identities = unified.finish_optional::<BASE_IDENTITY_WIDTH>(
-            &self.root,
+        // Load-bearing, not a nicety: a collapsed one-partition run is
+        // perfectly deterministic and passes every byte-equality test, so this
+        // is the only check that can tell a working range partition from a
+        // catastrophically skewed one.
+        identities.balance().assert_balanced("staged identity")?;
+        let partition_identity_rows = identities.balance().rows().to_vec();
+        self.checkpoint.evidence.max_partition_identity_rows = identities.balance().max_rows();
+        self.checkpoint.evidence.partitioned_identity_rows = identities.balance().total();
+        let staged_identities = identities
+            .finish_optional(
+                STAGED_IDENTITIES,
+                &mut cancelled,
+                &mut self.checkpoint.evidence,
+            )?
+            .ok_or_else(|| storage("construction contains no identities"))?;
+        let node_details = node_details.finish_optional(
+            SHAPED_NODE_DETAILS,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let staged_identities =
-            staged_identities.ok_or_else(|| storage("construction contains no identities"))?;
-        let node_details = node_details.finish_optional::<NODE_DETAIL_WIDTH>(
-            &self.root,
+        let edge_details = edge_details.finish_optional(
+            SHAPED_EDGE_DETAILS,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
-        let edge_details = edge_details.finish_optional::<EDGE_DETAIL_WIDTH>(
-            &self.root,
-            &mut cancelled,
-            &mut self.checkpoint.evidence,
-        )?;
-        let endpoints = endpoints.finish_optional::<ENDPOINT_WIDTH>(
-            &self.root,
+        let endpoints = endpoints.finish_optional(
+            STAGED_ENDPOINTS,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -325,11 +437,11 @@ impl GraphConstructionSession {
         reject_cancelled(&mut cancelled)?;
         let edge_endpoints = resolve_endpoint_surrogates(
             &self.root,
+            &plan,
             &identities,
             endpoints.as_deref(),
             self.base_snapshot.as_mut(),
             self.checkpoint.budgets.max_batch_rows,
-            self.checkpoint.budgets.merge_fan_in,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -357,11 +469,9 @@ impl GraphConstructionSession {
             reject_cancelled(&mut cancelled)?;
             let output = format!("shaped-rows-{kind}-{schema_digest}.parquet");
             let output = rows.finish(
-                &self.root,
                 &output,
                 self.checkpoint.budgets.max_batch_rows,
                 self.checkpoint.budgets.max_batch_bytes,
-                self.checkpoint.budgets.merge_fan_in,
                 &mut cancelled,
                 &mut self.checkpoint.evidence,
             )?;
@@ -473,6 +583,8 @@ impl GraphConstructionSession {
                 shape: Some(shape.clone()),
                 outputs,
                 shape_authority_sha256: Some(shape_authority_sha256),
+                splitters: shape_intent.splitters,
+                partition_identity_rows,
             },
         )?;
         construction_failpoint("shape.after_complete_inventory");
@@ -499,6 +611,14 @@ pub(super) fn validate_shape_binding(
     {
         return Err(storage("construction shape manifest authority changed"));
     }
+    // The recorded splitters are the range-partition authority. Refuse an
+    // intent whose splitters are not a well-formed monotone partition of the
+    // key space: a partitioning that is not a range partition would make the
+    // concatenated shape silently unordered.
+    PartitionPlan::from_recorded(
+        checkpoint.budgets.partition_count,
+        decode_splitters(&intent.splitters)?,
+    )?;
     Ok(())
 }
 
@@ -721,8 +841,23 @@ fn verify_payload_checksum(
     }
 }
 
+/// The durable shaping artifact grammar.
+///
+/// Range partitioning replaced the external merge tree, so the `merge-*`
+/// families are gone: what remains is the shaped domain set, the two staged
+/// domains that feed surrogate assignment and endpoint resolution, and the
+/// per-partition spills.
 pub(super) fn is_shape_artifact_name(name: &str) -> bool {
-    if name == "shaped-identities.run" || name == "shaped-runtime-catalog.parquet" {
+    if matches!(
+        name,
+        SHAPED_IDENTITIES
+            | SHAPED_RUNTIME_CATALOG
+            | SHAPED_NODE_DETAILS
+            | SHAPED_EDGE_DETAILS
+            | SHAPED_EDGE_ENDPOINTS
+            | STAGED_IDENTITIES
+            | STAGED_ENDPOINTS
+    ) {
         return true;
     }
     if let Some(body) = name
@@ -734,59 +869,7 @@ pub(super) fn is_shape_artifact_name(name: &str) -> bool {
             && body.as_bytes().get(1) == Some(&b'-')
             && is_canonical_sha256(&body[2..]);
     }
-    if let Some(body) = name
-        .strip_prefix("merge-rows-")
-        .and_then(|body| body.strip_suffix(".parquet"))
-    {
-        let mut parts = body.split("-l");
-        let namespace = parts.next().unwrap_or_default();
-        let level_group = parts.next().unwrap_or_default();
-        return parts.next().is_none()
-            && namespace.len() == 16
-            && is_canonical_lower_hex(namespace, 16)
-            && level_group.split_once("-g").is_some_and(|(level, group)| {
-                level.len() == 3
-                    && level.bytes().all(|byte| byte.is_ascii_digit())
-                    && group.len() == 20
-                    && group.bytes().all(|byte| byte.is_ascii_digit())
-            });
-    }
-    if let Some(sequence) = name
-        .strip_prefix("merge-unified-")
-        .and_then(|body| body.strip_suffix(".run"))
-    {
-        return sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit());
-    }
-    for prefix in [
-        "merge-node-source-",
-        "merge-edge-source-",
-        "merge-endpoint-source-",
-        "merge-resolved-source-",
-    ] {
-        if let Some(sequence) = name
-            .strip_prefix(prefix)
-            .and_then(|body| body.strip_suffix(".run"))
-        {
-            return sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit());
-        }
-    }
-    [
-        "merge-identities-l",
-        "merge-node-details-l",
-        "merge-edge-details-l",
-        "merge-endpoints-l",
-        "merge-resolved-l",
-    ]
-    .iter()
-    .any(|prefix| {
-        name.strip_prefix(prefix).is_some_and(|tail| {
-            tail.len() == 17
-                && tail.get(3..5) == Some("-g")
-                && tail.get(13..) == Some(".run")
-                && tail[..3].bytes().all(|byte| byte.is_ascii_digit())
-                && tail[5..13].bytes().all(|byte| byte.is_ascii_digit())
-        })
-    })
+    is_partition_artifact_name(name)
 }
 
 pub(super) fn run_record_bytes<const N: usize>(
@@ -812,6 +895,134 @@ pub(super) fn read_fixed<const N: usize>(
         }
     }
     Ok(Some(record))
+}
+
+/// Stream one staged fixed-width run into its range partitions.
+///
+/// This replaces the copy-then-merge pair the shaping path used to run: the
+/// staged run is authenticated against its writer receipt *while* its records
+/// are routed, so the verification the copy used to perform survives without
+/// the copy. No intermediate artifact is produced.
+pub(super) fn route_fixed_run<const N: usize>(
+    root: &StableDirectory,
+    plan: &PartitionPlan,
+    source: &ArtifactReceipt,
+    codec: Option<DetailCodec>,
+    target: &mut FixedRangePartitioner<N>,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let input = root
+        .open_child_file(OsStr::new(&source.name))
+        .map_err(storage)?;
+    account_sequential_read(source.bytes, evidence)?;
+    if !source
+        .identity
+        .matches(file_identity(&input).map_err(storage)?)
+        || file_link_count(&input).map_err(storage)? != 1
+    {
+        return Err(storage("construction partition source authority changed"));
+    }
+    let counter = IoCounter::default();
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        CountingRead {
+            inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                input,
+                cache_window,
+                graphforge_filesystem::FileCacheReleaseTracker::default(),
+            )
+            .map_err(storage)?,
+            counter: counter.clone(),
+        },
+    );
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let routed = (|| -> Result<(), GfError> {
+        while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
+            let wire = run_record_bytes(&record, codec)?;
+            digest.update(wire);
+            bytes = bytes
+                .checked_add(wire.len() as u64)
+                .ok_or_else(|| storage("partition source byte count overflows"))?;
+            let key: [u8; 16] = record[..16].try_into().expect("fixed key prefix");
+            target.route(plan, &key, &record, evidence)?;
+            reject_cancelled(cancelled)?;
+        }
+        if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
+            return Err(storage("construction partition source content changed"));
+        }
+        account_fixed_read_operations(&counter, evidence)
+    })();
+    let released = release_counted_reader_cache(&mut reader, evidence);
+    combine_cache_cleanup(routed, released, "construction partition source")
+}
+
+/// Stream one staged identity run into its range partitions, widening each
+/// UUID into the base identity record the shaped domain uses.
+fn route_identity_run(
+    root: &StableDirectory,
+    plan: &PartitionPlan,
+    receipt: &ConstructionChunkReceipt,
+    target: &mut FixedRangePartitioner<BASE_IDENTITY_WIDTH>,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let source = &receipt.identities;
+    let input = root
+        .open_child_file(OsStr::new(&source.name))
+        .map_err(storage)?;
+    account_sequential_read(source.bytes, evidence)?;
+    if !source
+        .identity
+        .matches(file_identity(&input).map_err(storage)?)
+        || file_link_count(&input).map_err(storage)? != 1
+    {
+        return Err(storage(
+            "identity source authority changed before partitioning",
+        ));
+    }
+    let counter = IoCounter::default();
+    let cache_window =
+        graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
+    let mut reader = BufReader::with_capacity(
+        BLOCK_BYTES,
+        CountingRead {
+            inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                input,
+                cache_window,
+                graphforge_filesystem::FileCacheReleaseTracker::default(),
+            )
+            .map_err(storage)?,
+            counter: counter.clone(),
+        },
+    );
+    let kind = u8::from(receipt.kind == ConstructionChunkKind::Edge);
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    let routed = (|| -> Result<(), GfError> {
+        while let Some(uuid) = read_fixed::<IDENTITY_WIDTH>(&mut reader)? {
+            digest.update(uuid);
+            bytes = bytes
+                .checked_add(IDENTITY_WIDTH as u64)
+                .ok_or_else(|| storage("identity source byte count overflows"))?;
+            let mut record = [0_u8; BASE_IDENTITY_WIDTH];
+            record[..16].copy_from_slice(&uuid);
+            record[16] = kind;
+            target.route(plan, &uuid, &record, evidence)?;
+            reject_cancelled(cancelled)?;
+        }
+        if bytes != source.bytes || hex(&digest.clone().finalize()) != source.sha256 {
+            return Err(storage(
+                "identity source content changed before partitioning",
+            ));
+        }
+        account_fixed_read_operations(&counter, evidence)
+    })();
+    let released = release_counted_reader_cache(&mut reader, evidence);
+    combine_cache_cleanup(routed, released, "identity partition source")
 }
 
 fn validate_staged_details(
@@ -1055,7 +1266,7 @@ fn assign_surrogates(
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<String, GfError> {
-    let output = "shaped-identities.run";
+    let output = SHAPED_IDENTITIES;
     let temporary = artifact_temp(output);
     let file = root
         .create_replaceable_child_file(OsStr::new(&temporary))
@@ -1134,14 +1345,23 @@ fn assign_surrogates(
     Ok(output.to_owned())
 }
 
+/// Resolve every staged endpoint's node UUID to its surrogate and re-key the
+/// result by edge UUID.
+///
+/// Resolution reads endpoints in node-UUID order but must emit them in
+/// edge-UUID order, so the output is a genuine reordering. It is produced the
+/// same way as every other shaped domain: route by the output key into range
+/// partitions, sort each partition, concatenate. Nothing depends on the order
+/// in which a result was produced, which is what makes this a deterministic
+/// shuffle rather than an arrival-ordered one.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn resolve_endpoint_surrogates(
     root: &StableDirectory,
+    plan: &PartitionPlan,
     identities_name: &str,
     endpoints_name: Option<&str>,
     mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
-    fan_in: usize,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<Option<String>, GfError> {
@@ -1153,9 +1373,13 @@ pub(super) fn resolve_endpoint_surrogates(
     let (mut endpoints, endpoints_counter) =
         open_counted_fixed_reader(root, endpoints_name, evidence)?;
     let mut identity = read_fixed::<BASE_IDENTITY_WIDTH>(&mut identities)?;
-    let mut window = Vec::<[u8; RESOLVED_ENDPOINT_WIDTH]>::with_capacity(window_rows);
-    let mut resolved = FixedMergeAccumulator::new("merge-resolved", fan_in, false);
-    let mut sequence = 0_u64;
+    let mut resolved = FixedRangePartitioner::<RESOLVED_ENDPOINT_WIDTH>::new(
+        root,
+        PartitionFamily::Resolved,
+        plan.partitions(),
+        None,
+        false,
+    )?;
     loop {
         let mut endpoint_window = Vec::with_capacity(window_rows);
         for _ in 0..window_rows {
@@ -1194,12 +1418,12 @@ pub(super) fn resolve_endpoint_surrogates(
             }
         }
         if !base_requests.is_empty() {
-            let (resolved, probe_work) = base
+            let (found, probe_work) = base
                 .as_deref_mut()
                 .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?
                 .lookup_node_surrogates(&base_requests)?;
             account_probe_work(&probe_work, evidence)?;
-            for (position, surrogate) in base_positions.into_iter().zip(resolved) {
+            for (position, surrogate) in base_positions.into_iter().zip(found) {
                 surrogates[position] = surrogate;
             }
         }
@@ -1207,89 +1431,31 @@ pub(super) fn resolve_endpoint_surrogates(
             let surrogate = surrogate
                 .filter(|value| *value != 0)
                 .ok_or_else(|| storage("endpoint UUID lacks node surrogate"))?;
-            let mut resolved = [0_u8; RESOLVED_ENDPOINT_WIDTH];
-            resolved[..16].copy_from_slice(&endpoint[16..32]);
-            resolved[16] = endpoint[32];
-            resolved[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
+            let mut record = [0_u8; RESOLVED_ENDPOINT_WIDTH];
+            record[..16].copy_from_slice(&endpoint[16..32]);
+            record[16] = endpoint[32];
+            record[RESOLVED_SURROGATE_OFFSET..RESOLVED_ENDPOINT_WIDTH]
                 .copy_from_slice(&surrogate.to_be_bytes());
-            window.push(resolved);
+            let key: [u8; 16] = record[..16].try_into().expect("fixed key prefix");
+            resolved.route(plan, &key, &record, evidence)?;
             account_merge_read::<ENDPOINT_WIDTH>(evidence)?;
         }
-        // Defer the final insertion: push can itself trigger the largest carry
-        // merge. The trailing block installs its durable run before retirement.
-        if endpoints.fill_buf().map_err(storage)?.is_empty() {
-            break;
-        }
-        if window.len() == window_rows {
-            window.sort_unstable();
-            let name = format!("merge-resolved-source-{sequence:020}.run");
-            let receipt = write_fixed_run(root, &name, &window, evidence)?;
-            record_shape_artifact_install(evidence, &receipt)?;
-            evidence.merge_written_bytes = evidence
-                .merge_written_bytes
-                .checked_add(receipt.bytes)
-                .ok_or_else(|| storage("merge written byte count overflows"))?;
-            account_fixed_write_operations(&receipt, evidence)?;
-            evidence.merge_written_records = evidence
-                .merge_written_records
-                .checked_add(window.len() as u64)
-                .ok_or_else(|| storage("merge written record count overflows"))?;
-            evidence.merge_fsync_operations = evidence
-                .merge_fsync_operations
-                .checked_add(receipt.fsync_operations)
-                .ok_or_else(|| storage("merge fsync count overflows"))?;
-            account_sequential_write(receipt.bytes, evidence)?;
-            resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
-            evidence.peak_resolved_endpoint_name_slots = evidence
-                .peak_resolved_endpoint_name_slots
-                .max(resolved.slot_count() as u64);
-            window.clear();
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| storage("resolved endpoint sequence overflows"))?;
-            reject_cancelled(cancelled)?;
-        }
+        reject_cancelled(cancelled)?;
     }
-    let pending = if window.is_empty() {
-        None
-    } else {
-        window.sort_unstable();
-        let name = format!("merge-resolved-source-{sequence:020}.run");
-        let receipt = write_fixed_run(root, &name, &window, evidence)?;
-        record_shape_artifact_install(evidence, &receipt)?;
-        evidence.merge_written_bytes = evidence
-            .merge_written_bytes
-            .checked_add(receipt.bytes)
-            .ok_or_else(|| storage("merge written byte count overflows"))?;
-        account_fixed_write_operations(&receipt, evidence)?;
-        evidence.merge_written_records = evidence
-            .merge_written_records
-            .checked_add(window.len() as u64)
-            .ok_or_else(|| storage("merge written record count overflows"))?;
-        evidence.merge_fsync_operations = evidence
-            .merge_fsync_operations
-            .checked_add(receipt.fsync_operations)
-            .ok_or_else(|| storage("merge fsync count overflows"))?;
-        account_sequential_write(receipt.bytes, evidence)?;
-        Some(name)
-    };
     account_fixed_read_operations(&identities_counter, evidence)?;
     account_fixed_read_operations(&endpoints_counter, evidence)?;
-    // All resolved windows are durable; the final merge needs only those runs.
+    release_counted_reader_cache(&mut identities, evidence)?;
+    release_counted_reader_cache(&mut endpoints, evidence)?;
     drop(identities);
     drop(endpoints);
+    // Every routed record is durable before the endpoint domain is retired.
+    resolved.seal(evidence)?;
     shape_publication_failure("shape.before_endpoint_retirement")?;
     unlink_shape_artifact(root, endpoints_name, evidence)?;
     construction_failpoint("shape.after_endpoint_retirement");
     shape_publication_failure("shape.after_endpoint_retirement")?;
     reject_cancelled(cancelled)?;
-    if let Some(name) = pending {
-        resolved.push::<RESOLVED_ENDPOINT_WIDTH>(root, name, cancelled, evidence)?;
-        evidence.peak_resolved_endpoint_name_slots = evidence
-            .peak_resolved_endpoint_name_slots
-            .max(resolved.slot_count() as u64);
-    }
-    resolved.finish_optional::<RESOLVED_ENDPOINT_WIDTH>(root, cancelled, evidence)
+    resolved.finish_optional(SHAPED_EDGE_ENDPOINTS, cancelled, evidence)
 }
 
 pub(super) fn validate_sorted_run(
