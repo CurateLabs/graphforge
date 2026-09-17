@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 127,
+  "cargo_target_count": 128,
   "targets": [
     {
       "package": "graphforge-api",
@@ -772,6 +772,16 @@
       "bazel_label": "//crates/graphforge-cli:repository",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "verify",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/verify.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:verify",
+      "exception_id": null,
+      "notes": "#1384 explicit out-of-band project verify command"
     },
     {
       "package": "graphforge-core",

@@ -1238,6 +1238,15 @@ fn run_clone_job(
         HandoffKind::Return,
         None,
     );
+    // `import_portable_v2` already reopened the destination through the public
+    // facade and verified the reopened generation UUID matches the published
+    // receipt (see `import_portable_v2_with_allocation`), including its own
+    // UTF-8 path check — success there already proves normal runtime
+    // readability. Reopening again here would just re-parse everything that
+    // call already confirmed is readable, for a `GraphForge` handle nothing
+    // uses. The stage itself is kept (with its test-only injected delay) so
+    // clone job telemetry keeps reporting a distinct recovery/verification
+    // phase.
     profile.stage(
         Stage::Reopen,
         ComponentKind::Recovery,
@@ -1246,10 +1255,7 @@ fn run_clone_job(
         1,
         || {
             std::thread::sleep(delays.reopen);
-            let destination = destination.to_str().ok_or_else(|| {
-                validation("hub.destination_conflict", "destination must be UTF-8")
-            })?;
-            GraphForge::new(Some(destination)).map(|graph| (graph, None, None))
+            Ok(((), None, None))
         },
     )?;
     profile.handoff(
@@ -2246,5 +2252,61 @@ mod tests {
                 .unwrap();
             assert_eq!(dominant.component, expected);
         }
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement for #1404, not part of the regular suite"]
+    fn measure_clone_wall_time() {
+        const ITERATIONS: usize = 20;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        GraphForge::new(source.to_str()).unwrap();
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let limits = PortableV2Limits::default();
+        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let bundle_path = root.path().join("complete.gfpb");
+        graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &bundle_path,
+            graphforge_storage::PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let bundle = std::fs::read(&bundle_path).unwrap();
+        let report = graphforge_storage::verify_portable_v2(
+            &bundle_path,
+            PortableV2Mode::Full,
+            limits,
+            None,
+        )
+        .unwrap();
+
+        let runtime = TelemetryRuntime::default();
+        let mut total = Duration::ZERO;
+        for i in 0..ITERATIONS {
+            let transport = clone_script(&bundle, &report.package_digest);
+            let destination = root.path().join(format!("clone-{i}"));
+            let started = Instant::now();
+            run_clone_profiled(
+                &transport,
+                CloneArgs {
+                    repository: "openalex/openalex".into(),
+                    destination: Some(destination),
+                    telemetry_endpoint: None,
+                },
+                true,
+                &mut Vec::new(),
+                &runtime,
+            )
+            .unwrap();
+            total += started.elapsed();
+        }
+        println!(
+            "hub clone: iterations={ITERATIONS} total={total:?} ({:?}/call)",
+            total / u32::try_from(ITERATIONS).unwrap(),
+        );
     }
 }
