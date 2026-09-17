@@ -38,11 +38,12 @@ adjacency CSR, as ordinary graph-files inventory entries.
   files forward without re-reading them, so its index would need the parent's
   edge tables too. Until that lands, an append's carried-forward manifest reads
   as stale and is never served; the provider rebuilds lazily as before.
-- **Portable import.** Packages deliberately exclude `Index`-role files. A
-  complete import builds the CSR into the verified package tree before the
-  compact object-store append, so the imported generation ships it. The v1
-  inventory contract, which is verified file-for-file against the package tree,
-  keeps the lazy rebuild.
+- **Portable import.** A complete package of a generation carries its index
+  and imports it unchanged. Subset exports exclude `Index`-role files and older
+  packages predate the index; for those a complete import builds the CSR into
+  the verified package tree before the compact object-store append, so the
+  imported generation ships it. The v1 inventory contract, which is verified
+  file-for-file against the package tree, keeps the lazy rebuild.
 - **Reading.** No read-path change. Hydration materializes the entries into
   the workspace, the provider finds a fresh manifest and opens the CSR
   presence-only (#1094), and a project without one rebuilds exactly as before.

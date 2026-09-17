@@ -1391,12 +1391,14 @@ fn prepare_compact_import_graph_with_allocation(
 /// stage so failure cleanup reclaims it with everything else.
 const IMPORT_ADJACENCY_SPILL_ROOT: &str = ".adjacency-spill";
 
-/// Build the derived adjacency CSR into the verified package graph tree so the
-/// imported generation ships it (#1388), exactly as a construction-published
-/// generation does. Portable packages deliberately exclude `Index`-role files,
-/// so a clean import would otherwise rebuild the whole CSR in every query
-/// process. The tree is still private here: the compact CAS append that
-/// follows hashes and installs the new files like any other package payload.
+/// Build the derived adjacency CSR into the verified package graph tree when
+/// the package carries none, so the imported generation ships it (#1388)
+/// exactly as a construction-published generation does. A complete package of
+/// such a generation already carries the index and is installed unchanged;
+/// subset exports and packages made before #1388 lack it, and a clean import
+/// of those would otherwise rebuild the whole CSR in every query process. The
+/// tree is still private here: the compact CAS append that follows hashes and
+/// installs the new files like any other package payload.
 ///
 /// Only the compact (v2 / mapped-root) participant contract is covered. A v1
 /// inventory participant is verified file-for-file against the package tree
@@ -2640,9 +2642,9 @@ mod tests {
         }
     }
 
-    /// A complete package deliberately carries no `Index`-role files, so a
-    /// clean import must publish the derived adjacency CSR itself (#1388) or
-    /// every query process against the import rebuilds it.
+    /// A complete package of a construction-published generation carries its
+    /// adjacency CSR, and the import must publish it unchanged rather than
+    /// building a second one (#1388).
     #[test]
     fn complete_import_publishes_the_derived_adjacency_index() {
         use arrow::array::{ArrayRef, FixedSizeBinaryArray, StringArray};
@@ -2737,10 +2739,10 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !package
-                .join("data/components/graph-data/graph-tree/indexes")
-                .exists(),
-            "portable packages exclude derived index files"
+            package
+                .join("data/components/graph-data/graph-tree/indexes/adjacency")
+                .is_dir(),
+            "a complete package carries the generation's derived index"
         );
 
         let target = tempfile::tempdir().unwrap();
@@ -2773,6 +2775,47 @@ mod tests {
             crate::adjacency::validate_adjacency_index(workspace.path())
                 .unwrap()
                 .is_empty()
+        );
+
+        // A package without the index (a subset export, or one made before
+        // #1388) gets it built into the verified stage tree before the compact
+        // CAS append, so the imported generation still ships it.
+        let stage = tempfile::tempdir().unwrap();
+        let tree = stage.path().join("graph-tree");
+        fs::create_dir(&tree).unwrap();
+        crate::materialize_graph_objects(imported.container_root(), &inventory, &tree).unwrap();
+        fs::remove_dir_all(tree.join("indexes")).unwrap();
+        let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
+            format: "graphforge-graph-files-root".into(),
+            format_version: crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        })
+        .unwrap();
+        let participants = vec![ProjectFileParticipant {
+            participant: placeholder.clone(),
+            source: stage.path().join("graph-files.json"),
+            byte_length: placeholder.bytes.len() as u64,
+            content_sha256: Sha256::digest(&placeholder.bytes).into(),
+        }];
+        let added = persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap();
+        assert_eq!(added, imported_index.len());
+        assert!(!stage.path().join(IMPORT_ADJACENCY_SPILL_ROOT).exists());
+        let rows = crate::adjacency::read_manifest(&tree).unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.topology_generation == topology_generation)
+        );
+        assert!(
+            crate::adjacency::validate_adjacency_index(&tree)
+                .unwrap()
+                .is_empty()
+        );
+        // Already present: nothing is added twice.
+        assert_eq!(
+            persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap(),
+            0
         );
     }
 

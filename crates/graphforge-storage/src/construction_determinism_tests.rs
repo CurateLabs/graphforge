@@ -375,16 +375,21 @@ mod determinism {
             .map(|artifact| artifact.path.as_str())
             .filter(|path| path.starts_with("indexes/adjacency/"))
             .collect::<Vec<_>>();
-        let relation_out = csr_path(std::path::Path::new(""), "R", Direction::Out)
-            .with_extension("csr.json")
-            .to_string_lossy()
-            .into_owned();
-        for expected in [
-            "indexes/adjacency/index_manifest.parquet",
-            "indexes/adjacency/_all.out.csr.json",
-            "indexes/adjacency/_all.in.csr.json",
-            relation_out.as_str(),
-        ] {
+        let shard_manifest = |stem: &str, direction: Direction| {
+            csr_path(std::path::Path::new(""), stem, direction)
+                .with_extension("csr.json")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let expected_manifests = [
+            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::Out),
+            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::In),
+            shard_manifest("R", Direction::Out),
+            shard_manifest("R", Direction::In),
+        ];
+        for expected in std::iter::once("indexes/adjacency/index_manifest.parquet")
+            .chain(expected_manifests.iter().map(String::as_str))
+        {
             assert!(
                 published_index.contains(&expected),
                 "{expected} is not among {published_index:?}"
