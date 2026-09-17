@@ -1,7 +1,6 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 128,
   "targets": [
     {
       "package": "graphforge-api",

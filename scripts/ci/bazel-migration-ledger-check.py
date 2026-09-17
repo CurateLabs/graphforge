@@ -8,6 +8,7 @@ Unmapped rows and stub retained-tool exceptions fail the gate.
 
 from __future__ import annotations
 
+import collections
 import argparse
 import json
 from pathlib import Path
@@ -91,11 +92,24 @@ def check(
     exceptions = {entry["id"]: entry for entry in payload.get("exceptions", [])}
 
     cargo_rows = cargo_targets(root)
-    if len(cargo_rows) != payload.get("cargo_target_count"):
-        errors.append(
-            "cargo_target_count mismatch: "
-            f"map={payload.get('cargo_target_count')} cargo={len(cargo_rows)}"
-        )
+
+    # The target count is DERIVED, never recorded. A hand-maintained integer
+    # here added no detection power -- the cargo_keys/map_keys set difference
+    # below already names the exact target that is missing or extra -- while
+    # creating a merge conflict git cannot see: two pull requests each adding a
+    # target both change the same recorded number from N to N+1, git merges the
+    # identical edit without complaint, and the merged result is short by one.
+    # That ejected two pull requests from the merge queue on 2026-09-17.
+    #
+    # What a recorded count did NOT check, and this does: duplicate entries.
+    # `mapped_entries` is a dict keyed by (package, target), so a duplicated
+    # entry silently collapsed and was invisible to every other check here.
+    seen: dict[tuple[str, str], int] = collections.Counter(
+        (entry["package"], entry["target"]) for entry in payload["targets"]
+    )
+    for key, count in sorted(seen.items()):
+        if count > 1:
+            errors.append(f"duplicate map entry: {key[0]}::{key[1]} appears {count} times")
 
     cargo_keys = {(pkg, tgt) for pkg, tgt, _cls, _src in cargo_rows}
     map_keys = set(mapped_entries)
@@ -175,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = load_map(map_path)
     print(
         "bazel migration ledger check OK: "
-        f"targets={payload['cargo_target_count']} "
+        f"targets={len(payload['targets'])} "
         f"exceptions={len(payload.get('exceptions', []))}"
     )
     return 0
