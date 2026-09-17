@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -135,6 +136,70 @@ assert not missing_license_dirs, (
 
 missing_notice = sorted(name for name in names if not (ROOT / "crates" / name / "NOTICE").is_file())
 assert not missing_notice, f"publishable crates without a NOTICE file: {missing_notice}"
+
+# --- Bazel target versions must not diverge from the workspace version (#1395) -
+# rules_rust reads a crate's `env!("CARGO_PKG_VERSION")` from the target's own
+# `version` attribute, not from Cargo.toml, and defaults an unset one to
+# "0.0.0". Three Bazel targets embed that macro in their compiled crate; each
+# must set `version = WORKSPACE_VERSION` (single-sourced from
+# tools/bazel/gf_version.bzl, itself rewritten by set_release_version.py) so a
+# release bump cannot leave one of them hand-typed and stale, the same
+# divergence shape the release-inventory check above closes for crates.io.
+BAZEL_VERSION_BZL = ROOT / "tools" / "bazel" / "gf_version.bzl"
+BAZEL_VERSIONED_TARGETS = (
+    (ROOT / "crates" / "graphforge-bindings-py" / "BUILD.bazel", "graphforge_bindings_py"),
+    (
+        ROOT / "crates" / "graphforge-bindings-node" / "BUILD.bazel",
+        "graphforge_bindings_node_build_script",
+    ),
+    (ROOT / "crates" / "graphforge-cli" / "BUILD.bazel", "graphforge_cli_build_script"),
+)
+
+
+def read_bazel_constant() -> str:
+    match = re.search(
+        r'(?m)^WORKSPACE_VERSION\s*=\s*"([^"]+)"',
+        BAZEL_VERSION_BZL.read_text(encoding="utf-8"),
+    )
+    assert match, f"{BAZEL_VERSION_BZL}: WORKSPACE_VERSION constant not found"
+    return match.group(1)
+
+
+def read_bazel_target_version(build_file: Path, target_name: str, bzl_constant: str) -> str:
+    """Return the resolved `version = ...` value of one Bazel macro call.
+
+    Resolves both a `WORKSPACE_VERSION` symbol reference and a hand-typed
+    literal, the way Bazel itself resolves the attribute at analysis time.
+    """
+    text = build_file.read_text(encoding="utf-8")
+    start_marker = f'name = "{target_name}"'
+    assert start_marker in text, f"{build_file.relative_to(ROOT)}: target {target_name!r} not found"
+    start = text.index(start_marker)
+    end = text.index("\n)\n", start)
+    block = text[start:end]
+    match = re.search(r'version\s*=\s*(WORKSPACE_VERSION|"([^"]*)")', block)
+    assert match, (
+        f"{build_file.relative_to(ROOT)}: target {target_name!r} sets no `version`; "
+        'rules_rust defaults an unset `version` to "0.0.0" (#1395)'
+    )
+    return bzl_constant if match.group(1) == "WORKSPACE_VERSION" else match.group(2)
+
+
+version_module = load_named_module(ROOT / "scripts" / "set_release_version.py")
+expected_workspace_version = version_module.read_current()["cargo"]
+
+bazel_constant = read_bazel_constant()
+assert bazel_constant == expected_workspace_version, (
+    f"{BAZEL_VERSION_BZL}: WORKSPACE_VERSION={bazel_constant!r} diverges from the "
+    f"Cargo workspace version {expected_workspace_version!r} (#1395)"
+)
+
+for build_file, target_name in BAZEL_VERSIONED_TARGETS:
+    resolved = read_bazel_target_version(build_file, target_name, bazel_constant)
+    assert resolved == expected_workspace_version, (
+        f"{build_file.relative_to(ROOT)}:{target_name} version={resolved!r} diverges from "
+        f"the Cargo workspace version {expected_workspace_version!r} (#1395)"
+    )
 
 
 print("crate-publish-plan tests passed")

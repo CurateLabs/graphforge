@@ -211,6 +211,36 @@ upstream updates #1355; Proposals #1356; Fork/interchange #1357; and integrated
 consumer/journey evidence #1358. Each implementation issue owns its direct tests;
 #1358 verifies composition rather than substituting for those tests.
 
+### Analyst journey comprehension
+
+Use the [journey questions](analyst-ux.md#journey-questions-and-user-stories)
+at the corresponding steps of the two-story/shared-character fixture. Preserve
+the complete research model; do not test every term before first use. The
+primary audience is a nontechnical analyst assisted by an agent, alongside the
+direct technical notebook/API path.
+
+| Evidence layer                  | Required observation                                                                                                                                                                                                                                                              | Owner                                                                                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Core behavior                   | Real outputs establish selected scope, evidence/claim distinctions, Branch isolation, Version identity, preview effects, partial acceptance, canonical decisions and replay outcomes.                                                                                             | #1348–#1357 for their operations; #1358 for composition across Rust/Python/Node/CLI.                                                                       |
+| Consumer and agent presentation | At each decision, the actual interface or agent tool result exposes the relevant answer, linked to Core output. Record the consumer and package versions, prompt/actions, result and interventions. A fluent agent explanation cannot replace missing state or evidence.          | Associated application repositories; #1209 coordinates candidate first-use evidence without making applications Core dependencies.                         |
+| First useful result             | Fresh supported VS Code/agent, agent-led and notebook paths produce the expected result using public instructions. Qualify Kaggle/Colab explicitly; record native/runtime constraints, memory-only state and session reset/retention guidance.                                    | #1209 and its ergonomic repairs, consuming existing clean-install infrastructure and associated-repository evidence.                                       |
+| Human comprehension             | Ask an independent participant to explain the current scope, supporting evidence or intended effect at the relevant step, then compare the answer with actual state. Record misunderstanding, assistance and resolution without substituting agent self-reports for participants. | #1209 independent first-use reviewers; #1211 post-release external pilots include nontechnical analysts working with agents as well as the technical path. |
+
+Begin scenario design and consumer checks as capabilities become available;
+do not wait for #1358 to discover that a required answer cannot be rendered.
+Record installation/prerequisite time separately from hands-on time to the first
+useful result, commands/prompts, expected versus observed answers, errors and
+undocumented help. Use #1209's existing ten-minute target and honest timing
+disposition; no new timing-only CI gate is introduced. Follow-up observations
+check whether the participant can continue research, not merely repeat a demo.
+
+Automated fixtures prove behavior and presentation contracts, not human
+comprehension or demand. A technically complete v0.6.0 and a usable
+agent-assisted analyst experience have distinct evidence. External pilots remain
+post-publication; planning and review of the existing journey can happen earlier.
+Do not infer participant competence or incomprehension from technical background
+alone, and never invent participants or successful hosted-environment runs.
+
 ### M11 contract regression scenarios
 
 Quality regime: **A (contracts and deterministic fixtures)**, supplemented by

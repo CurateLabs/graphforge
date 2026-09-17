@@ -24,7 +24,7 @@ def load_module():
 
 mod = load_module()
 sha = "a" * 40
-versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.2")
+versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills", "bazel"), "0.5.2")
 assert (
     mod.validate(
         tag="v0.5.2",
@@ -50,6 +50,7 @@ prerelease = {
     "node": "0.6.0-rc.1",
     "cli": "0.6.0-rc.1",
     "skills": "0.6.0-rc.1",
+    "bazel": "0.6.0-rc.1",
 }
 assert (
     mod.validate(

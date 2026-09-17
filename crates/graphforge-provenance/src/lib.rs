@@ -446,6 +446,22 @@ impl ProvenanceLedger {
     /// Identical operation event-sets are idempotent. Reuse of an operation
     /// UUID with a different complete event-set, or reuse of an event, lineage,
     /// or role/ordinal identity with different canonical content conflicts.
+    ///
+    /// # Performance
+    /// `self` and `staged` are each only ever produced by [`Self::new`],
+    /// [`Self::merge`], or [`Self::from_batches`], every one of which already
+    /// validates and canonically re-derives (SHA-256-hashes) each row it
+    /// accepts. This function therefore does not re-derive or re-hash the
+    /// canonical identity of rows it already has in hand: `self`'s rows were
+    /// validated once, at decode or an earlier merge; `staged`'s rows were
+    /// validated once, moments earlier, at its own construction. What merge
+    /// still must check, without rehashing, are the invariants that only
+    /// appear once two independently-valid ledgers are combined: identity
+    /// reuse with conflicting content, dangling references, duplicate
+    /// role/ordinal positions, and the row-count limit. Cost here is O(rows
+    /// already present) for cheap, non-cryptographic bookkeeping (clone,
+    /// hash-map insert, set membership) plus O(rows newly added) for the one
+    /// piece of real validation work, not O(ledger size) of SHA-256 hashing.
     pub fn merge(&self, staged: &Self) -> Result<Self, ProvenanceError> {
         let mut events = self.events.clone();
         let mut by_event = events
@@ -464,6 +480,8 @@ impl ProvenanceLedger {
                 return Err(ProvenanceError::Conflict("operation_uuid"));
             }
         }
+
+        let mut new_events = Vec::new();
         for event in &staged.events {
             if let Some(existing) = by_event.get(&event.provenance_uuid)
                 && existing != event
@@ -475,6 +493,7 @@ impl ProvenanceLedger {
                 .is_none()
             {
                 events.push(event.clone());
+                new_events.push(event.clone());
             }
         }
 
@@ -484,6 +503,7 @@ impl ProvenanceLedger {
             .cloned()
             .map(|row| (row.lineage_uuid, row))
             .collect::<HashMap<_, _>>();
+        let mut new_lineage = Vec::new();
         for row in &staged.lineage {
             if let Some(existing) = by_lineage.get(&row.lineage_uuid)
                 && existing != row
@@ -492,9 +512,71 @@ impl ProvenanceLedger {
             }
             if by_lineage.insert(row.lineage_uuid, row.clone()).is_none() {
                 lineage.push(row.clone());
+                new_lineage.push(row.clone());
             }
         }
-        Self::new(events, lineage)
+
+        if new_events.is_empty() && new_lineage.is_empty() {
+            // Fully idempotent merge: nothing new to validate, sort, or
+            // reconstruct.
+            return Ok(self.clone());
+        }
+
+        check_limit("events", events.len())?;
+        check_limit("lineage", lineage.len())?;
+
+        // Structural checks that only a merge can violate, over the rows
+        // genuinely new to this call. This does not call `ProvenanceEvent::new`
+        // / `LineageRecord::new` (the canonical-bytes + SHA-256 fingerprint +
+        // derived-UUID comparison) again for these rows: that already ran once,
+        // either when `staged` was constructed or when the ledger it came from
+        // was decoded. Each auxiliary index below is built only when there is
+        // a new row of the matching kind to check, so a single-record append
+        // that adds only an event (or only a lineage row) pays for one
+        // O(existing rows) pass, not both.
+        if !new_events.is_empty() {
+            let mut operation_kinds: HashSet<(Uuid, EventKind)> = self
+                .events
+                .iter()
+                .map(|event| (event.operation_uuid, event.event_kind))
+                .collect();
+            for event in &new_events {
+                if !operation_kinds.insert((event.operation_uuid, event.event_kind)) {
+                    return Err(ProvenanceError::Duplicate("operation_uuid/event_kind"));
+                }
+            }
+        }
+
+        if !new_lineage.is_empty() {
+            let mut positions: HashSet<(Uuid, LineageRole, u32)> = self
+                .lineage
+                .iter()
+                .map(|row| (row.provenance_uuid, row.role, row.ordinal))
+                .collect();
+            for row in &new_lineage {
+                if !by_event.contains_key(&row.provenance_uuid) {
+                    return Err(ProvenanceError::Dangling("provenance_uuid"));
+                }
+                if !positions.insert((row.provenance_uuid, row.role, row.ordinal)) {
+                    return Err(ProvenanceError::Duplicate("role/ordinal"));
+                }
+            }
+        }
+
+        events.sort_by_key(|event| (event.recorded_at_micros, event.provenance_uuid));
+        // `by_event` already holds every final event (old and new: every
+        // staged event was inserted into it above), so lineage sort keys can
+        // be read from there instead of rebuilding a separate time index.
+        lineage.sort_by_key(|row| {
+            (
+                by_event[&row.provenance_uuid].recorded_at_micros,
+                row.provenance_uuid,
+                role_order(row.role),
+                row.ordinal,
+                row.subject_uuid,
+            )
+        });
+        Ok(Self { events, lineage })
     }
 
     /// Build the authoritative event Arrow batch.
@@ -1241,6 +1323,35 @@ mod tests {
         );
         assert_eq!(ledger.events.len(), 1);
         assert_eq!(ledger.lineage.len(), 2);
+    }
+
+    /// Merge's fast path stops validating and re-hashing already-known-good
+    /// rows, but a staged batch that tries to add a lineage row occupying a
+    /// role/ordinal position an existing row already holds for the same
+    /// event must still be refused as a conflict, not silently accepted.
+    #[test]
+    fn merge_rejects_cross_ledger_duplicate_role_ordinal() {
+        let (event, rows) = fixture();
+        let ledger = ProvenanceLedger::new(vec![event.clone()], rows.clone()).unwrap();
+
+        // Reuses (event.provenance_uuid, Output, 0) — already occupied by
+        // rows[0] — with a different subject, so it is a distinct lineage
+        // row (different lineage_uuid) rather than an idempotent replay.
+        let colliding_position = LineageRecord::new(
+            event.provenance_uuid,
+            uuid(5),
+            SubjectKind::Edge,
+            LineageRole::Output,
+            0,
+        )
+        .unwrap();
+        let staged =
+            ProvenanceLedger::new(vec![event], vec![rows[1].clone(), colliding_position]).unwrap();
+
+        assert_eq!(
+            ledger.merge(&staged).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
     }
 
     #[test]
