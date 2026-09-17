@@ -30,12 +30,13 @@ mod construction_directory;
 pub use allocation_operation::StorageAllocationOperation;
 mod private_storage_ownership;
 pub mod storage_attribution;
+pub mod transient_composition;
 pub use private_storage_ownership::{
     PrivateStorageOwner, PrivateStorageOwnership, capture_artifact_storage_ownership,
     capture_private_storage_ownership, capture_published_storage_ownership,
 };
 pub use storage_attribution::{
-    ArtifactCategory, ArtifactCategoryAuthorityContext, ArtifactStorageTotals,
+    ArtifactCategory, ArtifactCategoryAuthorityContext, ArtifactStorageTotals, ComponentResidency,
     ConstructionPhaseAttribution, PhaseIoTotals, ProjectStorageIdentityUnion,
     StorageAllocationLifecycle, StorageAllocationTransition, StorageAttributionReceipt,
     StorageAttributionSnapshot, StorageIoPhase, artifact_category_authority_commitment,
@@ -43,6 +44,7 @@ pub use storage_attribution::{
     capture_storage_attribution, classify_graph_artifact,
     storage_attribution_receipt_from_snapshot,
 };
+pub use transient_composition::{TransientComponent, classify_allocation_path};
 
 pub mod generation;
 pub use generation::{

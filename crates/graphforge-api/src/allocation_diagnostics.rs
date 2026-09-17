@@ -56,4 +56,30 @@ impl StorageAllocationDiagnostics {
     pub fn totals(&self) -> Result<(u64, u64), GfError> {
         self.allocation.totals()
     }
+
+    /// Return the identity-free composition of the peak, per-component
+    /// residency, the transition count that is residency's denominator, and the
+    /// transition at which the peak was set.
+    ///
+    /// # Errors
+    /// Refuses a poisoned accounting context.
+    #[allow(clippy::type_complexity, reason = "one private diagnostic tuple")]
+    pub fn peak_detail(
+        &self,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<graphforge_storage::TransientComponent, u64>,
+            std::collections::BTreeMap<
+                graphforge_storage::TransientComponent,
+                graphforge_storage::ComponentResidency,
+            >,
+            u64,
+            u64,
+        ),
+        GfError,
+    > {
+        let composition = self.allocation.peak_composition()?;
+        let (residency, transitions, peak_transition) = self.allocation.residency()?;
+        Ok((composition, residency, transitions, peak_transition))
+    }
 }

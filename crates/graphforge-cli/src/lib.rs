@@ -1251,7 +1251,10 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, CliRuntimeError> {
     let result = run_with_allocation(cli, output, allocation.as_ref())?;
     if let Some(allocation) = allocation {
         let (current, peak) = allocation.totals()?;
-        serde_json::to_writer(&mut *output, &serde_json::json!({"contract":"graphforge-allocation-operation/1", "current_allocated_bytes":current, "peak_allocated_bytes":peak})).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        // The composition sums to `peak_allocated_bytes`, so a consumer can
+        // attribute the whole high-water mark rather than a fraction of it.
+        let (composition, residency, transitions, peak_transition) = allocation.peak_detail()?;
+        serde_json::to_writer(&mut *output, &serde_json::json!({"contract":"graphforge-allocation-operation/1", "current_allocated_bytes":current, "peak_allocated_bytes":peak, "peak_component_allocated_bytes":composition, "component_residency":residency, "owner_transitions":transitions, "peak_transition":peak_transition})).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
         writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
     }
     Ok(result)

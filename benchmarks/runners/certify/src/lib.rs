@@ -1036,6 +1036,13 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "contract",
                 "current_allocated_bytes",
                 "peak_allocated_bytes",
+                // Identity-free composition of the peak (#1393). Kept out of
+                // the numeric sanitizer list below because these are maps, not
+                // scalars; the receipt itself never leaves the private channel.
+                "peak_component_allocated_bytes",
+                "component_residency",
+                "owner_transitions",
+                "peak_transition",
             ],
         )
         .filter(|receipt| {

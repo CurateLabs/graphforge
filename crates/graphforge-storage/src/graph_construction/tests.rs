@@ -6,6 +6,7 @@ use super::shape::resolve_endpoint_surrogates;
 include!("../construction_detail_tests.rs");
 include!("../construction_lifecycle_tests.rs");
 include!("../construction_determinism_tests.rs");
+include!("../transient_composition_tests.rs");
 use std::sync::Arc;
 
 use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
