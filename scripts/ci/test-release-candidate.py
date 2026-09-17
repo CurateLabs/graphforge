@@ -254,7 +254,9 @@ def main() -> None:
         root = Path(temp)
         manifest_path, artifacts, manifest = create_candidate(root)
         validated = release_candidate.validate(manifest_path, artifacts, SHA, VERSION)
-        assert len(validated["nodes"]) == 26
+        assert len(validated["nodes"]) == 1 + len(manifest_module.NPM_PACKAGES) + len(
+            manifest_module.CRATES
+        )
         assert {
             "from": "crates:graphforge-storage",
             "requires": "crates:graphforge-filesystem",

@@ -16,6 +16,8 @@ import release_registry as registry
 VERSION = "0.5.1"
 SHA = "a" * 40
 NOW = "2030-01-01T12:02:00+00:00"
+# One PyPI node, every npm package, and every crates.io crate (#1373).
+NODE_COUNT = 1 + len(NPM_PACKAGES) + len(CRATES)
 
 
 def artifact(path: str, group: str, surface: str, name: str, *, dependencies=None):
@@ -206,7 +208,7 @@ def main() -> None:
     result = plan(manifest, all_verified)
     assert result["actions"] == []
     assert result["download_groups"] == []
-    assert result["summary"]["verified"] == 26
+    assert result["summary"]["verified"] == NODE_COUNT
 
     for node_id in (
         "pypi:graphforge",

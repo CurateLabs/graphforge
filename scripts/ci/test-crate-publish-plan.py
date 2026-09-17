@@ -20,6 +20,17 @@ def load_module():
     return module
 
 
+def load_named_module(path: Path):
+    """Import a scripts/ module by path (names contain hyphens)."""
+    name = path.stem.replace("-", "_")
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
@@ -97,5 +108,33 @@ assert any(command.startswith("cargo publish -p graphforge-value ") for command 
 assert any(command.startswith("cargo publish -p graphforge-observability ") for command in commands)
 assert commands[0].startswith("cargo publish -p graphforge-core ")
 assert commands[-1].startswith("cargo publish -p graphforge-cli ")
+
+# --- Release inventories must not diverge from the publish plan (#1373) -------
+# Every hand-maintained crates.io inventory is compared against the plan here so
+# that adding a crate cannot silently leave a release gate behind.
+INVENTORIES = (
+    (ROOT / "scripts" / "ci" / "release_candidate_manifest.py", "CRATES"),
+    (ROOT / "scripts" / "ci" / "clean-env-verify.py", "DEFAULT_CRATES"),
+    (ROOT / "scripts" / "verify_package_licenses.py", "CARGO_PUBLISH_CRATES"),
+)
+
+for script, attribute in INVENTORIES:
+    inventory_module = load_named_module(script)
+    inventory = tuple(getattr(inventory_module, attribute))
+    assert inventory == tuple(names), (
+        f"{script.relative_to(ROOT)}:{attribute} diverges from "
+        f"crate-publish-plan.py list; expected {list(names)}, found {list(inventory)}"
+    )
+
+license_check = load_named_module(ROOT / "scripts" / "license_check.py")
+license_dirs = {path.name for path in license_check.CARGO_PACKAGE_DIRS}
+missing_license_dirs = sorted(set(names) - license_dirs)
+assert not missing_license_dirs, (
+    f"scripts/license_check.py:CARGO_PACKAGE_DIRS lacks publishable crates: {missing_license_dirs}"
+)
+
+missing_notice = sorted(name for name in names if not (ROOT / "crates" / name / "NOTICE").is_file())
+assert not missing_notice, f"publishable crates without a NOTICE file: {missing_notice}"
+
 
 print("crate-publish-plan tests passed")
