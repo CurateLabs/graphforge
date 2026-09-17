@@ -123,6 +123,7 @@ const PAGES = [
   // Active ADRs; docs/adr/README.md is the index. Superseded records stay
   // under docs/adr/superseded/ and are not published.
   'adr/README.md',
+  // BEGIN generated ADR records — scripts/ci/adr-index.py generate
   'adr/0001-rust-core.md',
   'adr/0002-lr1-grammar.md',
   'adr/0003-progressive-ontology.md',
@@ -156,6 +157,7 @@ const PAGES = [
   'adr/0032-research-project-authority.md',
   'adr/0035-structured-stage-errors.md',
   'adr/0036-release-version-contract.md',
+  // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

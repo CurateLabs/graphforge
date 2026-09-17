@@ -86,5 +86,8 @@ entries mirror the active table). ADR bodies stay under `docs/adr/`; the public
 decision log at [`../engineering/adrs/`](../engineering/adrs/) links here and must
 not duplicate or renumber bodies. Do not fork a second ADR sequence.
 
-Both indexes and this directory must agree. Nothing enforces that yet;
-[#1390](https://github.com/CurateLabs/graphforge/issues/1390) owns the gate.
+Both indexes and this directory must agree, and so do the two docs-site files
+that the published build consumes. `scripts/ci/adr-index.py check` enforces all
+four in the Repository Policy job; the docs-site regions are generated, so run
+`python3 scripts/ci/adr-index.py generate` after adding or superseding a record
+rather than editing them by hand.
