@@ -21,6 +21,19 @@ const NODE_UUID_FIELD: &str = "node_uuid";
 const TANTIVY_MIN_WRITER_MEMORY_BYTES: usize = 15_000_000;
 type TextSchema = (Schema, Field, Vec<(String, Field)>);
 
+// Test-only instrumentation for #1409: counts calls to `open_validated`,
+// which fully reopens and decodes one text index directory, so a regression
+// test can prove how many times one text query decodes the corpus by
+// counting rather than by reading the source.
+//
+// A thread-local, not a shared global, because `cargo test` runs each
+// `#[test]` fn on its own OS thread; a shared counter would be polluted by
+// unrelated tests decoding indexes concurrently.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OPEN_VALIDATED_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Pinned Tantivy storage/index-format release used by this backend.
 pub const TEXT_BACKEND_VERSION: &str = "tantivy-0.26.1";
 
@@ -283,6 +296,8 @@ fn open_validated<C>(
 where
     C: FnMut() -> Result<(), SearchArtifactError>,
 {
+    #[cfg(test)]
+    OPEN_VALIDATED_CALLS.with(|calls| calls.set(calls.get() + 1));
     checkpoint()?;
     bounded_directory_bytes(index_dir, limits, checkpoint, true)?;
     let properties = normalize_properties(expected_properties, limits)?;
