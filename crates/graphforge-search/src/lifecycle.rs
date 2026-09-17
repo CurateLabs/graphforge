@@ -505,6 +505,14 @@ where
     let checkpoint = RefCell::new(checkpoint);
     let build_calls = Cell::new(0_u8);
     let projection = RefCell::new(None::<TextSourceProjection>);
+    // `validate_current` (reuse) and `build` (fresh publish) below each
+    // already open and fully validate the corpus exactly once before
+    // `coordinate_search_publication` can return. Their results are
+    // captured here so the outcome below can be built from them directly,
+    // instead of reopening and re-decoding the same immutable artifact a
+    // second time purely to discard the result.
+    let reused_prepared = RefCell::new(None::<PublishedTextIndex>);
+    let built_kind = Cell::new(None::<TextArtifactKind>);
     let revalidate = |expected: &SearchSourceSnapshot| {
         generation_checked_snapshot(
             project_dir,
@@ -546,10 +554,11 @@ where
             )
         },
         |artifact| {
-            inspect_text_artifact(artifact, &properties, limits.text, || {
+            let published = inspect_text_artifact(artifact, &properties, limits.text, || {
                 checkpoint.borrow_mut()()
-            })
-            .map(|_| ())
+            })?;
+            *reused_prepared.borrow_mut() = Some(published);
+            Ok(())
         },
         |build_dir, _snapshot| {
             if build_calls.replace(build_calls.get().saturating_add(1)) > 0 {
@@ -577,25 +586,35 @@ where
             if policy.require_observed_properties {
                 validate_observed_properties(projection)?;
             }
-            match build_text_index(build_dir, projection, limits.text, || {
+            let kind = match build_text_index(build_dir, projection, limits.text, || {
                 checkpoint.borrow_mut()()
             })? {
-                TextIndexBuildOutcome::Empty => write_empty_marker(build_dir)?,
-                TextIndexBuildOutcome::Built { .. } => {}
-            }
+                TextIndexBuildOutcome::Empty => {
+                    write_empty_marker(build_dir)?;
+                    TextArtifactKind::Empty
+                }
+                TextIndexBuildOutcome::Built { .. } => TextArtifactKind::Tantivy,
+            };
             inspect_build(build_dir, &properties, limits.text, || {
                 checkpoint.borrow_mut()()
-            })
+            })?;
+            built_kind.set(Some(kind));
+            Ok(())
         },
         || checkpoint.borrow_mut()(),
     )?;
-    let artifact = match outcome {
-        SearchPublicationOutcome::Reused(artifact)
-        | SearchPublicationOutcome::Published { artifact, .. } => artifact,
-    };
-    inspect_text_artifact(&artifact, &properties, limits.text, || {
-        checkpoint.borrow_mut()()
-    })
+    match outcome {
+        SearchPublicationOutcome::Reused(_) => Ok(reused_prepared.into_inner().expect(
+            "a reused outcome is only returned once validate_current has recorded it",
+        )),
+        SearchPublicationOutcome::Published { artifact, .. } => Ok(match built_kind
+            .get()
+            .expect("a published outcome is only returned once build has recorded its kind")
+        {
+            TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
+            TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
+        }),
+    }
 }
 
 /// Lazily reuse/build and search one explicit text artifact.
@@ -1140,6 +1159,54 @@ mod tests {
             set_node_properties(project_dir, LABEL, &updates).unwrap(),
             1
         );
+    }
+
+    fn bulk_uuid(index: usize) -> Uuid {
+        let mut bytes = [0_u8; 16];
+        bytes[8..16].copy_from_slice(&(index as u64).to_be_bytes());
+        Uuid::from_bytes(bytes)
+    }
+
+    /// Writes `count` distinct `Person` nodes, each with a `name` string that
+    /// shares one common searchable token, for scale measurements.
+    fn write_people(project_dir: &Path, count: usize) {
+        let mut writer = GraphWriter::open_at(project_dir, OntologyMode::Strict, 1).unwrap();
+        for index in 0..count {
+            let node = bulk_uuid(index);
+            writer
+                .create_node(
+                    node,
+                    graphforge_value::EntityTypeId::decode(LABEL_ID).unwrap(),
+                )
+                .unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    Some(LABEL),
+                    HashMap::from([(
+                        "name".to_owned(),
+                        IrLiteral::Str(format!("Person Number {index} findable")),
+                    )]),
+                )
+                .unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    /// Total on-disk bytes under `path`, the same quantity `open_validated`
+    /// reads through when it fully reopens and decodes one text index.
+    fn dir_bytes(path: &Path) -> u64 {
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                total += dir_bytes(&entry.path());
+            } else {
+                total += entry.metadata().unwrap().len();
+            }
+        }
+        total
     }
 
     fn prepare(project_dir: &Path) -> PublishedTextIndex {
@@ -1893,5 +1960,98 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, SearchArtifactError::ConcurrentMutation));
+    }
+
+    /// #1409 regression: a text query used to fully reopen and decode the
+    /// Tantivy corpus three times — once to validate a build or a reuse
+    /// candidate, once more purely to discard that same validation, and
+    /// once to actually run the search. Prove, by counting rather than by
+    /// reading the source, that the throwaway middle pass is gone on both
+    /// the fresh-build path and the warm-reuse path.
+    #[test]
+    fn search_query_opens_the_text_index_at_most_twice() {
+        let dir = TempDir::new().unwrap();
+        write_person(dir.path(), "Alice Example");
+        let properties = properties();
+
+        crate::text_index::OPEN_VALIDATED_CALLS.with(|calls| calls.set(0));
+        let built = search_published_text(
+            dir.path(),
+            request(&properties),
+            "ALICE",
+            10,
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(
+            crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
+            2,
+            "a fresh-build text query should decode the corpus exactly twice"
+        );
+
+        crate::text_index::OPEN_VALIDATED_CALLS.with(|calls| calls.set(0));
+        let reused = search_published_text(
+            dir.path(),
+            request(&properties),
+            "ALICE",
+            10,
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(reused.len(), 1);
+        assert_eq!(
+            crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get),
+            2,
+            "a warm-reuse text query should decode the corpus exactly twice"
+        );
+    }
+
+    /// Measured evidence for #1409: bytes decoded and wall time for one
+    /// warm-reuse text query, at two corpus sizes an order of magnitude
+    /// apart. Run with:
+    /// `cargo test -p graphforge-search --release measure_text_query_decode_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual perf evidence for #1409; timing and byte counts are hardware-specific"]
+    fn measure_text_query_decode_cost() {
+        use std::time::Instant;
+
+        for count in [1_000_usize, 100_000_usize] {
+            let dir = TempDir::new().unwrap();
+            write_people(dir.path(), count);
+            let properties = properties();
+
+            let published = prepare_text_index(
+                dir.path(),
+                request(&properties),
+                SearchPublicationMode::ReuseFresh,
+                TextLifecycleLimits::default(),
+                || Ok(()),
+            )
+            .unwrap();
+            let index_bytes = dir_bytes(&published.artifact().path);
+
+            crate::text_index::OPEN_VALIDATED_CALLS.with(|calls| calls.set(0));
+            let started = Instant::now();
+            let hits = search_published_text(
+                dir.path(),
+                request(&properties),
+                "findable",
+                10,
+                TextLifecycleLimits::default(),
+                || Ok(()),
+            )
+            .unwrap();
+            let elapsed = started.elapsed();
+            let calls = crate::text_index::OPEN_VALIDATED_CALLS.with(std::cell::Cell::get);
+            assert_eq!(hits.len(), 10);
+            eprintln!(
+                "count={count} index_bytes={index_bytes} open_validated_calls={calls} \
+                 bytes_decoded_this_query={} elapsed={elapsed:?}",
+                index_bytes * calls as u64
+            );
+        }
     }
 }
