@@ -564,58 +564,102 @@ where
             if build_calls.replace(build_calls.get().saturating_add(1)) > 0 {
                 consume_retry(policy.retry_budget)?;
             }
-            if projection.borrow().is_none() {
-                *projection.borrow_mut() = Some(project_text_source(
-                    project_dir,
-                    request.label_id,
-                    Some(&properties),
-                    limits.text,
-                    || checkpoint.borrow_mut()(),
-                )?);
-            }
-            let borrowed = projection.borrow();
-            let projection = borrowed.as_ref().expect("projection initialized");
-            if policy
-                .expected_snapshot
-                .is_some_and(|expected| expected != &projection.source_snapshot)
-            {
-                return Err(SearchArtifactError::Stale {
-                    reason: "graph changed after text property discovery".to_owned(),
-                });
-            }
-            if policy.require_observed_properties {
-                validate_observed_properties(projection)?;
-            }
-            let kind = match build_text_index(build_dir, projection, limits.text, || {
-                checkpoint.borrow_mut()()
-            })? {
-                TextIndexBuildOutcome::Empty => {
-                    write_empty_marker(build_dir)?;
-                    TextArtifactKind::Empty
-                }
-                TextIndexBuildOutcome::Built { .. } => TextArtifactKind::Tantivy,
-            };
-            inspect_build(build_dir, &properties, limits.text, || {
-                checkpoint.borrow_mut()()
-            })?;
-            built_kind.set(Some(kind));
-            Ok(())
+            build_and_record_text_index(
+                build_dir,
+                project_dir,
+                request,
+                &properties,
+                limits,
+                policy,
+                &projection,
+                &built_kind,
+                &checkpoint,
+            )
         },
         || checkpoint.borrow_mut()(),
     )?;
+    Ok(finish_prepared_text_index(
+        outcome,
+        reused_prepared,
+        &built_kind,
+    ))
+}
+
+/// Builds into `build_dir`, then fully validates the result and records
+/// which [`TextArtifactKind`] it turned out to be, so the caller can build
+/// the returned [`PublishedTextIndex`] without decoding the artifact again.
+#[allow(clippy::too_many_arguments)]
+fn build_and_record_text_index<C>(
+    build_dir: &Path,
+    project_dir: &Path,
+    request: TextIndexRequest<'_>,
+    properties: &[String],
+    limits: TextLifecycleLimits,
+    policy: TextPreparationPolicy<'_>,
+    projection: &RefCell<Option<TextSourceProjection>>,
+    built_kind: &Cell<Option<TextArtifactKind>>,
+    checkpoint: &RefCell<C>,
+) -> Result<(), SearchArtifactError>
+where
+    C: FnMut() -> Result<(), SearchArtifactError>,
+{
+    if projection.borrow().is_none() {
+        *projection.borrow_mut() = Some(project_text_source(
+            project_dir,
+            request.label_id,
+            Some(properties),
+            limits.text,
+            || checkpoint.borrow_mut()(),
+        )?);
+    }
+    let borrowed = projection.borrow();
+    let projection = borrowed.as_ref().expect("projection initialized");
+    if policy
+        .expected_snapshot
+        .is_some_and(|expected| expected != &projection.source_snapshot)
+    {
+        return Err(SearchArtifactError::Stale {
+            reason: "graph changed after text property discovery".to_owned(),
+        });
+    }
+    if policy.require_observed_properties {
+        validate_observed_properties(projection)?;
+    }
+    let kind = match build_text_index(build_dir, projection, limits.text, || {
+        checkpoint.borrow_mut()()
+    })? {
+        TextIndexBuildOutcome::Empty => {
+            write_empty_marker(build_dir)?;
+            TextArtifactKind::Empty
+        }
+        TextIndexBuildOutcome::Built { .. } => TextArtifactKind::Tantivy,
+    };
+    inspect_build(build_dir, properties, limits.text, || {
+        checkpoint.borrow_mut()()
+    })?;
+    built_kind.set(Some(kind));
+    Ok(())
+}
+
+/// Builds the final [`PublishedTextIndex`] from whichever already-validated
+/// result `coordinate_search_publication`'s outcome corresponds to, instead
+/// of reopening and re-decoding the artifact a second time.
+fn finish_prepared_text_index(
+    outcome: SearchPublicationOutcome,
+    reused_prepared: RefCell<Option<PublishedTextIndex>>,
+    built_kind: &Cell<Option<TextArtifactKind>>,
+) -> PublishedTextIndex {
     match outcome {
-        SearchPublicationOutcome::Reused(_) => Ok(reused_prepared
+        SearchPublicationOutcome::Reused(_) => reused_prepared
             .into_inner()
-            .expect("a reused outcome is only returned once validate_current has recorded it")),
-        SearchPublicationOutcome::Published { artifact, .. } => Ok(
-            match built_kind
-                .get()
-                .expect("a published outcome is only returned once build has recorded its kind")
-            {
-                TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
-                TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
-            },
-        ),
+            .expect("a reused outcome is only returned once validate_current has recorded it"),
+        SearchPublicationOutcome::Published { artifact, .. } => match built_kind
+            .get()
+            .expect("a published outcome is only returned once build has recorded its kind")
+        {
+            TextArtifactKind::Empty => PublishedTextIndex::Empty(artifact),
+            TextArtifactKind::Tantivy => PublishedTextIndex::Tantivy(artifact),
+        },
     }
 }
 
