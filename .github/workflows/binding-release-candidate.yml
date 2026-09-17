@@ -656,11 +656,13 @@ jobs:
           mkdir -p crates/graphforge-bindings-node/artifacts
           cp candidate/release-artifacts/node-addons/*.node \
             crates/graphforge-bindings-node/artifacts/
-          pushd crates/graphforge-bindings-node
           # index.js / index.d.ts are gitignored. Emit loaders from a retained
           # Linux addon via the Bazel assembler — no second native recompile.
-          linux_addon="$(ls candidate/release-artifacts/node-addons/graphforge.linux-x64-gnu.node | head -n1)"
+          # Resolve the addon absolutely: the rest of this step runs inside the
+          # Node binding package, where a workspace-relative path does not exist.
+          linux_addon="$GITHUB_WORKSPACE/candidate/release-artifacts/node-addons/graphforge.linux-x64-gnu.node"
           test -f "$linux_addon"
+          pushd crates/graphforge-bindings-node
           python3 "$GITHUB_WORKSPACE/scripts/ci/binding_rc_bazel_native.py" emit-node-loaders \
             --addon "$linux_addon" \
             --out-dir . \
