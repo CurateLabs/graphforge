@@ -174,6 +174,9 @@ pub use project_generation::{
     resolve_project_generation, resolve_verified_generation,
 };
 
+pub mod verify;
+pub use verify::{ProjectVerifyReport, VerifyCategoryCounts, verify_project_store};
+
 mod project_failpoint;
 
 #[cfg(any(test, feature = "test-failpoints"))]

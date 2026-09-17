@@ -151,6 +151,17 @@ impl AssertionSupersessionLedger {
     }
 
     /// Merge append-only relations with exact replay semantics.
+    ///
+    /// # Performance
+    /// `self` and `staged` are each only ever produced by [`Self::new`],
+    /// [`Self::merge`], or [`Self::from_batches`], which already validate
+    /// every relation they accept and already prove the relation set they
+    /// hold is acyclic. This function does not re-run [`validate_relation`]
+    /// or a whole-ledger cycle search over rows it already has in hand: it
+    /// validates only the relations genuinely new to this call, and extends
+    /// the already-proven-acyclic graph by checking each new edge against
+    /// reachability rather than re-deriving acyclicity for the whole ledger
+    /// from scratch.
     pub fn merge(&self, staged: &Self) -> Result<Self, KnowledgeError> {
         let mut relations = self.relations.clone();
         let mut by_id = relations
@@ -158,6 +169,7 @@ impl AssertionSupersessionLedger {
             .cloned()
             .map(|row| (row.supersession_uuid, row))
             .collect::<HashMap<_, _>>();
+        let mut new_relations = Vec::new();
         for relation in &staged.relations {
             if let Some(existing) = by_id.get(&relation.supersession_uuid) {
                 if existing != relation {
@@ -166,9 +178,63 @@ impl AssertionSupersessionLedger {
             } else {
                 relations.push(relation.clone());
                 by_id.insert(relation.supersession_uuid, relation.clone());
+                new_relations.push(relation.clone());
             }
         }
-        Self::new(relations)
+
+        if new_relations.is_empty() {
+            // Fully idempotent merge: nothing new to validate or re-sort.
+            return Ok(self.clone());
+        }
+
+        if relations.len() > MAX_KNOWLEDGE_ROWS {
+            return Err(KnowledgeError::Limit {
+                participant: "assertion_supersessions",
+                observed: relations.len(),
+                limit: MAX_KNOWLEDGE_ROWS,
+            });
+        }
+
+        let mut status_ids: HashSet<Uuid> = self
+            .relations
+            .iter()
+            .map(|row| row.status_event_uuid)
+            .collect();
+        for relation in &new_relations {
+            validate_relation(relation)?;
+            if !status_ids.insert(relation.status_event_uuid) {
+                return Err(KnowledgeError::Duplicate("status_event_uuid"));
+            }
+        }
+
+        // `self.relations` is already known acyclic (proven at its own
+        // construction). A cycle can only appear through a path that uses at
+        // least one of the newly added edges, so extend the existing graph
+        // one new edge at a time, rejecting an edge that would let its
+        // replacement reach back to its own prior.
+        let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for row in &self.relations {
+            adjacency
+                .entry(row.prior_assertion_uuid)
+                .or_default()
+                .push(row.replacement_assertion_uuid);
+        }
+        for relation in &new_relations {
+            if reaches(
+                &adjacency,
+                relation.replacement_assertion_uuid,
+                relation.prior_assertion_uuid,
+            ) {
+                return Err(invalid("assertion_supersession", "cycle detected"));
+            }
+            adjacency
+                .entry(relation.prior_assertion_uuid)
+                .or_default()
+                .push(relation.replacement_assertion_uuid);
+        }
+
+        relations.sort_by_key(|row| (row.recorded_at_micros, row.supersession_uuid));
+        Ok(Self { relations })
     }
 
     /// Canonical fingerprint over one exact immutable relation.
@@ -356,6 +422,26 @@ fn visit(
     true
 }
 
+/// Depth-first reachability search: can `from` reach `to` via `adjacency`?
+/// Used to check a single new edge against an already-proven-acyclic graph
+/// without re-validating the whole graph's acyclicity.
+fn reaches(adjacency: &HashMap<Uuid, Vec<Uuid>>, from: Uuid, to: Uuid) -> bool {
+    let mut stack = vec![from];
+    let mut seen = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == to {
+            return true;
+        }
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(next) = adjacency.get(&node) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    false
+}
+
 fn validate_relation(row: &AssertionSupersession) -> Result<(), KnowledgeError> {
     if row.contract_version != ASSERTION_SUPERSESSION_CONTRACT_VERSION {
         return Err(invalid(
@@ -507,6 +593,35 @@ mod tests {
         assert!(matches!(
             base.merge(&conflict),
             Err(KnowledgeError::Conflict("supersession_uuid"))
+        ));
+    }
+
+    /// Merge's fast path stops re-running the whole-ledger cycle search over
+    /// rows already proven acyclic, but a new edge that closes a cycle
+    /// against the *existing* ledger (rather than within one `new()` call)
+    /// must still be refused.
+    #[test]
+    fn merge_rejects_a_cross_ledger_cycle() {
+        let base = AssertionSupersessionLedger::new(vec![relation(1, 10, 11, 1)]).unwrap();
+        let staged = AssertionSupersessionLedger::new(vec![relation(2, 11, 10, 2)]).unwrap();
+        assert!(matches!(
+            base.merge(&staged),
+            Err(KnowledgeError::Invalid { .. })
+        ));
+    }
+
+    /// Same fast-path guarantee: a newly staged relation reusing a
+    /// status_event_uuid already claimed by an existing relation must still
+    /// be refused, even though the existing relation is not re-validated.
+    #[test]
+    fn merge_rejects_a_cross_ledger_duplicate_status_event() {
+        let base = AssertionSupersessionLedger::new(vec![relation(1, 10, 11, 1)]).unwrap();
+        let mut reused_status = relation(2, 12, 13, 2);
+        reused_status.status_event_uuid = base.relations()[0].status_event_uuid;
+        let staged = AssertionSupersessionLedger::new(vec![reused_status]).unwrap();
+        assert!(matches!(
+            base.merge(&staged),
+            Err(KnowledgeError::Duplicate("status_event_uuid"))
         ));
     }
 }
