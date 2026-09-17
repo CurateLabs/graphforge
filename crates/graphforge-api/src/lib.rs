@@ -205,6 +205,7 @@ pub use graphforge_core::storage_receipt::{
 };
 /// Finite portable export budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
+pub use graphforge_storage::{ProjectVerifyReport, VerifyCategoryCounts};
 pub use graphforge_storage::{
     SemanticMigrationOperation, WorkspaceOntologyComposition, WorkspacePortableOntologyStaging,
 };
@@ -587,6 +588,20 @@ impl GraphForge {
     /// Capture closed, identity-free storage evidence for ordinary consumers.
     pub fn storage_attribution_receipt(&self) -> Result<StorageAttributionReceipt, GfError> {
         graphforge_storage::storage_attribution_receipt_from_snapshot(&self.storage_attribution()?)
+    }
+
+    /// Explicitly re-authenticate the retained store on demand.
+    ///
+    /// This is the read-only, administrative check #1384 moved "is the
+    /// store still intact" behind, so it never runs as part of ingest or
+    /// construction. It re-reads and re-hashes the selected generation's
+    /// manifest, every declared participant, and every retained
+    /// content-addressed graph payload object, reporting what was checked,
+    /// what passed, and what failed. It never mutates, repairs, or
+    /// publishes anything.
+    pub fn verify_project_store(&self) -> Result<graphforge_storage::ProjectVerifyReport, GfError> {
+        let generation = self.generation_for_read()?;
+        graphforge_storage::verify_project_store(&generation)
     }
 
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.

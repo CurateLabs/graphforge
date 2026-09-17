@@ -35,6 +35,8 @@ const MAX_SKILL_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SKILL_BUNDLE_FILES: usize = 256;
 const MAX_SKILL_PATH_BYTES: usize = 1024;
 const OUT_OF_SYNC_EXIT_CODE: i32 = 4;
+/// `verify` ran cleanly but found a store that is not intact.
+const VERIFY_FAILED_EXIT_CODE: i32 = 5;
 
 fn project_skill_bundle() -> graphforge_api::SkillBundle<'static> {
     graphforge_api::SkillBundle {
@@ -318,6 +320,55 @@ enum Command {
     Recovery,
     /// Emit authenticated, identity-free retained storage attribution.
     StorageAttribution,
+    /// Explicitly re-authenticate the retained store on demand. Read-only;
+    /// never runs as part of ingest.
+    Verify,
+}
+
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyCommandReceipt {
+    contract: &'static str,
+    catalog_and_participants: graphforge_api::VerifyCategoryCounts,
+    content_addressed_objects: graphforge_api::VerifyCategoryCounts,
+    ok: bool,
+}
+
+fn run_verify(
+    graph: &GraphForge,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<i32, graphforge_api::GfError> {
+    let report = graph.verify_project_store()?;
+    let receipt = VerifyCommandReceipt {
+        contract: "graphforge-verify-command/1",
+        catalog_and_participants: report.catalog_and_participants,
+        content_addressed_objects: report.content_addressed_objects,
+        ok: report.ok,
+    };
+    if json {
+        serde_json::to_writer(&mut *output, &receipt)
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        writeln!(output).map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    } else {
+        writeln!(
+            output,
+            "ok={} catalog_and_participants(checked={} passed={} failed={}) content_addressed_objects(checked={} passed={} failed={})",
+            receipt.ok,
+            receipt.catalog_and_participants.objects_checked,
+            receipt.catalog_and_participants.objects_passed,
+            receipt.catalog_and_participants.objects_failed,
+            receipt.content_addressed_objects.objects_checked,
+            receipt.content_addressed_objects.objects_passed,
+            receipt.content_addressed_objects.objects_failed,
+        )
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    }
+    Ok(if receipt.ok {
+        0
+    } else {
+        VERIFY_FAILED_EXIT_CODE
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -1378,6 +1429,9 @@ fn run_with_allocation(
             return run_storage_attribution(graph, &path, cli.json, output, allocation)
                 .map(|()| 0)
                 .map_err(Into::into);
+        }
+        Command::Verify => {
+            return run_verify(&graph, cli.json, output).map_err(Into::into);
         }
         Command::Transaction { command } => {
             return maintenance_cli::run_transaction(&graph, command, cli.json, output)
@@ -2737,6 +2791,70 @@ mod tests {
             json["storage"]["categories"].as_object().unwrap().len(),
             graphforge_api::ArtifactCategory::ALL.len()
         );
+        fn assert_sanitized(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for (key, value) in object {
+                        assert!(
+                            !matches!(
+                                key.as_str(),
+                                "uuid"
+                                    | "path"
+                                    | "generation_uuid"
+                                    | "generation_manifest_sha256"
+                                    | "physical_identity_allocated_bytes"
+                                    | "provider_id"
+                                    | "resource_id"
+                                    | "credential"
+                                    | "credentials"
+                                    | "secret"
+                            ),
+                            "sensitive evidence key: {key}"
+                        );
+                        assert_sanitized(value);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(assert_sanitized);
+                }
+                serde_json::Value::String(value) => {
+                    assert!(Uuid::parse_str(value).is_err());
+                    assert!(!Path::new(value).is_absolute());
+                }
+                _ => {}
+            }
+        }
+        assert_sanitized(&json);
+        let encoded = String::from_utf8(result.stdout).unwrap();
+        assert!(!encoded.contains("generation_uuid"));
+        assert!(!encoded.contains("sha256"));
+        assert!(!encoded.contains(path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn verify_json_is_closed_sanitized_and_clean_on_a_fresh_project() {
+        let project = tempdir().unwrap();
+        let path = project.path().join("state");
+        fs::create_dir(&path).unwrap();
+        let result = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project".to_owned(),
+            path.to_string_lossy().into_owned(),
+            "verify".to_owned(),
+        ]);
+        assert_eq!(
+            result.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["contract"], "graphforge-verify-command/1");
+        assert_eq!(json["ok"], true);
+        for category in ["catalog_and_participants", "content_addressed_objects"] {
+            assert_eq!(json[category]["objects_failed"], 0);
+        }
         fn assert_sanitized(value: &serde_json::Value) {
             match value {
                 serde_json::Value::Object(object) => {
