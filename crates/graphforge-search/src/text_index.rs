@@ -21,10 +21,11 @@ const NODE_UUID_FIELD: &str = "node_uuid";
 const TANTIVY_MIN_WRITER_MEMORY_BYTES: usize = 15_000_000;
 type TextSchema = (Schema, Field, Vec<(String, Field)>);
 
-/// Counts calls to [`open_validated`], which fully reopens and decodes one
-/// text index directory. Test-only instrumentation for #1409: it lets a
-/// regression test prove, by counting rather than by reading the source, how
-/// many times one text query decodes the corpus.
+// Test-only instrumentation for #1409: counts calls to `open_validated`,
+// which fully reopens and decodes one text index directory, so a regression
+// test can prove how many times one text query decodes the corpus by
+// counting rather than by reading the source.
+//
 // A thread-local, not a shared global, because `cargo test` runs each
 // `#[test]` fn on its own OS thread; a shared counter would be polluted by
 // unrelated tests decoding indexes concurrently.
