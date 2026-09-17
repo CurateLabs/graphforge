@@ -690,7 +690,51 @@ impl OntologyInventory {
     }
 
     /// Reopen durable authority from a snapshot (staging starts empty).
+    ///
+    /// Recompiles every adopted module to independently re-derive the
+    /// composition fingerprint and rejects the snapshot if it does not match
+    /// the recorded one. Use this whenever the snapshot's integrity has not
+    /// already been established by the caller (for example, a true
+    /// from-disk crash-recovery reopen). When the caller already knows the
+    /// snapshot is good — because it just recompiled and verified the same
+    /// content itself — prefer [`Self::reopen_trusted`], which skips the
+    /// redundant recompile.
     pub fn reopen(snapshot: InventorySnapshot) -> Result<Self, CompositionError> {
+        let expected_fingerprint = snapshot.composition_fingerprint.clone();
+        let mut inv = Self::reopen_structure(snapshot)?;
+        inv.recompute_fingerprint()?;
+        if inv.fingerprint != expected_fingerprint {
+            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::InterchangeIntegrity,
+                "reopened composition fingerprint does not match snapshot",
+                vec![expected_fingerprint, inv.fingerprint.clone()],
+                inv.diag_limit(),
+            )));
+        }
+        Ok(inv)
+    }
+
+    /// Reopen durable authority from a snapshot whose composition fingerprint
+    /// is already known-good.
+    ///
+    /// Rebuilds the same in-memory authority as [`Self::reopen`] but trusts
+    /// `snapshot.composition_fingerprint` directly instead of recompiling
+    /// every adopted module (full validate, digest and Arrow compile) just to
+    /// re-derive and compare a value the caller already verified. Callers
+    /// must only use this when the snapshot's fingerprint was itself produced
+    /// or verified moments earlier from the same content (for example,
+    /// durable storage that already compiles and fingerprint-checks on
+    /// load) — never for snapshots of unverified or untrusted origin.
+    pub fn reopen_trusted(snapshot: InventorySnapshot) -> Result<Self, CompositionError> {
+        let fingerprint = snapshot.composition_fingerprint.clone();
+        let mut inv = Self::reopen_structure(snapshot)?;
+        inv.fingerprint = fingerprint;
+        Ok(inv)
+    }
+
+    /// Shared structural rebuild used by both [`Self::reopen`] and
+    /// [`Self::reopen_trusted`]; does not touch the composition fingerprint.
+    fn reopen_structure(snapshot: InventorySnapshot) -> Result<Self, CompositionError> {
         if snapshot.schema_version != 1 {
             return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
                 DiagnosticCode::InterchangeIntegrity,
@@ -720,15 +764,6 @@ impl OntologyInventory {
         }
         for receipt in snapshot.receipts {
             inv.receipts.insert(receipt.operation_id.clone(), receipt);
-        }
-        inv.recompute_fingerprint()?;
-        if inv.fingerprint != snapshot.composition_fingerprint {
-            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                DiagnosticCode::InterchangeIntegrity,
-                "reopened composition fingerprint does not match snapshot",
-                vec![snapshot.composition_fingerprint, inv.fingerprint.clone()],
-                inv.diag_limit(),
-            )));
         }
         Ok(inv)
     }
