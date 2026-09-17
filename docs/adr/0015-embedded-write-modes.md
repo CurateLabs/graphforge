@@ -1,6 +1,8 @@
 # ADR 0015: Three embedded project-write modes
 
-**Status:** Accepted for v0.5.0
+**Status:** Accepted
+
+**Build target:** v0.5.0
 
 **Related:** [ADR 0018](0018-acknowledged-durability-isolation.md) freezes the
 public isolation honesty rules, including the write-skew witness that shows

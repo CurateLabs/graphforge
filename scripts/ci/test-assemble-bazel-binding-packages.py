@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from email.parser import Parser
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ from assemble_bazel_binding_packages import (
     _NAPI_PLATFORM_TAGS,
     EXPORT_SURFACE_FILENAME,
     FORBIDDEN_RECOMPILE,
+    PYTHON_LEGAL_FILES,
     _napi_host_tag_map,
     _napi_platform_tag,
     assemble_node,
@@ -22,12 +24,17 @@ from assemble_bazel_binding_packages import (
     pep427_wheel_filename,
     read_node_export_surface,
     read_node_package_identity,
+    read_python_project_metadata,
     resolve_python_wheel_out,
     synthesize_node_index_dts,
     synthesize_node_index_js,
 )
+import release_candidate_manifest
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
+PY_PACKAGE_ROOT = ROOT / "crates" / "graphforge-bindings-py"
+LINUX_WHEEL_TAG = "cp310-abi3-manylinux_2_17_x86_64"
 
 
 class AssembleBazelBindingPackagesTests(unittest.TestCase):
@@ -432,6 +439,135 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
             )
             self.assertEqual(node_evidence["platform_tag"], "linux-arm64-gnu")
             self.assertEqual(node_evidence["addon"], "graphforge.linux-arm64-gnu.node")
+
+
+class BazelWheelReleaseCandidateContractTests(unittest.TestCase):
+    """The Bazel Linux wheel must satisfy the real candidate validator (#1379).
+
+    The macOS and Windows lanes run maturin, which reads the license, summary
+    and legal files from ``pyproject.toml``. Only Linux hand-assembles its
+    wheel, and it used to emit no license field and no legal files at all, so
+    ``release_candidate_manifest._validate_wheel`` rejected every candidate.
+    These tests run that validator unchanged, and prove it still rejects a
+    wheel that is missing any one of the four things it requires.
+    """
+
+    @staticmethod
+    def _assemble(directory: Path) -> tuple[Path, str]:
+        native = directory / "libgraphforge_bindings_py.so"
+        native.write_bytes(b"FAKE_NATIVE_PY_CDYLIB")
+        evidence = assemble_python(
+            native=native,
+            package_root=PY_PACKAGE_ROOT,
+            out=directory / "dist",
+            wheel_tag=LINUX_WHEEL_TAG,
+        )
+        return Path(evidence["wheel"]), evidence["version"]
+
+    @staticmethod
+    def _rewrite(wheel: Path, out: Path, *, drop: str = "", duplicate: str = "") -> Path:
+        """Copy a wheel while dropping or duplicating one member."""
+        with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(out, "w") as target:
+            for name in source.namelist():
+                if drop and name.endswith(drop):
+                    continue
+                target.writestr(name, source.read(name))
+            if duplicate:
+                member = next(n for n in source.namelist() if n.endswith(duplicate))
+                target.writestr(f"graphforge/{duplicate}", source.read(member))
+        return out
+
+    def test_assembled_wheel_passes_release_candidate_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel, version = self._assemble(Path(tmp))
+            view = release_candidate_manifest.ArchiveView(wheel)
+            result = release_candidate_manifest._validate_wheel(view, version)
+            self.assertEqual(result["name"], "graphforge")
+            self.assertEqual(result["version"], version)
+            for legal in PYTHON_LEGAL_FILES:
+                self.assertIn(
+                    f"graphforge-{version}.dist-info/licenses/{legal}",
+                    result["required_files"],
+                )
+
+    def test_assembled_wheel_metadata_matches_pyproject(self) -> None:
+        project = read_python_project_metadata(PY_PACKAGE_ROOT)
+        with tempfile.TemporaryDirectory() as tmp:
+            wheel, version = self._assemble(Path(tmp))
+            with zipfile.ZipFile(wheel) as archive:
+                raw = archive.read(f"graphforge-{version}.dist-info/METADATA").decode("utf-8")
+                entry_points = archive.read(
+                    f"graphforge-{version}.dist-info/entry_points.txt"
+                ).decode("utf-8")
+            metadata = Parser().parsestr(raw)
+            # Every value below is read from pyproject.toml, never restated in
+            # the assembler, so this lane cannot drift from maturin again.
+            self.assertEqual(metadata.get("Metadata-Version"), "2.4")
+            self.assertEqual(metadata.get("Name"), project["name"])
+            self.assertEqual(metadata.get("Version"), version)
+            self.assertEqual(metadata.get("License-Expression"), project["license"])
+            self.assertEqual(metadata.get("Summary"), project["description"])
+            self.assertEqual(metadata.get("Requires-Python"), project["requires-python"])
+            self.assertEqual(metadata.get_all("License-File"), list(project["license-files"]))
+            self.assertEqual(
+                metadata.get_all("Classifier"),
+                list(project["classifiers"]),
+            )
+            self.assertIn("pyarrow>=14", metadata.get_all("Requires-Dist"))
+            self.assertEqual(metadata.get_all("Provides-Extra"), ["polars"])
+            # A release artifact must not describe itself as a smoke wheel.
+            self.assertNotIn("smoke wheel", raw)
+            self.assertIn("[console_scripts]", entry_points)
+            for name, target in project["scripts"].items():
+                self.assertIn(f"{name}={target}", entry_points)
+
+    def test_wheel_version_and_license_come_from_one_pyproject(self) -> None:
+        document = tomllib.loads((PY_PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        project = read_python_project_metadata(PY_PACKAGE_ROOT)
+        self.assertEqual(project, document["project"])
+        self.assertEqual(project["license"], "Apache-2.0")
+        self.assertEqual(sorted(project["license-files"]), sorted(PYTHON_LEGAL_FILES))
+
+    def test_validator_still_rejects_wheels_missing_each_requirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wheel, version = self._assemble(root)
+            dist_info = f"graphforge-{version}.dist-info"
+
+            # 1. Apache-2.0 declaration stripped from METADATA.
+            stripped = root / "no-license-metadata.whl"
+            with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(stripped, "w") as target:
+                for name in source.namelist():
+                    data = source.read(name)
+                    if name == f"{dist_info}/METADATA":
+                        data = "\n".join(
+                            line
+                            for line in data.decode("utf-8").splitlines()
+                            if not line.startswith("License-Expression:")
+                        ).encode("utf-8")
+                    target.writestr(name, data)
+            self._expect_rejection(stripped, version, "lacks Apache-2.0 metadata")
+
+            # 2-4. Each legal file missing, and one present twice.
+            for legal in PYTHON_LEGAL_FILES:
+                missing = self._rewrite(
+                    wheel,
+                    root / f"no-{legal}.whl",
+                    drop=f"/licenses/{legal}",
+                )
+                self._expect_rejection(missing, version, f"must contain exactly one {legal}")
+                doubled = self._rewrite(
+                    wheel,
+                    root / f"two-{legal}.whl",
+                    duplicate=legal,
+                )
+                self._expect_rejection(doubled, version, f"must contain exactly one {legal}")
+
+    def _expect_rejection(self, wheel: Path, version: str, message: str) -> None:
+        view = release_candidate_manifest.ArchiveView(wheel)
+        with self.assertRaises(release_candidate_manifest.CandidateError) as raised:
+            release_candidate_manifest._validate_wheel(view, version)
+        self.assertIn(message, str(raised.exception))
 
 
 if __name__ == "__main__":

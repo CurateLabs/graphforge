@@ -11,8 +11,8 @@ Surfaces:
 
 Never publishes to production registries.
 
-Crate order prefers ``scripts/ci/crate-publish-plan.py list`` (from #269) when
-present; otherwise uses a conservative fallback that excludes bindings.
+Crate order has one source: ``scripts/ci/crate-publish-plan.py list``. A missing
+or failing plan script is a hard error, never a fallback to a different set.
 
 Usage:
     python3 scripts/publish_dry_run.py --surface npm,docs --report /tmp/dry-run.json
@@ -36,27 +36,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CRATE_PLAN = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 NPM_PUBLISHER = ROOT / "scripts" / "publish_npm_artifacts.py"
-
-# Fallback when crate-publish-plan.py is not on the branch yet (pre-#269).
-# Keep in sync with CRATES_IO_EXCLUDED there: no binding implementation crates.
-FALLBACK_CARGO_ORDER = (
-    "graphforge-core",
-    "graphforge-filesystem",
-    "graphforge-ast",
-    "graphforge-knowledge",
-    "graphforge-ontology",
-    "graphforge-provenance",
-    "graphforge-ir",
-    "graphforge-plan",
-    "graphforge-storage",
-    "graphforge-io",
-    "graphforge-rel",
-    "graphforge-search",
-    "graphforge-cypher",
-    "graphforge-exec",
-    "graphforge-api",
-    "graphforge-cli",
-)
 
 NPM_PACKAGES = (
     ROOT / "crates" / "graphforge-bindings-node",
@@ -120,21 +99,41 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
     }
 
 
+class CratePlanError(RuntimeError):
+    """The crates.io publish plan could not be read."""
+
+
 def cargo_publish_order() -> tuple[list[str], str]:
-    """Return (crate names, source label)."""
-    if CRATE_PLAN.exists():
-        result = subprocess.run(
-            [sys.executable, str(CRATE_PLAN), "list"],
-            cwd=str(ROOT),
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
+    """Return (crate names, source label) from the single authoritative plan.
+
+    ``scripts/ci/crate-publish-plan.py`` is the only source of publish order.
+    There is no fallback list: publishing a different crate set than the plan
+    names would be worse than failing, so a missing, failing or empty plan is a
+    hard error (#1377).
+    """
+    if not CRATE_PLAN.exists():
+        raise CratePlanError(
+            f"crates.io publish plan is missing: {CRATE_PLAN.relative_to(ROOT)}. "
+            "It is the only source of crate publish order; restore it before "
+            "running the cargo dry-run surfaces."
         )
-        if result.returncode == 0:
-            names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            return names, "crate-publish-plan.py"
-    return list(FALLBACK_CARGO_ORDER), "fallback"
+    result = subprocess.run(
+        [sys.executable, str(CRATE_PLAN), "list"],
+        cwd=str(ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise CratePlanError(
+            f"crate-publish-plan.py list failed (exit {result.returncode}): "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not names:
+        raise CratePlanError("crate-publish-plan.py list returned no crates")
+    return names, "crate-publish-plan.py"
 
 
 def dry_run_cargo_package() -> list[dict[str, Any]]:
@@ -298,7 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         if name not in runners:
             print(f"publish-dry-run: unknown surface {name}", file=sys.stderr)
             return 2
-        steps = runners[name]()
+        try:
+            steps = runners[name]()
+        except CratePlanError as error:
+            print(f"publish-dry-run: {name}: {error}", file=sys.stderr)
+            return 2
         evidence["surfaces"][name] = steps
         if not all(step["ok"] for step in steps):
             evidence["ok"] = False

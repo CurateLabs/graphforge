@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from email.parser import Parser
 import hashlib
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import re
@@ -15,6 +16,8 @@ import tarfile
 from typing import Any
 import zipfile
 
+ROOT = Path(__file__).resolve().parents[2]
+VERSION_SCRIPT = ROOT / "scripts" / "set_release_version.py"
 SCHEMA = "graphforge-release-candidate-v2"
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
@@ -86,6 +89,37 @@ GROUPS = ("python", "npm", "crates", "evidence")
 
 class CandidateError(ValueError):
     """The candidate does not satisfy the immutable release contract."""
+
+
+_VERSION_TOOLING: dict[str, Any] = {}
+
+
+def _version_tooling() -> Any:
+    """Load the single authority for per-ecosystem version spelling."""
+    module = _VERSION_TOOLING.get("module")
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            "graphforge_set_release_version", VERSION_SCRIPT
+        )
+        if spec is None or spec.loader is None:
+            raise CandidateError(f"cannot load version tooling from {VERSION_SCRIPT}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _VERSION_TOOLING["module"] = module
+    return module
+
+
+def python_spelling(version: str) -> str:
+    """Return the PEP 440 spelling of one root release version (ADR 0033).
+
+    The candidate carries one logical version. Maturin, pip and the PyPI API all
+    write the normalized form, so Python artifacts are validated against this
+    derived spelling rather than against the root version verbatim.
+    """
+    try:
+        return _version_tooling().python_spelling(version)
+    except ValueError as error:
+        raise CandidateError(f"root version {version!r} has no Python spelling: {error}") from error
 
 
 def sha256_file(path: Path) -> str:
@@ -351,13 +385,13 @@ def _validate_npm(view: ArchiveView, version: str) -> dict[str, Any]:
     }
 
 
-def _validate_wheel(view: ArchiveView, version: str) -> dict[str, Any]:
+def _validate_wheel(view: ArchiveView, python_version: str) -> dict[str, Any]:
     members = set(view.members)
     metadata_paths = [member for member in members if member.endswith(".dist-info/METADATA")]
     if len(metadata_paths) != 1:
         raise CandidateError(f"{view.path.name} must contain exactly one METADATA file")
     metadata = Parser().parsestr(view.text(metadata_paths[0]))
-    if metadata.get("Name") != "graphforge" or metadata.get("Version") != version:
+    if metadata.get("Name") != "graphforge" or metadata.get("Version") != python_version:
         raise CandidateError(f"{view.path.name} Python identity/version mismatch")
     if (metadata.get("License-Expression") or metadata.get("License")) != "Apache-2.0":
         raise CandidateError(f"{view.path.name} lacks Apache-2.0 metadata")
@@ -379,14 +413,14 @@ def _validate_wheel(view: ArchiveView, version: str) -> dict[str, Any]:
     _require(members, required, archive=view.path.name)
     return {
         "name": "graphforge",
-        "version": version,
+        "version": python_version,
         "dependencies": {},
         "required_files": sorted(required),
     }
 
 
-def _validate_sdist(view: ArchiveView, version: str) -> dict[str, Any]:
-    root = f"graphforge-{version}"
+def _validate_sdist(view: ArchiveView, python_version: str) -> dict[str, Any]:
+    root = f"graphforge-{python_version}"
     stripped = _strip_single_root(view.members, root)
     members = set(stripped)
     required = [
@@ -400,13 +434,13 @@ def _validate_sdist(view: ArchiveView, version: str) -> dict[str, Any]:
     ]
     _require(members, required, archive=view.path.name)
     metadata = Parser().parsestr(view.text(f"{root}/PKG-INFO"))
-    if metadata.get("Name") != "graphforge" or metadata.get("Version") != version:
+    if metadata.get("Name") != "graphforge" or metadata.get("Version") != python_version:
         raise CandidateError(f"{view.path.name} Python identity/version mismatch")
     if (metadata.get("License-Expression") or metadata.get("License")) != "Apache-2.0":
         raise CandidateError(f"{view.path.name} lacks Apache-2.0 metadata")
     return {
         "name": "graphforge",
-        "version": version,
+        "version": python_version,
         "dependencies": {},
         "required_files": sorted(f"{root}/{item}" for item in required),
     }
@@ -483,14 +517,17 @@ def _validate_crate(view: ArchiveView, version: str) -> dict[str, Any]:
     }
 
 
-def inspect_archive(path: Path, artifact_class: str, version: str) -> dict[str, Any]:
+def inspect_archive(
+    path: Path, artifact_class: str, version: str, python_version: str | None = None
+) -> dict[str, Any]:
     view = ArchiveView(path)
+    python_version = python_version if python_version is not None else python_spelling(version)
     if artifact_class == "npm-tarball":
         package = _validate_npm(view, version)
     elif artifact_class == "python-wheel":
-        package = _validate_wheel(view, version)
+        package = _validate_wheel(view, python_version)
     elif artifact_class == "python-sdist":
-        package = _validate_sdist(view, version)
+        package = _validate_sdist(view, python_version)
     elif artifact_class == "rust-crate":
         package = _validate_crate(view, version)
     else:
@@ -518,8 +555,11 @@ def _group_for(relative: str, artifact_class: str) -> str:
     return expected
 
 
-def scan_dist(dist_dir: Path, version: str) -> list[dict[str, Any]]:
+def scan_dist(
+    dist_dir: Path, version: str, python_version: str | None = None
+) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
+    python_version = python_version if python_version is not None else python_spelling(version)
     if not dist_dir.exists():
         return artifacts
     for path in sorted(dist_dir.rglob("*")):
@@ -533,7 +573,7 @@ def scan_dist(dist_dir: Path, version: str) -> list[dict[str, Any]]:
         inspection_error: str | None = None
         if artifact_class in {"python-wheel", "python-sdist", "npm-tarball", "rust-crate"}:
             try:
-                archive = inspect_archive(path, artifact_class, version)
+                archive = inspect_archive(path, artifact_class, version, python_version)
                 name = archive["package"]["name"]
             except CandidateError as error:
                 inspection_error = str(error)
@@ -609,7 +649,8 @@ def build_manifest(
     created = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
     if created.tzinfo is None:
         raise CandidateError("recorded_at must include a timezone")
-    artifacts = scan_dist(dist_dir, version)
+    python_version = python_spelling(version)
+    artifacts = scan_dist(dist_dir, version, python_version)
     nodes, dependencies = _build_nodes(artifacts)
     groups = []
     for group in GROUPS:
@@ -628,6 +669,8 @@ def build_manifest(
     return {
         "schema": SCHEMA,
         "version": version,
+        # Derived, never chosen: the same logical version in PEP 440 spelling.
+        "python_version": python_version,
         "tag": f"v{version}",
         "commit_sha": commit_sha,
         "recorded_at": created.astimezone(timezone.utc).isoformat(),
@@ -698,6 +741,12 @@ def validate(
         raise CandidateError(f"unexpected candidate manifest schema: {manifest.get('schema')!r}")
     if manifest.get("version") != version or manifest.get("tag") != f"v{version}":
         raise CandidateError("candidate version/tag does not match the requested root version")
+    python_version = python_spelling(version)
+    if manifest.get("python_version") != python_version:
+        raise CandidateError(
+            "candidate python_version must be the derived PEP 440 spelling "
+            f"{python_version!r}, got {manifest.get('python_version')!r}"
+        )
     if manifest.get("commit_sha") != expected_sha:
         raise CandidateError("candidate commit does not match the requested SHA")
     if manifest.get("publication_states") != PUBLICATION_STATES:
@@ -799,7 +848,7 @@ def validate(
         if surface in {"pypi", "npm", "crates"} and isinstance(name, str):
             names_by_surface[surface].add(name)
         if artifact_class in {"python-wheel", "python-sdist", "npm-tarball", "rust-crate"}:
-            inspected = inspect_archive(path, artifact_class, version)
+            inspected = inspect_archive(path, artifact_class, version, python_version)
             if item.get("inspection_error") is not None or item.get("archive") != inspected:
                 raise CandidateError(f"archive inventory/completeness mismatch: {relative}")
             if inspected["package"]["name"] != name:

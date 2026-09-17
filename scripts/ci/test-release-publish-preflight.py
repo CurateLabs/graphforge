@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("release-publish-preflight.py")
@@ -23,7 +24,7 @@ def load_module():
 
 mod = load_module()
 sha = "a" * 40
-versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.2")
+versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills", "bazel"), "0.5.2")
 assert (
     mod.validate(
         tag="v0.5.2",
@@ -39,6 +40,61 @@ assert mod.validate(
     actual_sha=sha,
     versions={**versions, "skills": "0.5.3"},
 )
+
+# A prerelease tag starts publication, and each surface is held to its own
+# canonical spelling of the one root version (ADR 0033).
+assert mod.release_version("v0.6.0-rc.1") == "0.6.0-rc.1"
+prerelease = {
+    "cargo": "0.6.0-rc.1",
+    "python": "0.6.0rc1",
+    "node": "0.6.0-rc.1",
+    "cli": "0.6.0-rc.1",
+    "skills": "0.6.0-rc.1",
+    "bazel": "0.6.0-rc.1",
+}
+assert (
+    mod.validate(
+        tag="v0.6.0-rc.1",
+        expected_sha=sha,
+        actual_sha=sha,
+        versions=prerelease,
+    )
+    == []
+)
+# The cargo spelling on the Python surface is the silent-mismatch case; it fails.
+assert mod.validate(
+    tag="v0.6.0-rc.1",
+    expected_sha=sha,
+    actual_sha=sha,
+    versions={**prerelease, "python": "0.6.0-rc.1"},
+)
+assert mod.release_version("v0.6.0-rc.10") == "0.6.0-rc.10"
+# A development tag never publishes, however it is spelled, and a noncanonical
+# candidate spelling is not a GraphForge release identity at all: each of these
+# would project to the same PyPI version as v0.6.0-rc.1 (ADR 0034, issue #858).
+for rejected_tag in (
+    "v0.6.0-dev",
+    "v0.6.0.dev0",
+    "0.6.0",
+    "v0.6",
+    "v0.6.0-foo",
+    "v0.6.0-rc1",
+    "v0.6.0-RC.1",
+    "v0.6.0-rc.01",
+    "v0.6.0-beta.2",
+    "v0.6.0rc1",
+):
+    assert mod.validate(
+        tag=rejected_tag,
+        expected_sha=sha,
+        actual_sha=sha,
+        versions=prerelease,
+    ), rejected_tag
+
+# The tag pattern itself refuses a noncanonical candidate spelling, before any
+# surface comparison runs.
+for noncanonical in ("v0.6.0-rc1", "v0.6.0-RC.1", "v0.6.0-rc.01", "v0.6.0-beta.2"):
+    assert mod.release_version(noncanonical) is None, noncanonical
 
 # The npm dist-tag policy is derived, not configured, and refuses the unclassifiable.
 publisher_spec = importlib.util.spec_from_file_location(
@@ -145,15 +201,10 @@ assert "NODE_AUTH_TOKEN" not in skills
 assert "needs: candidate-preflight" in crates
 assert "environment: release" in crates
 assert "timeout-minutes: 180" in crates
-assert "Use reviewed recovery-overlay SHA crates publisher" in crates
+assert "Overlay reviewed recovery publish-path scripts" in crates
 assert "RECOVERY_OVERLAY_SHA" in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/publish_crates.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_action.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/crate-authorize-refresh-nodes.py"' in crates
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_registry.py"' in crates
 assert "refs/remotes/origin/main:scripts/publish_crates.py" not in crates
 assert "RECOVERY_OVERLAY_SHA" in preflight
-assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-publish-preflight.py"' in preflight
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
@@ -206,6 +257,18 @@ for job in (
 assert "release_rehearsal.py reconcile" in summary
 assert "Release-Reconciliation-${{ github.run_id }}" in summary
 assert ".complete == true and (.nodes | length) == 25" in summary
+
+# Recovery overlays one reviewed list for the whole publish path, never a
+# per-lane subset: scripts/ci/test-release-recovery-overlay.py owns the list, and
+# the only file any lane may fetch by hand is the runner that installs it.
+overlaid_by_hand = re.findall(r'git show "\$RECOVERY_OVERLAY_SHA:([^"]+)"', workflow)
+assert set(overlaid_by_hand) == {"scripts/ci/release-recovery-overlay.sh"}, overlaid_by_hand
+for lane in (preflight, pypi, native, main, cli, skills, crates, summary):
+    assert 'bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"' in lane
+assert len(overlaid_by_hand) == 8
+# The npm publisher is recoverable in every lane that can write to npm.
+for lane in (native, main, cli, skills):
+    assert "scripts/publish_npm_artifacts.py" in lane
 
 assert "sleep" not in workflow
 assert "continue-on-error" not in workflow

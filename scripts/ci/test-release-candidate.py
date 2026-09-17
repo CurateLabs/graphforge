@@ -24,6 +24,10 @@ SPEC.loader.exec_module(release_candidate)
 manifest_module = __import__("release_candidate_manifest")
 SHA = "a" * 40
 VERSION = "0.5.0"
+# One logical version with two spellings: cargo/npm carry it verbatim, Python
+# normalizes under PEP 440 (ADR 0033).
+PRERELEASE = "0.6.0-rc.1"
+PRERELEASE_PYTHON = "0.6.0rc1"
 
 
 def write_tar(path: Path, members: dict[str, bytes]) -> None:
@@ -36,13 +40,13 @@ def write_tar(path: Path, members: dict[str, bytes]) -> None:
             archive.addfile(info, io.BytesIO(data))
 
 
-def write_wheel(path: Path, *, omit: str | None = None) -> None:
-    dist = f"graphforge-{VERSION}.dist-info"
+def write_wheel(path: Path, *, omit: str | None = None, python_version: str = VERSION) -> None:
+    dist = f"graphforge-{python_version}.dist-info"
     members = {
         "graphforge/__init__.py": b"from ._graphforge_rs import *\n",
         "graphforge/_graphforge_rs.abi3.so": b"native",
         f"{dist}/METADATA": (
-            f"Name: graphforge\nVersion: {VERSION}\nLicense-Expression: Apache-2.0\n"
+            f"Name: graphforge\nVersion: {python_version}\nLicense-Expression: Apache-2.0\n"
         ).encode(),
         f"{dist}/WHEEL": b"Wheel-Version: 1.0\n",
         f"{dist}/licenses/LICENSE": b"Apache-2.0",
@@ -57,7 +61,9 @@ def write_wheel(path: Path, *, omit: str | None = None) -> None:
             archive.writestr(name, data)
 
 
-def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes]:
+def npm_members(
+    name: str, *, package_version: str = VERSION, version: str = VERSION
+) -> dict[str, bytes]:
     metadata: dict[str, object] = {
         "name": name,
         "version": package_version,
@@ -85,7 +91,7 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
             {
                 "main": "index.js",
                 "types": "index.d.ts",
-                "optionalDependencies": dict.fromkeys(manifest_module.NATIVE_NPM_PACKAGES, VERSION),
+                "optionalDependencies": dict.fromkeys(manifest_module.NATIVE_NPM_PACKAGES, version),
             }
         )
         members.update(
@@ -100,7 +106,7 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
         metadata.update(
             {
                 "bin": {"graphforge": "bin/graphforge.js", "gf": "bin/graphforge.js"},
-                "dependencies": {"@curatelabs/graphforge": VERSION},
+                "dependencies": {"@curatelabs/graphforge": version},
             }
         )
         members.update(
@@ -153,20 +159,23 @@ def create_candidate(
     divergent_npm: str | None = None,
     omit_wheel: str | None = None,
     omit_crate_notice: str | None = None,
+    version: str = VERSION,
 ) -> tuple[Path, Path, dict[str, object]]:
+    python_version = manifest_module.python_spelling(version)
     artifacts = root / "artifacts"
     for platform in ("linux", "macos", "windows"):
         omit = omit_wheel if platform == "linux" else None
         write_wheel(
-            artifacts / "python" / f"graphforge-{VERSION}-{platform}.whl",
+            artifacts / "python" / f"graphforge-{python_version}-{platform}.whl",
             omit=omit,
+            python_version=python_version,
         )
-    sdist_root = f"graphforge-{VERSION}"
+    sdist_root = f"graphforge-{python_version}"
     write_tar(
-        artifacts / "python" / f"graphforge-{VERSION}.tar.gz",
+        artifacts / "python" / f"graphforge-{python_version}.tar.gz",
         {
             f"{sdist_root}/PKG-INFO": (
-                f"Name: graphforge\nVersion: {VERSION}\nLicense-Expression: Apache-2.0\n"
+                f"Name: graphforge\nVersion: {python_version}\nLicense-Expression: Apache-2.0\n"
             ).encode(),
             f"{sdist_root}/pyproject.toml": b"[project]\nname='graphforge'\n",
             f"{sdist_root}/python/graphforge/__init__.py": b"",
@@ -177,28 +186,32 @@ def create_candidate(
         },
     )
     for name in manifest_module.NPM_PACKAGES:
-        members = npm_members(name, package_version="0.5.1" if name == divergent_npm else VERSION)
+        members = npm_members(
+            name,
+            package_version="0.5.1" if name == divergent_npm else version,
+            version=version,
+        )
         if omit_npm and omit_npm[0] == name:
             members.pop(omit_npm[1])
         filename = name.removeprefix("@curatelabs/").replace("/", "-")
         write_tar(
-            artifacts / "npm" / f"curatelabs-{filename}-{VERSION}.tgz",
+            artifacts / "npm" / f"curatelabs-{filename}-{version}.tgz",
             members,
         )
     for name in manifest_module.CRATES:
-        crate_root = f"{name}-{VERSION}"
+        crate_root = f"{name}-{version}"
         if name in {"graphforge-core", "graphforge-filesystem"}:
             dependency = ""
         elif name == "graphforge-storage":
             dependency = (
-                f'graphforge-core = {{ version = "{VERSION}" }}\n'
-                f'graphforge-filesystem = {{ version = "{VERSION}" }}\n'
+                f'graphforge-core = {{ version = "{version}" }}\n'
+                f'graphforge-filesystem = {{ version = "{version}" }}\n'
             )
         else:
-            dependency = f'graphforge-core = {{ version = "{VERSION}" }}\n'
+            dependency = f'graphforge-core = {{ version = "{version}" }}\n'
         members = {
             f"{crate_root}/Cargo.toml": (
-                f'[package]\nname = "{name}"\nversion = "{VERSION}"\n'
+                f'[package]\nname = "{name}"\nversion = "{version}"\n'
                 'license = "Apache-2.0"\n[dependencies]\n' + dependency
             ).encode(),
             f"{crate_root}/src/lib.rs": b"pub fn candidate() {}\n",
@@ -207,7 +220,7 @@ def create_candidate(
         }
         if name == omit_crate_notice:
             members.pop(f"{crate_root}/NOTICE")
-        write_tar(artifacts / "crates" / f"{name}-{VERSION}.crate", members)
+        write_tar(artifacts / "crates" / f"{name}-{version}.crate", members)
     for target in ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"):
         path = artifacts / "node-addons" / f"graphforge.{target}.node"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,7 +230,7 @@ def create_candidate(
     evidence.write_text('{"offline":true}\n', encoding="utf-8")
     recorded_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     manifest = manifest_module.build_manifest(
-        version=VERSION,
+        version=version,
         dist_dir=artifacts,
         commit_sha=SHA,
         recorded_at=recorded_at,
@@ -234,9 +247,10 @@ def rejected(
     message: str,
     *,
     as_of: datetime | None = None,
+    version: str = VERSION,
 ) -> None:
     try:
-        release_candidate.validate(manifest_path, artifacts, SHA, VERSION, as_of=as_of)
+        release_candidate.validate(manifest_path, artifacts, SHA, version, as_of=as_of)
     except release_candidate.CandidateError as error:
         assert message in str(error), error
     else:
@@ -247,6 +261,65 @@ def write_mutation(root: Path, manifest: dict[str, object]) -> Path:
     path = root / "mutated-manifest.json"
     path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return path
+
+
+def prerelease_candidate() -> None:
+    """A prerelease candidate is one version with two canonical spellings."""
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        manifest_path, artifacts, manifest = create_candidate(root, version=PRERELEASE)
+        assert manifest["version"] == PRERELEASE
+        assert manifest["tag"] == f"v{PRERELEASE}"
+        assert manifest["python_version"] == PRERELEASE_PYTHON
+
+        validated = release_candidate.validate(manifest_path, artifacts, SHA, PRERELEASE)
+        by_class: dict[str, list[dict[str, object]]] = {}
+        for item in validated["artifacts"]:
+            by_class.setdefault(str(item["class"]), []).append(item)
+
+        # Python artifacts are named and self-describe in the PEP 440 spelling.
+        for item in by_class["python-wheel"] + by_class["python-sdist"]:
+            assert PRERELEASE_PYTHON in str(item["filename"]), item["filename"]
+            assert item["version"] == PRERELEASE, item
+            assert item["archive"]["package"]["version"] == PRERELEASE_PYTHON, item
+
+        # npm and crates artifacts keep the root spelling, and still resolve their
+        # package identity from a filename containing hyphens (#1374).
+        for item in by_class["npm-tarball"] + by_class["rust-crate"]:
+            assert str(item["filename"]).endswith((f"-{PRERELEASE}.tgz", f"-{PRERELEASE}.crate")), (
+                item["filename"]
+            )
+            assert item["archive"]["package"]["version"] == PRERELEASE, item
+        assert {item["name"] for item in by_class["npm-tarball"]} == set(
+            manifest_module.NPM_PACKAGES
+        )
+        assert {item["name"] for item in by_class["rust-crate"]} == set(manifest_module.CRATES)
+
+        # A candidate may not carry a second, independently chosen Python version.
+        forged = copy.deepcopy(manifest)
+        forged["python_version"] = "0.6.0"
+        rejected(
+            write_mutation(root, forged),
+            artifacts,
+            "derived PEP 440 spelling",
+            version=PRERELEASE,
+        )
+
+    # A wheel carrying the cargo spelling is rejected, not silently accepted.
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        artifacts = root / "artifacts"
+        write_wheel(
+            artifacts / "python" / f"graphforge-{PRERELEASE_PYTHON}-linux.whl",
+            python_version=PRERELEASE,
+        )
+        wheel = next((artifacts / "python").glob("*.whl"))
+        try:
+            manifest_module.inspect_archive(wheel, "python-wheel", PRERELEASE)
+        except manifest_module.CandidateError as error:
+            assert "Python identity/version mismatch" in str(error), error
+        else:
+            raise AssertionError("a wheel spelled for cargo was accepted")
 
 
 def main() -> None:
@@ -395,6 +468,8 @@ def main() -> None:
         malformed = copy.deepcopy(manifest)
         malformed["schema"] = "unknown"
         rejected(write_mutation(root, malformed), artifacts, "unexpected candidate manifest schema")
+
+    prerelease_candidate()
 
     print("release-candidate tests: ok")
     subprocess.run(
