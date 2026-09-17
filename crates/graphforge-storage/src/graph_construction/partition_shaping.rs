@@ -93,13 +93,19 @@ fn shaping_worker_count(work_items: usize) -> usize {
         .min(work_items.max(1))
 }
 
-/// Whether the current partition load should sleep briefly before returning,
+/// Sleep briefly before a worker returns its result, when `enabled`,
 /// scrambling completion order relative to partition index. Test-only: used
 /// to force adverse worker/writer interleaving in the determinism suite
 /// rather than relying on incidental scheduling luck.
+///
+/// Takes `enabled` as a plain `bool` rather than reading
+/// [`test_support::jitter_enabled`] itself, because this runs on a freshly
+/// spawned worker thread: thread-locals do not carry over from the
+/// orchestrating thread that called `set_jitter_enabled`, so the caller reads
+/// the flag once on that thread and moves the plain value into each worker.
 #[cfg(any(test, feature = "test-support"))]
-fn shaping_worker_jitter(index: usize) {
-    if test_support::jitter_enabled() {
+fn shaping_worker_jitter(enabled: bool, index: usize) {
+    if enabled {
         // A deterministic, index-dependent stagger: partitions do not
         // complete in index order, which is exactly the interleaving that
         // would expose a broken reorder buffer.
@@ -218,7 +224,12 @@ fn load_partitions_ordered<T: Send>(
     items: &[(usize, String)],
     cancelled: &mut impl FnMut() -> bool,
     load: impl Fn(&str) -> Result<(T, GraphConstructionEvidence), GfError> + Sync,
-    mut consume: impl FnMut(usize, T, &GraphConstructionEvidence) -> Result<(), GfError>,
+    mut consume: impl FnMut(
+        usize,
+        T,
+        &GraphConstructionEvidence,
+        &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
     if items.is_empty() {
         return Ok(());
@@ -228,12 +239,25 @@ fn load_partitions_ordered<T: Send>(
         for (index, name) in items {
             reject_cancelled(cancelled)?;
             let (value, delta) = load(name)?;
-            consume(*index, value, &delta)?;
+            // `load_partitions_ordered` keeps sole ownership of `cancelled`
+            // for the whole call; `consume` gets a short-lived reborrow of it
+            // as a plain callback, so it can poll cancellation *within* one
+            // partition (a large row-group write, say) at whatever
+            // granularity it used to — the orchestrator and `consume` never
+            // need to capture the same `&mut FnMut` at the same time, which
+            // is what made an intra-partition check impossible when
+            // `consume` tried to capture `cancelled` directly.
+            consume(*index, value, &delta, &mut || reject_cancelled(cancelled))?;
         }
         return Ok(());
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let abort = std::sync::atomic::AtomicBool::new(false);
+    // Read once on the orchestrating thread: thread-locals do not carry over
+    // to the freshly spawned workers below, so the flag has to travel in as
+    // a plain, moved `bool` rather than be re-read on each worker thread.
+    #[cfg(any(test, feature = "test-support"))]
+    let jitter = test_support::jitter_enabled();
     // Rendezvous channel: see the memory-bound argument in the module doc.
     let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, Result<(T, GraphConstructionEvidence), GfError>)>(0);
     std::thread::scope(|scope| {
@@ -251,6 +275,8 @@ fn load_partitions_ordered<T: Send>(
                     let Some((index, name)) = items.get(slot) else {
                         break;
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    shaping_worker_jitter(jitter, *index);
                     let result = load(name);
                     let failed = result.is_err();
                     if tx.send((*index, result)).is_err() {
@@ -294,8 +320,13 @@ fn load_partitions_ordered<T: Send>(
                 else {
                     break;
                 };
+                if let Err(error) = reject_cancelled(cancelled) {
+                    outcome = Err(error);
+                    abort.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
                 if let Err(error) =
-                    reject_cancelled(cancelled).and_then(|()| consume(want, value, &delta))
+                    consume(want, value, &delta, &mut || reject_cancelled(cancelled))
                 {
                     outcome = Err(error);
                     abort.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -649,7 +680,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 &items,
                 cancelled,
                 |name| Self::load_partition(root, codec, name),
-                |_index, records, delta| {
+                |_index, records, delta, check| {
                     merge_partition_load_evidence(delta, evidence)?;
                     for record in &records {
                         // Partition order is key order, so the concatenation is
@@ -677,6 +708,9 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                         written = written.checked_add(1).ok_or_else(|| {
                             super::storage("partition output record count overflows")
                         })?;
+                        if written.is_multiple_of(4096) {
+                            check()?;
+                        }
                     }
                     Ok(())
                 },
@@ -1135,7 +1169,7 @@ impl<'a> RowRangePartitioner<'a> {
                 &items,
                 cancelled,
                 |name| Self::load_partition(root, window, name, &schema),
-                |_index, sorted, delta| {
+                |_index, sorted, delta, check| {
                     merge_partition_load_evidence(delta, evidence)?;
                     let uuids = key_column(&sorted)?;
                     for row in 0..sorted.num_rows() {
@@ -1150,7 +1184,14 @@ impl<'a> RowRangePartitioner<'a> {
                     written = written
                         .checked_add(u64::try_from(sorted.num_rows()).map_err(super::storage)?)
                         .ok_or_else(|| super::storage("row partition output count overflows"))?;
-                    write_bounded_row_groups(&mut writer, &sorted, output_rows, output_bytes, evidence)
+                    write_bounded_row_groups(
+                        &mut writer,
+                        &sorted,
+                        output_rows,
+                        output_bytes,
+                        evidence,
+                        check,
+                    )
                 },
             )?;
             Ok(written)
@@ -1295,18 +1336,18 @@ impl<'a> RowRangePartitioner<'a> {
 /// order or buffer pressure, which is what keeps the produced bytes identical
 /// across runs.
 ///
-/// Takes no cancellation callback: it is only ever called from inside
-/// [`load_partitions_ordered`]'s `consume`, which already checks cancellation
-/// once before every partition it hands over. That bounds the delay between
-/// a cancellation request and its observation by one partition's write, the
-/// same bound a formula-derived partition count already puts on partition
-/// size.
+/// `check` polls cancellation once per row group, the same granularity this
+/// had before concurrency. It is a plain callback rather than the ambient
+/// `&mut impl FnMut() -> bool` because [`load_partitions_ordered`] keeps sole
+/// ownership of that closure for its whole call and hands `consume` (which
+/// forwards it here) a short-lived reborrow instead — see the comment there.
 fn write_bounded_row_groups<W: Write + Send>(
     writer: &mut ArrowWriter<W>,
     sorted: &RecordBatch,
     output_rows: usize,
     output_bytes: usize,
     evidence: &mut GraphConstructionEvidence,
+    check: &mut dyn FnMut() -> Result<(), GfError>,
 ) -> Result<(), GfError> {
     let mut start = 0;
     while start < sorted.num_rows() {
@@ -1343,6 +1384,7 @@ fn write_bounded_row_groups<W: Write + Send>(
             .checked_add(length as u64)
             .ok_or_else(|| super::storage("merge written records overflows"))?;
         start += length;
+        check()?;
     }
     Ok(())
 }

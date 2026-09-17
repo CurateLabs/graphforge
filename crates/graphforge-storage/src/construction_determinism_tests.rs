@@ -469,6 +469,106 @@ mod determinism {
         );
     }
 
+    /// Force adverse worker/writer interleaving and prove the concurrent
+    /// loader still reproduces exactly what the sequential loader produces.
+    ///
+    /// `threads=1` takes `load_partitions_ordered`'s sequential fallback
+    /// branch verbatim — no worker threads are spawned at all — so it *is*
+    /// the pre-concurrency loader, not merely "close to" it. Every other
+    /// thread count is compared against that baseline. Jitter makes
+    /// partitions complete out of index order on purpose (a deterministic,
+    /// index-dependent stagger — see `shaping_worker_jitter`), which is
+    /// exactly the interleaving a broken reorder buffer would fail under.
+    /// `partition_count = 256` against at most 16 threads keeps the number of
+    /// partitions well above the worker count, so the reorder buffer and the
+    /// work-stealing cursor both do real work rather than degenerating to a
+    /// one-partition-per-thread schedule.
+    ///
+    /// This also exercises the evidence-merge claim in the same pass:
+    /// `Layout` is read from `GraphConstructionEvidence`, which
+    /// `merge_partition_load_evidence` populates from independently-computed
+    /// per-worker deltas. If merging depended on completion order, these
+    /// fields would disagree across thread counts even when the shaped bytes
+    /// happened to match.
+    #[test]
+    fn concurrent_worker_counts_reproduce_the_sequential_loader() {
+        use crate::graph_construction::partition_shaping::test_support;
+
+        let nodes = node_ids(4_096);
+        let edges = edge_ids(4_096);
+        let mut baseline: Option<(Fingerprint, Layout)> = None;
+        let mut observed = Vec::new();
+        for threads in [1_usize, 2, 3, 5, 8, 16] {
+            test_support::set_worker_count_override(Some(threads));
+            test_support::set_jitter_enabled(threads > 1);
+            let root = TempDir::new().unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ingest(&root, 256, &nodes, &edges, 512)
+            }));
+            test_support::set_worker_count_override(None);
+            test_support::set_jitter_enabled(false);
+            let (fingerprint, layout) = result.unwrap_or_else(|payload| {
+                std::panic::resume_unwind(payload);
+            });
+            observed.push((
+                threads,
+                layout.partitions,
+                layout.max_partition_identity_rows,
+                layout.partitioned_identity_rows,
+                layout.peak_partition_records,
+            ));
+            match baseline.as_ref() {
+                None => baseline = Some((fingerprint, layout)),
+                Some((expected_fingerprint, expected_layout)) => {
+                    assert_eq!(
+                        *expected_fingerprint, fingerprint,
+                        "threads={threads} changed the shaped/encoded result relative to the \
+                         sequential (threads=1) loader"
+                    );
+                    assert_eq!(
+                        expected_layout.splitters, layout.splitters,
+                        "threads={threads}"
+                    );
+                    assert_eq!(
+                        expected_layout.partitions, layout.partitions,
+                        "threads={threads}"
+                    );
+                    assert_eq!(
+                        expected_layout.recorded_partition_count,
+                        layout.recorded_partition_count,
+                        "threads={threads}"
+                    );
+                    assert_eq!(
+                        expected_layout.max_partition_identity_rows,
+                        layout.max_partition_identity_rows,
+                        "threads={threads}: evidence merge disagrees with the sequential loader"
+                    );
+                    assert_eq!(
+                        expected_layout.partitioned_identity_rows,
+                        layout.partitioned_identity_rows,
+                        "threads={threads}: evidence merge disagrees with the sequential loader"
+                    );
+                    assert_eq!(
+                        expected_layout.partition_outputs, layout.partition_outputs,
+                        "threads={threads}"
+                    );
+                    assert_eq!(
+                        expected_layout.peak_partition_records,
+                        layout.peak_partition_records,
+                        "threads={threads}: evidence merge disagrees with the sequential loader"
+                    );
+                }
+            }
+        }
+        println!(
+            "CONCURRENCY_WORKER_COUNTS {}",
+            serde_json::json!({
+                "threads_tested": [1, 2, 3, 5, 8, 16],
+                "observed": observed,
+            })
+        );
+    }
+
     #[test]
     fn interrupted_shaping_resumes_to_identical_digests() {
         let nodes = node_ids(1_024);
