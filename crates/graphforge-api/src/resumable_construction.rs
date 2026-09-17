@@ -570,9 +570,11 @@ mod tests {
                     && entry.relative_path.ends_with(".csr")
             })
             .expect("published CSR shard");
-        let object =
-            graphforge_storage::graph_object_path(generation.container_root(), &shard.content_sha256)
-                .unwrap();
+        let object = graphforge_storage::graph_object_path(
+            generation.container_root(),
+            &shard.content_sha256,
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&object).unwrap().permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(&object, permissions).unwrap();

@@ -1045,7 +1045,9 @@ fn collect_relative_files(
             continue;
         }
         if !kind.is_file() {
-            return Err(storage("adjacency artifact tree contains a non-regular file"));
+            return Err(storage(
+                "adjacency artifact tree contains a non-regular file",
+            ));
         }
         let relative = path
             .strip_prefix(root)

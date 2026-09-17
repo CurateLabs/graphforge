@@ -1439,7 +1439,9 @@ fn persist_import_adjacency(
     };
     let built_at_micros = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX));
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
+        });
     let outcome = crate::adjacency::build_adjacency_index_for_edge_files(
         graph_tree,
         &edge_files,
@@ -1498,7 +1500,10 @@ fn import_edge_files(graph_tree: &Path) -> Result<Vec<(String, PathBuf)>, Portab
         })? {
             let path = entry
                 .map_err(|_| {
-                    PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read portable edge tables")
+                    PortableV2Error::new(
+                        PortableV2ErrorCode::Io,
+                        "cannot read portable edge tables",
+                    )
                 })?
                 .path();
             if path.is_dir() {
@@ -1536,8 +1541,8 @@ fn import_edge_files(graph_tree: &Path) -> Result<Vec<(String, PathBuf)>, Portab
                 None => crate::graph_files::legacy_inventory_logical_text(&relative),
             }
             .map_err(|error| storage(&error))?;
-            let Some(route) =
-                crate::route_component::route_position(&semantic).map_err(|error| storage(&error))?
+            let Some(route) = crate::route_component::route_position(&semantic)
+                .map_err(|error| storage(&error))?
             else {
                 continue;
             };

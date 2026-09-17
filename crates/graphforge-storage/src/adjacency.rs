@@ -37,6 +37,7 @@
 
 mod builder;
 mod codec;
+pub(crate) use builder::build_adjacency_index_for_edge_files;
 pub use builder::{
     ADJACENCY_SPILL_DIR_NAME, AdjacencyBuildMetrics, AdjacencyBuildOptions,
     DEFAULT_ADJACENCY_CHUNK_ROWS, DEFAULT_ADJACENCY_MERGE_FAN_IN, build_adjacency_index,
@@ -44,7 +45,6 @@ pub use builder::{
     build_adjacency_index_into_with_metrics, build_adjacency_index_into_with_options,
     build_adjacency_index_with_checkpoint,
 };
-pub(crate) use builder::build_adjacency_index_for_edge_files;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
