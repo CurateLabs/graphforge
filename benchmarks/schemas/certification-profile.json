@@ -82,7 +82,7 @@
       "properties": {
         "interface": { "const": "graph_forge_cli_workflow" },
         "commands": {
-          "type": "array", "minItems": 2, "maxItems": 5,
+          "type": "array", "minItems": 1, "maxItems": 5,
           "items": { "type": "array", "minItems": 1, "items": { "type": "string" } }
         }
       },

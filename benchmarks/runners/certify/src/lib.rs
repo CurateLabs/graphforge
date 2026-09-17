@@ -324,7 +324,7 @@ impl LifecycleStorageSession {
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
         for args in &commands {
             for flag in ["--nodes", "--edges", "--output"] {
-                if let Some(path) = argument_path(args, flag) {
+                for path in argument_paths(args, flag) {
                     if path.exists() {
                         self.artifact_paths
                             .entry(artifact_owner.to_owned())
@@ -469,8 +469,15 @@ fn validate_retained_owner_facts(
 }
 
 fn argument_path<'a>(args: &'a [String], flag: &str) -> Option<&'a Path> {
+    argument_paths(args, flag).next()
+}
+
+/// Every value of a flag, in order; `gf query` repeats `--output` once per
+/// statement when one process serves a whole read phase.
+fn argument_paths<'a>(args: &'a [String], flag: &str) -> impl Iterator<Item = &'a Path> + 'a {
+    let flag = flag.to_owned();
     args.windows(2)
-        .find(|values| values[0] == flag)
+        .filter(move |values| values[0] == flag)
         .map(|values| Path::new(&values[1]))
 }
 
@@ -485,7 +492,7 @@ impl PublicProcessExecutor {
         }
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
         for flag in ["--input", "--nodes", "--edges", "--path", "--output"] {
-            if let Some(path) = argument_path(args, flag) {
+            for path in argument_paths(args, flag) {
                 self.allocation_paths.insert(if path.is_absolute() {
                     path.to_path_buf()
                 } else {
@@ -842,10 +849,10 @@ fn release_command_owned_file_cache(
         "--edges",
         "--path",
     ] {
-        if let Some(path) = argument_path(args, flag)
-            && path.exists()
-        {
-            roots.insert(path.to_path_buf());
+        for path in argument_paths(args, flag) {
+            if path.exists() {
+                roots.insert(path.to_path_buf());
+            }
         }
     }
     let mut remaining = 1_000_000_usize;
@@ -2035,27 +2042,57 @@ fn is_sha256_identity(value: &str) -> bool {
     })
 }
 
+/// A read phase's `gf query` processes must carry exactly `expected`
+/// statements between them, every one a `--cypher`/`--output` pair, so the
+/// phase still emits exactly `expected` result-sink receipts whether it runs
+/// one process per statement or one process for the whole phase.
 fn query_workflow_is_valid(commands: &[Vec<String>], expected: usize) -> bool {
-    commands.len() == expected
+    !commands.is_empty()
+        && commands.len() <= expected
         && commands.iter().all(|args| {
-            args.iter().all(|argument| !argument.contains('\0'))
-                && contains_command(
-                    &args.iter().map(String::as_str).collect::<Vec<_>>(),
-                    &["query"],
-                )
+            cli_command_is_valid(args, &["query"])
+                && query_statement_count(args) == argument_paths(args, "--output").count()
         })
+        && commands
+            .iter()
+            .map(|args| query_statement_count(args))
+            .sum::<usize>()
+            == expected
 }
 
+fn query_statement_count(args: &[String]) -> usize {
+    args.windows(2)
+        .filter(|values| values[0] == "--cypher")
+        .count()
+}
+
+/// The reopen phase is `recovery` then `storage-attribution`, either as two
+/// processes or as one `storage-attribution --recovery` process that emits the
+/// same two receipts in the same order.
 fn reopen_workflow_is_valid(commands: &[Vec<String>]) -> bool {
-    commands.len() == 2
-        && cli_command_is_valid(&commands[0], &["recovery"])
-        && cli_command_is_valid(&commands[1], &["storage-attribution"])
+    match commands {
+        [attribution] => {
+            cli_command_is_valid(attribution, &["storage-attribution"])
+                && attribution.iter().any(|argument| argument == "--recovery")
+        }
+        [recovery, attribution] => {
+            cli_command_is_valid(recovery, &["recovery"])
+                && cli_command_is_valid(attribution, &["storage-attribution"])
+        }
+        _ => false,
+    }
 }
 
+/// Reopen proof re-runs the four source statements against the imported
+/// project, then attributes its storage in a separate process.
 fn reopen_proof_workflow_is_valid(commands: &[Vec<String>]) -> bool {
-    commands.len() == 5
-        && query_workflow_is_valid(&commands[..4], 4)
-        && cli_command_is_valid(&commands[4], &["storage-attribution"])
+    match commands {
+        [queries @ .., attribution] => {
+            query_workflow_is_valid(queries, 4)
+                && cli_command_is_valid(attribution, &["storage-attribution"])
+        }
+        [] => false,
+    }
 }
 
 fn cli_command_is_valid(args: &[String], operation: &[&str]) -> bool {
@@ -2900,6 +2937,144 @@ mod tests {
         assert_eq!(profile.validate(), Ok(()));
         profile.lifecycle.as_mut().unwrap()["storage_receipt"] = serde_json::json!("unknown/1");
         assert!(profile.validate().is_err());
+    }
+
+    fn query_process(project: &str, statements: &[(&str, &str)]) -> Vec<String> {
+        let mut args = vec!["--json", "--project", project, "query"];
+        for (cypher, output) in statements {
+            args.extend(["--cypher", cypher, "--output", output]);
+        }
+        args.into_iter().map(str::to_owned).collect()
+    }
+
+    fn cli(args: &[&str]) -> Vec<String> {
+        args.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn read_phases_accept_one_process_per_project_open() {
+        let counts = [
+            ("MATCH (n) RETURN count(n)", "n.arrow"),
+            ("MATCH ()-[r]->() RETURN count(r)", "e.arrow"),
+        ];
+        let hops = [
+            ("MATCH (a)-->(b) RETURN b", "one.arrow"),
+            ("MATCH (a)-->()-->(c) RETURN c", "two.arrow"),
+        ];
+        let attribution = cli(&["--json", "--project", "imported", "storage-attribution"]);
+        // One process for the whole phase, or one per statement: same receipts.
+        assert!(query_workflow_is_valid(
+            &[query_process("source", &counts)],
+            2
+        ));
+        assert!(query_workflow_is_valid(
+            &[
+                query_process("source", &counts[..1]),
+                query_process("source", &counts[1..])
+            ],
+            2
+        ));
+        assert!(reopen_proof_workflow_is_valid(&[
+            query_process("imported", &[counts[0], counts[1], hops[0], hops[1]]),
+            attribution.clone(),
+        ]));
+        assert!(reopen_proof_workflow_is_valid(&[
+            query_process("imported", &counts),
+            query_process("imported", &hops),
+            attribution.clone(),
+        ]));
+        assert!(reopen_workflow_is_valid(&[cli(&[
+            "--json",
+            "--project",
+            "source",
+            "storage-attribution",
+            "--recovery"
+        ])]));
+        assert!(reopen_workflow_is_valid(&[
+            cli(&["--json", "--project", "source", "recovery"]),
+            cli(&["--json", "--project", "source", "storage-attribution"]),
+        ]));
+        // The statement count is the receipt count; it is fixed per phase.
+        assert!(!query_workflow_is_valid(
+            &[query_process("source", &counts[..1])],
+            2
+        ));
+        assert!(!query_workflow_is_valid(
+            &[query_process("source", &[counts[0], counts[1], hops[0]])],
+            2
+        ));
+        assert!(!query_workflow_is_valid(&[], 2));
+        let mut unpaired = query_process("source", &counts);
+        unpaired.truncate(unpaired.len() - 2);
+        assert!(!query_workflow_is_valid(&[unpaired], 2));
+        assert!(!reopen_proof_workflow_is_valid(&[query_process(
+            "imported", &counts
+        )]));
+        assert!(!reopen_proof_workflow_is_valid(&[
+            query_process("imported", &counts),
+            attribution.clone()
+        ]));
+        assert!(!reopen_proof_workflow_is_valid(&[attribution.clone()]));
+        assert!(!reopen_workflow_is_valid(&[cli(&[
+            "--json",
+            "--project",
+            "source",
+            "storage-attribution"
+        ])]));
+        assert!(!reopen_workflow_is_valid(&[cli(&[
+            "--json",
+            "--project",
+            "source",
+            "recovery"
+        ])]));
+        assert!(!reopen_workflow_is_valid(&[]));
+    }
+
+    #[test]
+    fn repeated_output_flags_are_all_observed() {
+        let args = query_process(
+            "source",
+            &[("RETURN 1", "first.arrow"), ("RETURN 2", "second.arrow")],
+        );
+        let outputs: Vec<&Path> = argument_paths(&args, "--output").collect();
+        assert_eq!(
+            outputs,
+            [Path::new("first.arrow"), Path::new("second.arrow")]
+        );
+        assert_eq!(
+            argument_path(&args, "--output"),
+            Some(Path::new("first.arrow"))
+        );
+        assert_eq!(argument_path(&args, "--project"), Some(Path::new("source")));
+        assert!(argument_paths(&args, "--nodes").next().is_none());
+    }
+
+    #[test]
+    fn checked_in_profiles_collapse_each_read_phase_to_one_process_per_open() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut paths: Vec<_> = fs::read_dir(root.join("profiles/graph500"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        paths.push(root.join("fixtures/progressive/tiny-executable.json"));
+        assert_eq!(paths.len(), 8);
+        for path in paths {
+            let profile = read_profile(&path).unwrap();
+            assert_eq!(profile.validate(), Ok(()), "{}", path.display());
+            let commands = |phase: Phase| match &profile.phases
+                [Phase::ALL.iter().position(|value| *value == phase).unwrap()]
+            .action
+            {
+                PhaseAction::GraphForgeCliWorkflow { commands } => commands.clone(),
+                _ => panic!("{phase} must be a workflow in {}", path.display()),
+            };
+            assert_eq!(commands(Phase::Reopen).len(), 1);
+            assert_eq!(commands(Phase::Recount).len(), 1);
+            assert_eq!(commands(Phase::Query).len(), 1);
+            assert_eq!(commands(Phase::ReopenProof).len(), 2);
+            assert_eq!(query_statement_count(&commands(Phase::ReopenProof)[0]), 4);
+        }
     }
 
     #[test]

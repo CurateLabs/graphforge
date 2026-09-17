@@ -319,7 +319,7 @@ enum Command {
     /// Emit safe recovery-on-open evidence for the project.
     Recovery,
     /// Emit authenticated, identity-free retained storage attribution.
-    StorageAttribution,
+    StorageAttribution(storage_attribution_cli::StorageAttributionArgs),
     /// Explicitly re-authenticate the retained store on demand. Read-only;
     /// never runs as part of ingest.
     Verify,
@@ -1328,9 +1328,9 @@ fn run_with_allocation(
                 .map(|()| 0)
                 .map_err(Into::into);
         }
-        Command::StorageAttribution => {
+        Command::StorageAttribution(args) => {
             return storage_attribution_cli::run_storage_attribution(
-                graph, &path, cli.json, output, allocation,
+                graph, &path, &args, cli.json, output, allocation,
             )
             .map(|()| 0)
             .map_err(Into::into);

@@ -480,12 +480,14 @@ pub(crate) enum QuerySinkFormat {
 
 #[derive(Args)]
 pub(crate) struct QueryArgs {
-    /// Cypher query to execute.
-    #[arg(long)]
-    cypher: String,
-    /// Streaming sink destination.
-    #[arg(long)]
-    output: PathBuf,
+    /// Cypher statement to execute. Repeat `--cypher`/`--output` pairs to run
+    /// several statements against one open project; each statement emits its
+    /// own receipt line, in order.
+    #[arg(long, required = true)]
+    cypher: Vec<String>,
+    /// Streaming sink destination for the `--cypher` at the same position.
+    #[arg(long, required = true)]
+    output: Vec<PathBuf>,
     #[arg(long, value_enum, default_value_t = QuerySinkFormat::Parquet)]
     format: QuerySinkFormat,
     #[arg(long)]
@@ -500,52 +502,74 @@ pub(crate) fn run_query(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
+    if args.cypher.len() != args.output.len() {
+        return Err(graphforge_api::GfError::Validation(
+            "query requires exactly one --output per --cypher".into(),
+        ));
+    }
+    let mut destinations = std::collections::BTreeSet::new();
+    let mut paths = Vec::with_capacity(args.output.len());
+    for path in &args.output {
+        let path = path.to_str().ok_or_else(|| {
+            graphforge_api::GfError::Validation("query --output must be valid UTF-8".into())
+        })?;
+        if !destinations.insert(path) {
+            return Err(graphforge_api::GfError::Validation(
+                "query --output destinations must be distinct".into(),
+            ));
+        }
+        paths.push(path);
+    }
     let options = ResultSinkOptions {
         max_batch_rows: args.max_batch_rows.unwrap_or(65_536),
         max_row_group_rows: args.max_row_group_rows.unwrap_or(65_536),
     };
-    let path = args.output.to_str().ok_or_else(|| {
-        graphforge_api::GfError::Validation("query --output must be valid UTF-8".into())
-    })?;
     let params = std::collections::HashMap::new();
     let format = match args.format {
         QuerySinkFormat::Parquet => graphforge_api::ResultSinkFormat::Parquet,
         QuerySinkFormat::ArrowIpc => graphforge_api::ResultSinkFormat::ArrowIpc,
     };
-    let receipt = graph.execute_to_result_sink_with_evidence(
-        &args.cypher,
-        &params,
-        path,
-        format,
-        &options,
-        None,
-    )?;
-    if json {
-        write_json(
-            &serde_json::json!({
-                "contract": "graphforge-result-sink/2",
-                "application_io": crate::storage_attribution_cli::lifecycle_application_io()?,
-                "destination": receipt.sink.destination,
-                "format": format!("{:?}", receipt.sink.format),
-                "rows": receipt.sink.progress.rows,
-                "batches": receipt.sink.progress.batches,
-                "bytes": receipt.sink.progress.bytes,
-                "complete": receipt.sink.progress.complete,
-                "result_sha256": receipt.result_sha256,
-                "scalar_u64": receipt.scalar_u64,
-                "query_evidence": receipt.evidence,
-            }),
-            output,
-        )?;
-    } else {
-        writeln!(
-            output,
-            "wrote {} rows={} bytes={}",
-            receipt.sink.destination.display(),
-            receipt.sink.progress.rows,
-            receipt.sink.progress.bytes
-        )
-        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    // Each receipt attributes only the I/O performed since the previous
+    // receipt, so the first statement carries the project open and the
+    // receipts of one process sum to that process's whole attribution.
+    let mut previous_io: Option<graphforge_api::LifecyclePhaseAttribution> = None;
+    for (cypher, path) in args.cypher.iter().zip(paths) {
+        let receipt = graph
+            .execute_to_result_sink_with_evidence(cypher, &params, path, format, &options, None)?;
+        if json {
+            let snapshot = graphforge_api::lifecycle_io_snapshot();
+            let application_io = match &previous_io {
+                Some(earlier) => snapshot.since(earlier)?,
+                None => snapshot.clone(),
+            };
+            application_io.validate_for_qualification()?;
+            previous_io = Some(snapshot);
+            write_json(
+                &serde_json::json!({
+                    "contract": "graphforge-result-sink/2",
+                    "application_io": application_io,
+                    "destination": receipt.sink.destination,
+                    "format": format!("{:?}", receipt.sink.format),
+                    "rows": receipt.sink.progress.rows,
+                    "batches": receipt.sink.progress.batches,
+                    "bytes": receipt.sink.progress.bytes,
+                    "complete": receipt.sink.progress.complete,
+                    "result_sha256": receipt.result_sha256,
+                    "scalar_u64": receipt.scalar_u64,
+                    "query_evidence": receipt.evidence,
+                }),
+                output,
+            )?;
+        } else {
+            writeln!(
+                output,
+                "wrote {} rows={} bytes={}",
+                receipt.sink.destination.display(),
+                receipt.sink.progress.rows,
+                receipt.sink.progress.bytes
+            )
+            .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+        }
     }
     Ok(())
 }
