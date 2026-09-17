@@ -967,7 +967,7 @@ pub(super) fn run_record_bytes<const N: usize>(
     codec: Option<DetailCodec>,
 ) -> Result<&[u8], GfError> {
     match codec {
-        Some(codec) => codec.bytes(record).map_err(storage),
+        Some(codec) => codec.wire(record).map_err(storage),
         None => Ok(record),
     }
 }
