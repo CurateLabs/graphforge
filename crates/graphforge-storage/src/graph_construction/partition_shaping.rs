@@ -479,15 +479,17 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         let concatenated = (|| -> Result<u64, GfError> {
             let mut previous: Option<[u8; N]> = None;
             let mut written = 0_u64;
-            // Tracks the longest run of records sharing one key, across the
-            // whole concatenation. A range partition cannot split one key, so
-            // this is what tells a hub apart from a skewed splitter set
-            // (#1439) -- see `PartitionBalance::assert_balanced_with_hub_tolerance`.
-            // Keys are unique within a partition's sorted order without
-            // spanning partitions (the partition function is a function of
-            // the key), so accumulating this across the loop below is exact.
-            let mut current_run = 0_u64;
-            let mut max_single_key_run = 0_u64;
+            // Distinct keys per partition, counted off the sorted order below
+            // (identical keys are contiguous and never span partitions, since
+            // the partition function is a function of the key). This, not the
+            // row count, is what the splitters promise to balance: a range
+            // partition cannot split one key, so a node-keyed family such as
+            // staged endpoints is row-skewed exactly as much as its degree
+            // distribution is, and a power-law graph has many hubs, not one
+            // (#1439). A bad splitter set concentrates *distinct* keys, which
+            // this count does not hide. For a unique-key family it equals the
+            // row balance recorded at routing time.
+            let mut keys = PartitionBalance::new(self.sealed.len());
             for partition in 0..self.sealed.len() {
                 let Some(name) = self.sealed[partition]
                     .as_ref()
@@ -513,15 +515,12 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                                 "duplicate identity across construction runs",
                             ));
                         }
-                        current_run = if prior[..16] == record[..16] {
-                            current_run.saturating_add(1)
-                        } else {
-                            1
-                        };
+                        if prior[..16] != record[..16] {
+                            keys.record(partition)?;
+                        }
                     } else {
-                        current_run = 1;
+                        keys.record(partition)?;
                     }
-                    max_single_key_run = max_single_key_run.max(current_run);
                     let wire = run_record_bytes(record, self.codec)?;
                     writer.write_all(wire).map_err(super::storage)?;
                     account_merge_write_bytes(evidence, wire.len() as u64)?;
@@ -539,8 +538,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             // test, so this is what tells a working range partition apart
             // from a catastrophically skewed one for every fixed-width
             // family, not only identities.
-            self.balance
-                .assert_balanced_with_hub_tolerance(self.family.as_str(), max_single_key_run)?;
+            keys.assert_balanced(&format!("{} distinct keys", self.family.as_str()))?;
             Ok(written)
         })();
         let written = match concatenated {

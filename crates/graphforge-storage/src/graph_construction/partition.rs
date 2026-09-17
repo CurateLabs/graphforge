@@ -359,6 +359,16 @@ impl PartitionBalance {
     /// where the quantile estimate has fewer points than partitions and the
     /// ratio carries no information.
     ///
+    /// "Rows" are whatever the caller recorded. The splitters are quantiles
+    /// of the *key* domain, so the quantity they promise to balance is the
+    /// number of distinct keys per partition, not records: a range partition
+    /// cannot split one key, and a family with several records per key
+    /// (staged endpoints, keyed by node, hold one record per incident edge)
+    /// is expected to be row-skewed exactly as much as its key degrees are.
+    /// Such a family records its distinct-key counts here instead of its row
+    /// counts (`FixedRangePartitioner::finish_optional`, #1439); for a
+    /// unique-key family the two are the same number.
+    ///
     /// # Errors
     /// Returns an error when the partitioning is skewed beyond the tolerance.
     pub(crate) fn assert_balanced(&self, context: &str) -> Result<(), GfError> {
@@ -382,58 +392,6 @@ impl PartitionBalance {
                 "{context} range partitioning is skewed: largest partition holds {max} of \
                  {total} rows across {partitions} partitions, above the {BALANCE_TOLERANCE}x \
                  mean tolerance"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Refuse a partitioning whose largest partition exceeds
-    /// [`BALANCE_TOLERANCE`] times the mean, **unless** the excess is
-    /// explained by one repeated key.
-    ///
-    /// A range partition cannot split one key across partitions, so a hub --
-    /// one node referenced by a disproportionate number of edges, routing a
-    /// disproportionate number of endpoint records to the one partition that
-    /// owns it -- is not a splitter defect. `max_single_key_run` is the
-    /// largest number of records sharing one key observed anywhere in the
-    /// partitioning (computed after sorting, where identical keys are
-    /// contiguous). Discounting all but one of those occurrences from the
-    /// largest partition before comparing against the tolerance is what
-    /// distinguishes a genuine hub from a skewed splitter set: a bad splitter
-    /// set concentrates *distinct* keys into one partition, which this
-    /// discount does not hide.
-    ///
-    /// # Errors
-    /// Returns an error when the partitioning is skewed beyond the tolerance
-    /// even after that discount.
-    pub(crate) fn assert_balanced_with_hub_tolerance(
-        &self,
-        context: &str,
-        max_single_key_run: u64,
-    ) -> Result<(), GfError> {
-        let partitions = self.rows.len() as u64;
-        if partitions == 0 {
-            return Err(storage("partition balance has no partitions"));
-        }
-        let total = self.total();
-        if total / partitions < BALANCE_MIN_MEAN_ROWS {
-            return Ok(());
-        }
-        let max = self.max_rows();
-        let discount = max_single_key_run.saturating_sub(1);
-        let discounted = max.saturating_sub(discount);
-        let scaled = discounted
-            .checked_mul(partitions)
-            .ok_or_else(|| storage("partition balance ratio overflows"))?;
-        let budget = total
-            .checked_mul(BALANCE_TOLERANCE)
-            .ok_or_else(|| storage("partition balance budget overflows"))?;
-        if scaled > budget {
-            return Err(storage(format!(
-                "{context} range partitioning is skewed: largest partition holds {max} of \
-                 {total} rows across {partitions} partitions (largest single-key run \
-                 {max_single_key_run}), above the {BALANCE_TOLERANCE}x mean tolerance even after \
-                 discounting one hub key"
             )));
         }
         Ok(())

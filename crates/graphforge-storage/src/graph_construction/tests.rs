@@ -1123,3 +1123,120 @@ pub(super) fn construction_session_root(root: &TempDir, operation: Uuid) -> Path
         .join(PRIVATE_ROOT)
         .join(operation.simple().to_string())
 }
+
+/// Endpoint-shaped fixture for the partition balance check: 64 partitions of
+/// exactly 32 node keys each, so the key domain is perfectly balanced, with
+/// the node keys in `hubs` referencing `hub_degree` edges apiece and every
+/// other node exactly one. A route plan that agrees with that key layout is
+/// built by the caller.
+fn route_endpoint_fixture(
+    root: &StableDirectory,
+    plan: &super::partition::PartitionPlan,
+    hubs: &[u16],
+    hub_degree: u32,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<Option<String>, GfError> {
+    use super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    use crate::construction_record_layout::ENDPOINT_WIDTH;
+    const PARTITIONS: usize = 64;
+    const KEYS_PER_PARTITION: u16 = 32;
+    let mut partitioner = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
+        root,
+        PartitionFamily::Endpoints,
+        PARTITIONS,
+        None,
+        false,
+    )?;
+    let mut edge = 0_u128;
+    for node in 0..(PARTITIONS as u16 * KEYS_PER_PARTITION) {
+        let degree = if hubs.contains(&node) { hub_degree } else { 1 };
+        let mut key = [0_u8; 16];
+        key[..2].copy_from_slice(&node.to_be_bytes());
+        for _ in 0..degree {
+            edge += 1;
+            let mut record = [0_u8; ENDPOINT_WIDTH];
+            record[..16].copy_from_slice(&key);
+            record[16..32].copy_from_slice(&edge.to_be_bytes());
+            partitioner.route(plan, &key, &record, evidence)?;
+        }
+    }
+    partitioner.seal(evidence)?;
+    partitioner.finish_optional("shaped-fixture-endpoints.run", &mut || false, evidence)
+}
+
+/// Splitters at every 32nd node key: the plan the fixture's keys are laid out
+/// for, so each partition owns exactly 32 distinct keys.
+fn endpoint_fixture_plan() -> super::partition::PartitionPlan {
+    let splitters = (1_u16..64)
+        .map(|partition| {
+            let mut splitter = [0_u8; 16];
+            splitter[..2].copy_from_slice(&(partition * 32).to_be_bytes());
+            splitter
+        })
+        .collect();
+    super::partition::PartitionPlan::from_recorded(64, splitters).unwrap()
+}
+
+#[test]
+fn hub_heavy_endpoints_over_balanced_keys_are_accepted() {
+    // Three hubs in partition 0 and two elsewhere, each with 400 incident
+    // edges against a mean of ~63 rows per partition: partition 0 holds 1,229
+    // of 4,043 rows, more than 4x the mean even after discounting any one
+    // hub. That is the Graph500 shape (`scale_g500_ladder` at scale 10:
+    // "largest partition holds 315 of 1858 rows across 64 partitions,
+    // largest single-key run 91"), and it is not a splitter defect: every
+    // partition owns exactly 32 distinct keys.
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_041);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let output = route_endpoint_fixture(
+        session_root,
+        &endpoint_fixture_plan(),
+        &[5, 6, 7, 700, 1_500],
+        400,
+        &mut checkpoint.evidence,
+    )
+    .unwrap();
+    assert!(output.is_some());
+}
+
+#[test]
+fn collapsed_endpoint_splitters_are_still_refused() {
+    // The same 2,048 keys, one record each, under a splitter set that lies
+    // entirely above the key domain: every key lands in partition 0. No hub
+    // is involved, so the refusal can only come from key concentration --
+    // the property the balance check exists to guarantee.
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_042);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let collapsed = (1_u8..64)
+        .map(|partition| {
+            let mut splitter = [0xff_u8; 16];
+            splitter[1] = partition;
+            splitter
+        })
+        .collect();
+    let plan = super::partition::PartitionPlan::from_recorded(64, collapsed).unwrap();
+    let error = route_endpoint_fixture(session_root, &plan, &[], 1, &mut checkpoint.evidence)
+        .expect_err("a collapsed key partitioning must be refused")
+        .to_string();
+    assert!(error.contains("endpoints distinct keys"), "{error}");
+    assert!(error.contains("skewed"), "{error}");
+    assert!(error.contains("2048 of 2048"), "{error}");
+}
