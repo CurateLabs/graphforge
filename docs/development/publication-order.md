@@ -2,7 +2,7 @@
 
 GraphForge v0.5.2 is one 29-node release: 20 crates.io crates, one PyPI
 project, five native npm packages, the npm main package, CLI, and agent skills.
-[ADR 0017](../adr/0017-unified-release-version.md) forbids a registry-specific
+[ADR 0036](../adr/0036-release-version-contract.md) forbids a registry-specific
 version. Existing v0.5.0 tags, records, supplements, and published packages are
 immutable incident evidence; the v2 workflow rejects v0.5.0 rather than
 mutating or reinterpreting those records.
@@ -32,7 +32,8 @@ eight npm packages as `0.6.0-rc.1`, and projected onto PyPI, and only PyPI, as
 version. No other prerelease spelling is a GraphForge release: `0.6.0-rc1`,
 `0.6.0-RC.1`, `0.6.0-rc.01` and `1.0.0-beta.2` are refused by
 `scripts/set_release_version.py` and by publication preflight before any
-credential is used (ADR 0033, ADR 0034, issue #858).
+credential is used ([ADR 0036](../adr/0036-release-version-contract.md),
+issue #858).
 
 Before a maintainer authorizes publication (publish-track or human close):
 

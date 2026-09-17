@@ -1,9 +1,10 @@
 # ADR 0025: Storage values have a compiler-independent contract
 
-**Status:** Accepted (decision; extraction not yet implemented)
+**Status:** Accepted
+**Implementation:** Decision only; extraction not yet implemented.
 **Date:** 2026-09-04
 **Build target:** v0.6.0
-**Related:** issues #1013, #1011, #1012; ADRs 0008–0011, 0013, 0017, 0024
+**Related:** issues #1013, #1011, #1012; ADRs 0008–0011, 0013, 0024, 0036
 
 ## Context: the current dependency graph
 
@@ -69,7 +70,8 @@ not accidentally assign one universal meaning to tags used by different schemas.
 
 ## Versioning and compatibility
 
-Public package versions remain coordinated under ADR 0017. Four other version
+Public package versions remain coordinated under ADR 0036 (which
+consolidates and supersedes ADR 0017). Four other version
 boundaries remain distinct:
 
 | Boundary | Rule |

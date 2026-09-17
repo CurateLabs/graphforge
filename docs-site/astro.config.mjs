@@ -239,81 +239,125 @@ export default defineConfig({
                 { label: 'Decision log', slug: 'engineering/adrs' },
                 { label: 'Index', slug: 'adr' },
                 { label: '0001 — Rust Core', slug: 'adr/0001-rust-core' },
-                { label: '0002 — RD+Pratt Parser', slug: 'adr/0002-lr1-grammar' },
-                { label: '0003 — Progressive Ontology', slug: 'adr/0003-progressive-ontology' },
-                { label: '0004 — Adjacency Index', slug: 'adr/0004-adjacency-index' },
-                { label: '0005 — Layered Architecture', slug: 'adr/0005-layered-architecture' },
-                { label: '0006 — Epistemic Model', slug: 'adr/0006-epistemic-model' },
-                { label: '0007 — Temporal Values', slug: 'adr/0007-temporal-values' },
-                { label: '0008 — Heterogeneous Lists', slug: 'adr/0008-heterogeneous-lists' },
                 {
-                  label: '0009 — Nested Heterogeneous Lists',
+                  label: '0002 — Recursive Descent + Pratt Parser for graphforge-cypher',
+                  slug: 'adr/0002-lr1-grammar',
+                },
+                {
+                  label: '0003 — Progressive Ontology — Exploration First',
+                  slug: 'adr/0003-progressive-ontology',
+                },
+                { label: '0004 — Graph-Native Adjacency Index', slug: 'adr/0004-adjacency-index' },
+                {
+                  label: '0005 — Layered Architecture — Graph / Knowledge / Workbench',
+                  slug: 'adr/0005-layered-architecture',
+                },
+                {
+                  label: '0006 — Append-only epistemic interpretation',
+                  slug: 'adr/0006-epistemic-model',
+                },
+                { label: '0007 — Runtime Temporal Values', slug: 'adr/0007-temporal-values' },
+                { label: '0008 — Heterogeneous List Values', slug: 'adr/0008-heterogeneous-lists' },
+                {
+                  label: '0009 — Nested Heterogeneous List Values',
                   slug: 'adr/0009-nested-heterogeneous-lists',
                 },
                 {
-                  label: '0010 — Wide Date and Duration',
+                  label: '0010 — Full-range dates (proleptic-Gregorian calendar) and a wider duration model',
                   slug: 'adr/0010-wide-date-and-duration',
                 },
                 {
-                  label: '0011 — Dynamic Heterogeneous Values',
+                  label: '0011 — Dynamic Heterogeneous Value Lists',
                   slug: 'adr/0011-dynamic-heterogeneous-values',
                 },
                 {
-                  label: '0012 — Knowledge & Epistemic Domains',
+                  label: '0012 — Knowledge and epistemic domain ownership and schema evolution',
                   slug: 'adr/0012-knowledge-domain-ownership',
                 },
                 {
-                  label: '0013 — Project Generations',
+                  label: '0013 — Durable v0.5 project-generation protocol',
                   slug: 'adr/0013-project-generation-protocol',
                 },
                 {
-                  label: '0014 — Workspace Checkpoints',
+                  label: '0014 — Complete-workspace checkpoints and generation-preserving revert',
                   slug: 'adr/0014-workspace-checkpoints',
                 },
                 {
-                  label: '0015 — Embedded Write Modes',
+                  label: '0015 — Three embedded project-write modes',
                   slug: 'adr/0015-embedded-write-modes',
                 },
                 {
-                  label: '0016 — Repository Integration',
+                  label: '0016 — Repository integration and deployment configuration boundary',
                   slug: 'adr/0016-repository-integration-and-deployment-configuration',
                 },
                 {
-                  label: '0017 — Unified Release Version',
-                  slug: 'adr/0017-unified-release-version',
-                },
-                {
-                  label: '0018 — Durability and Isolation',
+                  label: '0018 — Acknowledged durability and isolation contract',
                   slug: 'adr/0018-acknowledged-durability-isolation',
                 },
                 {
-                  label: '0019 Authoritative graph delta journal',
+                  label: '0019 — Authoritative durable graph delta journal',
                   slug: 'adr/0019-authoritative-graph-delta-journal',
                 },
                 {
-                  label: '0020 NTFS namespace durability',
+                  label: '0020 — NTFS write-through namespace durability',
                   slug: 'adr/0020-ntfs-write-through-namespace-durability',
                 },
                 {
-                  label: '0021 Portable project v2',
+                  label: '0021 — Portable project v2 package layout and identity',
                   slug: 'adr/0021-portable-project-v2',
                 },
                 {
-                  label: '0023 Composable multi-ontology',
+                  label: '0022 — Multi-ontology semantics in portable project v2',
+                  slug: 'adr/0022-portable-v2-multi-ontology-compatibility',
+                },
+                {
+                  label: '0023 — Composable ontology modules and semantic bridges',
                   slug: 'adr/0023-composable-multi-ontology',
                 },
                 {
-                  label: '0024 Storage format exceptions',
+                  label: '0024 — Storage format exceptions for GFDR and compiled ontologies',
                   slug: 'adr/0024-storage-format-exceptions',
                 },
                 {
-                  label: '0025 Storage value contract',
+                  label: '0025 — Storage values have a compiler-independent contract',
                   slug: 'adr/0025-storage-value-contract',
                 },
-                { label: '0026 Read plan resources', slug: 'adr/0026-read-plan-resources' },
-                { label: '0027 Native runtime boundary', slug: 'adr/0027-native-runtime-boundary' },
-                { label: '0031 Source file size bounds', slug: 'adr/0031-source-size-policy' },
-                { label: '0032 Research Project authority', slug: 'adr/0032-research-project-authority' },
+                {
+                  label: '0026 — Read plans bind resources in execution',
+                  slug: 'adr/0026-read-plan-resources',
+                },
+                {
+                  label: '0027 — Native GraphForge execution boundary',
+                  slug: 'adr/0027-native-runtime-boundary',
+                },
+                {
+                  label: '0028 — One transaction owns graph mutation effects',
+                  slug: 'adr/0028-shared-mutation-transaction',
+                },
+                {
+                  label: '0029 — Compile against immutable schema and catalog data',
+                  slug: 'adr/0029-lowering-schema-snapshot',
+                },
+                {
+                  label: '0030 — Portable OCI protocol boundary',
+                  slug: 'adr/0030-portable-oci-boundary',
+                },
+                {
+                  label: '0031 — Reviewed source file size bounds',
+                  slug: 'adr/0031-source-size-policy',
+                },
+                {
+                  label: '0032 — Research Branches share Project publication authority',
+                  slug: 'adr/0032-research-project-authority',
+                },
+                {
+                  label: '0035 — Preserve stage diagnostics at public error boundaries',
+                  slug: 'adr/0035-structured-stage-errors',
+                },
+                {
+                  label: '0036 — The GraphForge release version contract',
+                  slug: 'adr/0036-release-version-contract',
+                },
               ],
             },
           ],
