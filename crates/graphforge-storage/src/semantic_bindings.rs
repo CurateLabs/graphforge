@@ -864,7 +864,12 @@ fn corrupt(message: &str) -> GfError {
 
 fn admitted_semantic_parquet(
     path: &Path,
-) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<File>, GfError> {
+) -> Result<
+    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder<
+        crate::lifecycle_io::ReadPathFile,
+    >,
+    GfError,
+> {
     crate::catalog::admitted_parquet(path)
         .map_err(|error| corrupt(&format!("semantic Parquet admission failed: {error}")))
 }

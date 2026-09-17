@@ -202,6 +202,18 @@
             "transient_peak_storage_bytes": {"$ref": "#/$defs/nonnegative"}
           }
         },
+        "lifecycle_application_io": {
+          "type": "object", "additionalProperties": false,
+          "required": ["reopen", "recount", "query", "export", "clean_import", "reopen_proof"],
+          "properties": {
+            "reopen": {"$ref": "#/$defs/lifecycleApplicationIo"},
+            "recount": {"$ref": "#/$defs/lifecycleApplicationIo"},
+            "query": {"$ref": "#/$defs/lifecycleApplicationIo"},
+            "export": {"$ref": "#/$defs/lifecycleApplicationIo"},
+            "clean_import": {"$ref": "#/$defs/lifecycleApplicationIo"},
+            "reopen_proof": {"$ref": "#/$defs/lifecycleApplicationIo"}
+          }
+        },
         "counts": {
           "type": "object", "additionalProperties": false,
           "required": ["source_nodes", "source_edges", "imported_nodes", "imported_edges"],
@@ -324,6 +336,30 @@
       "required": ["phases", "totals"],
       "properties": {
         "phases": {"$ref": "#/$defs/phaseMap"},
+        "totals": {"$ref": "#/$defs/phaseTotals"}
+      }
+    },
+    "lifecyclePhaseMap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["append_merge", "seal_authentication", "shape_consume_reauthentication", "encode_write_postwrite_authentication", "publication_preauthentication", "cas_install_read_write", "hydration_verification", "fsync_synchronization", "recovery_reauthentication", "read_path_scan"],
+      "properties": {
+        "append_merge": {"$ref": "#/$defs/phaseTotals"},
+        "seal_authentication": {"$ref": "#/$defs/phaseTotals"},
+        "shape_consume_reauthentication": {"$ref": "#/$defs/phaseTotals"},
+        "encode_write_postwrite_authentication": {"$ref": "#/$defs/phaseTotals"},
+        "publication_preauthentication": {"$ref": "#/$defs/phaseTotals"},
+        "cas_install_read_write": {"$ref": "#/$defs/phaseTotals"},
+        "hydration_verification": {"$ref": "#/$defs/phaseTotals"},
+        "fsync_synchronization": {"$ref": "#/$defs/phaseTotals"},
+        "recovery_reauthentication": {"$ref": "#/$defs/phaseTotals"},
+        "read_path_scan": {"$ref": "#/$defs/phaseTotals"}
+      }
+    },
+    "lifecycleApplicationIo": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phases", "totals"],
+      "properties": {
+        "phases": {"$ref": "#/$defs/lifecyclePhaseMap"},
         "totals": {"$ref": "#/$defs/phaseTotals"}
       }
     }

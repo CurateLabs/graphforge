@@ -4462,6 +4462,7 @@ const fn phase_name(phase: graphforge_storage::StorageIoPhase) -> &'static str {
         StorageIoPhase::HydrationVerification => "hydration_verification",
         StorageIoPhase::FsyncSynchronization => "fsync_synchronization",
         StorageIoPhase::RecoveryReauthentication => "recovery_reauthentication",
+        StorageIoPhase::ReadPathScan => "read_path_scan",
     }
 }
 

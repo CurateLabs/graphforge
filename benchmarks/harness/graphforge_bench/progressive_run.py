@@ -85,6 +85,18 @@ APPLICATION_IO_PHASES = (
     "fsync_synchronization",
     "recovery_reauthentication",
 )
+# The construction inventory plus the read-path row construction never performs
+# (#1389). Every non-ingest lifecycle receipt carries this closed inventory.
+LIFECYCLE_APPLICATION_IO_PHASES = (*APPLICATION_IO_PHASES, "read_path_scan")
+# Ladder phases whose receipts carry per-phase lifecycle I/O attribution.
+LIFECYCLE_APPLICATION_IO_LADDER_PHASES = (
+    "reopen",
+    "recount",
+    "query",
+    "export",
+    "clean_import",
+    "reopen_proof",
+)
 APPLICATION_IO_FIELDS = (
     "read_bytes",
     "write_bytes",
@@ -932,35 +944,94 @@ def _storage_receipt(graphforge: Mapping[str, Any], phase: str) -> Mapping[str, 
 
 
 def _application_io(construction: Mapping[str, Any]) -> Mapping[str, Any]:
-    application_io = construction.get("application_io")
+    return _phase_io_document(
+        construction.get("application_io"),
+        APPLICATION_IO_PHASES,
+        "ordinary import",
+    )
+
+
+def _phase_io_document(
+    application_io: Any,
+    phases: tuple[str, ...],
+    label: str,
+) -> Mapping[str, Any]:
+    """Validate one closed `{phases, totals}` application-I/O document."""
     if not isinstance(application_io, Mapping) or set(application_io) != {"phases", "totals"}:
-        raise ControllerError("ordinary import application I/O evidence is absent")
-    phases = application_io.get("phases")
+        raise ControllerError(f"{label} application I/O evidence is absent")
+    rows = application_io.get("phases")
     totals = application_io.get("totals")
     if (
-        not isinstance(phases, Mapping)
-        or set(phases) != set(APPLICATION_IO_PHASES)
+        not isinstance(rows, Mapping)
+        or set(rows) != set(phases)
         or not isinstance(totals, Mapping)
         or set(totals) != set(APPLICATION_IO_FIELDS)
     ):
-        raise ControllerError("ordinary import application I/O inventory is incomplete")
+        raise ControllerError(f"{label} application I/O inventory is incomplete")
     sums = dict.fromkeys(APPLICATION_IO_FIELDS, 0)
-    for phase in APPLICATION_IO_PHASES:
-        values = phases.get(phase)
+    for phase in phases:
+        values = rows.get(phase)
         if not isinstance(values, Mapping) or set(values) != set(APPLICATION_IO_FIELDS):
-            raise ControllerError(f"ordinary import application I/O phase is malformed: {phase}")
+            raise ControllerError(f"{label} application I/O phase is malformed: {phase}")
         for name in APPLICATION_IO_FIELDS:
             value = values.get(name)
             if not _is_int(value) or value < 0:
-                raise ControllerError(f"ordinary import application I/O omitted {name}: {phase}")
+                raise ControllerError(f"{label} application I/O omitted {name}: {phase}")
             sums[name] += value
         if (values["read_bytes"] == 0) != (values["read_calls"] == 0):
-            raise ControllerError("ordinary import application I/O read counters disagree")
+            raise ControllerError(f"{label} application I/O read counters disagree")
         if (values["write_bytes"] == 0) != (values["write_calls"] == 0):
-            raise ControllerError("ordinary import application I/O write counters disagree")
-    if totals != sums:
-        raise ControllerError("ordinary import application I/O totals do not reconcile")
+            raise ControllerError(f"{label} application I/O write counters disagree")
+    if dict(totals) != sums:
+        raise ControllerError(f"{label} application I/O totals do not reconcile")
     return application_io
+
+
+def _lifecycle_application_io(graphforge: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Per-ladder-phase lifecycle I/O attribution, summed across that phase's
+    receipts. Each receipt is one single-purpose `gf` process, so the sum is the
+    phase total.
+
+    Returns `None` when no lifecycle phase carries attribution at all, which is
+    how evidence recorded before #1389 presents itself; such a rung simply omits
+    the field and stays comparable. A run where some phases carry it and others
+    do not is a real gap and is refused.
+    """
+    collected: dict[str, dict[str, dict[str, int]]] = {}
+    missing: list[str] = []
+    for ladder_phase in LIFECYCLE_APPLICATION_IO_LADDER_PHASES:
+        rows = {
+            phase: dict.fromkeys(APPLICATION_IO_FIELDS, 0)
+            for phase in LIFECYCLE_APPLICATION_IO_PHASES
+        }
+        observed = 0
+        for receipt in _phase_receipts(graphforge, ladder_phase):
+            if not isinstance(receipt, Mapping) or "application_io" not in receipt:
+                continue
+            document = _phase_io_document(
+                receipt["application_io"],
+                LIFECYCLE_APPLICATION_IO_PHASES,
+                f"ordinary {ladder_phase}",
+            )
+            observed += 1
+            for phase in LIFECYCLE_APPLICATION_IO_PHASES:
+                for name in APPLICATION_IO_FIELDS:
+                    rows[phase][name] += int(document["phases"][phase][name])
+        if observed == 0:
+            missing.append(ladder_phase)
+            continue
+        totals = dict.fromkeys(APPLICATION_IO_FIELDS, 0)
+        for phase in LIFECYCLE_APPLICATION_IO_PHASES:
+            for name in APPLICATION_IO_FIELDS:
+                totals[name] += rows[phase][name]
+        collected[ladder_phase] = {"phases": rows, "totals": totals}
+    if not collected:
+        return None
+    if missing:
+        raise ControllerError(
+            "ordinary lifecycle application I/O is absent: " + ", ".join(missing)
+        )
+    return collected
 
 
 def _construction_metrics(
@@ -1045,6 +1116,7 @@ def assemble_rung_evidence(
         committed_import
     )
     portable_allocation = _portable_allocation(graphforge)
+    lifecycle_application_io = _lifecycle_application_io(graphforge)
     expected_edges = 16 * (1 << scale)
     source_counts = _query_receipts(graphforge, "recount", 2)
     source_hops = _query_receipts(graphforge, "query", 2)
@@ -1150,6 +1222,11 @@ def assemble_rung_evidence(
             },
             "portable_package": portable_allocation,
             "lifecycle": lifecycle_storage,
+            **(
+                {"lifecycle_application_io": lifecycle_application_io}
+                if lifecycle_application_io is not None
+                else {}
+            ),
             "counts": authoritative_counts,
         },
         "failure": None,

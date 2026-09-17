@@ -374,6 +374,12 @@ pub use vector_store::{
 pub mod io_stats;
 pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
+pub mod lifecycle_io;
+pub use lifecycle_io::{
+    LifecyclePhaseAttribution, PhaseScope as LifecycleIoPhaseScope,
+    snapshot as lifecycle_io_snapshot,
+};
+
 pub mod uuid_membership;
 pub use uuid_membership::{
     AuthenticatedUuidIndexSnapshot, UuidIndexAppendMetrics, UuidIndexBuildLimits,
