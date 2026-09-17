@@ -44,6 +44,7 @@ pub use builder::{
     build_adjacency_index_into_with_metrics, build_adjacency_index_into_with_options,
     build_adjacency_index_with_checkpoint,
 };
+pub(crate) use builder::build_adjacency_index_for_edge_files;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -1170,16 +1171,35 @@ fn capture_adjacency_inventory(
     crate::AuthenticatedPropertyInventory::from_inventory_at_root(root, inventory, None)
 }
 
+/// The `(relation, path)` edge tables an adjacency build streams, resolved
+/// through the admitted inventory when one is supplied, else the legacy raw
+/// `topology/edges/` layout.
+pub(crate) fn resolve_adjacency_edge_files(
+    project_dir: &Path,
+    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+) -> Result<Vec<(String, PathBuf)>, GfError> {
+    match inventory {
+        Some(inventory) => Ok(inventory.edge_files(None)),
+        None => crate::mutator::edge_parquet_files(project_dir, None),
+    }
+}
+
 fn for_each_adjacency_edge_file(
     project_dir: &Path,
     inventory: Option<&crate::AuthenticatedPropertyInventory>,
     batch_size: usize,
     on_batch: &mut dyn FnMut(&str, bool, &RecordBatch) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
-    let paths = match inventory {
-        Some(inventory) => inventory.edge_files(None),
-        None => crate::mutator::edge_parquet_files(project_dir, None)?,
-    };
+    let paths = resolve_adjacency_edge_files(project_dir, inventory)?;
+    for_each_adjacency_edge_path(&paths, batch_size, on_batch)
+}
+
+/// Stream every `(relation, path)` edge table in `paths` as projected batches.
+pub(crate) fn for_each_adjacency_edge_path(
+    paths: &[(String, PathBuf)],
+    batch_size: usize,
+    on_batch: &mut dyn FnMut(&str, bool, &RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     for (stem, path) in paths {
         // An unreadable edge file must FAIL the build, not be skipped: a
         // manifest written without it would stamp the current generation and
@@ -1199,8 +1219,8 @@ fn for_each_adjacency_edge_file(
         } else {
             &["edge_id", "src_id", "dst_id"]
         };
-        stream_projected_parquet_batches(&path, columns, batch_size, &mut |batch| {
-            on_batch(&stem, exploratory, &batch)
+        stream_projected_parquet_batches(path, columns, batch_size, &mut |batch| {
+            on_batch(stem, exploratory, &batch)
         })?;
     }
     Ok(())
