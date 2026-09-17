@@ -161,7 +161,8 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
                 .open_child_file(OsStr::new(&shape.runtime_catalog))
                 .is_ok()
         );
-        assert!(session.evidence().peak_merge_inputs <= 2);
+        assert!(session.evidence().shape_partitions >= 1);
+        assert!(session.evidence().partition_outputs > 0);
         assert!(session.evidence().merge_read_bytes > 0);
         assert!(session.evidence().merge_written_bytes > 0);
         assert!(session.evidence().merge_read_blocks > 0);
@@ -172,7 +173,8 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
         assert!(session.evidence().parquet_read_operations > 0);
         assert!(session.evidence().parquet_write_operations > 0);
         if chunks == 4 {
-            assert!(session.evidence().merge_passes >= 2);
+            assert!(session.evidence().shape_partitions > 1);
+            assert_eq!(session.evidence().merge_passes, 0);
         }
     }
 }
@@ -425,11 +427,7 @@ fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy(
             .len(),
         BASE_IDENTITY_WIDTH as u64
     );
-    assert!(
-        !operation_root
-            .join("merge-identities-with-base.run")
-            .exists()
-    );
+    assert!(!operation_root.join("staged-identities.run").exists());
     assert_eq!(shape.parent_topology_generation, 1);
     assert!(shape.parent_uuid_manifest_sha256.is_some());
 

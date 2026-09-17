@@ -334,6 +334,33 @@ pub struct GraphConstructionEvidence {
     pub peak_accounted_live_bytes: u64,
     /// Largest number of merge-source names retained by the online scheduler.
     pub peak_merge_name_slots: u64,
+    /// Effective range partitions used by shaping.
+    #[serde(default)]
+    pub shape_partitions: u64,
+    /// Recorded range-partition count requested by the session.
+    #[serde(default)]
+    pub shape_partition_count: u64,
+    /// Identity records observed by the splitter sampling pass.
+    #[serde(default)]
+    pub splitter_sampled_source_records: u64,
+    /// Identity keys retained as splitter sample points.
+    #[serde(default)]
+    pub splitter_sample_records: u64,
+    /// Rows routed into the largest identity partition.
+    #[serde(default)]
+    pub max_partition_identity_rows: u64,
+    /// Total identity rows routed by range partitioning.
+    #[serde(default)]
+    pub partitioned_identity_rows: u64,
+    /// Sorted partition outputs concatenated into shaped artifacts.
+    #[serde(default)]
+    pub partition_outputs: u64,
+    /// Largest number of records materialized for one sorted partition.
+    #[serde(default)]
+    pub peak_partition_records: u64,
+    /// Records emitted through range-partitioned shaped outputs.
+    #[serde(default)]
+    pub partition_rows: u64,
     /// Largest number of endpoint-window names retained by its online merge.
     pub peak_resolved_endpoint_name_slots: u64,
     /// Largest complete runtime-catalog entry count retained during shaping.
