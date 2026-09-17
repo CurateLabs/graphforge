@@ -27,6 +27,14 @@ npm          ``0.6.0``        ``0.6.0-dev.0``    ``0.6.0-rc.1``
 Python       ``0.6.0``        ``0.6.0.dev0``     ``0.6.0rc1``
 ============ ================ ================== ==================
 
+A prerelease has exactly one canonical root spelling, ``MAJOR.MINOR.PATCH-rc.N``
+(ADR 0034, issue #858): lowercase ``rc``, a dot separator, and a numeric
+counter with no leading zero. ``0.6.0-rc1``, ``0.6.0rc1``, ``0.6.0-RC.1``,
+``0.6.0-rc.01`` and ``1.0.0-beta.2`` are all refused. SemVer prerelease
+spellings are not injective into PEP 440 -- the first four above all normalize
+to ``0.6.0rc1`` -- so admitting more than one would let two distinct cargo/npm
+versions share one Python identity and defeat the ADR 0017 one-version rule.
+
 The Python prerelease spelling is whatever PEP 440 normalization produces from
 the root version. It is derived by ``packaging``, never written by hand, and it
 is not a second version.
@@ -86,8 +94,13 @@ def cargo_lock_versions() -> dict[str, str]:
 
 
 RELEASE_RE = re.compile(r"\d+\.\d+\.\d+")
-# SemVer prerelease identifier: dot-separated alphanumerics after MAJOR.MINOR.PATCH.
-PRERELEASE_RE = re.compile(r"(\d+\.\d+\.\d+)-([0-9A-Za-z][0-9A-Za-z.-]*)")
+# The one canonical prerelease identifier: lowercase `rc`, a dot separator and a
+# numeric counter with no leading zero (ADR 0034, issue #858). Exactly one
+# spelling is admitted per release because SemVer prerelease spellings are not
+# injective into PEP 440.
+RC_COUNTER = r"(?:0|[1-9]\d*)"
+PRERELEASE_RE = re.compile(rf"(\d+\.\d+\.\d+)-(rc\.{RC_COUNTER})")
+CANONICAL_HINT = "X.Y.Z, X.Y.Z-dev, or X.Y.Z-rc.N (lowercase 'rc', no leading zero in N)"
 
 
 def parse_base(version: str) -> tuple[str, bool, str | None]:
@@ -103,9 +116,7 @@ def parse_base(version: str) -> tuple[str, bool, str | None]:
         return raw, dev, None
     match = PRERELEASE_RE.fullmatch(raw)
     if match is None or dev:
-        raise ValueError(
-            f"unsupported version '{version}' (expected X.Y.Z, X.Y.Z-dev, or X.Y.Z-PRERELEASE)"
-        )
+        raise ValueError(f"unsupported version '{version}' (expected {CANONICAL_HINT})")
     base, prerelease = match.groups()
     # Fail closed here rather than at a registry writer: a prerelease we cannot
     # spell for PEP 440 is not a publishable GraphForge version (ADR 0033).
@@ -120,6 +131,13 @@ def _pep440_prerelease(base: str, pre: str) -> str:
     versions -- the only shapes this tool supported before ADR 0033 -- never
     depend on it.
     """
+    counter = re.fullmatch(rf"rc\.({RC_COUNTER})", pre)
+    if counter is None:
+        raise ValueError(
+            f"prerelease identifier '{pre}' is not canonical; "
+            "the only release-candidate spelling is 'rc.N' with lowercase 'rc' "
+            "and no leading zero in N (ADR 0034)"
+        )
     try:
         from packaging.version import InvalidVersion, Version
     except ModuleNotFoundError as exc:  # pragma: no cover - environment defect
@@ -141,6 +159,10 @@ def _pep440_prerelease(base: str, pre: str) -> str:
         or parsed.local is not None
     ):
         raise ValueError(f"prerelease '{raw}' is not a plain PEP 440 prerelease of {base}")
+    # Verify the reverse mapping: the normalized spelling must name the same
+    # canonical candidate it came from, never a neighbouring one (issue #858).
+    if parsed.pre != ("rc", int(counter.group(1))):
+        raise ValueError(f"prerelease '{raw}' does not project to the same release candidate")
     return str(parsed)
 
 

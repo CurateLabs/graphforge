@@ -44,10 +44,12 @@ def git_head() -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-# A release tag carries one root version: MAJOR.MINOR.PATCH, optionally with a
-# SemVer prerelease identifier (ADR 0033). The version tooling decides whether
-# the identifier is publishable; this pattern only admits the shape.
-RELEASE_TAG = re.compile(r"v(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)")
+# A release tag carries one root version: MAJOR.MINOR.PATCH, optionally with the
+# one canonical release-candidate identifier `-rc.N` (ADR 0033, ADR 0034). A
+# noncanonical spelling such as `v0.6.0-rc1` or `v0.6.0-RC.1` never names a
+# GraphForge release, because it would share `0.6.0rc1` with `v0.6.0-rc.1` on
+# PyPI while being a different version to cargo and npm (issue #858).
+RELEASE_TAG = re.compile(r"v(\d+\.\d+\.\d+(?:-rc\.(?:0|[1-9]\d*))?)")
 
 
 def release_version(tag: str) -> str | None:
@@ -103,7 +105,7 @@ def validate(
     errors: list[str] = []
     version = release_version(tag)
     if version is None:
-        return [f"release tag must be exactly vMAJOR.MINOR.PATCH[-PRERELEASE], got {tag!r}"]
+        return [f"release tag must be exactly vMAJOR.MINOR.PATCH[-rc.N], got {tag!r}"]
 
     version_module = load_version_module()
     try:

@@ -25,6 +25,15 @@ dual-track table and wall-clock targets.
 
 ## Candidate preconditions
 
+A release version is `MAJOR.MINOR.PATCH`, or, for a release candidate, exactly
+`MAJOR.MINOR.PATCH-rc.N` — tagged `v0.6.0-rc.1`, published to crates.io and all
+eight npm packages as `0.6.0-rc.1`, and projected onto PyPI, and only PyPI, as
+`0.6.0rc1`. The PyPI form is a projection, never an input and never a second
+version. No other prerelease spelling is a GraphForge release: `0.6.0-rc1`,
+`0.6.0-RC.1`, `0.6.0-rc.01` and `1.0.0-beta.2` are refused by
+`scripts/set_release_version.py` and by publication preflight before any
+credential is used (ADR 0033, ADR 0034, issue #858).
+
 Before a maintainer authorizes publication (publish-track or human close):
 
 1. The intended tag resolves to the current reviewed `main` commit and the root

@@ -27,9 +27,11 @@ def test_parse_release_and_dev() -> None:
 
 
 def test_parse_prerelease() -> None:
+    """Only the canonical `MAJOR.MINOR.PATCH-rc.N` spelling parses (ADR 0034)."""
     assert set_release_version.parse_base("0.6.0-rc.1") == ("0.6.0", False, "rc.1")
-    assert set_release_version.parse_base("0.6.0-rc1") == ("0.6.0", False, "rc1")
-    assert set_release_version.parse_base("1.0.0-beta.2") == ("1.0.0", False, "beta.2")
+    # Multi-digit candidate counters are canonical too (issue #858).
+    assert set_release_version.parse_base("0.6.0-rc.10") == ("0.6.0", False, "rc.10")
+    assert set_release_version.parse_base("1.0.0-rc.2") == ("1.0.0", False, "rc.2")
 
 
 @pytest.mark.parametrize(
@@ -46,11 +48,44 @@ def test_parse_prerelease() -> None:
         "0.6.0-foo",
         # A prerelease development build is not a shape this project publishes.
         "0.6.0-rc.1-dev",
+        # One release, one spelling. Each of these projects to the same PyPI
+        # version `0.6.0rc1` as the canonical `0.6.0-rc.1` while being a
+        # *different* version to cargo and npm, so admitting any of them would
+        # let two SemVer versions share one Python identity (ADR 0034, #858).
+        "0.6.0-rc1",
+        "0.6.0-RC.1",
+        "0.6.0-Rc.1",
+        "0.6.0-rc-1",
+        # A leading zero in the candidate counter is not canonical SemVer and
+        # normalizes to the same PEP 440 version as `rc.1`.
+        "0.6.0-rc.01",
+        "0.6.0-rc.001",
+        # Other PEP 440 prerelease phases are not release candidates.
+        "1.0.0-beta.2",
+        "1.0.0-alpha.3",
+        "1.0.0-b.2",
+        "1.0.0-a.3",
+        # Build metadata is never repurposed as an RC counter.
+        "0.6.0-rc.1+build.5",
+        "0.6.0-rc.1.2",
     ],
 )
 def test_parse_rejects_malformed(version: str) -> None:
     with pytest.raises(ValueError):
         set_release_version.parse_base(version)
+
+
+def test_noncanonical_prerelease_error_names_the_contract() -> None:
+    """The diagnostic is stable and names the canonical form (issue #858)."""
+    with pytest.raises(ValueError, match=r"rc\.N"):
+        set_release_version.parse_base("0.6.0-rc1")
+
+
+def test_expected_for_rejects_noncanonical_identifier() -> None:
+    """The identifier is re-validated wherever a spelling is derived, not only in parse."""
+    for identifier in ("rc1", "RC.1", "rc.01", "beta.2"):
+        with pytest.raises(ValueError):
+            set_release_version.expected_for("0.6.0", dev=False, pre=identifier)
 
 
 def test_expected_mapping() -> None:
@@ -88,14 +123,50 @@ def test_expected_mapping_prerelease() -> None:
         ("0.5.2", "0.5.2"),
         ("0.6.0", "0.6.0"),
         ("0.6.0-rc.1", "0.6.0rc1"),
-        ("0.6.0-rc1", "0.6.0rc1"),
+        ("0.6.0-rc.10", "0.6.0rc10"),
         ("0.6.0-dev", "0.6.0.dev0"),
-        ("1.0.0-beta.2", "1.0.0b2"),
-        ("1.0.0-alpha.3", "1.0.0a3"),
     ],
 )
 def test_python_spelling(version: str, python: str) -> None:
     assert set_release_version.python_spelling(version) == python
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.6.0-rc1", "0.6.0rc1", "0.6.0-RC.1", "0.6.0-rc.01", "1.0.0-beta.2", "1.0.0-alpha.3"],
+)
+def test_python_spelling_rejects_noncanonical(version: str) -> None:
+    """A version with no canonical root spelling has no Python spelling either."""
+    with pytest.raises(ValueError):
+        set_release_version.python_spelling(version)
+
+
+def test_prerelease_spellings_are_injective() -> None:
+    """One PyPI version per release: no two accepted roots may share a projection.
+
+    This is the reason the parser admits exactly one spelling (ADR 0034). The
+    rejected spellings above all project to `0.6.0rc1`, which is also the
+    projection of the canonical `0.6.0-rc.1`, yet `0.6.0-rc1` and `0.6.0-rc.1`
+    are different versions to cargo and npm.
+    """
+    accepted = ["0.6.0-rc.1", "0.6.0-rc.2", "0.6.0-rc.10", "0.6.0", "0.5.2"]
+    projections = [set_release_version.python_spelling(version) for version in accepted]
+    assert len(set(projections)) == len(projections)
+
+
+def test_multi_digit_candidates_order_after_single_digit() -> None:
+    """`rc.10` follows `rc.2`, in the root spelling and in the projection (#858)."""
+    from packaging.version import Version
+
+    candidates = ["0.6.0-rc.1", "0.6.0-rc.2", "0.6.0-rc.9", "0.6.0-rc.10", "0.6.0-rc.11"]
+    counters = [int(set_release_version.parse_base(root)[2].split(".")[1]) for root in candidates]
+    assert counters == sorted(counters)
+    projected = [
+        Version(set_release_version.python_spelling(root)) for root in [*candidates, "0.6.0"]
+    ]
+    assert projected == sorted(projected)
+    # String ordering would put rc10 before rc2; the derived ordering must not.
+    assert Version("0.6.0rc2") < Version("0.6.0rc10") < Version("0.6.0")
 
 
 def test_current_tree_is_aligned() -> None:
