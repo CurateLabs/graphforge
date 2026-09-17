@@ -49,7 +49,7 @@ class SourceSizePolicyTests(unittest.TestCase):
 
     def exempt(self):
         self.write(SOURCE, b"\n" * 3001)
-        self.write(ADR, "# Decision\n\n**Status:** Accepted\n")
+        self.write(ADR, '---\nstatus: "Accepted"\n---\n\n# Decision\n')
         self.policy["exemptions"] = [
             {"path": SOURCE, "max_lines": 3500, "adr": ADR, "rationale": "Bounded cohesion."}
         ]
@@ -117,7 +117,7 @@ class SourceSizePolicyTests(unittest.TestCase):
 
     def test_accepted_adr_with_crlf(self):
         self.exempt()
-        self.write(ADR, b"# Decision\r\n\r\n**Status:** Accepted\r\n")
+        self.write(ADR, b'---\r\nstatus: "Accepted"\r\n---\r\n\r\n# Decision\r\n')
         self.assertFalse(self.check()[1])
 
     def test_missing_unaccepted_and_duplicate_adr_status(self):
@@ -126,14 +126,15 @@ class SourceSizePolicyTests(unittest.TestCase):
         self.assertTrue(any("missing" in error for error in self.check()[1]))
         for text in [
             "",
-            "**Status:** Proposed\n",
-            "**Status:** Superseded\n",
-            "**Status:**\nAccepted\n",
-            "**Status:** Accepted\n**Status:** Accepted\n",
+            "# Decision\n\n**Status:** Accepted\n",
+            '---\nstatus: "Proposed"\n---\n',
+            '---\nstatus: "Superseded by ADR 0099"\n---\n',
+            '---\ntitle: "x"\n---\n',
+            '---\nstatus: "Accepted"\nstatus: "Accepted"\n---\n',
         ]:
             with self.subTest(text=text):
                 self.write(ADR, text)
-                self.assertTrue(any("Accepted line" in error for error in self.check()[1]))
+                self.assertTrue(any("accepted status" in error for error in self.check()[1]))
 
     def test_malformed_json_and_duplicate_keys(self):
         for text in [
