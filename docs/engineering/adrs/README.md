@@ -22,7 +22,13 @@ docslime add adr <short-slug>
 ```
 
 Until bodies move under this folder, add new ADR markdown under `docs/adr/` and update both
-[`../../adr/README.md`](../../adr/README.md) and this decision log in the same change.
+[`../../adr/README.md`](../../adr/README.md) and this decision log in the same change, then
+regenerate the two docs-site files the published build consumes:
+
+```
+python3 scripts/ci/adr-index.py generate
+python3 scripts/ci/adr-index.py check
+```
 
 ## Status values
 
@@ -39,8 +45,8 @@ Implementation state (shipped, pending, partial) is recorded in an
 ## Decision log
 
 Mirrors [`../../adr/README.md`](../../adr/README.md). This table and that one must
-agree with `docs/adr/` itself; nothing enforces that yet, and
-[#1390](https://github.com/CurateLabs/graphforge/issues/1390) owns the gate.
+agree with `docs/adr/` itself, and `scripts/ci/adr-index.py check` enforces it in
+the Repository Policy job (#1390).
 
 | ADR | Title | Status | Path |
 | --- | --- | --- | --- |

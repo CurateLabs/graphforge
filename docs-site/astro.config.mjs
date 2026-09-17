@@ -238,6 +238,7 @@ export default defineConfig({
               items: [
                 { label: 'Decision log', slug: 'engineering/adrs' },
                 { label: 'Index', slug: 'adr' },
+                // BEGIN generated ADR records — scripts/ci/adr-index.py generate
                 { label: '0001 — Rust Core', slug: 'adr/0001-rust-core' },
                 {
                   label: '0002 — Recursive Descent + Pratt Parser for graphforge-cypher',
@@ -358,6 +359,7 @@ export default defineConfig({
                   label: '0036 — The GraphForge release version contract',
                   slug: 'adr/0036-release-version-contract',
                 },
+                // END generated ADR records
               ],
             },
           ],
