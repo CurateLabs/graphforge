@@ -19,7 +19,10 @@ import re
 import shutil
 import sys
 import tempfile
+from typing import Any
 import zipfile
+
+import tomllib
 
 FORBIDDEN_RECOMPILE = re.compile(
     r"""(?ix)
@@ -348,6 +351,169 @@ def synthesize_node_index_dts(surface: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+# The wheel that candidate validation accepts must carry Apache-2.0 metadata and
+# exactly one of each legal file (release_candidate_manifest._validate_wheel).
+PYTHON_LEGAL_FILES = ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
+# maturin emits core metadata 2.4 for the macOS/Windows lanes (PEP 639
+# License-Expression + License-File); the Bazel lane emits the same version so
+# the three wheels of one release describe the same package (#1379).
+WHEEL_METADATA_VERSION = "2.4"
+_README_CONTENT_TYPES = {
+    ".md": "text/markdown; charset=UTF-8; variant=GFM",
+    ".rst": "text/x-rst; charset=UTF-8",
+    ".txt": "text/plain; charset=UTF-8",
+}
+
+
+def read_python_project_metadata(package_root: Path) -> dict[str, Any]:
+    """Return the ``[project]`` table of the Python binding ``pyproject.toml``.
+
+    Only the Linux lane hand-assembles its wheel; macOS and Windows run maturin,
+    which reads this same table. Every metadata value the assembled wheel
+    carries is therefore read from here rather than restated in this script, so
+    the Bazel lane and maturin cannot drift apart again (#1379).
+    """
+    manifest = package_root / "pyproject.toml"
+    if not manifest.is_file():
+        _die(f"missing pyproject.toml under {package_root}")
+    try:
+        document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        _die(f"{manifest} is not valid TOML: {error}")
+    project = document.get("project")
+    if not isinstance(project, dict):
+        _die(f"{manifest} has no [project] table")
+    return project
+
+
+def _require_str(project: dict[str, Any], key: str) -> str:
+    value = project.get(key)
+    if not isinstance(value, str) or not value.strip():
+        _die(f"pyproject.toml [project].{key} must be a non-empty string")
+    return value.strip()
+
+
+def _string_list(project: dict[str, Any], key: str) -> list[str]:
+    value = project.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        _die(f"pyproject.toml [project].{key} must be a list of strings")
+    return list(value)
+
+
+def resolve_python_license_files(
+    package_root: Path,
+    project: dict[str, Any],
+) -> list[tuple[str, Path]]:
+    """Resolve ``[project].license-files`` to ``(dist-info relative, source)`` pairs.
+
+    Fails closed when the set does not contain exactly one of each file the
+    release-candidate validator demands, so the Bazel lane reports the gap where
+    the wheel is built instead of at candidate assembly.
+    """
+    patterns = project.get("license-files")
+    if not isinstance(patterns, list) or not patterns:
+        _die("pyproject.toml [project].license-files must list the legal files")
+    resolved: dict[str, Path] = {}
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern:
+            _die(f"unsupported [project].license-files entry: {pattern!r}")
+        matches = sorted(match for match in package_root.glob(pattern) if match.is_file())
+        if not matches:
+            _die(f"[project].license-files pattern matched no file: {pattern}")
+        for match in matches:
+            resolved[match.relative_to(package_root).as_posix()] = match
+    basenames = [relative.rsplit("/", 1)[-1] for relative in resolved]
+    for legal in PYTHON_LEGAL_FILES:
+        if basenames.count(legal) != 1:
+            _die(
+                f"[project].license-files must resolve to exactly one {legal}; "
+                "release-candidate validation rejects the wheel otherwise"
+            )
+    # Declaration order, as maturin emits License-File, not sorted order.
+    return list(resolved.items())
+
+
+def synthesize_wheel_metadata(
+    project: dict[str, Any],
+    *,
+    version: str,
+    package_root: Path,
+    license_files: list[tuple[str, Path]],
+) -> str:
+    """Render dist-info METADATA in maturin's field order from ``[project]``."""
+    lines = [
+        f"Metadata-Version: {WHEEL_METADATA_VERSION}",
+        f"Name: {_require_str(project, 'name')}",
+        f"Version: {version}",
+    ]
+    lines.extend(f"Classifier: {value}" for value in _string_list(project, "classifiers"))
+    lines.extend(f"Requires-Dist: {value}" for value in _string_list(project, "dependencies"))
+    extras = project.get("optional-dependencies") or {}
+    if not isinstance(extras, dict):
+        _die("pyproject.toml [project.optional-dependencies] must be a table")
+    for extra in sorted(extras):
+        requirements = extras[extra]
+        if not isinstance(requirements, list):
+            _die(f"[project.optional-dependencies].{extra} must be a list of strings")
+        for requirement in requirements:
+            lines.append(f"Requires-Dist: {requirement} ; extra == '{extra}'")
+    lines.extend(f"Provides-Extra: {extra}" for extra in sorted(extras))
+    lines.extend(f"License-File: {relative}" for relative, _ in license_files)
+    lines.append(f"Summary: {_require_str(project, 'description')}")
+    keywords = _string_list(project, "keywords")
+    if keywords:
+        lines.append("Keywords: " + ",".join(keywords))
+    lines.append(f"License-Expression: {_require_str(project, 'license')}")
+    lines.append(f"Requires-Python: {_require_str(project, 'requires-python')}")
+
+    body = ""
+    readme = project.get("readme")
+    if readme is not None:
+        if not isinstance(readme, str):
+            _die("pyproject.toml [project].readme must be a file path string")
+        readme_path = package_root / readme
+        if not readme_path.is_file():
+            _die(f"[project].readme is not a file: {readme_path}")
+        content_type = _README_CONTENT_TYPES.get(readme_path.suffix.lower())
+        if content_type is None:
+            _die(f"unsupported [project].readme suffix: {readme_path.suffix}")
+        lines.append(f"Description-Content-Type: {content_type}")
+        body = readme_path.read_text(encoding="utf-8")
+
+    urls = project.get("urls") or {}
+    if not isinstance(urls, dict):
+        _die("pyproject.toml [project.urls] must be a table")
+    lines.extend(f"Project-URL: {label}, {urls[label]}" for label in sorted(urls))
+
+    rendered = "\n".join(lines) + "\n"
+    if body:
+        rendered += "\n" + body
+    return rendered
+
+
+def synthesize_entry_points(project: dict[str, Any]) -> str:
+    """Render dist-info entry_points.txt so the console scripts still install."""
+    groups: dict[str, dict[str, str]] = {}
+    for key, group in (("scripts", "console_scripts"), ("gui-scripts", "gui_scripts")):
+        table = project.get(key) or {}
+        if not isinstance(table, dict):
+            _die(f"pyproject.toml [project.{key}] must be a table")
+        if table:
+            groups[group] = {str(name): str(target) for name, target in table.items()}
+    declared = project.get("entry-points") or {}
+    if not isinstance(declared, dict):
+        _die("pyproject.toml [project.entry-points] must be a table")
+    for group, table in declared.items():
+        if not isinstance(table, dict):
+            _die(f"pyproject.toml [project.entry-points.{group}] must be a table")
+        groups[str(group)] = {str(name): str(target) for name, target in table.items()}
+    sections = []
+    for group in sorted(groups):
+        entries = "".join(f"{name}={groups[group][name]}\n" for name in sorted(groups[group]))
+        sections.append(f"[{group}]\n{entries}")
+    return "\n".join(sections)
+
+
 def _read_version(package_root: Path, language: str) -> str:
     if language == "python":
         text = (package_root / "pyproject.toml").read_text(encoding="utf-8")
@@ -376,6 +542,8 @@ def assemble_python(
         _die(f"missing pure-Python package at {python_pkg}")
 
     version = _read_version(package_root, "python")
+    project = read_python_project_metadata(package_root)
+    license_files = resolve_python_license_files(package_root, project)
     module_name = _native_python_module_name(native)
     native_hash = _sha256(native)
     resolved_wheel_tag = _python_wheel_tag(wheel_tag)
@@ -404,19 +572,23 @@ def assemble_python(
         wheel_tag = resolved_wheel_tag
 
         (dist_info / "METADATA").write_text(
-            "\n".join(
-                [
-                    "Metadata-Version: 2.1",
-                    "Name: graphforge",
-                    f"Version: {version}",
-                    "Summary: GraphForge native graph engine (Bazel-built smoke wheel)",
-                    "Requires-Python: >=3.10",
-                    "Requires-Dist: pyarrow>=14",
-                    "",
-                ]
+            synthesize_wheel_metadata(
+                project,
+                version=version,
+                package_root=package_root,
+                license_files=license_files,
             ),
             encoding="utf-8",
         )
+        # PEP 639 layout, identical to maturin's macOS/Windows wheels:
+        # graphforge-{version}.dist-info/licenses/{LICENSE,NOTICE,THIRD_PARTY_NOTICES.md}.
+        for relative, source in license_files:
+            staged_license = dist_info / "licenses" / relative
+            staged_license.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, staged_license)
+        entry_points = synthesize_entry_points(project)
+        if entry_points:
+            (dist_info / "entry_points.txt").write_text(entry_points, encoding="utf-8")
         (dist_info / "WHEEL").write_text(
             "\n".join(
                 [
