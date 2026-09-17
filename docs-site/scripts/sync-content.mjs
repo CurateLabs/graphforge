@@ -157,6 +157,7 @@ const PAGES = [
   'adr/0032-research-project-authority.md',
   'adr/0035-structured-stage-errors.md',
   'adr/0036-release-version-contract.md',
+  'adr/0038-determinism-at-the-publication-boundary.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

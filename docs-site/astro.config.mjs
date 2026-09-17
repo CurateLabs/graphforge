@@ -359,6 +359,10 @@ export default defineConfig({
                   label: '0036 — The GraphForge release version contract',
                   slug: 'adr/0036-release-version-contract',
                 },
+                {
+                  label: '0038 — Determinism belongs at the publication boundary',
+                  slug: 'adr/0038-determinism-at-the-publication-boundary',
+                },
                 // END generated ADR records
               ],
             },
