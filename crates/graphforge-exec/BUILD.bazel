@@ -80,6 +80,16 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "merge_scaling_bench",
+    srcs = ["tests/merge_scaling_bench.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
     name = "create_execution",
     srcs = ["tests/create_execution.rs"],
     crate = ":graphforge_exec",
@@ -176,6 +186,7 @@ test_suite(
     tests = [
         ":adjacency_expand",
         ":bench_traversal_scaling",
+        ":merge_scaling_bench",
         ":create_execution",
         ":create_input_driven",
         ":differential_traversal",

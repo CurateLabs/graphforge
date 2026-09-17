@@ -180,12 +180,45 @@ pub(super) fn run_merge_phase(
         ));
     }
     let specs = resolve_merge_node_properties_by_row(env, &nodes[0], frontier)?;
+    // Hoist the node topology read out of the per-row loop (#1400): the
+    // on-disk topology cannot change mid-statement (the writer buffers every
+    // create/merge in memory and is flushed exactly once, in
+    // `stage_statement`, after the whole statement finishes), so one read up
+    // front is equivalent to re-reading it per row. Nodes created earlier in
+    // *this* statement (by an earlier CREATE/MERGE phase, or by earlier rows
+    // of this same MERGE) are not on disk yet either way — they stay visible
+    // through `writer.find_pending_nodes` inside `find_matching_merge_nodes`,
+    // exactly as before. This mirrors `run_relationship_merge_phase`, which
+    // hoists `edge_batches` the same way.
+    let node_batches =
+        graphforge_storage::read_nodes(env.dir).map_err(|e| GfError::Storage(e.to_string()))?;
+    // Every row of one MERGE clause shares the same label set (only literal
+    // property values vary per row via `computed_properties`), so the
+    // property-partition stem is invariant across rows too. Read that whole
+    // partition once instead of decoding it fresh for every candidate match
+    // (the bulk primitive `read_node_property_rows` replaces the per-uuid
+    // `read_entity_properties` call that used to run per candidate).
+    let stem = if matches!(env.mode, OntologyMode::Exploratory) {
+        "_untyped"
+    } else {
+        nodes[0]
+            .label_names
+            .first()
+            .map_or("_untyped", String::as_str)
+    };
+    let node_properties = graphforge_storage::read_node_property_rows(env.dir, stem)?;
     let mut merged = Vec::new();
     let mut created = Vec::new();
     let mut source_rows = Vec::new();
     for (source_row, spec) in specs.iter().enumerate() {
         reject_null_merge_properties(&spec.properties)?;
-        let found = find_matching_merge_nodes(env, &ctx.writer, spec, &ctx.deleted)?;
+        let found = find_matching_merge_nodes(
+            &ctx.writer,
+            spec,
+            &ctx.deleted,
+            &node_batches,
+            &node_properties,
+        )?;
         if found.is_empty() {
             merged.push(create_single_merge_node(spec, ctx)?);
             created.push(true);
@@ -323,10 +356,11 @@ pub(super) struct MatchedMergeEdge {
 }
 
 fn find_matching_merge_nodes(
-    env: &PhaseEnv<'_>,
     writer: &graphforge_storage::GraphWriter,
     spec: &ResolvedNodeSpec,
     deleted: &HashSet<[u8; 16]>,
+    batches: &[RecordBatch],
+    node_properties: &HashMap<[u8; 16], HashMap<String, graphforge_ir::IrLiteral>>,
 ) -> Result<Vec<MatchedMergeNode>, GfError> {
     let mut matches = writer
         .find_pending_nodes(&spec.label_ids, &spec.properties)
@@ -339,8 +373,6 @@ fn find_matching_merge_nodes(
             properties: found.4,
         })
         .collect::<Vec<_>>();
-    let batches =
-        graphforge_storage::read_nodes(env.dir).map_err(|e| GfError::Storage(e.to_string()))?;
     for batch in batches {
         let uuids = batch
             .column_by_name("node_uuid")
@@ -397,12 +429,12 @@ fn find_matching_merge_nodes(
             if deleted.contains(&uuid) {
                 continue;
             }
-            let stem = if matches!(env.mode, OntologyMode::Exploratory) {
-                "_untyped"
-            } else {
-                spec.label_names.first().map_or("_untyped", String::as_str)
-            };
-            let props = graphforge_storage::read_entity_properties(env.dir, stem, &uuid, false)?;
+            // The property partition was read and decoded once, up front, in
+            // `run_merge_phase` (into `node_properties`, keyed by the same
+            // stem every row of this MERGE clause shares) — no per-candidate
+            // decode here (#1400). A missing entry means the node currently
+            // owns no non-null properties in that partition.
+            let props = node_properties.get(&uuid).cloned().unwrap_or_default();
             if spec
                 .properties
                 .iter()
