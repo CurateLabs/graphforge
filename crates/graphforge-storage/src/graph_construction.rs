@@ -10,7 +10,7 @@ mod intake;
 use intake::{
     ReceiptPointer, artifact_stem, receipt_from_intent, receipt_name, uuid_column, uuid_value,
     validate_artifact_name, validate_intent, validate_parquet_metadata, validate_receipt_artifacts,
-    validate_receipt_semantics, write_fixed_run, write_parquet_with_properties,
+    validate_receipt_semantics, write_parquet_with_properties,
 };
 mod io_evidence;
 pub(crate) use io_evidence::{
@@ -37,9 +37,9 @@ pub(crate) struct AuthenticatedShapeSource {
 
 mod shape;
 use shape::{
-    authenticate_shaped_output, is_shape_artifact_name, persist_shape_receipt,
-    read_completed_shape, read_completed_shape_outputs, read_fixed, run_record_bytes,
-    shape_receipt_name, validate_shape_binding, validate_sorted_run,
+    authenticate_shaped_output, authenticate_shaped_output_identity, is_shape_artifact_name,
+    persist_shape_receipt, read_completed_shape, read_completed_shape_outputs, read_fixed,
+    run_record_bytes, shape_receipt_name, validate_shape_binding, validate_sorted_run,
 };
 pub(crate) use shape::{open_authenticated_shape_source, shaped_output_sha256};
 mod encoding_publication;
@@ -64,22 +64,17 @@ use controls::{
 mod catalog;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod diagnostics;
+mod partition;
 use catalog::{
     build_runtime_catalog, load_parent_runtime_catalog, load_parent_runtime_catalog_from_compact,
 };
-mod shaping_merge;
+mod partition_shaping;
 mod supersession;
-#[cfg(test)]
-use shaping_merge::online_merge_name_slot_bound;
-use shaping_merge::{
-    FixedMergeAccumulator, RowMergeAccumulator, convert_identity_run, copy_authenticated_run,
-    copy_authenticated_run_with_codec,
-};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -475,6 +470,12 @@ pub struct GraphConstructionBudgets {
     pub max_catalog_decoded_bytes: usize,
     /// Maximum UTF-8 identifier bytes retained by the complete runtime catalog.
     pub max_catalog_identifier_bytes: usize,
+    /// Range partitions shaping cuts the identity key space into.
+    ///
+    /// This is a recorded format parameter, never derived from the machine. It
+    /// must not be tied to `available_parallelism()` or to a thread count: the
+    /// same logical input has to stage identically on hosts of different sizes.
+    pub partition_count: u32,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -490,6 +491,7 @@ impl Default for GraphConstructionBudgets {
             max_catalog_entries: 1_000_000,
             max_catalog_decoded_bytes: 256 << 20,
             max_catalog_identifier_bytes: 64 << 20,
+            partition_count: partition::DEFAULT_PARTITION_COUNT,
         }
     }
 }
@@ -506,6 +508,8 @@ impl GraphConstructionBudgets {
             || self.max_catalog_entries == 0
             || self.max_catalog_decoded_bytes == 0
             || self.max_catalog_identifier_bytes == 0
+            || self.partition_count == 0
+            || self.partition_count > partition::MAX_PARTITION_COUNT
         {
             return Err(storage("invalid construction budgets"));
         }
@@ -657,7 +661,12 @@ pub(crate) struct ArtifactReceipt {
     name: String,
     bytes: u64,
     allocated_bytes: u64,
+    /// The content-addressing digest. Cryptographic, and stays cryptographic.
     sha256: String,
+    /// Inline corruption checksum over the same payload, produced by the pass
+    /// that wrote the bytes. Non-cryptographic by design; see
+    /// [`crate::corruption_checksum`] for the two assumptions that permits.
+    xxh64: String,
     identity: IdentityRecord,
     write_operations: u64,
     fsync_operations: u64,
@@ -806,6 +815,16 @@ struct ShapeIntent {
     outputs: Vec<ArtifactReceipt>,
     #[serde(default)]
     shape_authority_sha256: Option<String>,
+    /// Recorded range-partition splitters, canonical lower hex, strictly
+    /// increasing. These are the reproducibility authority: a resumed or re-run
+    /// import reuses them rather than recomputing a partition function, so the
+    /// staged layout is a pure function of recorded data. Installed before any
+    /// partition writes a byte.
+    #[serde(default)]
+    splitters: Vec<String>,
+    /// Measured identity rows per effective partition, in partition order.
+    #[serde(default)]
+    partition_identity_rows: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -870,6 +889,12 @@ pub struct GraphConstructionSession {
     parent_catalog: RuntimeCatalog,
     compact_parent: Option<crate::GraphFilesInventory>,
     semantic_authority: Option<ConstructionSemanticAuthority>,
+    /// Whether this process has already streamed and checksummed the retained
+    /// shape output payloads since it opened the session (#1392). The refusal
+    /// is once per process-open: nothing inside this process mutates those
+    /// bytes, and the threat model excludes an active same-identity adversary
+    /// racing it (ADR 0013, recorded in `crate::corruption_checksum`).
+    shape_outputs_verified: bool,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -1494,6 +1519,7 @@ impl GraphConstructionSession {
             parent_catalog,
             compact_parent,
             semantic_authority,
+            shape_outputs_verified: false,
             session_lock,
             _reservation: reservation,
         };
@@ -1523,7 +1549,9 @@ impl GraphConstructionSession {
                 .entry(category)
                 .or_default();
         }
-        let shape_recovery_work = recover_shape_intent(&session.root, &mut session.checkpoint)?;
+        let (shape_recovery_work, shape_outputs_verified) =
+            recover_shape_intent(&session.root, &mut session.checkpoint)?;
+        session.shape_outputs_verified = shape_outputs_verified;
         session.recover_intent()?;
         if session
             .checkpoint

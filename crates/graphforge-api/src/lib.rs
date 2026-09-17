@@ -476,6 +476,12 @@ pub struct GraphForge {
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
     /// Authenticated UUID index handle cached for one topology generation.
     uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
+    /// Decoded epistemic ledgers cached for one immutable read generation.
+    /// See `epistemic_snapshot::EpistemicLedgerCache` for the invalidation
+    /// contract: keyed by `(generation_uuid, manifest_sha256)`, so a publish
+    /// (which always mints a new `generation_uuid`) is a guaranteed cache
+    /// miss rather than a stale hit.
+    epistemic_ledger_cache: Mutex<Option<epistemic_snapshot::EpistemicLedgerCache>>,
     /// Exact generation-pinned ordinal destination identity authority shared
     /// by every fixed-hop session.
     ordinal_identities: Arc<graphforge_exec::V4OrdinalIdentityResolver>,
@@ -706,6 +712,7 @@ impl GraphForge {
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(
@@ -941,6 +948,7 @@ impl GraphForge {
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
             uuid_membership_index: Mutex::new(None),
+            epistemic_ledger_cache: Mutex::new(None),
             ordinal_identities,
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(std::sync::RwLock::new(Arc::new(adjacency_provider))),

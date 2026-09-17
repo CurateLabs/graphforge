@@ -5286,6 +5286,24 @@ enum PhaseMetricPolicy {
         byte_field: usize,
         max_bytes_per_call: u64,
     },
+    /// Buffered read calls dominated by a small, fixed set of file/manifest
+    /// authentication operations rather than by payload bytes (#1412): the
+    /// object count behind the call total does not grow with the rung, so
+    /// unlike `BufferedCalls` this does not require non-decreasing values.
+    /// It keeps the same per-rung buffered bounds, then bounds the spread
+    /// across rungs to `max_growth_percent` of the minimum observed count,
+    /// AND requires every rung to clear `min_absolute_calls`. The spread
+    /// bound alone cannot see a uniform drop applied to all three rungs
+    /// alike (e.g. one authentication component silently skipped every
+    /// time) - only the absolute floor catches that. See
+    /// `validate_bounded_object_calls` for exactly what this would have to
+    /// fail to catch a real regression.
+    BoundedObjectCalls {
+        byte_field: usize,
+        max_bytes_per_call: u64,
+        max_growth_percent: u64,
+        min_absolute_calls: u64,
+    },
     InventoryControlBytes {
         maximum: u64,
     },
@@ -5315,6 +5333,27 @@ const ENCODING_BUFFER_BYTES: u64 =
 const OBJECT_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_OBJECT_IO_BUFFER_BYTES as u64;
 const HYDRATION_BUFFER_BYTES: u64 = graphforge_storage::GRAPH_FILES_IO_BUFFER_BYTES as u64;
 const STAGING_BUFFER_BYTES: u64 = graphforge_storage::STAGE_FILE_BLOCK_BYTES as u64;
+// Observed spread on the 1x/2x/4x edge-axis fixture is 2 calls out of a
+// minimum of 68 (~2.9%), from manifest-tree page packing alone (#1412). 20%
+// keeps comfortable headroom above that deterministic jitter while staying
+// far tighter than what byte-proportional authentication would produce: at
+// this fixture's scale bytes alone grow 48% (427,394 -> 631,744), and at
+// production scale a reintroduced per-byte pass would grow calls by orders
+// of magnitude more than 20%.
+const RECOVERY_REAUTHENTICATION_CALL_GROWTH_PERCENT: u64 = 20;
+// A relative spread bound cannot see a component silently dropped from every
+// rung alike, so this is an absolute second line of defense. The observed
+// total (68-72 calls at this fixture's scale) is the sum of three
+// independent, always-present contributors: the current construction's own
+// supersession-read accounting (~14 calls), authenticating the published
+// successor's manifest and file entries (~27-31 calls), and the
+// interrupted-import recovery drill's bounded package materialization (a
+// fixed 27 calls). Losing any one of those - the regression class this
+// floor exists to catch - drops the total to at most ~58 (supersession
+// reads gone) or ~45 (successor authentication gone) or ~41-45
+// (materialization gone). 55 sits below the full total's observed jitter
+// but above what any single dropped contributor would leave.
+const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 55;
 
 // This is deliberately exhaustive: adding a storage phase or counter requires
 // choosing semantics here instead of silently inheriting an affine assertion.
@@ -5421,9 +5460,24 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
         fields: [
             SCALE,
             ZERO,
-            PhaseMetricPolicy::BufferedCalls {
+            // Recovery reauthentication (#1392/#1412) authenticates the small,
+            // fixed set of files/manifest objects a completed shape, a
+            // published successor and an interrupted-import drill touch, not
+            // the payload bytes those files hold. That object count does not
+            // grow with the rung, so the call total is bounded rather than
+            // monotonic: a manifest packed one content-addressed page
+            // differently between rungs can move it by a page either way.
+            // `RECOVERY_REAUTHENTICATION_CALL_GROWTH_PERCENT` still bounds the
+            // spread tightly enough that a regression back to per-byte
+            // authentication - which would move calls roughly in step with
+            // the bytes the SCALE policy on the byte field independently
+            // requires to grow - blows the envelope. See
+            // `validate_bounded_object_calls`.
+            PhaseMetricPolicy::BoundedObjectCalls {
                 byte_field: 0,
                 max_bytes_per_call: ENCODING_BUFFER_BYTES,
+                max_growth_percent: RECOVERY_REAUTHENTICATION_CALL_GROWTH_PERCENT,
+                min_absolute_calls: RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS,
             },
             ZERO,
             ZERO,
@@ -5491,6 +5545,66 @@ fn validate_buffered_calls(
                 "{name} rung {rung} violates buffered bounds {minimum_calls}..={bytes}: calls={calls}"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Same per-rung buffered bounds as [`validate_buffered_calls`], but without
+/// the non-decreasing requirement: the call count here is dominated by a
+/// fixed, small set of file/manifest objects rather than by payload bytes
+/// (#1412), so legitimate content-addressed manifest packing can move it by
+/// one page in either direction between rungs. What must still hold, and
+/// what a regression would have to breach:
+///
+/// * every rung keeps paired non-zero bytes/calls and stays within the
+///   `ceil(bytes / max_bytes_per_call)..=bytes` buffered envelope, exactly as
+///   `validate_buffered_calls` requires;
+/// * the spread between the highest and lowest call count across the three
+///   rungs stays within `max_growth_percent` of the lowest count. A
+///   regression that reintroduces per-byte authentication on this phase
+///   (the defect class #1392 removed) would grow calls roughly in step with
+///   bytes, and the SCALE policy on the byte field already forces bytes to
+///   grow substantially rung over rung, so that growth would blow this
+///   envelope even though it does not require monotonicity;
+/// * every rung clears `min_absolute_calls`. The spread check above only
+///   compares rungs against each other, so it cannot see a component
+///   dropped from every rung uniformly alike - e.g. one of the fixed
+///   authentication passes behind this phase silently skipped every time.
+///   Only an absolute floor catches that.
+fn validate_bounded_object_calls(
+    name: &str,
+    calls: [u64; 3],
+    bytes: [u64; 3],
+    max_bytes_per_call: u64,
+    max_growth_percent: u64,
+    min_absolute_calls: u64,
+) -> Result<(), String> {
+    for (rung, (calls, bytes)) in calls.into_iter().zip(bytes).enumerate() {
+        if bytes == 0 || calls == 0 {
+            return Err(format!("{name} rung {rung} lacks paired buffered evidence"));
+        }
+        let minimum_calls = checked_ceil_div(name, bytes, max_bytes_per_call)?;
+        if calls < minimum_calls || calls > bytes {
+            return Err(format!(
+                "{name} rung {rung} violates buffered bounds {minimum_calls}..={bytes}: calls={calls}"
+            ));
+        }
+        if calls < min_absolute_calls {
+            return Err(format!(
+                "{name} rung {rung} call count {calls} is below the absolute floor {min_absolute_calls}"
+            ));
+        }
+    }
+    let min_calls = calls.into_iter().min().expect("three rungs");
+    let max_calls = calls.into_iter().max().expect("three rungs");
+    let allowed_spread = min_calls
+        .checked_mul(max_growth_percent)
+        .ok_or_else(|| format!("{name} growth bound overflows"))?
+        / 100;
+    if max_calls - min_calls > allowed_spread {
+        return Err(format!(
+            "{name} bounded-object call spread exceeds {max_growth_percent}% of the minimum: {calls:?}"
+        ));
     }
     Ok(())
 }
@@ -5958,6 +6072,25 @@ fn validate_lifecycle_metric_policies_for_axis(
                         max_bytes_per_call,
                     )?;
                 }
+                PhaseMetricPolicy::BoundedObjectCalls {
+                    byte_field,
+                    max_bytes_per_call,
+                    max_growth_percent,
+                    min_absolute_calls,
+                } => {
+                    validate_bounded_object_calls(
+                        &name,
+                        values,
+                        [
+                            baseline.phases[phase][byte_field],
+                            observations[1].phases[phase][byte_field],
+                            observations[2].phases[phase][byte_field],
+                        ],
+                        max_bytes_per_call,
+                        max_growth_percent,
+                        min_absolute_calls,
+                    )?;
+                }
                 PhaseMetricPolicy::InventoryControlBytes { maximum } => {
                     if values[0] == 0
                         || values.windows(2).any(|pair| pair[1] < pair[0])
@@ -6380,7 +6513,11 @@ fn synthetic_linearity_observations_for_axis(
                 ),
                 (
                     "recovery_reauthentication".into(),
-                    [100 + 900 * factor, 0, factor, 0, 0, 0, 0],
+                    // Calls are bounded rather than scale-bearing (#1412): the
+                    // fixture keeps them fixed across rungs (spread 0, clears
+                    // the absolute floor) which the bounded-object-calls
+                    // policy accepts trivially.
+                    [100 + 900 * factor, 0, 60, 0, 0, 0, 0],
                 ),
             ]),
             retained: LINEARITY_RETAINED_FIELDS
@@ -7042,6 +7179,53 @@ fn lifecycle_metric_policy_accepts_bounded_fixed_protocol_and_rejects_false_grow
     let mut missing_phase = observations.clone();
     missing_phase[1].phases.remove("hydration_verification");
     assert!(validate_lifecycle_metric_policies(&missing_phase).is_err());
+
+    // `recovery_reauthentication.read_calls` is BoundedObjectCalls (#1412),
+    // not the monotonic BufferedCalls every other buffered field above uses:
+    // a small, held-constant call count across rungs is exactly what a
+    // bounded, file/manifest-driven authentication pass should look like, so
+    // it must be *accepted*, unlike the generic held-constant case above.
+    let recovery_calls_held_constant = observations.clone();
+    validate_lifecycle_metric_policies(&recovery_calls_held_constant)
+        .expect("held-constant bounded-object recovery read calls must pass");
+
+    // A regression that reintroduces per-byte authentication on this phase
+    // (the defect class #1392 removed) would move read_calls roughly in step
+    // with read_bytes. Mutate calls to track this fixture's byte growth
+    // (1000/1900/3700, i.e. the recovery_reauthentication byte field) instead
+    // of staying bounded, and confirm the bounded-object-calls policy still
+    // catches it even though it no longer requires monotonicity.
+    let mut recovery_calls_track_bytes = observations.clone();
+    for observation in &mut recovery_calls_track_bytes {
+        let bytes = observation.phases["recovery_reauthentication"][0];
+        observation
+            .phases
+            .get_mut("recovery_reauthentication")
+            .unwrap()[2] = bytes / 100;
+    }
+    assert!(
+        validate_lifecycle_metric_policies(&recovery_calls_track_bytes).is_err(),
+        "recovery read calls tracking byte growth must fail the bounded-object envelope"
+    );
+
+    // The spread check above only compares the three rungs against each
+    // other, so it is blind to a component silently dropped from every rung
+    // alike - e.g. `authenticate_public_successor` never running. Mutate
+    // calls to a value that is held constant (spread 0, well inside
+    // `max_growth_percent`) but below `RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS`,
+    // and confirm the absolute floor - not the spread check - is what
+    // catches it.
+    let mut recovery_calls_uniform_drop = observations.clone();
+    for observation in &mut recovery_calls_uniform_drop {
+        observation
+            .phases
+            .get_mut("recovery_reauthentication")
+            .unwrap()[2] = 1;
+    }
+    assert!(
+        validate_lifecycle_metric_policies(&recovery_calls_uniform_drop).is_err(),
+        "recovery read calls dropped uniformly below the absolute floor must still fail"
+    );
 
     let mut underreported_shape_aggregate = observations.clone();
     underreported_shape_aggregate[2]

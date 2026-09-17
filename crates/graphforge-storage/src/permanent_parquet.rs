@@ -18,14 +18,27 @@ use parquet::{
 pub(crate) const PAGE_BYTES: usize = 1024 * 1024;
 pub(crate) const PAGE_ROWS: usize = 20_000;
 
+/// The `created_by` string embedded in every permanent Parquet footer.
+///
+/// arrow-rs otherwise writes its own crate version here, which puts the
+/// library version inside the file bytes and therefore inside every digest
+/// derived from them. A dependency bump would then change the content address
+/// of a graph whose logical content did not change, breaking both digest
+/// reproducibility and dedup. The constant is a durable format parameter:
+/// changing it changes every permanent Parquet's digest.
+pub(crate) const CREATED_BY: &str = "graphforge permanent parquet/1";
+
 /// Shared permanent-payload encoding defaults.
 ///
-/// Callers retain measured path-specific dictionary and row-group settings,
-/// and domain metadata such as restoration's `created_by` marker. The builder
-/// does not own files, publication leases, recovery or cancellation.
+/// Callers retain measured path-specific dictionary and row-group settings.
+/// `created_by` is pinned here rather than left to arrow-rs, so a dependency
+/// bump cannot silently change published bytes; restoration overrides it with
+/// its own domain marker. The builder does not own files, publication leases,
+/// recovery or cancellation.
 #[must_use]
 pub fn writer_properties() -> WriterPropertiesBuilder {
     WriterProperties::builder()
+        .set_created_by(CREATED_BY.to_owned())
         .set_writer_version(WriterVersion::PARQUET_1_0)
         .set_compression(Compression::ZSTD(
             ZstdLevel::try_new(1).expect("Zstd level 1 is valid"),

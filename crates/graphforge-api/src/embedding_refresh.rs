@@ -262,6 +262,7 @@ impl GraphForge {
             read_only: self.read_only,
             current_generation_uuid: Arc::clone(&self.current_generation_uuid),
             uuid_membership_index: std::sync::Mutex::new(None),
+            epistemic_ledger_cache: std::sync::Mutex::new(None),
             clock: std::sync::Mutex::new(Arc::clone(
                 &self.clock.lock().expect("clock lock poisoned"),
             )),

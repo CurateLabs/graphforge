@@ -118,6 +118,13 @@ fn resolved_endpoint_windows_use_logarithmic_name_state_at_1x_2x_4x() {
 
 #[test]
 fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
+    // Sized so the recorded cut yields several partitions at every rung: the
+    // cut is the recorded count bounded by identities/16, so a handful of rows
+    // would shape into one partition and this test would stop exercising the
+    // multi-partition concatenation it exists for.
+    const NODES_PER_CHUNK: usize = 64;
+    const EDGES_PER_CHUNK: usize = 32;
+    let mut observed_partitions = Vec::new();
     for chunks in [1_usize, 2, 4] {
         let root = TempDir::new().unwrap();
         let mut session = GraphConstructionSession::open(
@@ -135,7 +142,7 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
                 .append(
                     ConstructionChunkKind::Node,
                     &format!("nodes-{chunk}"),
-                    &node_batch(1 + chunk as u128 * 4, 4),
+                    &node_batch(1 + (chunk * NODES_PER_CHUNK) as u128, NODES_PER_CHUNK),
                 )
                 .unwrap();
         }
@@ -143,15 +150,15 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
             .append(
                 ConstructionChunkKind::Edge,
                 "edges",
-                &edge_batch(10_000, chunks * 2),
+                &edge_batch(10_000, chunks * EDGES_PER_CHUNK),
             )
             .unwrap();
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-        assert_eq!(shape.node_count, (chunks * 4) as u64);
-        assert_eq!(shape.edge_count, (chunks * 2) as u64);
-        assert_eq!(shape.max_node_surrogate, (chunks * 4) as u64);
-        assert_eq!(shape.max_edge_surrogate, (chunks * 2) as u64);
+        assert_eq!(shape.node_count, (chunks * NODES_PER_CHUNK) as u64);
+        assert_eq!(shape.edge_count, (chunks * EDGES_PER_CHUNK) as u64);
+        assert_eq!(shape.max_node_surrogate, (chunks * NODES_PER_CHUNK) as u64);
+        assert_eq!(shape.max_edge_surrogate, (chunks * EDGES_PER_CHUNK) as u64);
         assert_eq!(shape.node_rows.len(), 1);
         assert_eq!(shape.edge_rows.len(), 1);
         assert!(shape.edge_endpoints.is_some());
@@ -161,7 +168,18 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
                 .open_child_file(OsStr::new(&shape.runtime_catalog))
                 .is_ok()
         );
-        assert!(session.evidence().peak_merge_inputs <= 2);
+        // The global order is a concatenation across several partitions at
+        // every rung, not a degenerate single sorted run.
+        assert!(
+            session.evidence().shape_partitions > 1,
+            "chunks={chunks} partitions={}",
+            session.evidence().shape_partitions
+        );
+        assert_eq!(
+            session.evidence().partitioned_identity_rows,
+            (chunks * (NODES_PER_CHUNK + EDGES_PER_CHUNK)) as u64
+        );
+        assert!(session.evidence().partition_outputs > 0);
         assert!(session.evidence().merge_read_bytes > 0);
         assert!(session.evidence().merge_written_bytes > 0);
         assert!(session.evidence().merge_read_blocks > 0);
@@ -171,10 +189,16 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
         assert!(session.evidence().merge_write_operations > 0);
         assert!(session.evidence().parquet_read_operations > 0);
         assert!(session.evidence().parquet_write_operations > 0);
-        if chunks == 4 {
-            assert!(session.evidence().merge_passes >= 2);
-        }
+        // The external merge tree is gone; there are no merge levels left.
+        assert_eq!(session.evidence().merge_passes, 0);
+        observed_partitions.push(session.evidence().shape_partitions);
     }
+    // The partition count rises with the input, which is the partitioned
+    // analogue of the merge tree gaining a level at 4x.
+    assert!(
+        observed_partitions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{observed_partitions:?}"
+    );
 }
 
 #[test]
@@ -425,11 +449,7 @@ fn nonempty_base_rejects_duplicate_cross_kind_and_missing_endpoint_without_copy(
             .len(),
         BASE_IDENTITY_WIDTH as u64
     );
-    assert!(
-        !operation_root
-            .join("merge-identities-with-base.run")
-            .exists()
-    );
+    assert!(!operation_root.join("staged-identities.run").exists());
     assert_eq!(shape.parent_topology_generation, 1);
     assert!(shape.parent_uuid_manifest_sha256.is_some());
 
