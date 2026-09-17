@@ -1650,33 +1650,39 @@ fn prepare_graph_delta_inner(
             role: GraphFileRole::Delta,
         },
     );
-    if let Some(catalog) = catalog {
+    let (inventory, mut files_participant) = if let Some(catalog) = catalog {
+        // `persist_runtime_catalog` commits through `commit_topology_aware`,
+        // which durably bumps `topology/generation.json` as an intrinsic part
+        // of *any* commit — not just the two catalog file paths it stages
+        // directly. That side effect isn't safe to enumerate by hand (#1401
+        // regression: a stale cached digest for `topology/generation.json`
+        // produced "no authenticated legacy path resolution" once its byte
+        // length actually changed), so this specific branch falls back to a
+        // full rehash of the workspace rather than guess at everything
+        // `commit_topology_aware` might have touched.
         crate::runtime_entity_labels::persist_runtime_catalog(workspace.path(), catalog)?;
-        // Only the handful of catalog files just written are re-read and
-        // hashed here — not the rest of the (unmodified) workspace tree.
-        for relative in RUNTIME_CATALOG_RELATIVE_PATHS {
-            let entry = hash_workspace_relative_file(workspace.path(), relative)?;
-            extended_files.insert((*relative).to_string(), entry);
-        }
-    }
-    let files: Vec<GraphFileEntry> = extended_files.into_values().collect();
-    let total_byte_length = files.iter().try_fold(0_u64, |total, entry| {
-        total
-            .checked_add(entry.byte_length)
-            .ok_or_else(|| resource_limit("graph files total size overflow"))
-    })?;
-    let file_count = u64::try_from(files.len())
-        .map_err(|_| resource_limit("graph files count exceeds limit"))?;
-    let inventory = GraphFilesInventory {
-        format: base_format,
-        format_version: base_format_version,
-        file_count,
-        total_byte_length,
-        files,
+        capture_graph_files(workspace.path())?
+    } else {
+        let files: Vec<GraphFileEntry> = extended_files.into_values().collect();
+        let total_byte_length = files.iter().try_fold(0_u64, |total, entry| {
+            total
+                .checked_add(entry.byte_length)
+                .ok_or_else(|| resource_limit("graph files total size overflow"))
+        })?;
+        let file_count = u64::try_from(files.len())
+            .map_err(|_| resource_limit("graph files count exceeds limit"))?;
+        let inventory = GraphFilesInventory {
+            format: base_format,
+            format_version: base_format_version,
+            file_count,
+            total_byte_length,
+            files,
+        };
+        let inventory_bytes = crate::graph_files::encode_inventory(&inventory)?;
+        let participant =
+            crate::graph_files::inventory_participant(inventory_bytes, inventory.file_count)?;
+        (inventory, participant)
     };
-    let inventory_bytes = crate::graph_files::encode_inventory(&inventory)?;
-    let mut files_participant =
-        crate::graph_files::inventory_participant(inventory_bytes, inventory.file_count)?;
     let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory)?;
     let parent_base_count = count_base_files(&parent_inventory)?;
     let preserved_base_parquet_digests = base_parquet_digests_preserved(
@@ -1745,33 +1751,6 @@ fn write_prepared_run(
     file.sync_all()
         .map_err(|error| storage("flush delta run", &new_path, error))?;
     Ok(())
-}
-
-/// Workspace-relative paths `persist_runtime_catalog` writes or overwrites.
-/// Only these are re-read and re-hashed after a catalog update (#1401);
-/// everything else in the workspace keeps its already-known digest.
-const RUNTIME_CATALOG_RELATIVE_PATHS: [&str; 2] = [
-    "topology/runtime_catalog.parquet",
-    "topology/runtime_entity_label_encoding.json",
-];
-
-/// Hash exactly one known workspace-relative file, in isolation from the rest
-/// of the tree.
-fn hash_workspace_relative_file(
-    workspace: &Path,
-    relative: &str,
-) -> Result<GraphFileEntry, GfError> {
-    let path = workspace.join(relative);
-    let bytes =
-        fs::read(&path).map_err(|error| storage("read graph workspace file", &path, error))?;
-    let byte_length = u64::try_from(bytes.len())
-        .map_err(|_| resource_limit("graph workspace file byte length exceeds u64"))?;
-    Ok(GraphFileEntry {
-        relative_path: relative.to_string(),
-        byte_length,
-        content_sha256: hex_digest(Sha256::digest(&bytes).into()),
-        role: crate::graph_files::infer_role(Path::new(relative)),
-    })
 }
 
 /// Publish one small-write generation that preserves unchanged base Parquet.
@@ -2576,6 +2555,19 @@ mod crash_oracle_tests {
         state.node_ids.insert(node_uuid.clone(), 1);
         state.node_timestamps.insert(node_uuid, (1, 1));
         crate::writer::write_reconstructed_graph(workspace.path(), &state).unwrap();
+        // Sealed in the minimal (single-key) legacy form some writers still
+        // use, rather than the three-key canonical form
+        // `generation::encode_generation_state` always produces. Any commit
+        // that runs the durable-rewrite path — even one with no
+        // topology/search/property flag set, like a plain catalog write —
+        // rewrites this file in the canonical form, so a base sealed with the
+        // legacy form genuinely changes byte-for-byte on the very next
+        // commit, regardless of whether that commit logically touches it.
+        fs::write(
+            workspace.path().join("topology/generation.json"),
+            br#"{"topology_generation":0}"#,
+        )
+        .unwrap();
         let (mapped_inventory, _) = capture_graph_files(workspace.path()).unwrap();
         // GFDR replay (`write_replay_overlay_streaming`) requires the mapped
         // route-table layout, so the genesis v2 root must be sealed as
@@ -2688,6 +2680,147 @@ mod crash_oracle_tests {
         )
         .unwrap();
         assert_eq!(recomputed, receipt.state_fingerprint);
+    }
+
+    /// #1401 regression: `persist_runtime_catalog` commits through
+    /// `commit_topology_aware`, which durably bumps `topology/generation.json`
+    /// as a side effect of *any* commit — not just the two catalog paths it
+    /// stages directly. The incremental inventory merge in
+    /// `prepare_graph_delta_inner` initially kept a stale cached digest for
+    /// that file, and `bounded_materialized_fingerprint`'s own verification
+    /// then failed with "no authenticated legacy path resolution" the moment
+    /// that file's byte length actually changed. This fails against the
+    /// unfixed incremental-merge-for-every-catalog-write behavior and passes
+    /// once the catalog branch falls back to a full rehash.
+    #[test]
+    fn property_mutation_with_runtime_catalog_on_content_addressed_base_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        publish_graph_base_v2(root.path());
+        let parent = resolve_project_generation(root.path()).unwrap();
+        let catalog = graphforge_ir::RuntimeCatalog::new();
+        let request = one_node_request();
+        let prepared =
+            prepare_graph_delta_with_runtime_catalog(&parent, &request, &catalog).unwrap();
+        assert_eq!(prepared.run_sequence, 1);
+
+        let generation_request = generation_with_replaced_graph(
+            &parent,
+            request.transaction_uuid,
+            request.generation_uuid,
+            prepared.files_participant.clone(),
+        )
+        .unwrap();
+        prepared.revalidate_for_publish().unwrap();
+        let ProjectStageOutcome::Staged(staged) = crate::stage_project_generation_with_graph_tree(
+            root.path(),
+            &generation_request,
+            prepared.graph_tree_source(),
+        )
+        .unwrap() else {
+            panic!("unexpectedly replayed");
+        };
+        prepared
+            .publish(staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap())
+            .unwrap();
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        let source = DeltaReplaySource::open(&reopened).unwrap();
+        let (state, _) = reconstruct_graph_state(
+            source.root(),
+            &source.inventory,
+            GraphDeltaJournalLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            state
+                .node_properties
+                .contains_key(&(Uuid::from_u128(1221).to_string(), "score".to_string())),
+            "mutated property must be visible after a catalog-carrying replay"
+        );
+    }
+
+    /// Closes the coverage gap #1401 was found with: the non-mapped (legacy)
+    /// V2 fallback branch of `DeltaReplaySource::open` — reachable for a
+    /// content-addressed base sealed without a route table, e.g. via
+    /// `migrate_graph_files_v1_to_v2` — had no direct test in this crate.
+    #[test]
+    fn delta_replay_source_open_reuses_legacy_non_mapped_v2_layout() {
+        let root = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let source_files = tempfile::tempdir().unwrap();
+        fs::create_dir_all(source_files.path().join("topology")).unwrap();
+        fs::write(
+            source_files.path().join("topology/nodes.parquet"),
+            b"legacy-nodes",
+        )
+        .unwrap();
+        let (inventory, _) = capture_graph_files(source_files.path()).unwrap();
+        assert_eq!(
+            inventory.format_version,
+            crate::GRAPH_FILES_RECORD_VERSION,
+            "fixture must be the raw, non-mapped layout"
+        );
+        let lease = crate::begin_graph_object_publication(root.path()).unwrap();
+        let (v2_root, _) = crate::graph_object_store::migrate_graph_files_v1_to_v2(
+            &lease,
+            source_files.path(),
+            &inventory,
+        )
+        .unwrap();
+        let files_participant = crate::graph_files::graph_files_root_participant(&v2_root).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files_participant);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root.path(), &request, None).unwrap()
+        else {
+            panic!("legacy v2 base publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+
+        let resolved = resolve_project_generation(root.path()).unwrap();
+        let parent_inventory = resolved.graph_files_inventory().unwrap().unwrap();
+        assert_ne!(
+            parent_inventory.format_version,
+            crate::GRAPH_FILES_MAPPED_RECORD_VERSION,
+            "this base must exercise the non-mapped fallback in DeltaReplaySource::open"
+        );
+
+        // Fix 2's fallback branch (materialize, then a fresh capture) must
+        // still authenticate and correctly re-derive a legacy content-addressed
+        // base — the half of that branch the mapped fast path doesn't cover.
+        let source = DeltaReplaySource::open_with_inventory(&resolved, &parent_inventory).unwrap();
+        assert_eq!(
+            fs::read(source.root().join("topology/nodes.parquet")).unwrap(),
+            b"legacy-nodes"
+        );
+        assert!(
+            source
+                .inventory
+                .files
+                .iter()
+                .any(|entry| entry.relative_path == "topology/nodes.parquet"),
+            "materialized workspace inventory must include the legacy base file"
+        );
     }
 }
 
