@@ -1,6 +1,7 @@
 """Bazel targets for graphforge-bindings-py PyO3 cdylib (#7)."""
 
 load("//tools/bazel:gf_rust.bzl", "gf_rust_shared_library")
+load("//tools/bazel:gf_version.bzl", "WORKSPACE_VERSION")
 
 exports_files(["Cargo.toml"])
 
@@ -32,6 +33,9 @@ filegroup(
 gf_rust_shared_library(
     name = "graphforge_bindings_py",
     crate_name = "graphforge_bindings_py",
+    # `env!("CARGO_PKG_VERSION")` in src/lib.rs reads this at compile time;
+    # rules_rust otherwise defaults an unset `version` to "0.0.0" (#1395).
+    version = WORKSPACE_VERSION,
     # ABI3 comes from Cargo.toml; extension-build mode is scoped explicitly to
     # PyO3's Bazel build scripts in MODULE.bazel (see cargo-bazel-lock.json).
     # Mirror `.cargo/config.toml` apple rustflags so PyO3 extension-module
