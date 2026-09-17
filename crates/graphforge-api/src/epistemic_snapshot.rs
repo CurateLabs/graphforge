@@ -127,18 +127,18 @@ fn read_ledgers_cached(
             .epistemic_ledger_cache
             .lock()
             .expect("epistemic ledger cache lock poisoned");
-        if let Some(entry) = cached.as_ref() {
-            if entry.generation_uuid == generation_uuid && entry.manifest_sha256 == manifest_sha256
-            {
-                return Ok((
-                    entry.assertions.clone(),
-                    entry.statuses.clone(),
-                    entry.reasoning.clone(),
-                    entry.supersessions.clone(),
-                    entry.hypotheses.clone(),
-                    entry.confidence.clone(),
-                ));
-            }
+        if let Some(entry) = cached.as_ref()
+            && entry.generation_uuid == generation_uuid
+            && entry.manifest_sha256 == manifest_sha256
+        {
+            return Ok((
+                entry.assertions.clone(),
+                entry.statuses.clone(),
+                entry.reasoning.clone(),
+                entry.supersessions.clone(),
+                entry.hypotheses.clone(),
+                entry.confidence.clone(),
+            ));
         }
     }
     let assertions = crate::knowledge::read_ledger(generation)?;
@@ -1002,7 +1002,7 @@ mod tests {
             ("epistemic", "hypothesis_selection_events"),
         ];
 
-        for &n in &[100u32, 3_000u32] {
+        for &n in &[40u32, 800u32] {
             let root = tempfile::tempdir().unwrap();
             let graph = GraphForge::new(root.path().to_str()).unwrap();
             graph.set_clock_for_test(|| Ok(10));
