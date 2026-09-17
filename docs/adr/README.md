@@ -42,6 +42,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0032 | [Research Branches share Project publication authority](0032-research-project-authority.md) | `0032-research-project-authority.md` |
 | 0035 | [Preserve stage diagnostics at public error boundaries](0035-structured-stage-errors.md) | `0035-structured-stage-errors.md` |
 | 0036 | [The GraphForge release version contract](0036-release-version-contract.md) | `0036-release-version-contract.md` |
+| 0037 | [Derived adjacency is published with the generation](0037-adjacency-published-with-generation.md) | `0037-adjacency-published-with-generation.md` |
 | 0038 | [Determinism belongs at the publication boundary](0038-determinism-at-the-publication-boundary.md) | `0038-determinism-at-the-publication-boundary.md` |
 
 ## Superseded records

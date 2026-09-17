@@ -83,6 +83,7 @@ the Repository Policy job (#1390).
 | 0032 | Research Branches share Project publication authority | Accepted | [`../../adr/0032-research-project-authority.md`](../../adr/0032-research-project-authority.md) |
 | 0035 | Preserve stage diagnostics at public error boundaries | Accepted | [`../../adr/0035-structured-stage-errors.md`](../../adr/0035-structured-stage-errors.md) |
 | 0036 | The GraphForge release version contract | Accepted | [`../../adr/0036-release-version-contract.md`](../../adr/0036-release-version-contract.md) |
+| 0037 | Derived adjacency is published with the generation | Accepted | [`../../adr/0037-adjacency-published-with-generation.md`](../../adr/0037-adjacency-published-with-generation.md) |
 | 0038 | Determinism belongs at the publication boundary | Accepted | [`../../adr/0038-determinism-at-the-publication-boundary.md`](../../adr/0038-determinism-at-the-publication-boundary.md) |
 
 ### Superseded
