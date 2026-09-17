@@ -169,19 +169,16 @@ fn materialize_from_cas(
                         error,
                     )
                 })?;
-            let verified = verify_file_counted(
-                installed,
-                &entry.content_sha256,
+            let verified = verify_hardlinked_materialization(
+                &installed,
+                installed_identity,
+                source_identity,
                 entry.byte_length,
                 &cas.diagnostic_root,
             );
             match verified {
-                Ok(io) => {
-                    return Ok(MaterializeIoEvidence {
-                        read_bytes: io.bytes,
-                        read_calls: io.calls,
-                        ..MaterializeIoEvidence::default()
-                    });
+                Ok(()) => {
+                    return Ok(MaterializeIoEvidence::default());
                 }
                 Err(error) => {
                     let _ = parent.unlink_child_if_identity(name, installed_identity);
@@ -191,6 +188,78 @@ fn materialize_from_cas(
         }
     }
     Err(validation("materialization path has no final component"))
+}
+
+/// Authenticate a just-installed hardlink without re-reading its bytes.
+///
+/// `bucket.link_child_into` above already confirmed, via `file_identity`,
+/// that the newly-created directory entry resolves to the exact same inode
+/// as `source`. That is an identity guarantee, not a content one: rewriting
+/// a file in place (same length, same inode) is invisible to it and to the
+/// checks below.
+///
+/// This function is deliberately *not* self-sufficient authentication. It
+/// is safe to skip a re-hash here only because every real caller of
+/// [`materialize_graph_objects`] obtains its `inventory` argument from
+/// `ResolvedProjectGeneration::graph_files_inventory` (`project_generation.rs`),
+/// whose V2 loop performs a full streamed SHA-256 admission of every
+/// declared object's *content* against `entry.content_sha256` — memoized
+/// once per resolved generation, but a real check, not a presence check —
+/// before this function ever runs, in the same open, against the same CAS
+/// bytes this hardlink points at. The original version of this comment
+/// claimed the source's bytes were "authenticated once already... lazily
+/// on first real read via `open_graph_object_by_digest`/
+/// `read_graph_object_by_digest`" and cited that as why a hard link could
+/// never install different bytes than an already-authenticated inode. That
+/// claim was wrong for Topology-role objects: after materialization, the
+/// ordinary query path (`PersistentAdjacencyProvider`, Parquet reads) opens
+/// these files by path, never by CAS digest lookup, so neither function is
+/// ever called on them again. See
+/// `hardlinked_topology_payload_corruption_is_refused`
+/// (`graphforge-api`'s `workspace_hydration/tests.rs`) for the mutation
+/// proof: with the V2-loop hash deleted (as it was in #1425/cd964b69) and
+/// only this function's checks in place, a same-inode same-length byte
+/// flip in a hardlinked `topology/nodes.parquet` was accepted at open and
+/// an ordinary query silently returned a result over the corrupted data.
+/// If a future caller ever materializes an inventory that did not just
+/// come from a `graph_files_inventory()` call on the same resolved
+/// generation, this function alone will not catch content corruption.
+/// This keeps the checks that stay meaningful after the hardlink: identity
+/// (defense in depth — cheap, `stat`-only, even though `link_child_into`
+/// already enforced it), declared length (mirrors `verify_file_counted`'s
+/// own pre-hash guard, `graph_object_store.rs`'s `verify_file_counted`), and
+/// link count (confirms the destination really is a second name for the CAS
+/// inode rather than some other single-link file that happened to be
+/// substituted in the window between `link_child_into`'s internal checks and
+/// this one).
+fn verify_hardlinked_materialization(
+    installed: &File,
+    installed_identity: graphforge_filesystem::FileIdentity,
+    source_identity: graphforge_filesystem::FileIdentity,
+    expected_length: u64,
+    diagnostic: &Path,
+) -> Result<(), GfError> {
+    if installed_identity != source_identity {
+        return Err(validation(
+            "materialized graph object is not the hard-linked CAS object",
+        ));
+    }
+    let metadata = installed
+        .metadata()
+        .map_err(|error| storage("inspect materialized graph object", diagnostic, error))?;
+    if !metadata.is_file() || metadata.len() != expected_length {
+        return Err(validation(
+            "materialized graph object length does not match manifest",
+        ));
+    }
+    let link_count = graphforge_filesystem::file_link_count(installed)
+        .map_err(|error| storage("inspect materialized graph object links", diagnostic, error))?;
+    if link_count < 2 {
+        return Err(validation(
+            "materialized graph object was not hard-linked from the CAS store",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

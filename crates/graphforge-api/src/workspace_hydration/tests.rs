@@ -474,3 +474,111 @@ fn retained_generation_handles_outlive_reads_and_survive_reopen() {
         1
     );
 }
+
+/// Regression proof for the #1425/#1388 open-path gap: a byte flipped in
+/// place (same inode, same declared length) inside a *hardlink-materialized*
+/// Topology-role payload object must still be refused, either at open or at
+/// the latest by the first ordinary query that reads it. `topology/nodes.parquet`
+/// is deliberately NOT the object
+/// `compact_graph_root_reopens_through_ordinary_api_and_rematerializes`
+/// corrupts: that test's `find(|entry| entry.byte_length > 0)` lands on the
+/// first Properties/Catalog-role entry in file order, which is either
+/// copy-and-hash materialized (control files) or independently re-hashed by
+/// `property_overlay::inventory` -- neither exercises the hardlink path this
+/// test targets, and neither would have caught #1425/cd964b69 removing the
+/// only content check that ever covered Topology-role objects.
+#[test]
+fn hardlinked_topology_payload_corruption_is_refused() {
+    let project = tempfile::tempdir().unwrap();
+    let graph = GraphForge::new(Some(project.path().to_str().unwrap())).unwrap();
+    // Enough real edges that topology route files are nonempty and go
+    // through the ordinary hardlink materialization path (not the
+    // small-control-file copy path).
+    graph
+        .execute(
+            "UNWIND range(1, 200) AS i \
+             CREATE (a:Person {name: 'p' + toString(i), rank: i}) \
+             CREATE (b:Person {name: 'q' + toString(i), rank: i}) \
+             CREATE (a)-[:KNOWS {since: i}]->(b)",
+        )
+        .expect("seed payload data");
+    publish_compact_graph_workspace(project.path(), &graph.dir());
+    drop(graph);
+
+    let resolved = graphforge_storage::resolve_project_generation(project.path()).unwrap();
+    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+    let victim_entry = inventory
+        .files
+        .iter()
+        .find(|entry| entry.relative_path == "topology/nodes.parquet")
+        .expect("compact fixture contains topology/nodes.parquet");
+    assert_eq!(
+        victim_entry.role,
+        graphforge_storage::GraphFileRole::Topology,
+        "victim must exercise the hardlink path, not a control/property file"
+    );
+    let victim =
+        graphforge_storage::graph_object_path(project.path(), &victim_entry.content_sha256)
+            .unwrap();
+    let before_meta = std::fs::metadata(&victim).unwrap();
+    #[cfg(unix)]
+    let before_ino = {
+        use std::os::unix::fs::MetadataExt;
+        before_meta.ino()
+    };
+    drop(resolved);
+
+    // Flip exactly one byte in place: open read-write, no truncate, no
+    // rename -- same inode, same length, one bit different.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut permissions = before_meta.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(permissions.mode() | 0o200);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&victim, permissions).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&victim)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut byte = [0_u8; 1];
+        std::io::Read::read_exact(&mut std::fs::File::open(&victim).unwrap(), &mut byte).unwrap();
+        file.write_all(&[byte[0] ^ 0xFF]).unwrap();
+        file.sync_all().unwrap();
+    }
+    let after_meta = std::fs::metadata(&victim).unwrap();
+    assert_eq!(
+        after_meta.len(),
+        victim_entry.byte_length,
+        "mutation must preserve declared length"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(after_meta.ino(), before_ino, "mutation must preserve inode");
+    }
+
+    // Fresh open, exactly the ordinary API surface a session uses. Either
+    // the open itself refuses the corruption, or -- if it did not -- the
+    // first ordinary query that reads the corrupted object must. Silently
+    // returning a result computed over corrupted data is the one outcome
+    // that is never acceptable, regardless of which layer catches it.
+    match GraphForge::new(Some(project.path().to_str().unwrap())) {
+        Err(_) => {} // Refused at open: correct, nothing more to check.
+        Ok(reopened) => {
+            let query_result = reopened.execute("MATCH (n:Person) RETURN count(n) AS total");
+            assert!(
+                query_result.is_err(),
+                "corrupted hardlinked Topology payload object was accepted at open \
+                 AND an ordinary query over it succeeded (rows: {:?}) -- corruption \
+                 that determines a query answer was never caught",
+                query_result.map(|r| r.stats.rows_produced)
+            );
+        }
+    }
+}
