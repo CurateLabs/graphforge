@@ -145,6 +145,7 @@ while IFS= read -r -d '' path; do
     scripts/ci/test-release-publish-preflight.py | scripts/ci/test-release-candidate.py | \
       scripts/ci/test-prepare-napi-packages.py | scripts/ci/test-publish-npm-artifacts.py | \
       scripts/ci/test-amend-npm-main-artifact.py | scripts/ci/release-publish-preflight.py | \
+      scripts/ci/test-release-recovery-overlay.py | scripts/ci/release-recovery-overlay.sh | \
       scripts/ci/release-candidate.py | scripts/ci/prepare-napi-packages.py | \
       scripts/ci/publish-npm-artifacts.py | scripts/ci/amend-npm-main-artifact.py | \
       .github/workflows/publish.yaml)

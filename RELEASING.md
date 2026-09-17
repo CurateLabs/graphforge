@@ -16,7 +16,11 @@ are in
   registry writes (GitHub Environment `release` reviewers on `publish.yaml`
   registry jobs).
 - Recovery dispatches must pass `release_tag`, `recovery_reason`, and an
-  explicit reviewed `recovery_overlay_sha` (not floating `main`).
+  explicit reviewed `recovery_overlay_sha` (not floating `main`). That SHA
+  overlays every publish-path script listed in
+  `scripts/ci/release-recovery-overlay.sh` — npm and crates publishers
+  included — onto the tag checkout, so a defect found after a tag is cut is
+  repaired by review, not by a new tag.
 
 ## Release
 

@@ -75,10 +75,11 @@ jobs:
             git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
             git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
             git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-            git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-publish-preflight.py" \
-              > "$RUNNER_TEMP/release-publish-preflight.py"
-            install -m 0755 "$RUNNER_TEMP/release-publish-preflight.py" \
-              scripts/ci/release-publish-preflight.py
+            git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+              > "$RUNNER_TEMP/release-recovery-overlay.sh"
+            install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+              scripts/ci/release-recovery-overlay.sh
+            bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
             printf 'Recovery reason: %s\n' "$RECOVERY_REASON"
             printf 'Recovery overlay SHA: %s\n' "$RECOVERY_OVERLAY_SHA"
           fi
@@ -237,6 +238,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - name: Download manifest and Python partition
         env:
@@ -313,6 +336,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -392,6 +437,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -468,6 +535,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -516,6 +605,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
@@ -566,34 +677,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Use reviewed recovery-overlay SHA crates publisher
+      - name: Overlay reviewed recovery publish-path scripts
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
         run: |
-          # Recovery checkouts the immutable tag SHA for certified crate bytes.
-          # Overlay durable publisher scripts from an explicit reviewed SHA
-          # (not floating origin/main tip). Never print secrets.
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
           test -n "$RECOVERY_OVERLAY_SHA"
           test "${#RECOVERY_OVERLAY_SHA}" -eq 40
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
           git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
           git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
-          git show "$RECOVERY_OVERLAY_SHA:scripts/publish_crates.py" \
-            > "$RUNNER_TEMP/publish_crates.py"
-          install -m 0755 "$RUNNER_TEMP/publish_crates.py" scripts/publish_crates.py
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_action.py" \
-            > "$RUNNER_TEMP/release_action.py"
-          install -m 0755 "$RUNNER_TEMP/release_action.py" scripts/ci/release_action.py
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/crate-authorize-refresh-nodes.py" \
-            > "$RUNNER_TEMP/crate-authorize-refresh-nodes.py"
-          install -m 0755 "$RUNNER_TEMP/crate-authorize-refresh-nodes.py" \
-            scripts/ci/crate-authorize-refresh-nodes.py
-          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_registry.py" \
-            > "$RUNNER_TEMP/release_registry.py"
-          install -m 0755 "$RUNNER_TEMP/release_registry.py" scripts/ci/release_registry.py
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
@@ -671,6 +776,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha || github.sha }}
+      - name: Overlay reviewed recovery publish-path scripts
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
+        run: |
+          # Recovery checks out the immutable tag SHA for certified bytes and
+          # never rebuilds them. Overlay every publish-path script from an
+          # explicit reviewed SHA (not the floating origin/main tip), including
+          # the overlay runner itself, so the tag's own list cannot govern.
+          # Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-recovery-overlay.sh" \
+            > "$RUNNER_TEMP/release-recovery-overlay.sh"
+          install -m 0755 "$RUNNER_TEMP/release-recovery-overlay.sh" \
+            scripts/ci/release-recovery-overlay.sh
+          bash scripts/ci/release-recovery-overlay.sh "$RECOVERY_OVERLAY_SHA"
       - name: Download retained manifest when available
         if: needs.candidate-preflight.result == 'success'
         env:
