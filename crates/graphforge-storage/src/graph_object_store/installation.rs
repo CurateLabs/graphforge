@@ -283,6 +283,251 @@ pub(super) fn install_graph_object_file_with_lease(
         Ok(evidence)
     })
 }
+/// Promote a same-filesystem source into the CAS without copying its bytes.
+///
+/// **Only call this for a source the caller will never read, install, or
+/// reference again under any name.** A rename shares the source's inode with
+/// the installed CAS object; it does not create an independent copy. Two
+/// consequences follow, both load-bearing:
+///
+/// - A descriptor opened on `source` before this call and still open
+///   afterward can mutate the sealed CAS object's bytes; a byte copy would
+///   not be affected. See
+///   `cas_move_shares_the_source_inode_with_a_preexisting_writable_descriptor`.
+/// - `source`'s name stops existing once this call applies its fast path.
+///   Any other caller that expects to read, re-install, or otherwise
+///   reference the same workspace-relative path again - including a *second,
+///   independent* publication of the same workspace, not merely a retry of
+///   this one - will fail. This is why the plain (non-mapped) append
+///   functions and the v1-to-v2 migration path do not use this: their own
+///   tests exercise installing the same workspace content more than once.
+///
+/// Returns `Ok(None)` when the source is not eligible for the fast path
+/// (cross-device, an unsupported target, or a rename race against a
+/// concurrent installer for the same digest) so the caller falls back to the
+/// byte-copy path. `source` must not be touched before this call decides
+/// whether it applies, because a crash-recovery retry of the *copy* path
+/// depends on `source` still existing.
+#[cfg(unix)]
+#[allow(clippy::too_many_lines)]
+fn install_graph_object_file_by_move(
+    cas: &CasRoot,
+    source: &Path,
+    digest: &str,
+    expected_length: u64,
+) -> Result<Option<GraphObjectInstallEvidence>, GfError> {
+    #[cfg(test)]
+    if super::FORCE_MOVE_INSTALL_INELIGIBLE.with(std::cell::Cell::get) {
+        return Ok(None);
+    }
+    let bucket = cas.digest_bucket(digest, true)?;
+    let destination_name = std::ffi::OsStr::new(&digest[2..]);
+    if let Some(evidence) =
+        try_reuse_existing_object(cas, &bucket, destination_name, digest, expected_length)?
+    {
+        return Ok(Some(evidence));
+    }
+    // A name derived from the digest, rather than a fresh random one, lets a
+    // retry after a crash between the move and the final link find and
+    // resume these exact staged bytes even though the original source name
+    // is gone by then. Two different digests cannot share this name; two
+    // sources that share this exact digest are, by the content-addressing
+    // contract, the same bytes, so resuming from either is correct.
+    let staging_name = std::ffi::OsString::from(format!("moving-{digest}"));
+    let resuming = match cas.tmp.open_child_file(&staging_name) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(storage(
+                "open moved graph object staging file",
+                &cas.diagnostic_root,
+                error,
+            ));
+        }
+    };
+    let temporary = if let Some(file) = resuming {
+        file
+    } else {
+        let source_metadata = fs::symlink_metadata(source)
+            .map_err(|error| storage("inspect graph object source", source, error))?;
+        if !source_metadata.is_file()
+            || source_metadata.file_type().is_symlink()
+            || source_metadata.len() != expected_length
+        {
+            return Err(validation(
+                "graph object source is not the declared regular file",
+            ));
+        }
+        let destination = cas.tmp.path().join(&staging_name);
+        match graphforge_filesystem::rename_no_replace(source, &destination) {
+            Ok(()) => {}
+            Err(error) if is_move_ineligible(&error) => return Ok(None),
+            Err(error) => {
+                return Err(storage(
+                    "move graph object source into staging",
+                    source,
+                    error,
+                ));
+            }
+        }
+        cas.tmp.open_child_file(&staging_name).map_err(|error| {
+            storage(
+                "open moved graph object staging file",
+                &cas.diagnostic_root,
+                error,
+            )
+        })?
+    };
+    let temporary_identity = graphforge_filesystem::file_identity(&temporary).map_err(|error| {
+        storage(
+            "inspect moved graph object staging file",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let metadata = temporary.metadata().map_err(|error| {
+        storage(
+            "inspect moved graph object staging file",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() != expected_length {
+        return Err(validation(
+            "moved graph object staging file is not the declared regular file",
+        ));
+    }
+    // Normalize permissions to what a freshly created temporary object
+    // starts with, so sealing below yields the same final mode regardless
+    // of which path installed the object.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        temporary
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                storage(
+                    "normalize moved graph object staging permissions",
+                    &cas.diagnostic_root,
+                    error,
+                )
+            })?;
+    }
+    // The bytes were never observed by our own write path (nor, on resume,
+    // reconfirmed since the prior attempt): authenticate them with a single
+    // read pass now, before sealing. This replaces the read+write copy loop
+    // with one read and zero writes.
+    let mut reader = temporary.try_clone().map_err(|error| {
+        storage(
+            "clone moved graph object staging file",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let preseal_io =
+        verify_stream_counted(&mut reader, digest, expected_length, &cas.diagnostic_root)?;
+    drop(reader);
+    // The moved bytes may not have reached stable storage under their prior
+    // name; fsync here so this path's durability guarantee does not depend
+    // on whichever writer produced the source file.
+    temporary.sync_all().map_err(|error| {
+        storage(
+            "fsync moved graph object staging file",
+            &cas.diagnostic_root,
+            error,
+        )
+    })?;
+    let temporary_path = cas
+        .diagnostic_root
+        .join(GRAPH_OBJECTS_DIR)
+        .join(TEMP_DIR)
+        .join(&staging_name);
+    if let Some(allocation) = &cas.allocation {
+        allocation.replace_file_at(&temporary_path, &temporary)?;
+    }
+    let (installed, sealed_bytes_hashed, concurrent_io) = finalize_temporary_object(
+        cas,
+        &bucket,
+        TemporaryObject {
+            name: staging_name,
+            file: temporary,
+            identity: temporary_identity,
+        },
+        digest,
+        expected_length,
+    )?;
+    let bytes_hashed = [
+        preseal_io.bytes,
+        sealed_bytes_hashed,
+        if installed { 0 } else { expected_length },
+    ]
+    .into_iter()
+    .try_fold(0_u64, u64::checked_add)
+    .ok_or_else(|| validation("graph object hashed byte count overflows"))?;
+    let read_calls = preseal_io
+        .calls
+        .checked_add(concurrent_io.calls)
+        .ok_or_else(|| validation("graph object read call count overflows"))?;
+    Ok(Some(GraphObjectInstallEvidence {
+        bytes_hashed,
+        bytes_installed: if installed { expected_length } else { 0 },
+        reused_existing: !installed,
+        attempted_install: true,
+        read_calls,
+        write_calls: 0,
+        write_bytes: 0,
+        file_fsync_calls: 1,
+        fsync_calls: 3,
+        directory_fsync_calls: 2,
+    }))
+}
+
+/// Whether a rename failure means "not eligible for the move fast path",
+/// as opposed to a genuine I/O error that should fail the install.
+///
+/// `AlreadyExists` covers a race against a concurrent installer staging the
+/// identical digest under the same deterministic name: `source` is
+/// guaranteed untouched (the rename did not happen), so falling back to an
+/// independent copy is always correct.
+#[cfg(unix)]
+fn is_move_ineligible(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::CrossesDevices
+            | std::io::ErrorKind::Unsupported
+            | std::io::ErrorKind::AlreadyExists
+    ) || error.raw_os_error() == Some(18) // EXDEV
+}
+
+/// Install a source the caller guarantees is exclusively owned and will
+/// never be referenced again, promoting it by rename where the fast path
+/// applies (see [`install_graph_object_file_by_move`]) and falling back to
+/// the ordinary byte-copy path otherwise.
+#[cfg(unix)]
+pub(super) fn install_graph_object_file_move_eligible_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    validate_digest(expected_digest)?;
+    if let Some(evidence) =
+        install_graph_object_file_by_move(&lease.cas, source, expected_digest, expected_length)?
+    {
+        return Ok(evidence);
+    }
+    install_graph_object_file_with_lease(lease, source, expected_digest, expected_length)
+}
+
+#[cfg(not(unix))]
+pub(super) fn install_graph_object_file_move_eligible_with_lease(
+    lease: &GraphObjectPublicationLease,
+    source: &Path,
+    expected_digest: &str,
+    expected_length: u64,
+) -> Result<GraphObjectInstallEvidence, GfError> {
+    install_graph_object_file_with_lease(lease, source, expected_digest, expected_length)
+}
+
 fn install_object<F>(
     cas: &CasRoot,
     digest: &str,

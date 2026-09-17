@@ -26,6 +26,7 @@ use super::fs;
 use super::hash_regular_file;
 use super::hex_digest;
 use super::install_graph_object_bytes_with_lease;
+use super::install_graph_object_file_move_eligible_with_lease;
 use super::install_graph_object_file_with_lease;
 use super::read_graph_object_by_digest_file_counted;
 use super::returned_error_boundary;
@@ -145,6 +146,7 @@ pub fn append_graph_files_v2(
         None,
         tombstones,
         None,
+        false,
     )
 }
 
@@ -243,6 +245,7 @@ pub(crate) fn append_replayed_graph_files(
         None,
         tombstones,
         routes.as_ref(),
+        false,
     )
 }
 
@@ -261,6 +264,7 @@ pub(crate) fn append_mapped_import_graph_files(
         None,
         &[],
         Some(routes),
+        false,
     )
 }
 
@@ -285,6 +289,7 @@ pub(crate) fn append_authenticated_graph_files_v2(
         Some(sealed_files),
         tombstones,
         None,
+        false,
     )
 }
 
@@ -359,6 +364,13 @@ pub(crate) fn append_authenticated_mapped_graph_files(
         .iter()
         .map(|file| file.relative_path.clone())
         .collect::<Vec<_>>();
+    // `move_eligible = true`: this is the checkpoint-authorized mapped
+    // encoding path, encoding_publication's single per-generation publish of
+    // its own freshly written, session-exclusive workspace. Nothing else
+    // reads these exact paths again, so promoting them into the CAS by
+    // rename (see `install_graph_object_file_by_move`) is sound here in a
+    // way it is not for the plain append functions above, whose own tests
+    // install the same workspace content more than once.
     let (root, mut evidence) = append_graph_files_v2_inner(
         lease,
         workspace,
@@ -367,6 +379,7 @@ pub(crate) fn append_authenticated_mapped_graph_files(
         Some(sealed_files),
         tombstones,
         Some(routes),
+        true,
     )?;
     evidence.publication_io.checked_add_assign(&migration_io)?;
     let totals = evidence.publication_io.totals()?;
@@ -387,6 +400,7 @@ pub(crate) fn append_authenticated_mapped_graph_files(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn append_graph_files_v2_inner(
     lease: &GraphObjectPublicationLease,
     workspace: &Path,
@@ -395,6 +409,12 @@ fn append_graph_files_v2_inner(
     authenticated: Option<&[AuthenticatedGraphFile]>,
     tombstones: &[String],
     mapped_routes: Option<&crate::route_component::RouteTable>,
+    // Whether every `source` this call installs is exclusively owned by the
+    // caller and will never be read or referenced again under its workspace
+    // name. See `install_graph_object_file_by_move`'s doc comment for what
+    // that promises and what it costs; only pass `true` from a caller that
+    // has verified its own workspace lifecycle meets it.
+    move_eligible: bool,
 ) -> Result<(GraphFilesRootV2, GraphFilesAppendEvidence), GfError> {
     validate_publication_identity(lease)?;
     if state
@@ -455,8 +475,16 @@ fn append_graph_files_v2_inner(
             let (digest, io) = hash_regular_file(&source)?;
             (hex_digest(digest), metadata.len(), io)
         };
-        let installed =
-            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?;
+        let installed = if move_eligible {
+            install_graph_object_file_move_eligible_with_lease(
+                lease,
+                &source,
+                &digest,
+                expected_length,
+            )?
+        } else {
+            install_graph_object_file_with_lease(lease, &source, &digest, expected_length)?
+        };
         evidence.publication_io.payload.add_install(&installed)?;
         evidence.publication_io.payload.add_read(prehash_io)?;
         let relative_path = relative

@@ -37,6 +37,11 @@ const BUFFER_BYTES: usize = GRAPH_OBJECT_IO_BUFFER_BYTES;
 thread_local! {
     static RETURNED_ERROR_BOUNDARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
     static BEFORE_OBJECT_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Forces the same-filesystem CAS install fast path to report itself
+    /// ineligible, exactly as a cross-device source would, so tests can
+    /// exercise the byte-copy fallback deterministically without depending
+    /// on a real second filesystem being mounted.
+    static FORCE_MOVE_INSTALL_INELIGIBLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1538,6 +1543,7 @@ use installation::install_graph_object_bytes_with_lease;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use installation::install_graph_object_file;
+use installation::install_graph_object_file_move_eligible_with_lease;
 use installation::install_graph_object_file_with_lease;
 pub use manifest_tree::GraphManifestState;
 #[allow(

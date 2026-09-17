@@ -24,10 +24,27 @@ use crate::graph_object_store::hex_digest;
 use crate::graph_object_store::open_graph_object_by_digest;
 use crate::graph_object_store::read_graph_object;
 use crate::graph_object_store::tests::assert_injected_error;
+use crate::graph_object_store::tests::force_move_install_ineligible;
 use crate::graph_object_store::tests::inject_returned_error;
 #[cfg(unix)]
 use crate::graph_object_store::verify_file;
 use crate::graph_object_store::verify_graph_object;
+
+/// Forces the same-filesystem CAS install fast path off for the guard's
+/// lifetime, so a test can exercise the byte-copy fallback deterministically
+/// without a real second filesystem. Resets on drop, including on panic.
+struct ForceCopyPath;
+impl ForceCopyPath {
+    fn engage() -> Self {
+        force_move_install_ineligible(true);
+        Self
+    }
+}
+impl Drop for ForceCopyPath {
+    fn drop(&mut self) {
+        force_move_install_ineligible(false);
+    }
+}
 
 #[test]
 fn allocation_observed_concurrent_cas_winner_keeps_real_temporary_peak() {
@@ -566,6 +583,13 @@ fn rejects_unsafe_digest_and_source_mismatch() {
 
 #[test]
 fn cas_copy_isolated_from_preexisting_writable_source_descriptor() {
+    // `append_authenticated_graph_files_v2` never installs by move (only
+    // encoding_publication's checkpoint-authorized mapped path does, via
+    // `append_authenticated_mapped_graph_files`), so this always keeps the
+    // CAS-installed bytes in their own inode, independent of anything still
+    // holding the source open for writing. See
+    // `cas_move_shares_the_source_inode_with_a_preexisting_writable_descriptor`
+    // below for the move-eligible path's narrower, accepted contract.
     let container = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let relative_path = PathBuf::from("owned.parquet");
@@ -595,4 +619,194 @@ fn cas_copy_isolated_from_preexisting_writable_source_descriptor() {
         payload.len() as u64,
     )
     .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_move_shares_the_source_inode_with_a_preexisting_writable_descriptor() {
+    // `install_graph_object_file_move_eligible_with_lease` is what
+    // encoding_publication's mapped append uses for its own
+    // exclusively-owned workspace files (see manifest_tree.rs's
+    // `move_eligible` parameter). It promotes the source by rename, not
+    // copy: no new inode is created, so a descriptor opened on the source
+    // before installation - and still open afterward - shares the exact
+    // bytes now sealed and linked into the CAS. This is a deliberate,
+    // narrower contract than the byte-copy path (previous test) provides,
+    // accepted as the cost of removing the copy on the content-addressed
+    // install path (issue #1387 S4), and only reachable by a caller that
+    // has committed to never referencing that source again.
+    let container = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = workspace.path().join("owned.parquet");
+    let payload = vec![9_u8; 4096];
+    fs::write(&source, &payload).unwrap();
+    let digest = hex_digest(Sha256::digest(&payload).into());
+    let mut hostile = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+
+    let lease = begin_graph_object_publication(container.path()).unwrap();
+    install_graph_object_file_move_eligible_with_lease(
+        &lease,
+        &source,
+        &digest,
+        payload.len() as u64,
+    )
+    .unwrap();
+    // The source name is gone: it was renamed into the CAS, not copied.
+    assert!(!source.exists());
+    hostile.rewind().unwrap();
+    hostile.write_all(&vec![0x44; payload.len()]).unwrap();
+    hostile.sync_all().unwrap();
+    // The stale descriptor's write landed on the same inode now sealed
+    // under the object's digest name: verification, which re-hashes from
+    // the retained inode, observes the corruption and fails closed. It
+    // does not silently serve wrong bytes under the digest name, but it
+    // also did not prevent the corruption the way a copy would have.
+    assert!(verify_graph_object(container.path(), &digest, payload.len() as u64).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_move_refuses_corruption_introduced_before_installation_authenticates_it() {
+    let container = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = workspace.path().join("owned.parquet");
+    let payload = vec![9_u8; 4096];
+    let digest = hex_digest(Sha256::digest(&payload).into());
+    // The declared digest is for `payload`; the bytes actually on disk are
+    // corrupted before install ever reads them. Install must authenticate
+    // from the bytes it actually promotes, not trust this caller-declared
+    // digest, matching the same rule the reuse (concurrent CAS winner) path
+    // already enforces.
+    fs::write(&source, vec![0x44; payload.len()]).unwrap();
+
+    let lease = begin_graph_object_publication(container.path()).unwrap();
+    assert!(
+        install_graph_object_file_move_eligible_with_lease(
+            &lease,
+            &source,
+            &digest,
+            payload.len() as u64,
+        )
+        .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_move_promotes_a_same_filesystem_source_by_rename_and_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let source_root = tempfile::tempdir().unwrap();
+    let source = source_root.path().join("source");
+    let payload = vec![0x5a_u8; 4096];
+    fs::write(&source, &payload).unwrap();
+    let digest = hex_digest(Sha256::digest(&payload).into());
+
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let installed =
+        install_graph_object_file_move_eligible_with_lease(&lease, &source, &digest, 4096).unwrap();
+    assert!(!installed.reused_existing);
+    assert!(installed.attempted_install);
+    // The defining property of this path: no bytes are written, only read
+    // once to authenticate what the rename already staged.
+    assert_eq!(installed.write_bytes, 0);
+    assert_eq!(installed.write_calls, 0);
+    assert_eq!(installed.read_calls, 1);
+    assert_eq!(installed.bytes_hashed, 4096);
+    assert_eq!(installed.bytes_installed, 4096);
+    assert_eq!(installed.file_fsync_calls, 1);
+    assert_eq!(installed.directory_fsync_calls, 2);
+    assert_eq!(installed.fsync_calls, 3);
+    // The source name is gone - it was renamed, not copied - and no trace
+    // is left in the CAS temporary namespace.
+    assert!(!source.exists());
+    assert!(
+        root.path()
+            .join(GRAPH_OBJECTS_DIR)
+            .join(TEMP_DIR)
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    let object = graph_object_path(root.path(), &digest).unwrap();
+    assert_eq!(graphforge_filesystem::path_link_count(&object).unwrap(), 1);
+    assert!(fs::metadata(&object).unwrap().permissions().readonly());
+    assert_eq!(
+        fs::metadata(&object).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    assert_eq!(
+        read_graph_object(root.path(), &digest, 4096).unwrap(),
+        payload
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_move_falls_back_to_copy_when_ineligible() {
+    let _forced_ineligible = ForceCopyPath::engage();
+    let root = tempfile::tempdir().unwrap();
+    let source_root = tempfile::tempdir().unwrap();
+    let source = source_root.path().join("source");
+    let payload = vec![0x5a_u8; 4096];
+    fs::write(&source, &payload).unwrap();
+    let digest = hex_digest(Sha256::digest(&payload).into());
+
+    let lease = begin_graph_object_publication(root.path()).unwrap();
+    let installed =
+        install_graph_object_file_move_eligible_with_lease(&lease, &source, &digest, 4096).unwrap();
+    // Forced ineligible: behaves exactly like the byte-copy path, and the
+    // source is left untouched.
+    assert_eq!(installed.write_bytes, 4096);
+    assert!(source.exists());
+    assert_eq!(
+        read_graph_object(root.path(), &digest, 4096).unwrap(),
+        payload
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_move_resumes_after_a_crash_between_the_move_and_the_final_link() {
+    let container = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = workspace.path().join("resumable.parquet");
+    let payload = vec![0x7b_u8; 4096];
+    fs::write(&source, &payload).unwrap();
+    let digest = hex_digest(Sha256::digest(&payload).into());
+
+    let lease = begin_graph_object_publication(container.path()).unwrap();
+    inject_returned_error(Some("install:final-linked"));
+    let error = install_graph_object_file_move_eligible_with_lease(
+        &lease,
+        &source,
+        &digest,
+        payload.len() as u64,
+    )
+    .unwrap_err();
+    inject_returned_error(None);
+    assert_injected_error(error, "install:final-linked");
+    // The rename already happened: the workspace source is gone, whether or
+    // not the object had already reached its digest name when the fault
+    // fired. A retry must not depend on `source` still existing - only on
+    // the deterministically named staged bytes being findable by digest.
+    assert!(!source.exists());
+
+    install_graph_object_file_move_eligible_with_lease(
+        &lease,
+        &source,
+        &digest,
+        payload.len() as u64,
+    )
+    .unwrap();
+    verify_graph_object(container.path(), &digest, payload.len() as u64).unwrap();
+    assert_eq!(
+        read_graph_object(container.path(), &digest, payload.len() as u64).unwrap(),
+        payload
+    );
 }

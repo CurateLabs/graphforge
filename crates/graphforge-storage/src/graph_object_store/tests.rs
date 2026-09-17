@@ -44,6 +44,15 @@ pub(super) fn inject_returned_error(boundary: Option<&str>) {
     });
 }
 
+/// Forces the same-filesystem CAS install fast path to behave as if the
+/// source were on a different filesystem, so tests can exercise the
+/// byte-copy fallback deterministically.
+pub(super) fn force_move_install_ineligible(ineligible: bool) {
+    crate::graph_object_store::FORCE_MOVE_INSTALL_INELIGIBLE.with(|current| {
+        current.set(ineligible);
+    });
+}
+
 #[test]
 fn returned_errors_release_every_cas_lock_and_pending_lease_boundary() {
     let root = tempfile::tempdir().unwrap();
