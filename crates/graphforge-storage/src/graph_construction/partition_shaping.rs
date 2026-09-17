@@ -130,6 +130,12 @@ pub(crate) mod test_support {
 
     /// Force [`super::shaping_worker_count`] to return `threads` (clamped to
     /// the item count) on the calling thread, until cleared with `None`.
+    ///
+    /// `feature = "test-support"` exposes this to other crates' tests, the
+    /// same way the rest of this feature does; nothing outside this crate's
+    /// own `cfg(test)` determinism suite calls it yet, so a `test-support`-only
+    /// build (no `cfg(test)`) sees it as unused. That is expected, not a bug.
+    #[allow(dead_code, reason = "reachable via feature = \"test-support\" alone; not yet called outside cfg(test)")]
     pub(crate) fn set_worker_count_override(threads: Option<usize>) {
         WORKER_COUNT_OVERRIDE.with(|cell| cell.set(threads));
     }
@@ -139,6 +145,7 @@ pub(crate) mod test_support {
     }
 
     /// Enable or disable the completion-order jitter on the calling thread.
+    #[allow(dead_code, reason = "reachable via feature = \"test-support\" alone; not yet called outside cfg(test)")]
     pub(crate) fn set_jitter_enabled(enabled: bool) {
         JITTER_ENABLED.with(|cell| cell.set(enabled));
     }
