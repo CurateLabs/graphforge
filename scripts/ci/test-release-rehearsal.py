@@ -111,7 +111,9 @@ def test_artifact_rehearsal() -> None:
             )
             assert report["status"] == "passed"
             assert report["registry_writes"] == 0
-            assert report["checks"]["candidate_completeness"]["nodes"] == 26
+            assert (
+                report["checks"]["candidate_completeness"]["nodes"] == registry_fixture.NODE_COUNT
+            )
             node_check = report["checks"]["node_cli_skills_clean_consumer"]
             assert node_check["loaded_version"] == candidate_fixture.VERSION
             host_native = rehearsal._compatible_native_npm_name()
@@ -122,7 +124,9 @@ def test_artifact_rehearsal() -> None:
                 "@curatelabs/graphforge-agent-skills",
                 host_native,
             ]
-            assert len(report["checks"]["rust_packages"]["packages"]) == 17
+            assert len(report["checks"]["rust_packages"]["packages"]) == len(
+                candidate_contract.CRATES
+            )
             assert not any(word in json.dumps(report).lower() for word in rehearsal.FORBIDDEN_TEXT)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -168,14 +172,14 @@ def test_sequential_reconciliation() -> None:
     availability = _availability()
     absent = _all(manifest, {"status": 404})
     transitions = _sequential_happy_path(manifest)
-    assert len(transitions) == 26
+    assert len(transitions) == registry_fixture.NODE_COUNT
     report = rehearsal.simulate_sequential(
         manifest, absent, availability, transitions, simulated_at=NOW
     )
     assert report["complete"] is True
-    assert report["summary"]["nodes"] == 26
-    assert report["summary"]["verified"] == 26
-    assert len(report["events"]) == 26
+    assert report["summary"]["nodes"] == registry_fixture.NODE_COUNT
+    assert report["summary"]["verified"] == registry_fixture.NODE_COUNT
+    assert len(report["events"]) == registry_fixture.NODE_COUNT
     assert all(event["sequence"] == index for index, event in enumerate(report["events"], 1))
 
     all_verified = registry_fixture.observation_set(manifest)

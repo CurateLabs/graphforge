@@ -31,21 +31,26 @@ RELEASE_CANDIDATE_SCHEMA = "graphforge-release-candidate-v2"
 RELEASE_RECORD_SCHEMAS = (RELEASE_RECORD_SCHEMA, RELEASE_CANDIDATE_SCHEMA)
 DEFAULT_VERSION = "0.5.2"
 DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
+# crates.io publish set and order; must equal `crate-publish-plan.py list`.
+# scripts/ci/test-crate-publish-plan.py fails when this drifts from the plan.
 DEFAULT_CRATES = (
     "graphforge-core",
-    "graphforge-value",
+    "graphforge-discovery",
     "graphforge-filesystem",
+    "graphforge-io",
+    "graphforge-observability",
     "graphforge-ast",
     "graphforge-knowledge",
-    "graphforge-ontology",
+    "graphforge-portable-oci",
     "graphforge-provenance",
+    "graphforge-value",
+    "graphforge-cypher",
+    "graphforge-ontology",
     "graphforge-ir",
     "graphforge-plan",
     "graphforge-storage",
-    "graphforge-io",
     "graphforge-rel",
     "graphforge-search",
-    "graphforge-cypher",
     "graphforge-exec",
     "graphforge-api",
     "graphforge-cli",

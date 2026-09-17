@@ -18,8 +18,11 @@ cev = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cev  # required for dataclasses under Python 3.9
 SPEC.loader.exec_module(cev)
 
-assert len(cev.DEFAULT_CRATES) == 17
+assert len(cev.DEFAULT_CRATES) == 20
 assert "graphforge-value" in cev.DEFAULT_CRATES
+# #1373: these three were in the publish plan but missing from the inventory.
+for crate_name in ("graphforge-discovery", "graphforge-observability", "graphforge-portable-oci"):
+    assert crate_name in cev.DEFAULT_CRATES
 assert cev.DEFAULT_CRATES[0] == "graphforge-core"
 assert cev.DEFAULT_CRATES[-1] == "graphforge-cli"
 assert cev.LANE_ISSUES["cargo"] == 185

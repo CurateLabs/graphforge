@@ -27,21 +27,26 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 
 # Crates intended for crates.io (bindings ship via PyPI/npm).
+# Must equal `scripts/ci/crate-publish-plan.py list`; enforced by
+# scripts/ci/test-crate-publish-plan.py.
 CARGO_PUBLISH_CRATES = (
     "graphforge-core",
-    "graphforge-value",
+    "graphforge-discovery",
     "graphforge-filesystem",
+    "graphforge-io",
+    "graphforge-observability",
     "graphforge-ast",
     "graphforge-knowledge",
-    "graphforge-ontology",
+    "graphforge-portable-oci",
     "graphforge-provenance",
+    "graphforge-value",
+    "graphforge-cypher",
+    "graphforge-ontology",
     "graphforge-ir",
     "graphforge-plan",
     "graphforge-storage",
-    "graphforge-io",
     "graphforge-rel",
     "graphforge-search",
-    "graphforge-cypher",
     "graphforge-exec",
     "graphforge-api",
     "graphforge-cli",
