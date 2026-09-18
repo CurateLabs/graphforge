@@ -1122,7 +1122,11 @@ fn encode_nodes(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
-    if shape.node_rows.is_empty() {
+    // "No staged nodes" is the details family being absent -- its finish
+    // returns `None` at zero records. `node_rows` is not a count: a
+    // property-free session stages nodes and produces no row artifacts
+    // (#1455), and an empty-rows guard would encode it as an empty graph.
+    if shape.node_details.is_none() {
         if !build_v4 {
             return Ok(None);
         }
@@ -1146,7 +1150,7 @@ fn encode_nodes(
     let details_name = shape
         .node_details
         .as_deref()
-        .ok_or_else(|| storage("node rows lack canonical details"))?;
+        .ok_or_else(|| storage("staged nodes lack canonical details"))?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
@@ -1489,13 +1493,12 @@ fn encode_edges(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
-    if shape.edge_rows.is_empty() {
+    // Same count guard as `encode_nodes`: the details family is absent only
+    // when no edge was staged, whereas `edge_rows` is empty for every
+    // property-free session (#1455).
+    let Some(details_name) = shape.edge_details.as_deref() else {
         return Ok(());
-    }
-    let details_name = shape
-        .edge_details
-        .as_deref()
-        .ok_or_else(|| storage("edge rows lack canonical details"))?;
+    };
     let endpoints_name = shape
         .edge_endpoints
         .as_deref()

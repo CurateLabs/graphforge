@@ -380,8 +380,9 @@ fn catalog_shape_preserves_parent_ids_history_and_ignores_null_observations() {
     let output = build_runtime_catalog(
         parent_catalog,
         &private,
-        &["nodes.parquet".to_owned()],
-        &[],
+        CatalogSource::Rows(&["nodes.parquet".to_owned()]),
+        CatalogSource::Rows(&[]),
+        DetailCodec::from_version(FORMAT_VERSION).unwrap(),
         42,
         GraphConstructionBudgets::default(),
         &mut || false,
@@ -541,7 +542,12 @@ fn staged_catalog_cardinality_is_bounded_at_one_and_two_windows() {
             session.evidence().peak_catalog_identifier_bytes,
             expected_identifier_bytes as u64
         );
-        assert!(session.evidence().peak_catalog_decoded_batch_bytes > 0);
+        // Property-free chunks derive the catalog from the details family
+        // (#1455): no row Parquet is scanned, so no batch is decoded. The
+        // admission budgets above are what this test defends; the
+        // property-bearing path's decode is asserted in `catalog::tests`.
+        assert_eq!(session.evidence().peak_catalog_decoded_batch_bytes, 0);
+        assert!(session.evidence().merge_read_records > 0);
         assert!(session.evidence().shape_input_validation_read_bytes > 0);
     }
 }

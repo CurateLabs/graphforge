@@ -8,9 +8,9 @@
 
 mod intake;
 use intake::{
-    ReceiptPointer, artifact_stem, receipt_from_intent, receipt_name, uuid_column, uuid_value,
-    validate_artifact_name, validate_intent, validate_parquet_metadata, validate_receipt_artifacts,
-    validate_receipt_semantics, write_parquet_with_properties,
+    ReceiptPointer, artifact_stem, property_free_schema_sha256, receipt_from_intent, receipt_name,
+    uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
+    validate_receipt_artifacts, validate_receipt_semantics, write_parquet_with_properties,
 };
 mod io_evidence;
 pub(crate) use io_evidence::{
@@ -66,7 +66,8 @@ mod catalog;
 pub(crate) mod diagnostics;
 mod partition;
 use catalog::{
-    build_runtime_catalog, load_parent_runtime_catalog, load_parent_runtime_catalog_from_compact,
+    CatalogSource, build_runtime_catalog, load_parent_runtime_catalog,
+    load_parent_runtime_catalog_from_compact,
 };
 mod partition_shaping;
 mod supersession;
