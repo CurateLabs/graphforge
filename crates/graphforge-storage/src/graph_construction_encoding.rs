@@ -2862,7 +2862,7 @@ impl<const N: usize> FixedReader<N> {
             record
         };
         let wire = match self.detail_codec {
-            Some(codec) => codec.bytes(&record).map_err(storage)?,
+            Some(codec) => codec.wire(&record).map_err(storage)?,
             None => &record,
         };
         self.digest.update(wire);
