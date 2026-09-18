@@ -311,6 +311,8 @@ impl GraphConstructionSession {
             partition_identity_rows: Vec::new(),
         };
         install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let chunk_scope = crate::graph_construction::diagnostics::Scope::start("shape.chunk_loop");
         for sequence in 0..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
@@ -434,10 +436,15 @@ impl GraphConstructionSession {
                 }
             }
         }
+        #[cfg(any(test, feature = "test-support"))]
+        drop(chunk_scope);
         // Load-bearing, not a nicety: a collapsed one-partition run is
         // perfectly deterministic and passes every byte-equality test, so this
         // is the only check that can tell a working range partition from a
         // catastrophically skewed one.
+        #[cfg(any(test, feature = "test-support"))]
+        let between_scope =
+            crate::graph_construction::diagnostics::Scope::start("shape.loop_to_chain");
         identities.balance().assert_balanced("staged identity")?;
         let partition_identity_rows = identities.balance().rows().to_vec();
         self.checkpoint.evidence.max_partition_identity_rows = identities.balance().max_rows();
@@ -480,6 +487,8 @@ impl GraphConstructionSession {
         if base_max_node != self.checkpoint.base_work.max_node_surrogate {
             return Err(storage("UUID snapshot and surrogate tails disagree"));
         }
+        #[cfg(any(test, feature = "test-support"))]
+        drop(between_scope);
         #[cfg(any(test, feature = "test-support"))]
         let validate_scope =
             crate::graph_construction::diagnostics::Scope::start("chain.validate_staged_details");
@@ -544,6 +553,8 @@ impl GraphConstructionSession {
         )?;
         #[cfg(any(test, feature = "test-support"))]
         drop(resolve_scope);
+        #[cfg(any(test, feature = "test-support"))]
+        let tail_scope = crate::graph_construction::diagnostics::Scope::start("shape.after_chain");
         let node_count = self
             .checkpoint
             .base_work
