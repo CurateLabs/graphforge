@@ -20,16 +20,31 @@ def summarize(documents: dict[str, Any]) -> dict[str, Any]:
         for operation, timing in receipt.get("operation_timings", {}).items():
             total = calls.setdefault(operation, dict.fromkeys(("calls", "errors", "elapsed_ns"), 0))
             for key, value in timing.items():
-                total[key] += value
+                # `.get` rather than `+=`: the receipt gained `cpu_ns` and
+                # `cpu_unmeasured_calls` (#1462) and a fixed seed would raise
+                # KeyError on any field added after this was written.
+                total[key] = total.get(key, 0) + value
     if not calls:
         raise ValueError("runtime diagnosis requires operation timing receipts")
     call_ns = sum(timing["elapsed_ns"] for timing in calls.values())
+    # Process CPU over elapsed wall, per construction operation: how many cores'
+    # worth each used (#1462). This is the figure #1387's serialized-fraction
+    # budget is read from -- `seal` is 68-80% of ingest, so its value is the one
+    # that matters. Omitted per operation when CPU was unavailable, rather than
+    # reported as zero, and absent entirely for evidence recorded before the
+    # receipt carried CPU, so historical bundles stay comparable.
+    effective_cores = {
+        operation: timing["cpu_ns"] / timing["elapsed_ns"]
+        for operation, timing in calls.items()
+        if timing.get("elapsed_ns") and not timing.get("cpu_unmeasured_calls", 1)
+    }
     return {
         "identities": documents["result"]["identities"],
         "whole_lifecycle_benchexec": documents["benchexec"]["authority"],
         "phase_wall_ms": {phase["phase"]: phase["duration_ms"] for phase in phases},
         "process_peak_rss_bytes": documents["rung"]["metrics"]["peak_rss_bytes"],
         "construction_calls": calls,
+        **({"construction_call_effective_cores": effective_cores} if effective_cores else {}),
         "ingest_outside_construction_calls_ns": ingest["duration_ms"] * 1_000_000 - call_ns,
         "lifecycle_outside_phase_wall_seconds": documents["benchexec"]["authority"]["wall_seconds"]
         - sum(phase["duration_ms"] for phase in phases) / 1000,
