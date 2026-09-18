@@ -630,7 +630,25 @@ fn logical_batch_digest(
     Ok(hex(&digest.finalize()))
 }
 
-fn normalized_schema_digest(schema: &Schema) -> String {
+/// Digest of the bare canonical construction schema for `kind`: the exact
+/// schema a chunk carries when it has no property columns (#1455).
+///
+/// A chunk's recorded `schema_sha256` is [`normalized_schema_digest`] of its
+/// complete normalized schema, so equality with this digest is a durable,
+/// receipt-level statement that the chunk's rows carry nothing beyond the
+/// identity and label (or endpoints and route) its details run already holds.
+pub(super) fn property_free_schema_sha256(kind: ConstructionChunkKind) -> &'static str {
+    static NODE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| normalized_schema_digest(&CONSTRUCTION_NODE_SCHEMA));
+    static EDGE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| normalized_schema_digest(&CONSTRUCTION_EDGE_SCHEMA));
+    match kind {
+        ConstructionChunkKind::Node => NODE.as_str(),
+        ConstructionChunkKind::Edge => EDGE.as_str(),
+    }
+}
+
+pub(super) fn normalized_schema_digest(schema: &Schema) -> String {
     let mut digest = Sha256::new();
     for field in schema.fields() {
         digest.update((field.name().len() as u64).to_be_bytes());

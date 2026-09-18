@@ -19,19 +19,46 @@ use sha2::{Digest, Sha256};
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
 
 use super::{
-    BLOCK_BYTES, ConstructionChunkKind, ConstructionFileHandle, CountingChunkReader,
-    GraphConstructionBudgets, GraphConstructionEvidence, IoCounter, ReadWork,
-    account_cache_release, account_sequential_write, combine_cache_cleanup, hex,
-    is_canonical_sha256, merge_cache_release_evidence, record_shape_artifact_install,
-    reject_cancelled, storage, write_parquet_with_properties,
+    BLOCK_BYTES, ConstructionChunkKind, ConstructionFileHandle, CountingChunkReader, DetailCodec,
+    EDGE_DETAIL_WIDTH, GraphConstructionBudgets, GraphConstructionEvidence, IoCounter,
+    NODE_DETAIL_WIDTH, ReadWork, account_cache_release, account_fixed_read_operations,
+    account_merge_read, account_sequential_write, combine_cache_cleanup, hex, is_canonical_sha256,
+    merge_cache_release_evidence, open_counted_fixed_reader, record_shape_artifact_install,
+    reject_cancelled, release_counted_reader_cache, storage, write_parquet_with_properties,
 };
+
+/// Where one kind's runtime-catalog observations are read from (#1455).
+///
+/// The catalog interns one observation per staged row -- its label or route,
+/// then any non-null property -- in row order, and the encoded bytes depend
+/// on that order because entity and relation types share one id space. Both
+/// sources below present the rows of one kind in the same order: the UUID
+/// order the shaped families are concatenated in.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum CatalogSource<'a> {
+    /// The kind's exact-schema shaped row artifacts, scanned as Parquet. This
+    /// is the path every property-bearing input takes: property observations
+    /// exist only in the rows. It is also the path a kind keeps when its
+    /// chunks mix property-free and property-bearing schemas, because the
+    /// rows are then grouped by schema before UUID and the details family's
+    /// plain UUID order would intern them differently.
+    Rows(&'a [String]),
+    /// The kind's shaped details family, when every staged chunk of that kind
+    /// carried the bare canonical schema. Node details carry the label and
+    /// edge details carry the route, sorted by UUID exactly as the single
+    /// property-free row group would have been, so the intern sequence -- and
+    /// the catalog bytes -- are identical to a scan of that row group. The
+    /// row artifacts are not produced at all on this path.
+    Details(Option<&'a str>),
+}
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One bounded streamed catalog pass; admission must surround each intern.
 pub(super) fn build_runtime_catalog(
     mut catalog: RuntimeCatalog,
     root: &StableDirectory,
-    node_rows: &[String],
-    edge_rows: &[String],
+    node_source: CatalogSource<'_>,
+    edge_source: CatalogSource<'_>,
+    detail_codec: DetailCodec,
     now_micros: i64,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
@@ -50,10 +77,44 @@ pub(super) fn build_runtime_catalog(
     evidence.peak_catalog_identifier_bytes = evidence
         .peak_catalog_identifier_bytes
         .max(identifier_bytes as u64);
-    for (kind, names) in [
-        (ConstructionChunkKind::Node, node_rows),
-        (ConstructionChunkKind::Edge, edge_rows),
+    for (kind, source) in [
+        (ConstructionChunkKind::Node, node_source),
+        (ConstructionChunkKind::Edge, edge_source),
     ] {
+        let names = match source {
+            CatalogSource::Rows(names) => names,
+            CatalogSource::Details(None) => continue,
+            CatalogSource::Details(Some(name)) => {
+                let mut admission = CatalogAdmission {
+                    catalog: &mut catalog,
+                    entries: &mut catalog_entries,
+                    identifier_bytes: &mut identifier_bytes,
+                    now_micros,
+                    budgets,
+                };
+                match kind {
+                    ConstructionChunkKind::Node => intern_details::<NODE_DETAIL_WIDTH>(
+                        &mut admission,
+                        root,
+                        name,
+                        kind,
+                        detail_codec,
+                        cancelled,
+                        evidence,
+                    )?,
+                    ConstructionChunkKind::Edge => intern_details::<EDGE_DETAIL_WIDTH>(
+                        &mut admission,
+                        root,
+                        name,
+                        kind,
+                        detail_codec,
+                        cancelled,
+                        evidence,
+                    )?,
+                }
+                continue;
+            }
+        };
         for name in names {
             let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
             let counter = IoCounter::default();
@@ -178,6 +239,90 @@ pub(super) fn build_runtime_catalog(
         .ok_or_else(|| storage("Parquet write operation count overflows"))?;
     account_sequential_write(receipt.bytes, evidence)?;
     Ok(output.to_owned())
+}
+
+/// The admission state one catalog pass threads through every intern.
+struct CatalogAdmission<'a> {
+    catalog: &'a mut RuntimeCatalog,
+    entries: &'a mut usize,
+    identifier_bytes: &'a mut usize,
+    now_micros: i64,
+    budgets: GraphConstructionBudgets,
+}
+
+impl CatalogAdmission<'_> {
+    /// Admit and intern one row's label or route observation.
+    fn observe_owner(
+        &mut self,
+        kind: ConstructionChunkKind,
+        owner_name: &str,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        let is_new = match kind {
+            ConstructionChunkKind::Node => !self.catalog.contains_entity_type(owner_name),
+            ConstructionChunkKind::Edge => !self.catalog.contains_relation_type(owner_name),
+        };
+        admit_catalog_identifier(
+            is_new,
+            owner_name.len(),
+            self.entries,
+            self.identifier_bytes,
+            self.budgets,
+            evidence,
+        )?;
+        match kind {
+            ConstructionChunkKind::Node => {
+                self.catalog.intern_label_at(owner_name, self.now_micros)?;
+            }
+            ConstructionChunkKind::Edge => {
+                self.catalog
+                    .intern_relation_type_at(owner_name, self.now_micros)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Intern one kind's observations from its shaped details family (#1455).
+///
+/// The family is the same fixed-width run the encoder later consumes: UUID
+/// sorted, one record per staged row, name bounded and padded by
+/// [`DetailCodec`]. Node records carry the label after a 16-byte UUID; edge
+/// records carry the route after the 48-byte UUID/endpoint prefix. The read
+/// is charged as a merge read, like every other fixed-width shaping scan.
+#[allow(clippy::too_many_arguments)]
+fn intern_details<const N: usize>(
+    admission: &mut CatalogAdmission<'_>,
+    root: &StableDirectory,
+    name: &str,
+    kind: ConstructionChunkKind,
+    codec: DetailCodec,
+    cancelled: &mut impl FnMut() -> bool,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    // Both detail widths are `prefix + 1 + 255`: the name-length byte sits
+    // immediately after the fixed prefix (`construction_detail_codec`).
+    const { assert!(N == NODE_DETAIL_WIDTH || N == EDGE_DETAIL_WIDTH) };
+    let prefix = N - 256;
+    let (mut reader, counter) = open_counted_fixed_reader(root, name, evidence)?;
+    let scanned = (|| -> Result<(), GfError> {
+        let mut records = 0_u64;
+        while let Some(record) = codec.read::<N>(&mut reader).map_err(storage)? {
+            let wire = codec.bytes(&record).map_err(storage)?;
+            let owner_name = std::str::from_utf8(&wire[prefix + 1..]).map_err(storage)?;
+            admission.observe_owner(kind, owner_name, evidence)?;
+            account_merge_read::<N>(evidence)?;
+            records = records
+                .checked_add(1)
+                .ok_or_else(|| storage("catalog detail record count overflows"))?;
+            if records.is_multiple_of(4096) {
+                reject_cancelled(cancelled)?;
+            }
+        }
+        account_fixed_read_operations(&counter, evidence)
+    })();
+    let released = release_counted_reader_cache(&mut reader, evidence);
+    combine_cache_cleanup(scanned, released, "runtime catalog detail source")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -426,3 +571,6 @@ where
         },
     ))
 }
+
+#[cfg(test)]
+mod tests;
