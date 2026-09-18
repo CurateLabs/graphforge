@@ -1,0 +1,198 @@
+{
+ "note": "Verbatim extracts of storage_attribution.construction.application_io and metrics from the ladder rung JSON on the GraphForge host (/home/ubuntu/graphforge-ladder/<evidence>/<rung>-rung.json, plus benchexec.authority.wall_seconds from <rung>-benchexec.json). The two evidence sets (93c041df and f80f69fe) carry identical application_io counters for S18-S22.",
+ "rungs": {
+  "s18": {
+   "source_file": "/home/ubuntu/graphforge-ladder/s18-s22-93c041df-evidence/s18-rung.json",
+   "commit": "93c041df9a788b1603844114ccd7223cef6082ab",
+   "live_edges": 4194304,
+   "benchexec_authority_wall_seconds": 54.937489710049704,
+   "metrics": {
+    "logical_read_bytes": 4988357114,
+    "logical_write_bytes": 2950826627,
+    "physical_read_bytes": 20990296064,
+    "physical_write_bytes": 12709068800,
+    "peak_rss_bytes": 179757056
+   },
+   "application_io_totals": {
+    "block_count": 38630,
+    "fsync_calls": 12340,
+    "object_count": 68,
+    "read_bytes": 4988357114,
+    "read_calls": 96721,
+    "write_bytes": 2950826627,
+    "write_calls": 67882
+   }
+  },
+  "s19": {
+   "source_file": "/home/ubuntu/graphforge-ladder/s18-s22-93c041df-evidence/s19-rung.json",
+   "commit": "93c041df9a788b1603844114ccd7223cef6082ab",
+   "live_edges": 8388608,
+   "benchexec_authority_wall_seconds": 108.56035948195495,
+   "metrics": {
+    "logical_read_bytes": 10023057723,
+    "logical_write_bytes": 5919150121,
+    "physical_read_bytes": 42384556032,
+    "physical_write_bytes": 25508794368,
+    "peak_rss_bytes": 190767104
+   },
+   "application_io_totals": {
+    "block_count": 42983,
+    "fsync_calls": 22000,
+    "object_count": 136,
+    "read_bytes": 10023057723,
+    "read_calls": 192789,
+    "write_bytes": 5919150121,
+    "write_calls": 135560
+   }
+  },
+  "s20": {
+   "source_file": "/home/ubuntu/graphforge-ladder/s18-s22-93c041df-evidence/s20-rung.json",
+   "commit": "93c041df9a788b1603844114ccd7223cef6082ab",
+   "live_edges": 16777216,
+   "benchexec_authority_wall_seconds": 215.46566465194337,
+   "metrics": {
+    "logical_read_bytes": 20134730473,
+    "logical_write_bytes": 11870432160,
+    "physical_read_bytes": 85508055040,
+    "physical_write_bytes": 51223048192,
+    "peak_rss_bytes": 194805760
+   },
+   "application_io_totals": {
+    "block_count": 52217,
+    "fsync_calls": 41070,
+    "object_count": 272,
+    "read_bytes": 20134730473,
+    "read_calls": 384923,
+    "write_bytes": 11870432160,
+    "write_calls": 272323
+   },
+   "application_io_phases": {
+    "append_merge": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 272,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 3126373984,
+     "write_calls": 8016
+    },
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 3360,
+     "object_count": 0,
+     "read_bytes": 679176194,
+     "read_calls": 11925,
+     "write_bytes": 678497696,
+     "write_calls": 11289
+    },
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 606,
+     "object_count": 0,
+     "read_bytes": 4395299283,
+     "read_calls": 162835,
+     "write_bytes": 798035338,
+     "write_calls": 40994
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 37088,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 84076105,
+     "read_calls": 1291,
+     "write_bytes": 42037964,
+     "write_calls": 645
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 95645,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "recovery_reauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 2710915685,
+     "read_calls": 13345,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "seal_authentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "shape_consume_reauthentication": {
+     "block_count": 52217,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 12265167561,
+     "read_calls": 195524,
+     "write_bytes": 7225487178,
+     "write_calls": 211379
+    }
+   }
+  },
+  "s22": {
+   "source_file": "/home/ubuntu/graphforge-ladder/s18-s22-93c041df-evidence/s22-rung.json",
+   "commit": "93c041df9a788b1603844114ccd7223cef6082ab",
+   "live_edges": 67108864,
+   "benchexec_authority_wall_seconds": 863.2433736571111,
+   "metrics": {
+    "logical_read_bytes": 81072666296,
+    "logical_write_bytes": 47674893250,
+    "physical_read_bytes": 352760922112,
+    "physical_write_bytes": 248589811712,
+    "peak_rss_bytes": 300376064
+   },
+   "application_io_totals": {
+    "block_count": 105535,
+    "fsync_calls": 155314,
+    "object_count": 1088,
+    "read_bytes": 81072666296,
+    "read_calls": 1536722,
+    "write_bytes": 47674893250,
+    "write_calls": 1095800
+   }
+  },
+  "s24": {
+   "source_file": "/home/ubuntu/graphforge-ladder/clean-f80f69fe-evidence/s24-rung.json",
+   "commit": "f80f69fe02612fa789d1b4df21606d2ff79aac50",
+   "live_edges": 268435456,
+   "benchexec_authority_wall_seconds": 4724.182273960905,
+   "metrics": {
+    "logical_read_bytes": 325445217170,
+    "logical_write_bytes": 191111001972,
+    "physical_read_bytes": 1724626731008,
+    "physical_write_bytes": 1533717729280,
+    "peak_rss_bytes": 492920832
+   },
+   "application_io_totals": {
+    "block_count": 318433,
+    "fsync_calls": 623895,
+    "object_count": 4352,
+    "read_bytes": 325445217170,
+    "read_calls": 6157850,
+    "write_bytes": 191111001972,
+    "write_calls": 4407271
+   }
+  }
+ }
+}
