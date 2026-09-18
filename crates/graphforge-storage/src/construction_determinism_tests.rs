@@ -499,8 +499,15 @@ mod determinism {
     fn partition_cut_cost_sweep() {
         // 65_536 of each gives 131_072 identities, so identities / 16 = 8_192
         // and the requested count binds for every sweep point up to 4_096.
-        let nodes = node_ids(65_536);
-        let edges = edge_ids(65_536);
+        // Scalable so the region ratios can be checked at rung scale: the
+        // 65_536 default is ~3 MB of output per family, while S18 writes
+        // hundreds of MB, and the two do not behave alike (#1464).
+        let per_kind = std::env::var("GF_SWEEP_IDENTITIES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(65_536);
+        let nodes = node_ids(per_kind);
+        let edges = edge_ids(per_kind);
         println!(
             "\n#1439 cut cost sweep: {} identities, chunk 8192",
             nodes.len() + edges.len()
