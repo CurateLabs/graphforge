@@ -2313,3 +2313,87 @@ fn persisted_authority_digests_reject_uppercase_hex() {
     };
     assert!(error.to_string().contains("digest is invalid"));
 }
+
+/// The encoder no longer re-reads the artifacts it just wrote after installing
+/// the inventory (#1384). The boundary that consumes those bytes is the CAS
+/// install at publication, which copies and hashes every artifact against the
+/// inventory. This asserts the refusal *there*, by its own message, for a
+/// same-inode, same-length payload mutation — not on the end-to-end result,
+/// and not through the reclaim sweep, which `publish_canonical` never runs.
+#[test]
+fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(9_440);
+    let mut session = encoded_publication_session(&root, operation);
+    let output = session
+        .root
+        .open_child_directory(OsStr::new("encoded-v1"))
+        .unwrap();
+    let encoded = crate::graph_construction_encoding::read_inventory(&output)
+        .unwrap()
+        .unwrap();
+    let artifact = encoded
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == "topology/surrogate_tails.parquet")
+        .unwrap();
+    let artifact_path = root
+        .path()
+        .join(PRIVATE_ROOT)
+        .join(operation.simple().to_string())
+        .join(&encoded.root)
+        .join("graph")
+        .join(&artifact.path);
+    let length_before = std::fs::metadata(&artifact_path).unwrap().len();
+    let identity_before = graphforge_filesystem::path_identity(&artifact_path).unwrap();
+    {
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&artifact_path)
+            .unwrap();
+        let mut first = [0_u8; 1];
+        file.read_exact(&mut first).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[first[0] ^ 0xff]).unwrap();
+        file.sync_all().unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&artifact_path).unwrap().len(),
+        length_before
+    );
+    assert_eq!(
+        graphforge_filesystem::path_identity(&artifact_path).unwrap(),
+        identity_before
+    );
+
+    let error = session
+        .publish_canonical(&encoded, Uuid::from_u128(9_441), Uuid::from_u128(9_442))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("graph object source digest or length changed during install"),
+        "expected the CAS install boundary to refuse the mutation, got: {error}"
+    );
+    assert_ne!(
+        session.checkpoint.publication_state,
+        Some(ConstructionPublicationState::Published)
+    );
+
+    // The reclaim sweep, when it runs, refuses the same bytes with its own
+    // message. It is not what the publication boundary depends on.
+    let sweep = crate::graph_construction_encoding::authenticate_inventory_payloads(
+        &output,
+        &encoded,
+        &mut || false,
+    )
+    .unwrap_err();
+    assert!(
+        sweep
+            .to_string()
+            .contains("canonical artifact differs from inventory"),
+        "{sweep}"
+    );
+}
