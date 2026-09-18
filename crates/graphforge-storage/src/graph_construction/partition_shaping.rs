@@ -10,21 +10,28 @@
 //! is monotone, that concatenation *is* the global order: there is nothing left
 //! to merge. Two passes over the data replace `1 + ceil(log_fanin(chunks))`.
 //!
-//! The partitions run sequentially here. Nothing in this module shares mutable
-//! state between partitions, which is what makes the concurrent step that
-//! follows a scheduling change rather than a correctness change.
+//! Fixed-width partitions are loaded and sorted by a bounded worker pool and
+//! consumed by the calling thread in partition index order
+//! (see [`super::partition_load`]). Workers return their own results and local
+//! counters; the shared evidence, the allocation ledger and publication stay
+//! with the coordinator, so the worker count is a scheduling decision that
+//! changes neither the evidence nor a byte of output. Row partitions still run
+//! sequentially.
 
 use super::partition::{PartitionBalance, PartitionPlan};
+use super::partition_load::{
+    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order,
+};
 use super::{
     ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
-    IoCounter, account_cache_release, account_fixed_read_operations,
-    account_fixed_write_operations, account_merge_read_bytes, account_merge_write_bytes,
-    account_sequential_write, artifact_temp, cleanup_failed_shape_output,
-    cleanup_shape_publication, combine_cache_cleanup, combine_secondary_cleanup,
-    construction_failpoint, hex, open_counted_fixed_reader, persist_shape_receipt, read_run_record,
-    record_shape_artifact_install, reject_cancelled, release_counted_reader_cache,
-    run_record_bytes, sha256, shape_publication_failure, shape_publication_io_failure,
-    unlink_shape_artifact, unlink_writer_capability, uuid_column, uuid_value,
+    IoCounter, account_cache_release, account_fixed_write_operations, account_merge_read_bytes,
+    account_merge_write_bytes, account_sequential_write, artifact_temp,
+    cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
+    combine_secondary_cleanup, construction_failpoint, hex, injected_input_release_failure,
+    open_fixed_reader, persist_shape_receipt, read_run_record, record_shape_artifact_install,
+    reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
+    shape_publication_io_failure, unlink_shape_artifact, unlink_writer_capability, uuid_column,
+    uuid_value,
 };
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
@@ -38,6 +45,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use sha2::Digest;
 use std::ffi::OsStr;
 use std::io::{BufWriter, Write};
+use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicBool;
 
 /// Per-spill write buffer for row (Arrow) partition spills. Every partition
 /// holds one open spill during the routing pass, so this is multiplied by the
@@ -373,6 +382,9 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     sealed: Vec<Option<ArtifactReceipt>>,
     balance: PartitionBalance,
     records: u64,
+    /// Concurrent partition loads while finishing; see
+    /// [`super::partition_load::consume_in_partition_order`] for the bound.
+    load_workers: NonZeroUsize,
 }
 
 impl<const N: usize> Drop for FixedRangePartitioner<'_, N> {
@@ -408,7 +420,16 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             sealed: (0..partitions).map(|_| None).collect(),
             balance: PartitionBalance::new(partitions),
             records: 0,
+            load_workers: PARTITION_LOAD_WORKERS,
         })
+    }
+
+    /// Force the finish-time worker count. Scheduling only: the tests hold the
+    /// evidence and output bytes equal across every value.
+    #[cfg(test)]
+    pub(super) fn with_load_workers(mut self, workers: NonZeroUsize) -> Self {
+        self.load_workers = workers;
+        self
     }
 
     /// Route one record into the partition owning `key`.
@@ -557,49 +578,71 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             // this count does not hide. For a unique-key family it equals the
             // row balance recorded at routing time.
             let mut keys = PartitionBalance::new(self.sealed.len());
-            for partition in 0..self.sealed.len() {
-                let Some(name) = self.sealed[partition]
-                    .as_ref()
-                    .map(|receipt| receipt.name.clone())
-                else {
-                    continue;
-                };
-                reject_cancelled(cancelled)?;
-                let expected = self.balance.rows().get(partition).copied();
-                let records = self.load_partition(&name, expected, evidence)?;
-                for record in &records {
-                    // Partition order is key order, so the concatenation is the
-                    // global order. Prove it rather than assume it: this is the
-                    // invariant the external merge's heap used to provide.
-                    if let Some(prior) = previous.as_ref() {
-                        if prior[..16] > record[..16] {
-                            return Err(super::storage(
-                                "range partition concatenation is not globally ordered",
-                            ));
-                        }
-                        if self.reject_duplicates && prior[..16] == record[..16] {
-                            return Err(super::storage(
-                                "duplicate identity across construction runs",
-                            ));
-                        }
-                        if prior[..16] != record[..16] {
+            // Every sealed partition, in canonical index order. Workers load
+            // and sort them on their own; this thread consumes them in this
+            // order, so the output is the same for any worker count.
+            let jobs = self
+                .sealed
+                .iter()
+                .enumerate()
+                .filter_map(|(partition, slot)| {
+                    slot.as_ref().map(|receipt| {
+                        (
+                            partition,
+                            receipt.name.clone(),
+                            self.balance.rows().get(partition).copied(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            let codec = self.codec;
+            let load = |job: usize, stop: &AtomicBool| {
+                let (_, name, expected) = &jobs[job];
+                load_fixed_partition::<N>(root, name, *expected, codec, stop)
+            };
+            let consume =
+                |job: usize, (records, counters): (Vec<[u8; N]>, PartitionLoadCounters)| {
+                    let partition = jobs[job].0;
+                    reject_cancelled(cancelled)?;
+                    // The ordered critical section: fold the worker's local
+                    // counters into the shared evidence, then write the partition.
+                    counters.merge_into(evidence)?;
+                    injected_input_release_failure()?;
+                    for record in &records {
+                        // Partition order is key order, so the concatenation is the
+                        // global order. Prove it rather than assume it: this is the
+                        // invariant the external merge's heap used to provide.
+                        if let Some(prior) = previous.as_ref() {
+                            if prior[..16] > record[..16] {
+                                return Err(super::storage(
+                                    "range partition concatenation is not globally ordered",
+                                ));
+                            }
+                            if self.reject_duplicates && prior[..16] == record[..16] {
+                                return Err(super::storage(
+                                    "duplicate identity across construction runs",
+                                ));
+                            }
+                            if prior[..16] != record[..16] {
+                                keys.record(partition)?;
+                            }
+                        } else {
                             keys.record(partition)?;
                         }
-                    } else {
-                        keys.record(partition)?;
+                        let wire = run_record_bytes(record, self.codec)?;
+                        writer.write_all(wire).map_err(super::storage)?;
+                        account_merge_write_bytes(evidence, wire.len() as u64)?;
+                        previous = Some(*record);
+                        written = written.checked_add(1).ok_or_else(|| {
+                            super::storage("partition output record count overflows")
+                        })?;
+                        if written.is_multiple_of(4096) {
+                            reject_cancelled(cancelled)?;
+                        }
                     }
-                    let wire = run_record_bytes(record, self.codec)?;
-                    writer.write_all(wire).map_err(super::storage)?;
-                    account_merge_write_bytes(evidence, wire.len() as u64)?;
-                    previous = Some(*record);
-                    written = written
-                        .checked_add(1)
-                        .ok_or_else(|| super::storage("partition output record count overflows"))?;
-                    if written.is_multiple_of(4096) {
-                        reject_cancelled(cancelled)?;
-                    }
-                }
-            }
+                    Ok(())
+                };
+            consume_in_partition_order(jobs.len(), self.load_workers, load, consume)?;
             // Load-bearing, not a nicety (#1439): a collapsed one-partition
             // run is perfectly deterministic and passes every byte-equality
             // test, so this is what tells a working range partition apart
@@ -746,48 +789,59 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         }
         Ok(Some(output.to_owned()))
     }
+}
 
-    /// Read one partition spill into memory and sort it.
-    ///
-    /// This is the materialization the design's rule R4 requires: the sorted
-    /// partition exists in full before any of it is written, so row-group and
-    /// record boundaries are a pure function of row count, never of arrival.
-    ///
-    /// `expected_records`, when given, pre-sizes the returned `Vec` from the
-    /// row count the routing pass already recorded in `self.balance` (#1439),
-    /// removing the growth-by-doubling headroom `Vec::new()` would otherwise
-    /// carry at the moment a large partition is fully materialized.
-    fn load_partition(
-        &self,
-        name: &str,
-        expected_records: Option<u64>,
-        evidence: &mut GraphConstructionEvidence,
-    ) -> Result<Vec<[u8; N]>, GfError> {
-        let (mut reader, counter) = open_counted_fixed_reader(self.root, name, evidence)?;
-        let loaded = (|| -> Result<Vec<[u8; N]>, GfError> {
-            let mut records = match expected_records.and_then(|count| usize::try_from(count).ok()) {
-                Some(count) => Vec::with_capacity(count),
-                None => Vec::new(),
-            };
-            while let Some(record) = read_run_record::<N>(&mut reader, self.codec)? {
-                account_merge_read_bytes(
-                    evidence,
-                    run_record_bytes(&record, self.codec)?.len() as u64,
-                )?;
-                records.push(record);
-            }
-            Ok(records)
-        })();
-        let released = release_counted_reader_cache(&mut reader, evidence);
-        let mut records = combine_cache_cleanup(loaded, released, "partition spill")?;
-        account_fixed_read_operations(&counter, evidence)?;
-        evidence.peak_partition_records = evidence.peak_partition_records.max(records.len() as u64);
-        // The sort key is the whole record, whose leading 16 bytes are the
-        // UUID. Records are globally unique on that prefix, so this is a total
-        // order and no stability assumption is needed.
-        records.sort_unstable();
+/// Read one fixed-width partition spill into memory and sort it, on a worker.
+///
+/// This is the materialization the design's rule R4 requires: the sorted
+/// partition exists in full before any of it is written, so row-group and
+/// record boundaries are a pure function of row count, never of arrival.
+///
+/// The shared evidence is never touched here. Everything the load observes
+/// comes back as [`PartitionLoadCounters`] for the coordinator to merge, in
+/// partition order, once it consumes the result.
+///
+/// `expected_records`, when given, pre-sizes the returned `Vec` from the
+/// row count the routing pass already recorded in the balance (#1439),
+/// removing the growth-by-doubling headroom `Vec::new()` would otherwise
+/// carry at the moment a large partition is fully materialized.
+fn load_fixed_partition<const N: usize>(
+    root: &StableDirectory,
+    name: &str,
+    expected_records: Option<u64>,
+    codec: Option<DetailCodec>,
+    stop: &AtomicBool,
+) -> Result<(Vec<[u8; N]>, PartitionLoadCounters), GfError> {
+    let (mut reader, counter, spill_bytes) = open_fixed_reader(root, name)?;
+    let mut counters = PartitionLoadCounters {
+        spill_bytes,
+        ..PartitionLoadCounters::default()
+    };
+    let loaded = (|| -> Result<Vec<[u8; N]>, GfError> {
+        let mut records = match expected_records.and_then(|count| usize::try_from(count).ok()) {
+            Some(count) => Vec::with_capacity(count),
+            None => Vec::new(),
+        };
+        while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
+            records.push(record);
+            abandon_if_stopped(records.len(), stop)?;
+        }
         Ok(records)
-    }
+    })();
+    let released = reader
+        .get_mut()
+        .inner
+        .finish()
+        .map_err(super::storage)
+        .map(|released| counters.cache_release = released);
+    let mut records = combine_cache_cleanup(loaded, released, "partition spill")?;
+    (counters.read_bytes, counters.read_operations) = counter.values();
+    counters.records = records.len() as u64;
+    // The sort key is the whole record, whose leading 16 bytes are the
+    // UUID. Records are globally unique on that prefix, so this is a total
+    // order and no stability assumption is needed.
+    records.sort_unstable();
+    Ok((records, counters))
 }
 
 /// Routes normalized Arrow rows into per-partition spills, then emits one
