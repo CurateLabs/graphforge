@@ -133,7 +133,7 @@ pub(super) fn row_spill_name(namespace: &str, partition: usize) -> String {
 }
 
 /// Whether `name` is a per-partition spill in the durable shaping grammar.
-pub(super) fn is_partition_artifact_name(name: &str) -> bool {
+pub(crate) fn is_partition_artifact_name(name: &str) -> bool {
     let is_partition_index =
         |tail: &str| tail.len() == 5 && tail.bytes().all(|byte| byte.is_ascii_digit());
     for family in PartitionFamily::ALL {

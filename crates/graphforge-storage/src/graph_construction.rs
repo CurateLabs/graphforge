@@ -70,7 +70,7 @@ use catalog::{
     load_parent_runtime_catalog_from_compact,
 };
 mod partition_load;
-mod partition_shaping;
+pub(crate) mod partition_shaping;
 mod supersession;
 
 use std::collections::{BTreeMap, BTreeSet};

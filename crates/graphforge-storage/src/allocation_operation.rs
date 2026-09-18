@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use graphforge_core::GfError;
 
+use crate::transient_composition::{TransientComponent, classify_allocation_path};
 use crate::{StorageAllocationLifecycle, StorageAllocationTransition};
 
 /// First-party operation evidence context. Native identities must remain on
@@ -204,7 +205,11 @@ impl StorageAllocationOperation {
     /// # Errors
     /// Requires an absolute route and consistent actual file metadata.
     pub fn replace_file_at(&self, path: &Path, file: &File) -> Result<(), GfError> {
-        self.replace_file(&Self::file_owner(path)?, file)
+        self.replace_file_in(
+            classify_allocation_path(path),
+            &Self::file_owner(path)?,
+            file,
+        )
     }
 
     /// Remove a successfully unlinked resolved writer route.
@@ -220,6 +225,20 @@ impl StorageAllocationOperation {
     /// # Errors
     /// Returns metadata, identity reconciliation, and accounting errors.
     pub fn replace_file(&self, owner: &str, file: &File) -> Result<(), GfError> {
+        self.replace_file_in(TransientComponent::Unclassified, owner, file)
+    }
+
+    /// Record an open file's allocated bytes, attributing newly resident bytes
+    /// to `component` so the peak composition explains them.
+    ///
+    /// # Errors
+    /// Returns metadata, identity reconciliation, and accounting errors.
+    pub fn replace_file_in(
+        &self,
+        component: TransientComponent,
+        owner: &str,
+        file: &File,
+    ) -> Result<(), GfError> {
         let usage = graphforge_filesystem::file_space_usage(file)
             .map_err(|error| GfError::Storage(error.to_string()))?;
         let identity = graphforge_filesystem::file_identity(file)
@@ -228,10 +247,11 @@ impl StorageAllocationOperation {
             identity.volume_serial,
             &identity.file_id,
         );
-        self.state
-            .lock()
-            .map_err(poisoned)?
-            .replace_owner(owner, &BTreeMap::from([(identity, usage.allocated_bytes)]))
+        self.state.lock().map_err(poisoned)?.replace_owner_in(
+            component,
+            owner,
+            &BTreeMap::from([(identity, usage.allocated_bytes)]),
+        )
     }
 
     /// Remove a writer's reference after successful unlink/replacement.
@@ -240,6 +260,44 @@ impl StorageAllocationOperation {
     /// Returns accounting errors without discarding other owners' aliases.
     pub fn remove_owner(&self, owner: &str) -> Result<(), GfError> {
         self.state.lock().map_err(poisoned)?.remove_owner(owner)
+    }
+
+    /// Return the composition of the high-water mark, which sums to the peak
+    /// returned by [`Self::totals`].
+    ///
+    /// # Errors
+    /// Refuses a poisoned accounting context.
+    pub fn peak_composition(&self) -> Result<BTreeMap<TransientComponent, u64>, GfError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(poisoned)?
+            .peak_component_allocated_bytes())
+    }
+
+    /// Return per-component residency measured in owner transitions, with the
+    /// transition count that is its denominator and the transition at which the
+    /// peak was set.
+    ///
+    /// # Errors
+    /// Refuses a poisoned accounting context.
+    #[allow(clippy::type_complexity, reason = "one private diagnostic tuple")]
+    pub fn residency(
+        &self,
+    ) -> Result<
+        (
+            BTreeMap<TransientComponent, crate::ComponentResidency>,
+            u64,
+            u64,
+        ),
+        GfError,
+    > {
+        let state = self.state.lock().map_err(poisoned)?;
+        Ok((
+            state.component_residency(),
+            state.transition_count(),
+            state.peak_transition(),
+        ))
     }
 
     /// Return the exact current union and ordered high-water mark.
