@@ -198,6 +198,7 @@ mod determinism {
         partitioned_identity_rows: u64,
         partition_outputs: u64,
         peak_partition_records: u64,
+        fsync_operations: u64,
     }
 
     fn append_all(
@@ -292,19 +293,23 @@ mod determinism {
             partitioned_identity_rows: evidence.partitioned_identity_rows,
             partition_outputs: evidence.partition_outputs,
             peak_partition_records: evidence.peak_partition_records,
+            fsync_operations: evidence.fsync_operations,
         }
     }
 
     /// A session whose recorded clock is pinned, so runs at different wall-clock
     /// instants remain comparable.
     fn pinned_session(root: &TempDir, partition_count: u32) -> GraphConstructionSession {
-        let mut session = GraphConstructionSession::open(
-            root.path(),
-            Uuid::from_u128(OPERATION),
-            0,
-            budgets(partition_count),
-        )
-        .unwrap();
+        pinned_session_with(root, budgets(partition_count))
+    }
+
+    fn pinned_session_with(
+        root: &TempDir,
+        budgets: GraphConstructionBudgets,
+    ) -> GraphConstructionSession {
+        let mut session =
+            GraphConstructionSession::open(root.path(), Uuid::from_u128(OPERATION), 0, budgets)
+                .unwrap();
         session.checkpoint.session_now_micros = FIXED_NOW_MICROS;
         session
     }
@@ -318,7 +323,19 @@ mod determinism {
         edges: &[[u8; 16]],
         chunk: usize,
     ) -> (Fingerprint, Layout) {
-        let mut session = pinned_session(root, partition_count);
+        ingest_with(root, budgets(partition_count), nodes, edges, chunk)
+    }
+
+    /// [`ingest`] under caller-chosen budgets, for measurements that need a
+    /// wider staging window than the contract tests' fixed one.
+    fn ingest_with(
+        root: &TempDir,
+        budgets: GraphConstructionBudgets,
+        nodes: &[[u8; 16]],
+        edges: &[[u8; 16]],
+        chunk: usize,
+    ) -> (Fingerprint, Layout) {
+        let mut session = pinned_session_with(root, budgets);
         append_all(&mut session, nodes, edges, chunk);
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
@@ -463,6 +480,104 @@ mod determinism {
                 "differing": differing,
             })
         );
+    }
+
+    /// Measurement for #1439: at fixed data, what does raising the cut cost?
+    ///
+    /// The issue calls the fsync trade-off central — each partition costs a
+    /// durable spill with its own barrier in every family — but the ladder
+    /// evidence cannot separate the per-partition barrier term from the
+    /// per-chunk one, because the cut is pinned at 256 on every rung while the
+    /// data grows. This holds the data fixed and varies only the cut, so every
+    /// difference below is the per-partition term.
+    ///
+    /// Ignored by default: it is a measurement, not an assertion, and it costs
+    /// minutes. Run with
+    /// `cargo test -p graphforge-storage --lib partition_cut_cost_sweep -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement for #1439, run explicitly"]
+    fn partition_cut_cost_sweep() {
+        // 65_536 of each gives 131_072 identities, so identities / 16 = 8_192
+        // and the requested count binds for every sweep point up to 4_096.
+        let nodes = node_ids(65_536);
+        let edges = edge_ids(65_536);
+        println!(
+            "\n#1439 cut cost sweep: {} identities, chunk 8192",
+            nodes.len() + edges.len()
+        );
+        println!(
+            "{:>9} {:>11} {:>13} {:>16} {:>16} {:>14} {:>14}",
+            "requested", "partitions", "rows/part", "max_part_rows", "peak_part_recs",
+            "part_outputs", "fsync_ops"
+        );
+        type Durable = (
+            Vec<(String, String)>,
+            Vec<(String, u64, String)>,
+            u64,
+            u64,
+            u64,
+            u64,
+        );
+        let mut reference: Option<(Durable, Vec<(String, String)>)> = None;
+        for partition_count in [256_u32, 512, 1_024, 2_048, 4_096] {
+            let root = TempDir::new().unwrap();
+            let sweep_budgets = GraphConstructionBudgets {
+                max_batch_rows: 8_192,
+                max_run_records: 262_144,
+                partition_count,
+                ..GraphConstructionBudgets::default()
+            };
+            let (fingerprint, layout) =
+                ingest_with(&root, sweep_budgets, &nodes, &edges, 8_192);
+            let rows = layout.partitioned_identity_rows / layout.partitions.max(1);
+            println!(
+                "{partition_count:>9} {:>11} {rows:>13} {:>16} {:>16} {:>14} {:>14}",
+                layout.partitions,
+                layout.max_partition_identity_rows,
+                layout.peak_partition_records,
+                layout.partition_outputs,
+                layout.fsync_operations,
+            );
+            // What the contract actually protects across cuts: the four
+            // fixed-width run digests and every published artifact. ADR 0038
+            // released byte-identical *intermediates*, and `shaped-rows-*`
+            // parquet is an intermediate -- `recover_shape_intent` unlinks
+            // every `shaped-` name on an incomplete run. Measured here: those
+            // rows files do differ by cut while nothing published does.
+            let durable = (
+                fingerprint
+                    .shaped
+                    .iter()
+                    .filter(|(name, _)| name.ends_with(".run"))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                fingerprint.encoded.clone(),
+                fingerprint.node_count,
+                fingerprint.edge_count,
+                fingerprint.max_node_surrogate,
+                fingerprint.max_edge_surrogate,
+            );
+            let rows = fingerprint
+                .shaped
+                .iter()
+                .filter(|(name, _)| !name.ends_with(".run"))
+                .cloned()
+                .collect::<Vec<_>>();
+            match reference.as_ref() {
+                None => reference = Some((durable, rows)),
+                Some((expected_durable, expected_rows)) => {
+                    assert_eq!(
+                        *expected_durable, durable,
+                        "cut {partition_count} changed a durable artifact"
+                    );
+                    if *expected_rows != rows {
+                        println!(
+                            "          shaped intermediates differ at cut {partition_count} (permitted by ADR 0038)"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
