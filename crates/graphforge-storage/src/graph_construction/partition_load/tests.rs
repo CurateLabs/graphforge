@@ -138,12 +138,24 @@ fn load_error_surfaces_at_its_partition_and_stops_dispatch() {
 fn consume_error_stops_the_pool_and_abandoned_loads_are_never_observed() {
     const PARTITIONS: usize = 6;
     let abandoned = AtomicUsize::new(0);
+    let third_started = AtomicBool::new(false);
     let load = |index: usize, stop: &AtomicBool| {
         if index >= 2 {
-            // An in-flight load sees the coordinator stop and exits.
+            // An in-flight load sees the coordinator stop and exits. A load
+            // dispatched after the stop never starts, so only partition 2,
+            // held in flight below, is certain to be abandoned.
+            third_started.store(true, Ordering::SeqCst);
             spin_until(|| stop.load(Ordering::Acquire), "the stop flag");
             abandoned.fetch_add(1, Ordering::SeqCst);
             return Err(storage("abandoned"));
+        }
+        if index == 1 {
+            // Three slots dispatch 0, 1 and 2 together; hold 1 until 2 is
+            // genuinely in flight so the failure below abandons it.
+            spin_until(
+                || third_started.load(Ordering::SeqCst),
+                "partition 2 to start",
+            );
         }
         Ok(index)
     };
@@ -153,12 +165,13 @@ fn consume_error_stops_the_pool_and_abandoned_loads_are_never_observed() {
         }
         Ok(())
     };
-    let error = consume_in_partition_order(PARTITIONS, workers(2), load, consume)
+    let error = consume_in_partition_order(PARTITIONS, workers(3), load, consume)
         .unwrap_err()
         .to_string();
     assert!(error.contains("injected consume failure"), "{error}");
-    // With two slots, exactly partition 2 was in flight when 1 was consumed.
-    assert_eq!(abandoned.load(Ordering::SeqCst), 1);
+    assert!(!error.contains("abandoned"), "{error}");
+    let abandoned = abandoned.load(Ordering::SeqCst);
+    assert!((1..=2).contains(&abandoned), "abandoned={abandoned}");
 }
 
 #[test]
@@ -376,10 +389,12 @@ fn fixed_partition_finish_is_schedule_independent_across_worker_counts() {
         let digest = super::super::hex(&sha2::Sha256::digest(&bytes));
         let after = &checkpoint.evidence;
 
-        // Plain sums are what a sequential pass credits: two passes over the
-        // records and every partition read once.
+        // Plain sums are what a sequential pass credits: every record routed
+        // and read back once (this fixture routes from memory, so the only
+        // descriptor reads are the partition spills), and every spill byte
+        // read exactly once.
         assert_eq!(after.merge_read_records, RECORDS * 2, "workers={count}");
-        assert_eq!(after.merge_read_bytes, RECORDS * 16 * 2, "workers={count}");
+        assert_eq!(after.merge_read_bytes, RECORDS * 16, "workers={count}");
         assert_eq!(after.partition_rows, RECORDS, "workers={count}");
         assert_eq!(after.partition_outputs, 1, "workers={count}");
         assert!(after.peak_partition_records > 0, "workers={count}");
