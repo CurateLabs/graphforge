@@ -66,16 +66,20 @@ pub struct ExecutionResourcePolicy {
 impl Default for ExecutionResourcePolicy {
     fn default() -> Self {
         Self {
-            // Preserve pre-#337 behavior: fixed two-worker facade.
-            mode: ResourcePolicyMode::Explicit,
-            tokio_worker_threads: Some(2),
-            target_partitions: Some(2),
+            // Derive concurrency from machine parallelism (#1387). The former
+            // fixed two-worker facade predates #337 and left the G500 ladder at
+            // 0.89 effective cores across a 64x edge range on a 16-thread host,
+            // because every default-constructed instance took two workers
+            // whatever the machine had. `None` defers each knob to the mode.
+            mode: ResourcePolicyMode::Automatic,
+            tokio_worker_threads: None,
+            target_partitions: None,
             batch_size: Some(DEFAULT_BATCH_SIZE),
             memory_budget_bytes: Some(DEFAULT_MEMORY_BUDGET_BYTES),
             spill: SpillPolicy::default(),
-            io_concurrency: Some(2),
+            io_concurrency: None,
             max_concurrent_heavy_queries: Some(DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES),
-            compute_threads: Some(2),
+            compute_threads: None,
         }
     }
 }
@@ -389,13 +393,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_preserve_fixed_two_worker_baseline() {
+    fn defaults_derive_concurrency_from_machine_parallelism() {
         let normalized = ExecutionResourcePolicy::default()
             .normalize()
             .expect("default policy");
-        assert_eq!(normalized.tokio_worker_threads, 2);
-        assert_eq!(normalized.target_partitions, 2);
-        assert_eq!(normalized.mode, ResourcePolicyMode::Explicit);
+        let observed = logical_cpus();
+        let expected = if observed <= 2 {
+            1
+        } else {
+            observed.div_ceil(2).clamp(MIN_THREADS, 8)
+        };
+        assert_eq!(normalized.tokio_worker_threads, expected);
+        assert_eq!(normalized.target_partitions, expected);
+        assert_eq!(normalized.io_concurrency, expected);
+        assert_eq!(normalized.compute_threads, expected);
+        assert_eq!(normalized.mode, ResourcePolicyMode::Automatic);
         assert!(!normalized.spill_enabled);
         assert_eq!(normalized.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(normalized.memory_budget_bytes, DEFAULT_MEMORY_BUDGET_BYTES);
