@@ -18,7 +18,8 @@ PASS_A="cycles,instructions,stalled-cycles-frontend,cache-references,cache-misse
 PASS_B="cycles,instructions,l2_latency.l2_cycles_waiting_on_fills,ls_refills_from_sys.ls_mabresp_lcl_dram,ls_refills_from_sys.ls_mabresp_lcl_cache,ls_refills_from_sys.ls_mabresp_lcl_l2,ls_dc_accesses"
 PASS_C="cycles,instructions,de_dis_dispatch_token_stalls1.load_queue_token_stall,de_dis_dispatch_token_stalls1.store_queue_token_stall,de_dis_dispatch_token_stalls0.retire_token_stall,ls_l1_d_tlb_miss.all,ic_fetch_stall.ic_stall_any"
 # nps1_die_to_dram is omitted: it needs the data-fabric PMU (dram_channel_data_controller_*), absent on this desktop Ryzen.
-METRICS="l3_read_miss_latency,l1d_miss_rate,llc_miss_rate,dtlb_miss_rate,branch_misprediction_ratio"
+# l3_read_miss_latency needs the amd_l3 PMU (xi_sys_fill_latency) and llc_miss_rate needs LLC-loads; neither exists here.
+METRICS=${METRICS:-l1d_miss_rate,dtlb_miss_rate,branch_misprediction_ratio}
 # PASSES: which subject passes to run (default all). SKIP_ANCHORS=1 skips the anchors (for a second scale).
 PASSES=${PASSES:-A A2 B C M}
 
