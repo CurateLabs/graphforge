@@ -1041,6 +1041,13 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "contract",
                 "current_allocated_bytes",
                 "peak_allocated_bytes",
+                // Identity-free composition of the peak (#1393). Kept out of
+                // the numeric sanitizer list below because these are maps, not
+                // scalars; the receipt itself never leaves the private channel.
+                "peak_component_allocated_bytes",
+                "component_residency",
+                "owner_transitions",
+                "peak_transition",
             ],
         )
         .filter(|receipt| {
@@ -1281,7 +1288,13 @@ fn sanitized_import_operation_timings(value: &serde_json::Value) -> bool {
                 let Some(timing) = phases.get(*phase).and_then(serde_json::Value::as_object) else {
                     return false;
                 };
-                if timing.len() != 3 {
+                // Three fields before #1462, five after: `cpu_ns` and
+                // `cpu_unmeasured_calls` carry process CPU so the serialized
+                // fraction #1387 budgets can be read off a run. Both shapes are
+                // accepted, because rejecting the old one would invalidate every
+                // bundle recorded before the change, and rejecting the new one
+                // fails every rung after it.
+                if timing.len() != 3 && timing.len() != 5 {
                     return false;
                 }
                 let (Some(calls), Some(errors), Some(elapsed)) = (
@@ -1291,6 +1304,19 @@ fn sanitized_import_operation_timings(value: &serde_json::Value) -> bool {
                 ) else {
                     return false;
                 };
+                if timing.len() == 5 {
+                    let (Some(cpu_ns), Some(unmeasured)) = (
+                        timing.get("cpu_ns").and_then(serde_json::Value::as_u64),
+                        timing
+                            .get("cpu_unmeasured_calls")
+                            .and_then(serde_json::Value::as_u64),
+                    ) else {
+                        return false;
+                    };
+                    if unmeasured > calls || (calls == 0 && (cpu_ns != 0 || unmeasured != 0)) {
+                        return false;
+                    }
+                }
                 errors <= calls && (calls != 0 || elapsed == 0)
             })
 }

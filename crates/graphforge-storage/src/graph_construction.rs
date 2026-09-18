@@ -8,9 +8,9 @@
 
 mod intake;
 use intake::{
-    ReceiptPointer, artifact_stem, receipt_from_intent, receipt_name, uuid_column, uuid_value,
-    validate_artifact_name, validate_intent, validate_parquet_metadata, validate_receipt_artifacts,
-    validate_receipt_semantics, write_parquet_with_properties,
+    ReceiptPointer, artifact_stem, property_free_schema_sha256, receipt_from_intent, receipt_name,
+    uuid_column, uuid_value, validate_artifact_name, validate_intent, validate_parquet_metadata,
+    validate_receipt_artifacts, validate_receipt_semantics, write_parquet_with_properties,
 };
 mod io_evidence;
 pub(crate) use io_evidence::{
@@ -66,10 +66,11 @@ mod catalog;
 pub(crate) mod diagnostics;
 mod partition;
 use catalog::{
-    build_runtime_catalog, load_parent_runtime_catalog, load_parent_runtime_catalog_from_compact,
+    CatalogSource, build_runtime_catalog, load_parent_runtime_catalog,
+    load_parent_runtime_catalog_from_compact,
 };
 mod partition_load;
-mod partition_shaping;
+pub(crate) mod partition_shaping;
 mod supersession;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -561,8 +562,12 @@ pub struct ConstructionShape {
     /// UUID-sorted edge endpoint and relation records, when edges were staged.
     pub edge_details: Option<String>,
     /// UUID-sorted normalized node row artifacts, partitioned by exact schema.
+    /// Empty when every node chunk carried the bare canonical schema (#1455):
+    /// the catalog is then derived from `node_details`, and this is not a
+    /// count of staged nodes.
     pub node_rows: Vec<String>,
     /// UUID-sorted normalized edge row artifacts, partitioned by exact schema.
+    /// Empty when every edge chunk carried the bare canonical schema (#1455).
     pub edge_rows: Vec<String>,
     /// Edge-UUID regrouped `(edge, role, node_surrogate)` endpoint run.
     pub edge_endpoints: Option<String>,
@@ -570,7 +575,8 @@ pub struct ConstructionShape {
     pub runtime_catalog_now_micros: i64,
     /// Authority digest of the exact normalized row artifacts that feed the catalog.
     pub runtime_catalog_inputs_sha256: String,
-    /// Serialized RuntimeCatalog produced once from the normalized row stream.
+    /// Serialized RuntimeCatalog produced once from the normalized row stream,
+    /// or from the details families for property-free kinds (#1455).
     pub runtime_catalog: String,
     /// Live retained plus staged nodes.
     pub node_count: u64,

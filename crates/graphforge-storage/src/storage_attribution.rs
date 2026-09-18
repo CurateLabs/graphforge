@@ -5,6 +5,8 @@ use std::fs::File;
 use std::path::Path;
 
 use graphforge_core::GfError;
+
+use crate::transient_composition::TransientComponent;
 pub use graphforge_core::storage_receipt::{
     ArtifactCategory, ArtifactStorageTotals, StorageAttributionReceipt,
 };
@@ -504,16 +506,80 @@ fn merge_identity_allocations(
 /// Exact high-water tracker for simultaneously active authenticated files.
 /// Owners are replaced atomically; aliases share one native identity and are
 /// counted once until the final owner removes it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StorageAllocationLifecycle {
     owners: BTreeMap<String, BTreeSet<String>>,
     active: BTreeMap<String, (u64, u64)>,
     current_allocated_bytes: u64,
     peak_allocated_bytes: u64,
+    /// Component of the owner that first installed each active identity.
+    /// A shared identity is counted once, under where its bytes first became
+    /// resident; see [`crate::transient_composition`].
+    #[serde(default)]
+    identity_components: BTreeMap<String, TransientComponent>,
+    /// Current allocation split across the closed component inventory. Sums to
+    /// `current_allocated_bytes`.
+    #[serde(default)]
+    component_allocated_bytes: BTreeMap<TransientComponent, u64>,
+    /// Composition captured at the instant `peak_allocated_bytes` was last
+    /// raised. Sums to `peak_allocated_bytes`, which is the whole point: the
+    /// peak is explained in full rather than in part.
+    #[serde(default)]
+    peak_component_allocated_bytes: BTreeMap<TransientComponent, u64>,
+    /// Residency of each component, measured in owner transitions.
+    #[serde(default)]
+    component_residency: BTreeMap<TransientComponent, ComponentResidency>,
+    /// Owner transitions applied so far. The residency clock.
+    #[serde(default)]
+    transitions: u64,
+    /// Transition ordinal at which the peak was last raised.
+    #[serde(default)]
+    peak_transition: u64,
+}
+
+impl PartialEq for StorageAllocationLifecycle {
+    /// Equality is over the owner union that defines the allocation: owners,
+    /// active identities, and the current and peak totals. The composition,
+    /// the residency clock and the transition ordinals describe *how* a run
+    /// reached that union, and they are path-dependent by construction — two
+    /// runs that install the same files in a different order hold identical
+    /// bytes and different histories. Callers compare an observed operation
+    /// against an independently reconstructed union, which is a claim about
+    /// bytes, not about order, so this is the same equality those callers had
+    /// before the composition existed.
+    fn eq(&self, other: &Self) -> bool {
+        self.owners == other.owners
+            && self.active == other.active
+            && self.current_allocated_bytes == other.current_allocated_bytes
+            && self.peak_allocated_bytes == other.peak_allocated_bytes
+    }
+}
+
+impl Eq for StorageAllocationLifecycle {}
+
+/// How long one component stayed resident, in owner transitions.
+///
+/// Transitions rather than wall time: an allocation transition is the only
+/// event this accounting observes, it is deterministic for a deterministic
+/// workload, and it is therefore assertable in a test. `resident_transitions`
+/// over [`StorageAllocationLifecycle::transition_count`] is the fraction of the
+/// run during which the component held bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComponentResidency {
+    /// First transition after which the component held bytes.
+    pub first_transition: u64,
+    /// Last transition after which the component held bytes.
+    pub last_transition: u64,
+    /// Transitions after which the component held bytes.
+    pub resident_transitions: u64,
+    /// Highest allocation this component ever held on its own.
+    pub peak_allocated_bytes: u64,
 }
 
 struct PreparedAllocationChange {
     active: BTreeMap<String, Option<(u64, u64)>>,
+    identity_components: BTreeMap<String, Option<TransientComponent>>,
+    components: BTreeMap<TransientComponent, u64>,
     current: u64,
     peak: u64,
 }
@@ -537,14 +603,28 @@ impl StorageAllocationLifecycle {
     }
 
     /// Replace an owner's exact authenticated identity inventory.
+    ///
+    /// Newly installed identities are attributed to
+    /// [`TransientComponent::Unclassified`]. Writers that know the path should
+    /// call [`Self::replace_owner_in`] so the peak composition stays explained.
     pub fn replace_owner(
         &mut self,
         owner: impl Into<String>,
         identities: &BTreeMap<String, u64>,
     ) -> Result<(), GfError> {
+        self.replace_owner_in(TransientComponent::Unclassified, owner, identities)
+    }
+
+    /// Replace an owner's inventory, attributing new identities to `component`.
+    pub fn replace_owner_in(
+        &mut self,
+        component: TransientComponent,
+        owner: impl Into<String>,
+        identities: &BTreeMap<String, u64>,
+    ) -> Result<(), GfError> {
         let owner = owner.into();
         let removed = self.owners.get(&owner).cloned().unwrap_or_default();
-        let prepared = self.prepare_change(&removed, identities)?;
+        let prepared = self.prepare_change(component, &removed, identities)?;
         self.commit_change(prepared);
         self.owners
             .insert(owner, identities.keys().cloned().collect());
@@ -561,10 +641,71 @@ impl StorageAllocationLifecycle {
         self.replace_owner(owner, &snapshot.physical_identity_allocated_bytes)
     }
 
+    /// Current allocation split across the closed component inventory.
+    #[must_use]
+    pub fn component_allocated_bytes(&self) -> BTreeMap<TransientComponent, u64> {
+        Self::closed(&self.component_allocated_bytes)
+    }
+
+    /// Composition of the transient high-water mark. Sums to
+    /// [`Self::peak_allocated_bytes`].
+    #[must_use]
+    pub fn peak_component_allocated_bytes(&self) -> BTreeMap<TransientComponent, u64> {
+        Self::closed(&self.peak_component_allocated_bytes)
+    }
+
+    /// Residency of every component, including components that never held
+    /// bytes.
+    #[must_use]
+    pub fn component_residency(&self) -> BTreeMap<TransientComponent, ComponentResidency> {
+        TransientComponent::ALL
+            .into_iter()
+            .map(|component| {
+                (
+                    component,
+                    self.component_residency
+                        .get(&component)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Owner transitions observed, the denominator for residency.
+    #[must_use]
+    pub const fn transition_count(&self) -> u64 {
+        self.transitions
+    }
+
+    /// Transition ordinal at which the peak was last raised.
+    #[must_use]
+    pub const fn peak_transition(&self) -> u64 {
+        self.peak_transition
+    }
+
+    fn closed(values: &BTreeMap<TransientComponent, u64>) -> BTreeMap<TransientComponent, u64> {
+        TransientComponent::ALL
+            .into_iter()
+            .map(|component| (component, values.get(&component).copied().unwrap_or(0)))
+            .collect()
+    }
+
     /// Apply one writer-owned install/remove transition without reconstructing
     /// an operation's historical state from its final filesystem layout.
     pub fn apply_owner_transition(
         &mut self,
+        owner: impl Into<String>,
+        transition: &StorageAllocationTransition,
+    ) -> Result<(), GfError> {
+        self.apply_owner_transition_in(TransientComponent::Unclassified, owner, transition)
+    }
+
+    /// Apply one writer-owned transition, attributing new identities to
+    /// `component`.
+    pub fn apply_owner_transition_in(
+        &mut self,
+        component: TransientComponent,
         owner: impl Into<String>,
         transition: &StorageAllocationTransition,
     ) -> Result<(), GfError> {
@@ -597,7 +738,8 @@ impl StorageAllocationLifecycle {
                 "allocation transition installs an owned identity",
             ));
         }
-        let prepared = self.prepare_change(&transition.removed, &transition.installed)?;
+        let prepared =
+            self.prepare_change(component, &transition.removed, &transition.installed)?;
         self.commit_change(prepared);
         let identities = self.owners.entry(owner).or_default();
         for id in &transition.removed {
@@ -612,7 +754,8 @@ impl StorageAllocationLifecycle {
         let Some(removed) = self.owners.get(owner) else {
             return Ok(());
         };
-        let prepared = self.prepare_change(removed, &BTreeMap::new())?;
+        let prepared =
+            self.prepare_change(TransientComponent::Unclassified, removed, &BTreeMap::new())?;
         self.commit_change(prepared);
         self.owners.remove(owner);
         Ok(())
@@ -622,10 +765,13 @@ impl StorageAllocationLifecycle {
     // checks precede mutation; unrelated owners are neither copied nor visited.
     fn prepare_change(
         &self,
+        component: TransientComponent,
         removed: &BTreeSet<String>,
         installed: &BTreeMap<String, u64>,
     ) -> Result<PreparedAllocationChange, GfError> {
         let mut active = BTreeMap::new();
+        let mut identity_components = BTreeMap::new();
+        let mut components = self.component_allocated_bytes.clone();
         let mut current = self.current_allocated_bytes;
         for id in removed {
             let (allocated, references) = self
@@ -640,6 +786,16 @@ impl StorageAllocationLifecycle {
                 current = current
                     .checked_sub(allocated)
                     .ok_or_else(|| validation("active allocation underflow"))?;
+                let owning = self
+                    .identity_components
+                    .get(id)
+                    .copied()
+                    .unwrap_or(TransientComponent::Unclassified);
+                let held = components.entry(owning).or_default();
+                *held = held
+                    .checked_sub(allocated)
+                    .ok_or_else(|| validation("component allocation underflow"))?;
+                identity_components.insert(id.clone(), None);
                 None
             } else {
                 Some((allocated, references))
@@ -658,12 +814,17 @@ impl StorageAllocationLifecycle {
                 (*allocated, checked_add(references, 1)?)
             } else {
                 current = checked_add(current, *allocated)?;
+                let held = components.entry(component).or_default();
+                *held = checked_add(*held, *allocated)?;
+                identity_components.insert(id.clone(), Some(component));
                 (*allocated, 1)
             };
             active.insert(id.clone(), Some(next));
         }
         Ok(PreparedAllocationChange {
             active,
+            identity_components,
+            components,
             current,
             peak: self.peak_allocated_bytes.max(current),
         })
@@ -677,8 +838,35 @@ impl StorageAllocationLifecycle {
                 self.active.remove(&id);
             }
         }
+        for (id, value) in prepared.identity_components {
+            if let Some(value) = value {
+                self.identity_components.insert(id, value);
+            } else {
+                self.identity_components.remove(&id);
+            }
+        }
+        self.component_allocated_bytes = prepared.components;
+        self.transitions = self.transitions.saturating_add(1);
+        // Snapshot the composition only when the mark is genuinely raised, so
+        // the recorded split belongs to the transition that set the peak.
+        if prepared.current > self.peak_allocated_bytes {
+            self.peak_component_allocated_bytes = self.component_allocated_bytes.clone();
+            self.peak_transition = self.transitions;
+        }
         self.current_allocated_bytes = prepared.current;
         self.peak_allocated_bytes = prepared.peak;
+        for (component, allocated) in &self.component_allocated_bytes {
+            if *allocated == 0 {
+                continue;
+            }
+            let residency = self.component_residency.entry(*component).or_default();
+            if residency.resident_transitions == 0 {
+                residency.first_transition = self.transitions;
+            }
+            residency.last_transition = self.transitions;
+            residency.resident_transitions = residency.resident_transitions.saturating_add(1);
+            residency.peak_allocated_bytes = residency.peak_allocated_bytes.max(*allocated);
+        }
     }
 
     /// Validate private continuation state once before operation admission.
@@ -720,6 +908,42 @@ impl StorageAllocationLifecycle {
         }
         if current != self.current_allocated_bytes || self.peak_allocated_bytes < current {
             return Err(validation("allocation continuation totals differ"));
+        }
+        self.validate_composition()
+    }
+
+    /// Recheck that the component split explains the whole of the current and
+    /// peak allocation. A composition that does not sum to its total is worse
+    /// than no composition, because it invites an attribution argument built on
+    /// a fraction of the bytes.
+    fn validate_composition(&self) -> Result<(), GfError> {
+        if self.identity_components.len() > self.active.len()
+            || self
+                .identity_components
+                .keys()
+                .any(|id| !self.active.contains_key(id))
+        {
+            return Err(validation(
+                "allocation continuation components name an inactive identity",
+            ));
+        }
+        let mut component_total = 0_u64;
+        for (component, allocated) in &self.component_allocated_bytes {
+            if !TransientComponent::ALL.contains(component) {
+                return Err(validation("allocation continuation component is unknown"));
+            }
+            component_total = checked_add(component_total, *allocated)?;
+        }
+        let mut peak_total = 0_u64;
+        for allocated in self.peak_component_allocated_bytes.values() {
+            peak_total = checked_add(peak_total, *allocated)?;
+        }
+        if component_total != self.current_allocated_bytes
+            || peak_total != self.peak_allocated_bytes
+        {
+            return Err(validation(
+                "allocation continuation composition does not sum to its total",
+            ));
         }
         Ok(())
     }
@@ -1520,7 +1744,11 @@ mod tests {
             let identities = (0..count).map(|n| (format!("file-{n}"), 1)).collect();
             state.replace_owner("unrelated", &identities).unwrap();
             let prepared = state
-                .prepare_change(&BTreeSet::new(), &BTreeMap::from([("new".into(), 7)]))
+                .prepare_change(
+                    TransientComponent::Unclassified,
+                    &BTreeSet::new(),
+                    &BTreeMap::from([("new".into(), 7)]),
+                )
                 .unwrap();
             assert_eq!(
                 prepared.active.len(),

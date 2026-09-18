@@ -303,41 +303,6 @@ fn account_cache_release(
     Ok(())
 }
 
-fn merge_encoding_evidence(
-    target: &mut GraphConstructionEncodingEvidence,
-    source: &GraphConstructionEncodingEvidence,
-) -> Result<(), GfError> {
-    add_evidence_counter(
-        &mut target.input_read_bytes,
-        source.input_read_bytes,
-        "input read bytes",
-    )?;
-    add_evidence_counter(
-        &mut target.input_read_operations,
-        source.input_read_operations,
-        "input read operations",
-    )?;
-    add_evidence_counter(
-        &mut target.cache_release_operations,
-        source.cache_release_operations,
-        "cache release operations",
-    )?;
-    add_evidence_counter(
-        &mut target.cache_release_unsupported_operations,
-        source.cache_release_unsupported_operations,
-        "cache release unsupported operations",
-    )?;
-    add_evidence_counter(
-        &mut target.cache_released_bytes,
-        source.cache_released_bytes,
-        "cache released bytes",
-    )?;
-    target.peak_cache_release_window_bytes = target
-        .peak_cache_release_window_bytes
-        .max(source.peak_cache_release_window_bytes);
-    Ok(())
-}
-
 fn storage(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(format!("graph construction encoding: {error}"))
 }
@@ -886,10 +851,9 @@ pub(crate) fn encode(
         invocation: GraphConstructionEncodingInvocationEvidence::default(),
     };
     install_json(&output, INVENTORY, &completed)?;
-    let authentication = authenticate_inventory(&output, &completed, parent_index)?;
+    authenticate_inventory_control(&completed, parent_index)?;
     remove_encoding_intent(&output)?;
-    let mut invocation = completed.evidence.clone();
-    merge_encoding_evidence(&mut invocation, &authentication)?;
+    let invocation = completed.evidence.clone();
     completed.invocation = GraphConstructionEncodingInvocationEvidence {
         performed: true,
         reused: false,
@@ -1122,7 +1086,9 @@ fn encode_nodes(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
-    if shape.node_rows.is_empty() {
+    // The details family is `None` exactly at zero staged nodes. `node_rows`
+    // is not a count: a property-free session has none (#1455).
+    if shape.node_details.is_none() {
         if !build_v4 {
             return Ok(None);
         }
@@ -1146,7 +1112,7 @@ fn encode_nodes(
     let details_name = shape
         .node_details
         .as_deref()
-        .ok_or_else(|| storage("node rows lack canonical details"))?;
+        .ok_or_else(|| storage("staged nodes lack canonical details"))?;
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(5).map_err(storage)?;
     let mut identities = FixedReader::<IDENTITY_WIDTH>::open(
@@ -1489,13 +1455,11 @@ fn encode_edges(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
-    if shape.edge_rows.is_empty() {
+    // Same count guard as `encode_nodes`: `edge_rows` is empty for every
+    // property-free session (#1455); the details family is not.
+    let Some(details_name) = shape.edge_details.as_deref() else {
         return Ok(());
-    }
-    let details_name = shape
-        .edge_details
-        .as_deref()
-        .ok_or_else(|| storage("edge rows lack canonical details"))?;
+    };
     let endpoints_name = shape
         .edge_endpoints
         .as_deref()
@@ -2611,50 +2575,71 @@ pub(crate) fn authenticate_inventory(
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
+    authenticate_inventory_references(inventory, parent_index)?;
+    Ok(evidence)
+}
+
+/// The control half of [`authenticate_inventory`]: the inventory's structural
+/// invariants and its retained-parent references, without reading a payload
+/// byte. The encoder runs this after installing the inventory it just wrote.
+///
+/// The payloads are not re-read here. Every artifact digest in the inventory
+/// was computed by the single pass that wrote the bytes, and the boundary that
+/// consumes those bytes — the CAS install at publication — copies and hashes
+/// each artifact against this inventory and refuses a mismatch on its own
+/// (`install_graph_object_file_with_lease`). Re-reading bytes this process
+/// wrote a moment ago, from its own page cache, names no failure that the
+/// consuming copy does not already refuse (#1384; the reasoning #1392 applied
+/// to shape outputs).
+pub(crate) fn authenticate_inventory_control(
+    inventory: &GraphConstructionEncoding,
+    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+) -> Result<(), GfError> {
+    validate_inventory_invariants(inventory)?;
+    authenticate_inventory_references(inventory, parent_index)
+}
+
+fn authenticate_inventory_references(
+    inventory: &GraphConstructionEncoding,
+    parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
+) -> Result<(), GfError> {
     if inventory.retained_artifacts.is_empty() {
         if inventory.evidence.retained_index_runs != 0 {
             return Err(storage("retained-index evidence lacks references"));
         }
-    } else {
-        let parent = parent_index
-            .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
-        let mut previous = None;
-        let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
-        for retained in &inventory.retained_artifacts {
-            if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
-                return Err(storage(
-                    "retained artifact targets are not unique and sorted",
-                ));
-            }
-            references.push(
-                crate::uuid_membership::ConstructionReferenceAuthentication {
-                    source_root: &retained.source_root,
-                    source_root_volume: retained.source_root_volume,
-                    source_root_file_id: &retained.source_root_file_id,
-                    source_path: &retained.source_path,
-                    source_volume: retained.source_volume,
-                    source_file_id: &retained.source_file_id,
-                    target_path: &retained.target_path,
-                    bytes: retained.bytes,
-                    sha256: &retained.sha256,
-                    parent_manifest_sha256: &retained.parent_manifest_sha256,
-                },
-            );
-            previous = Some(retained.target_path.as_str());
-        }
-        parent.authenticate_construction_references(&references)?;
+        return Ok(());
     }
-    Ok(evidence)
+    let parent = parent_index
+        .ok_or_else(|| storage("retained artifacts lack authenticated parent snapshot"))?;
+    let mut previous = None;
+    let mut references = Vec::with_capacity(inventory.retained_artifacts.len());
+    for retained in &inventory.retained_artifacts {
+        if previous.is_some_and(|value: &str| value >= retained.target_path.as_str()) {
+            return Err(storage(
+                "retained artifact targets are not unique and sorted",
+            ));
+        }
+        references.push(
+            crate::uuid_membership::ConstructionReferenceAuthentication {
+                source_root: &retained.source_root,
+                source_root_volume: retained.source_root_volume,
+                source_root_file_id: &retained.source_root_file_id,
+                source_path: &retained.source_path,
+                source_volume: retained.source_volume,
+                source_file_id: &retained.source_file_id,
+                target_path: &retained.target_path,
+                bytes: retained.bytes,
+                sha256: &retained.sha256,
+                parent_manifest_sha256: &retained.parent_manifest_sha256,
+            },
+        );
+        previous = Some(retained.target_path.as_str());
+    }
+    parent.authenticate_construction_references(&references)?;
+    Ok(())
 }
 
-pub(crate) fn authenticate_inventory_payloads(
-    root: &StableDirectory,
-    inventory: &GraphConstructionEncoding,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    #[cfg(any(test, feature = "test-support"))]
-    let _diagnostic_scope =
-        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
+fn validate_inventory_invariants(inventory: &GraphConstructionEncoding) -> Result<(), GfError> {
     if inventory.root != ENCODED_ROOT
         || inventory.shape_inputs_sha256.len() != 64
         || inventory.shape_authority_sha256.len() != 64
@@ -2681,6 +2666,18 @@ pub(crate) fn authenticate_inventory_payloads(
     {
         return Err(storage("canonical inventory invariants are invalid"));
     }
+    Ok(())
+}
+
+pub(crate) fn authenticate_inventory_payloads(
+    root: &StableDirectory,
+    inventory: &GraphConstructionEncoding,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<GraphConstructionEncodingEvidence, GfError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _diagnostic_scope =
+        crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
+    validate_inventory_invariants(inventory)?;
     let mut evidence = GraphConstructionEncodingEvidence::default();
     for expected in &inventory.artifacts {
         let (directory, name) = directory_for(root, &expected.path)?;
@@ -2865,7 +2862,7 @@ impl<const N: usize> FixedReader<N> {
             record
         };
         let wire = match self.detail_codec {
-            Some(codec) => codec.bytes(&record).map_err(storage)?,
+            Some(codec) => codec.wire(&record).map_err(storage)?,
             None => &record,
         };
         self.digest.update(wire);

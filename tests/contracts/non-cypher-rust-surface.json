@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "579ecfaa8ec837a88c55b6a5d7adb2e2d3b3f0ec1365e09b682048c2495d2f27",
+  "public_method_digest": "3a1ef807a314823589c657fd7973c3ff9a74d55703be90a00aad42d221ca95eb",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -31,7 +31,8 @@
       "ProviderRerankedFindResult": "introspection",
       "ResolvedBeliefProjection": "introspection",
       "SearchIndexOptions": "introspection",
-      "ExecutionResourcePolicy": "introspection"
+      "ExecutionResourcePolicy": "introspection",
+      "ImportCallTiming": "introspection"
     },
     "overrides": {
       "GraphForge.index": "release-tested",

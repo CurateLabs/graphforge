@@ -328,8 +328,13 @@ struct SessionManifest {
     updated_unix_millis: u64,
 }
 
-/// Monotonic wall time for attempted calls, including returned errors.
-/// These observations are not durable progress or performance limits.
+/// Monotonic wall time and process CPU for attempted calls, including returned
+/// errors. These observations are not durable progress or performance limits.
+///
+/// CPU is here so that [`ImportCallTiming::effective_cores`] can answer how much
+/// of the machine an operation used. #1387 budgets a serialized fraction of the
+/// ingest path, and `seal` is 68-80% of it, so `seal.effective_cores()` is the
+/// figure that budget is read from.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ImportCallTiming {
     /// Number of attempted calls.
@@ -338,15 +343,68 @@ pub struct ImportCallTiming {
     pub errors: u64,
     /// Sum of elapsed nanoseconds around these calls.
     pub elapsed_ns: u64,
+    /// Sum of process CPU nanoseconds consumed across these calls.
+    pub cpu_ns: u64,
+    /// Calls for which process CPU could not be read. Non-zero makes
+    /// [`ImportCallTiming::effective_cores`] refuse rather than under-report.
+    pub cpu_unmeasured_calls: u64,
 }
 
 impl ImportCallTiming {
-    fn record(&mut self, started: Instant, failed: bool) {
+    fn record(&mut self, started: CallStart, failed: bool) {
         self.elapsed_ns = self
             .elapsed_ns
-            .saturating_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(started.wall.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        match (
+            started.cpu,
+            graphforge_storage::concurrency_attribution::process_cpu_time(),
+        ) {
+            (Some(before), Some(after)) => {
+                self.cpu_ns = self.cpu_ns.saturating_add(
+                    u64::try_from(after.saturating_sub(before).as_nanos()).unwrap_or(u64::MAX),
+                );
+            }
+            _ => self.cpu_unmeasured_calls = self.cpu_unmeasured_calls.saturating_add(1),
+        }
         self.calls = self.calls.saturating_add(1);
         self.errors = self.errors.saturating_add(u64::from(failed));
+    }
+
+    /// Process CPU divided by elapsed wall across these calls: how many cores'
+    /// worth the operation used. `1.0` means it ran on one core.
+    ///
+    /// `None` when no wall time elapsed or any call's CPU could not be read,
+    /// rather than a fabricated zero — a reader must be able to tell "not
+    /// measured" from "measured as idle".
+    ///
+    /// **This is a process-level ratio.** The CPU term counts every thread in
+    /// the process, so it answers "how much of this machine did the process use
+    /// during this operation", which is only the operation's own figure when the
+    /// process is doing one thing. A ladder rung is; a busy embedding host is
+    /// not. See `graphforge_storage::concurrency_attribution`.
+    #[must_use]
+    pub fn effective_cores(&self) -> Option<f64> {
+        if self.elapsed_ns == 0 || self.cpu_unmeasured_calls > 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss, reason = "reporting-only ratio")]
+        Some(self.cpu_ns as f64 / self.elapsed_ns as f64)
+    }
+}
+
+/// Wall and process CPU captured at the start of a timed call.
+#[derive(Clone, Copy, Debug)]
+struct CallStart {
+    wall: Instant,
+    cpu: Option<std::time::Duration>,
+}
+
+impl CallStart {
+    fn now() -> Self {
+        Self {
+            wall: Instant::now(),
+            cpu: graphforge_storage::concurrency_attribution::process_cpu_time(),
+        }
     }
 }
 
@@ -745,7 +803,7 @@ impl GraphImportSession {
                         self.persist_manifest()?;
                     }
                     let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
-                    let started = Instant::now();
+                    let started = CallStart::now();
                     let staged = match (input_kind, cancellation) {
                         (BulkInputKind::Node, Some(token)) => {
                             construction.append_nodes_with_cancellation(&chunk_id, &batch, token)
@@ -805,7 +863,7 @@ impl GraphImportSession {
         construction: &mut crate::GraphConstructionSession<'_>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
-        let started = Instant::now();
+        let started = CallStart::now();
         let sealed = construction.validate_and_seal(cancellation);
         self.operation_timings.seal.record(started, sealed.is_err());
         sealed?;
@@ -859,7 +917,7 @@ impl GraphImportSession {
         }
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
-        let started = Instant::now();
+        let started = CallStart::now();
         let publication = match cancellation {
             Some(token) => construction.seal_and_publish_with_cancellation(token),
             None => construction.seal_and_publish(),
@@ -910,7 +968,7 @@ impl GraphImportSession {
         graph: &'a GraphForge,
     ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
         let budgets = self.construction_budgets();
-        let started = Instant::now();
+        let started = CallStart::now();
         if let Some(session_uuid) = self.manifest.construction_session_uuid {
             let resumed = graph.resume_graph_construction(session_uuid, budgets);
             self.operation_timings
@@ -1442,6 +1500,59 @@ mod tests {
     }
 
     #[test]
+    fn operation_timings_carry_process_cpu_for_every_measured_call() {
+        // #1462: #1387 budgets a serialized fraction of ingest and nothing on
+        // the path computed one. This is the end-to-end check that a real
+        // import now carries CPU, so `seal.effective_cores()` -- the figure the
+        // budget is read from, seal being 68-80% of ingest -- is available off
+        // an ordinary run rather than inferred from phase totals.
+        let (_directory, _project, graph) = fixture();
+        let mut session = graph
+            .begin_import_session(
+                OperationId(Uuid::now_v7()),
+                ImportSessionLimits {
+                    batch_rows: 1,
+                    ..ImportSessionLimits::default()
+                },
+            )
+            .unwrap();
+        let ids = [Uuid::now_v7(), Uuid::now_v7()];
+        session
+            .append_arrow(BulkInputKind::Node, &[nodes(&ids[..1]), nodes(&ids[1..])])
+            .unwrap();
+        session
+            .append_arrow(
+                BulkInputKind::Edge,
+                &[edges(Uuid::now_v7(), ids[0], ids[1])],
+            )
+            .unwrap();
+        session.validate(&graph).unwrap();
+        let timing = session.operation_timings();
+
+        for (name, call) in [
+            ("begin", timing.begin),
+            ("append", timing.append),
+            ("seal", timing.seal),
+        ] {
+            assert!(call.calls > 0, "{name} should have been called");
+            assert_eq!(
+                call.cpu_unmeasured_calls, 0,
+                "{name}: process CPU unavailable on this platform"
+            );
+            assert!(
+                call.effective_cores().is_some(),
+                "{name}: effective cores must be reported once CPU is measured"
+            );
+        }
+
+        // An operation never invoked reports nothing rather than zero cores,
+        // so a reader cannot mistake "not run" for "ran on no CPU".
+        assert_eq!(timing.publish.calls, 0);
+        assert_eq!(timing.publish.cpu_ns, 0);
+        assert!(timing.publish.effective_cores().is_none());
+    }
+
+    #[test]
     fn operation_timings_are_scoped_non_durable_and_preserve_cancelled_commit() {
         let (_directory, _project, graph) = fixture();
         let mut session = graph
@@ -1843,7 +1954,16 @@ mod tests {
         let chunk = (0_u32..(1 << 18))
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
-        let length = 129_u64 * 1024 * 1024 + 17;
+        // Derived from the live per-stream window rather than a fixed byte
+        // count: the length must exceed one full window so that (a) the
+        // combined reader+writer window genuinely peaks at the shared
+        // aggregate budget and (b) at least one rollover plus a final
+        // partial window occurs, regardless of how the budget is priced.
+        let window = graphforge_filesystem::cache_release_window_for_streams(2)
+            .unwrap()
+            .get();
+        let length = window + 17;
+        let expected_release_operations = (length + window - 1) / window;
         let mut output = File::create(&source).unwrap();
         let mut remaining = length;
         while remaining > 0 {
@@ -1859,8 +1979,14 @@ mod tests {
         assert_eq!(destination.metadata().unwrap().len(), length);
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(evidence.reader.release_operations, 5);
-            assert_eq!(evidence.writer.release_operations, 5);
+            assert_eq!(
+                evidence.reader.release_operations,
+                expected_release_operations
+            );
+            assert_eq!(
+                evidence.writer.release_operations,
+                expected_release_operations
+            );
             assert_eq!(evidence.reader.released_bytes, length);
             assert_eq!(evidence.writer.released_bytes, length);
             assert_eq!(

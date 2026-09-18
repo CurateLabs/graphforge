@@ -5360,17 +5360,24 @@ const STAGING_BUFFER_BYTES: u64 = graphforge_storage::STAGE_FILE_BLOCK_BYTES as 
 const RECOVERY_REAUTHENTICATION_CALL_GROWTH_PERCENT: u64 = 20;
 // A relative spread bound cannot see a component silently dropped from every
 // rung alike, so this is an absolute second line of defense. The observed
-// total (68-72 calls at this fixture's scale) is the sum of three
-// independent, always-present contributors: the current construction's own
-// supersession-read accounting (~14 calls), authenticating the published
-// successor's manifest and file entries (~27-31 calls), and the
-// interrupted-import recovery drill's bounded package materialization (a
-// fixed 27 calls). Losing any one of those - the regression class this
-// floor exists to catch - drops the total to at most ~58 (supersession
-// reads gone) or ~45 (successor authentication gone) or ~41-45
-// (materialization gone). 55 sits below the full total's observed jitter
-// but above what any single dropped contributor would leave.
-const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 55;
+// total (54-56 calls at this fixture's scale) is the sum of two independent,
+// always-present contributors: authenticating the published successor's
+// manifest and file entries (~27-29 calls) and the interrupted-import
+// recovery drill's bounded package materialization (a fixed 27 calls).
+// Losing either one - the regression class this floor exists to catch -
+// drops the total to at most ~29. 45 sits below the full total's observed
+// jitter but well above what a single dropped contributor would leave.
+//
+// History: #1412 sized this at 55 when a third contributor existed, the
+// reclaim sweep's per-payload re-read of the encoded inventory (~14 calls,
+// one per encoded artifact). That re-read was demoted to an identity, link
+// count and length check (#1384, the #1392 pattern applied to the encoded
+// branch), and the total moved from 68-72 to 54-56 - a drop of exactly
+// that contributor, with the other two intact. Cheaper, not absent: the
+// bytes those calls re-read are hashed by the CAS install at publication,
+// which `cas_install_read_write` accounts for separately.
+const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 45;
+
 // The only hydration read that is neither a copy nor a copy verification is
 // the single authentication read of the manifest route table
 // (`MaterializationRoutes::prepare`). Like the UUID control JSON that
