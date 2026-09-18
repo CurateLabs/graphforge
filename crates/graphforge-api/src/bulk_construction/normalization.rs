@@ -4,7 +4,7 @@ use super::{
     Arc, Array, ArrayRef, BTreeMap, BTreeSet, BULK_CONSTRUCTION_CONTRACT_VERSION, BooleanArray,
     BulkEdgeRow, BulkInputKind, BulkNodeRow, BulkValidationError, BulkValidationReason, DataType,
     Digest, Field, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float32Array, Float64Array,
-    GraphForge, HashMap, Int8Array, Int16Array, Int32Array, Int64Array, LargeListArray,
+    GraphForge, HashMap, HashSet, Int8Array, Int16Array, Int32Array, Int64Array, LargeListArray,
     LargeStringArray, ListArray, OntologyMode, OperationId, PropValue, PropertyValueType,
     RecordBatch, Schema, SchemaRef, Sha256, StringArray, StructArray, Time64NanosecondArray,
     TimestampMicrosecondArray, UInt8Array, UInt16Array, UInt32Array, Uuid, ValidatedBulkEdges,
@@ -203,9 +203,9 @@ fn property_columns<'a>(
 
 fn validate_edge_identity(
     edge_uuid: Uuid,
-    known_nodes: &BTreeSet<Uuid>,
-    existing_edges: &BTreeSet<Uuid>,
-    observed: &mut BTreeSet<Uuid>,
+    known_nodes: &HashSet<Uuid>,
+    existing_edges: &HashSet<Uuid>,
+    observed: &mut HashSet<Uuid>,
     ordinal: u64,
 ) -> Result<(), BulkValidationError> {
     if known_nodes.contains(&edge_uuid)
@@ -225,7 +225,7 @@ fn validate_edge_identity(
 
 fn validate_edge_endpoint(
     endpoint_uuid: Uuid,
-    known_nodes: &BTreeSet<Uuid>,
+    known_nodes: &HashSet<Uuid>,
     ordinal: u64,
     field: &str,
 ) -> Result<(), BulkValidationError> {
@@ -1092,7 +1092,7 @@ impl GraphForge {
             .expect("generation UUID lock poisoned");
         validate_operation_uuid(BulkInputKind::Node, operation_uuid)?;
         validate_partition_schemas(BulkInputKind::Node, &NODE_REQUIRED, batches)?;
-        let mut existing = BTreeSet::new();
+        let mut existing = HashSet::new();
         if reject_existing {
             let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
             let mut index = open_membership_index(self, BulkInputKind::Node)?;
@@ -1109,7 +1109,7 @@ impl GraphForge {
                 BulkInputKind::Node,
             )?);
         }
-        let mut observed = BTreeSet::new();
+        let mut observed = HashSet::new();
         let mut rows = Vec::new();
         let mut ordinal = 0_u64;
 
@@ -1221,12 +1221,12 @@ impl GraphForge {
             .then(|| candidate_uuids(batches, BulkInputKind::Edge, "edge_uuid"))
             .transpose()?;
         let (mut known_nodes, existing_edges) =
-            existing_edge_context(self, &endpoint_candidates, edge_candidates.as_ref())?;
+            existing_edge_context(self, &endpoint_candidates, edge_candidates.as_deref())?;
         if let Some(additional) = additional_known_nodes {
             known_nodes.extend(additional.iter().copied());
         }
         known_nodes.extend(same_request_nodes.identities());
-        let mut observed = BTreeSet::new();
+        let mut observed = HashSet::new();
         let mut rows = Vec::new();
         let mut ordinal = 0_u64;
 

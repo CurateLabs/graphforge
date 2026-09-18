@@ -218,7 +218,9 @@ impl GraphForge {
             )?);
         }
 
-        let candidates = normalized.identities().collect::<BTreeSet<_>>();
+        let mut candidates = normalized.identities().collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
         let mut index = open_membership_index(self, BulkInputKind::Node)?;
         let mut existing = indexed_existing(
             index.as_mut(),
@@ -394,11 +396,13 @@ impl GraphForge {
             )?);
         }
 
-        let candidates = normalized
+        let mut candidates = normalized
             .rows
             .iter()
             .map(|row| row.edge_uuid)
-            .collect::<BTreeSet<_>>();
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
         let mut index = open_membership_index(self, BulkInputKind::Edge)?;
         let mut existing = indexed_existing(
             index.as_mut(),
