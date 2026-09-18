@@ -1,7 +1,13 @@
+---
+title: "ADR 0012: Knowledge and epistemic domain ownership and schema evolution"
+adr: "0012"
+status: "Accepted"
+date: "2026-07-24"
+superseded_by: null
+---
+
 # ADR 0012: Knowledge and epistemic domain ownership and schema evolution
 
-**Status:** Accepted
-**Date:** 2026-07-24
 **Build target:** v0.5.0
 
 **Related:** ADR 0005 (layering), ADR 0006 (epistemic model)

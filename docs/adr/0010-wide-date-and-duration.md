@@ -1,7 +1,13 @@
+---
+title: "ADR 0010: Full-range dates (proleptic-Gregorian calendar) and a wider duration model"
+adr: "0010"
+status: "Accepted"
+date: "2026-06-30"
+superseded_by: null
+---
+
 # ADR 0010: Full-range dates (proleptic-Gregorian calendar) and a wider duration model
 
-**Status:** Accepted
-**Date:** 2026-06-30
 **Build target:** v0.5.0 (conformance hardening); openCypher `Temporal10` large-value cases
 **Related:** builds on ADR 0007 (runtime temporal values)
 

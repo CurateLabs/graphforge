@@ -1,7 +1,13 @@
+---
+title: "ADR 0027: Native GraphForge execution boundary"
+adr: "0027"
+status: "Accepted"
+date: "2026-09-09"
+superseded_by: null
+---
+
 # ADR 0027: Native GraphForge execution boundary
 
-**Status:** Accepted
-**Date:** 2026-09-09
 **Decider:** Project maintainer
 **Related:** [#495](https://github.com/CurateLabs/graphforge/issues/495), [#1198](https://github.com/CurateLabs/graphforge/issues/1198), [ADR 0001](0001-rust-core.md)
 

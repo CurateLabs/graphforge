@@ -1,8 +1,14 @@
+---
+title: "ADR 0026: Read plans bind resources in execution"
+adr: "0026"
+status: "Accepted"
+date: "2026-09-07"
+superseded_by: null
+---
+
 # ADR 0026: Read plans bind resources in execution
 
-**Status:** Accepted
 **Implementation:** Accepted for implementation; tracked by #1136 and #1008.
-**Date:** 2026-09-07
 **Related:** #1136, #1008, ADR 0025
 
 ## Context

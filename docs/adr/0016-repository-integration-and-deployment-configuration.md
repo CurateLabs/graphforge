@@ -1,8 +1,12 @@
+---
+title: "ADR 0016: Repository integration and deployment configuration boundary"
+adr: "0016"
+status: "Accepted"
+date: "2026-07-30"
+superseded_by: null
+---
+
 # ADR 0016: Repository integration and deployment configuration boundary
-
-**Status:** Accepted
-
-**Date:** 2026-07-30
 
 **Build target:** post-v0.5.0
 

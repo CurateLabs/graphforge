@@ -1,7 +1,13 @@
+---
+title: "ADR 0009: Nested Heterogeneous List Values"
+adr: "0009"
+status: "Accepted"
+date: "2026-06-28"
+superseded_by: null
+---
+
 # ADR 0009: Nested Heterogeneous List Values
 
-**Status:** Accepted
-**Date:** 2026-06-28
 **Build target:** v0.5.0 (conformance hardening); openCypher `List5`/IN, `Precedence3`, `String8`, `Aggregation2 [11]/[12]`
 **Related:** supersedes the "nested" limitation amendment of [ADR 0008](0008-heterogeneous-lists.md); closes the heterogeneous-list cluster of (residue of / the histogram)
 

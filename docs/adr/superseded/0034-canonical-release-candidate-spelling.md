@@ -1,14 +1,18 @@
-# ADR 0034: One canonical release-candidate spelling, `-rc.N`
+---
+title: "ADR 0034: One canonical release-candidate spelling, `-rc.N`"
+adr: "0034"
+status: "Superseded by ADR 0036"
+date: "2026-09-17"
+superseded_by: "0036"
+---
 
-**Status:** Superseded by ADR 0036
+# ADR 0034: One canonical release-candidate spelling, `-rc.N`
 
 > **Superseded.** This record is retained for history. The GraphForge
 > release version contract is stated in full in
 > [ADR 0036: The GraphForge release version contract](../0036-release-version-contract.md),
 > which consolidates ADRs 0017, 0033 and 0034 without changing any decision
 > they made.
-
-**Date:** 2026-09-17
 
 **Build target:** v0.6.0-rc.1 and later
 

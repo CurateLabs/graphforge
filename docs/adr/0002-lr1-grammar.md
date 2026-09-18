@@ -1,7 +1,13 @@
+---
+title: "ADR 0002: Recursive Descent + Pratt Parser for graphforge-cypher"
+adr: "0002"
+status: "Accepted"
+date: "2026-05-28"
+superseded_by: null
+---
+
 # ADR 0002: Recursive Descent + Pratt Parser for graphforge-cypher
 
-**Date:** 2026-05-28
-**Status:** Accepted
 **Supersedes:** Partial update to ADR 0001 (parser algorithm choice)
 
 ---

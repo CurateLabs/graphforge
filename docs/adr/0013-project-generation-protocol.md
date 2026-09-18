@@ -1,7 +1,13 @@
+---
+title: "ADR 0013: Durable v0.5 project-generation protocol"
+adr: "0013"
+status: "Accepted"
+date: "2026-07-24"
+superseded_by: null
+---
+
 # ADR 0013: Durable v0.5 project-generation protocol
 
-**Status:** Accepted
-**Date:** 2026-07-24
 **Build target:** v0.5.0
 
 **Related:** ADR 0012 (domain ownership), ADR 0018 (acknowledged durability and

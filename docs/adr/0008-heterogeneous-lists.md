@@ -1,7 +1,13 @@
+---
+title: "ADR 0008: Heterogeneous List Values"
+adr: "0008"
+status: "Accepted"
+date: "2026-06-27"
+superseded_by: null
+---
+
 # ADR 0008: Heterogeneous List Values
 
-**Status:** Accepted
-**Date:** 2026-06-27
 **Build target:** v0.5.0 (conformance hardening); openCypher heterogeneous-list cluster (`List5`/IN, `Precedence3`, `Aggregation2`, `Literals7`, …)
 **Related:** (mixed-numeric `max`/`min` returns `Float64`, not the integer element); the histogram "heterogeneous list literals" cluster (`docs/reference/tck-failure-histogram.md`)
 
