@@ -492,7 +492,11 @@ fn authenticate_encoded_artifact_identities(
         for component in path.components() {
             match component {
                 std::path::Component::Normal(name) => components.push(name),
-                _ => return Err(storage("supersession encoded artifact path is not normalized")),
+                _ => {
+                    return Err(storage(
+                        "supersession encoded artifact path is not normalized",
+                    ));
+                }
             }
         }
         let Some((name, directories)) = components.split_last() else {

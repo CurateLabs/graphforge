@@ -940,7 +940,10 @@ fn flip_first_byte_in_place(path: &std::path::Path) {
     file.sync_all().unwrap();
     drop(file);
     assert_eq!(std::fs::metadata(path).unwrap().len(), length);
-    assert_eq!(graphforge_filesystem::path_identity(path).unwrap(), identity);
+    assert_eq!(
+        graphforge_filesystem::path_identity(path).unwrap(),
+        identity
+    );
 }
 
 /// The reclaim sweep no longer re-reads encoded payloads (the #1392 pattern
@@ -962,7 +965,11 @@ fn ladder_path_refuses_same_inode_encoded_corruption_at_cas_install() {
     let encoded = crate::graph_construction_encoding::read_inventory(&output)
         .unwrap()
         .unwrap();
-    let encoded_bytes: u64 = encoded.artifacts.iter().map(|artifact| artifact.bytes).sum();
+    let encoded_bytes: u64 = encoded
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.bytes)
+        .sum();
     assert!(encoded_bytes > 0);
     let before = session.evidence().clone();
     drop(session);
@@ -1023,7 +1030,10 @@ fn reclaim_refuses_encoded_artifact_inode_replacement() {
     std::fs::write(&replacement, &body).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), body);
-    assert_ne!(graphforge_filesystem::path_identity(&path).unwrap(), identity);
+    assert_ne!(
+        graphforge_filesystem::path_identity(&path).unwrap(),
+        identity
+    );
 
     let error = session
         .reclaim_superseded_payloads_cancellable(&mut || false)
@@ -1056,11 +1066,14 @@ fn reclaim_refuses_encoded_artifact_inode_replacement() {
 #[test]
 fn reclaim_refuses_encoded_artifact_length_and_link_changes() {
     for (case, mutate) in [
-        ("append", (|path: &std::path::Path| {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-            file.write_all(&[0]).unwrap();
-        }) as fn(&std::path::Path)),
+        (
+            "append",
+            (|path: &std::path::Path| {
+                use std::io::Write as _;
+                let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+                file.write_all(&[0]).unwrap();
+            }) as fn(&std::path::Path),
+        ),
         ("link", |path: &std::path::Path| {
             std::fs::hard_link(path, path.with_extension("parquet.link")).unwrap();
         }),
@@ -1071,7 +1084,10 @@ fn reclaim_refuses_encoded_artifact_length_and_link_changes() {
         let path = encoded_artifact_path(&root, operation, "topology/surrogate_tails.parquet");
         let identity = graphforge_filesystem::path_identity(&path).unwrap();
         mutate(&path);
-        assert_eq!(graphforge_filesystem::path_identity(&path).unwrap(), identity);
+        assert_eq!(
+            graphforge_filesystem::path_identity(&path).unwrap(),
+            identity
+        );
         let error = session
             .reclaim_superseded_payloads_cancellable(&mut || false)
             .unwrap_err();
