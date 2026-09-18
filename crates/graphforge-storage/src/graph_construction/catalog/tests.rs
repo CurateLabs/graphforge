@@ -178,6 +178,42 @@ fn ingest(operation: u128, null_property: bool) -> Run {
         graphforge_ir::RuntimeCatalog::from_record_batches(batches.iter()).unwrap()
     };
     let encoding = session.encode_canonical(&shape, 1).unwrap();
+    // Ingest byte accounting for this path, so the two paths' I/O can be
+    // compared on identical logical input (#1455).
+    let after_encode = session.evidence();
+    println!(
+        "CATALOG_BYTES {}",
+        serde_json::json!({
+            "null_property": null_property,
+            "shape": {
+                "parquet_read_bytes": evidence.parquet_read_bytes,
+                "parquet_read_operations": evidence.parquet_read_operations,
+                "parquet_write_bytes": evidence.parquet_write_bytes,
+                "parquet_write_operations": evidence.parquet_write_operations,
+                "merge_read_bytes": evidence.merge_read_bytes,
+                "merge_written_bytes": evidence.merge_written_bytes,
+                "merge_fsync_operations": evidence.merge_fsync_operations,
+                "shape_input_validation_read_bytes": evidence.shape_input_validation_read_bytes,
+                "shaped_output_authentication_bytes": evidence.shaped_output_authentication_bytes,
+                "shape_application_read_bytes": evidence.shape_application_read_bytes,
+                "write_bytes": evidence.write_bytes,
+                "fsync_operations": evidence.fsync_operations,
+                "partition_outputs": evidence.partition_outputs,
+                "storage_transient_peak_total_allocated_bytes":
+                    evidence.storage_transient_peak_total_allocated_bytes,
+            },
+            "encode": {
+                "input_read_bytes": encoding.evidence.input_read_bytes,
+                "output_write_bytes": encoding.evidence.output_write_bytes,
+                "source_spool_write_bytes": encoding.evidence.source_spool_write_bytes,
+                "source_spool_read_bytes": encoding.evidence.source_spool_read_bytes,
+                "source_spool_fsync_operations": encoding.evidence.source_spool_fsync_operations,
+                "fsync_operations": encoding.evidence.fsync_operations,
+                "application_read_bytes": after_encode.encode_application_read_bytes,
+                "application_write_bytes": after_encode.encode_application_write_bytes,
+            },
+        })
+    );
     let encoded_catalog_sha256 = encoding
         .artifacts
         .iter()
