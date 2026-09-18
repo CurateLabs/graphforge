@@ -480,6 +480,9 @@ impl GraphConstructionSession {
         if base_max_node != self.checkpoint.base_work.max_node_surrogate {
             return Err(storage("UUID snapshot and surrogate tails disagree"));
         }
+        #[cfg(any(test, feature = "test-support"))]
+        let validate_scope =
+            crate::graph_construction::diagnostics::Scope::start("chain.validate_staged_details");
         let (new_nodes, new_edges) = validate_staged_details(
             &self.root,
             &staged_identities,
@@ -489,6 +492,8 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        #[cfg(any(test, feature = "test-support"))]
+        drop(validate_scope);
         if let Some(base) = self.base_snapshot.as_mut() {
             reject_staged_base_conflicts(
                 &self.root,
@@ -499,6 +504,9 @@ impl GraphConstructionSession {
                 &mut self.checkpoint.evidence,
             )?;
         }
+        #[cfg(any(test, feature = "test-support"))]
+        let assign_scope =
+            crate::graph_construction::diagnostics::Scope::start("chain.assign_surrogates");
         let identities = assign_surrogates(
             &self.root,
             &staged_identities,
@@ -507,6 +515,8 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        #[cfg(any(test, feature = "test-support"))]
+        drop(assign_scope);
         // Original chunks remain recovery authority until shaping completes. The
         // assigned identity successor now owns every later identity consumer.
         shape_publication_failure("shape.before_identity_retirement")?;
@@ -518,6 +528,10 @@ impl GraphConstructionSession {
         construction_failpoint("shape.after_identity_retirement");
         shape_publication_failure("shape.after_identity_retirement")?;
         reject_cancelled(&mut cancelled)?;
+        #[cfg(any(test, feature = "test-support"))]
+        let resolve_scope = crate::graph_construction::diagnostics::Scope::start(
+            "chain.resolve_endpoint_surrogates",
+        );
         let edge_endpoints = resolve_endpoint_surrogates(
             &self.root,
             &plan,
@@ -528,6 +542,8 @@ impl GraphConstructionSession {
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
+        #[cfg(any(test, feature = "test-support"))]
+        drop(resolve_scope);
         let node_count = self
             .checkpoint
             .base_work

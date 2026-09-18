@@ -16,6 +16,7 @@ fn clock_ns() -> u128 {
 pub(crate) struct Scope {
     name: &'static str,
     started_ns: u128,
+    cpu_before: Option<std::time::Duration>,
 }
 
 impl Scope {
@@ -23,15 +24,29 @@ impl Scope {
         enabled().then(|| Self {
             name,
             started_ns: clock_ns(),
+            cpu_before: crate::concurrency_attribution::process_cpu_time(),
         })
     }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
+        // Process CPU alongside wall, so a scope reports how many cores' worth
+        // it used rather than only how long it took (#1462). `seal` is 68-80%
+        // of ingest and #1387 budgets the serialized fraction, so which stage
+        // holds that fraction up is the question these scopes exist to answer.
+        let cpu_ns = match (
+            self.cpu_before,
+            crate::concurrency_attribution::process_cpu_time(),
+        ) {
+            (Some(before), Some(after)) => {
+                serde_json::Value::from(after.saturating_sub(before).as_nanos() as u64)
+            }
+            _ => serde_json::Value::Null,
+        };
         emit(
             &json!({"event":"scope", "scope":self.name, "start_ns":self.started_ns,
-            "end_ns":clock_ns()}),
+            "end_ns":clock_ns(), "cpu_ns":cpu_ns}),
         );
     }
 }
