@@ -66,6 +66,12 @@ impl DetailCodec {
     /// bytes are filled from the reader, so the padding is zero by
     /// construction; only the name is validated (non-empty, UTF-8), which is
     /// exactly what [`Self::bytes`] checks on the wire-bearing bytes.
+    ///
+    /// The receiver became unused when this stopped calling `Self::bytes` on a
+    /// record it had just zero-initialised itself. It is kept so `read` stays
+    /// symmetric with `bytes` and `wire` and so a second codec variant needs no
+    /// call-site churn.
+    #[allow(clippy::unused_self)]
     pub(crate) fn read<const N: usize>(
         self,
         reader: &mut impl Read,
