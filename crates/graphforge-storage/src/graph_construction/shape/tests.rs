@@ -164,8 +164,12 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
         assert_eq!(shape.edge_count, (chunks * EDGES_PER_CHUNK) as u64);
         assert_eq!(shape.max_node_surrogate, (chunks * NODES_PER_CHUNK) as u64);
         assert_eq!(shape.max_edge_surrogate, (chunks * EDGES_PER_CHUNK) as u64);
-        assert_eq!(shape.node_rows.len(), 1);
-        assert_eq!(shape.edge_rows.len(), 1);
+        // Property-free input: the catalog is derived from the details
+        // families and no shaped row artifact is produced (#1455).
+        assert!(shape.node_rows.is_empty());
+        assert!(shape.edge_rows.is_empty());
+        assert!(shape.node_details.is_some());
+        assert!(shape.edge_details.is_some());
         assert!(shape.edge_endpoints.is_some());
         assert!(
             session
@@ -192,7 +196,12 @@ fn shaping_is_bounded_deterministic_and_multipass_at_1x_2x_4x() {
         assert!(session.evidence().merge_fsync_operations > 0);
         assert!(session.evidence().merge_read_operations > 0);
         assert!(session.evidence().merge_write_operations > 0);
-        assert!(session.evidence().parquet_read_operations > 0);
+        // Property-free input opens no Parquet through the counted row
+        // reader (#1455): the row partitioner and the catalog's row scan are
+        // skipped. The chunk Parquet is still authenticated once per
+        // receipt, which the input-validation counters record.
+        assert_eq!(session.evidence().parquet_read_operations, 0);
+        assert!(session.evidence().shape_input_validation_read_operations > 0);
         assert!(session.evidence().parquet_write_operations > 0);
         // The external merge tree is gone; there are no merge levels left.
         assert_eq!(session.evidence().merge_passes, 0);
@@ -218,7 +227,8 @@ fn batch_partition_and_resume_produce_identical_canonical_data_fingerprints() {
         .shape_canonical_with_cancellation(|| false)
         .unwrap();
     let one_identity = receipt_for_existing(&one_session.root, &one_shape.identities).unwrap();
-    let one_rows = receipt_for_existing(&one_session.root, &one_shape.node_rows[0]).unwrap();
+    let one_details =
+        receipt_for_existing(&one_session.root, one_shape.node_details.as_ref().unwrap()).unwrap();
 
     let two = TempDir::new().unwrap();
     let mut two_session = open(&two, 7_101);
@@ -233,9 +243,10 @@ fn batch_partition_and_resume_produce_identical_canonical_data_fingerprints() {
     let mut resumed = open(&two, 7_101);
     let two_shape = resumed.shape_canonical_with_cancellation(|| false).unwrap();
     let two_identity = receipt_for_existing(&resumed.root, &two_shape.identities).unwrap();
-    let two_rows = receipt_for_existing(&resumed.root, &two_shape.node_rows[0]).unwrap();
+    let two_details =
+        receipt_for_existing(&resumed.root, two_shape.node_details.as_ref().unwrap()).unwrap();
     assert_eq!(one_identity.sha256, two_identity.sha256);
-    assert_eq!(one_rows.sha256, two_rows.sha256);
+    assert_eq!(one_details.sha256, two_details.sha256);
     assert_eq!((one_shape.node_count, one_shape.edge_count), (8, 0));
     assert_eq!((two_shape.node_count, two_shape.edge_count), (8, 0));
 }

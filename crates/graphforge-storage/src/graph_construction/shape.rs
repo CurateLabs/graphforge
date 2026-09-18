@@ -6,7 +6,7 @@ use super::partition_shaping::{
 };
 use super::{
     ArtifactReceipt, AuthenticatedShapeSource, AuthenticatedUuidIndexSnapshot, BASE_IDENTITY_WIDTH,
-    BLOCK_BYTES, BTreeMap, BufReader, BufWriter, Checkpoint, ConstructionChunkKind,
+    BLOCK_BYTES, BTreeMap, BufReader, BufWriter, CatalogSource, Checkpoint, ConstructionChunkKind,
     ConstructionChunkReceipt, ConstructionPublicationState, ConstructionShape, CountingRead,
     DetailCodec, DetailValidator, Digest, EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, File, GfError,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
@@ -19,11 +19,12 @@ use super::{
     checked_evidence_sum, combine_cache_cleanup, compact_parent_surrogate_tails,
     construction_failpoint, decode_bounded, decode_shape_intent, file_identity, file_link_count,
     hex, install_control, is_canonical_lower_hex, is_canonical_sha256,
-    merge_cache_release_evidence, open_counted_fixed_reader, read_run_record, receipt_for_existing,
-    receipt_for_existing_with_work, record_shape_artifact_install, reject_cancelled,
-    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
-    replace_control, sha256, shape_authority_sha256, shape_publication_failure, storage,
-    unlink_shape_artifact, validate_parquet_metadata,
+    merge_cache_release_evidence, open_counted_fixed_reader, property_free_schema_sha256,
+    read_run_record, receipt_for_existing, receipt_for_existing_with_work,
+    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
+    release_counted_reader_cache, replace_checkpoint_control, replace_control, sha256,
+    shape_authority_sha256, shape_publication_failure, storage, unlink_shape_artifact,
+    validate_parquet_metadata,
 };
 use std::io::Seek;
 
@@ -289,6 +290,26 @@ impl GraphConstructionSession {
             false,
         )?;
         let mut row_groups: BTreeMap<(u8, String), RowRangePartitioner> = BTreeMap::new();
+        // #1455. A kind whose every staged chunk carries the bare canonical
+        // schema has no property columns, so its shaped rows would hold
+        // exactly the identity plus label (or endpoints plus route) that its
+        // details family already holds, in the same UUID order. The rows'
+        // only consumers are the runtime-catalog scan and the encoder's
+        // property projection, and the latter discards a property-free batch
+        // on sight. Skip the row spills and the rows Parquet finish for such
+        // a kind and derive its catalog observations from the details family
+        // instead. A kind with any property-bearing chunk, including one
+        // that mixes bare and property schemas, keeps the row path unchanged:
+        // its rows are grouped by exact schema before UUID, and the catalog's
+        // intern order must follow that grouping.
+        let node_catalog_from_details = catalog_derives_from_details(
+            &self.checkpoint.node_schema_sha256,
+            ConstructionChunkKind::Node,
+        );
+        let edge_catalog_from_details = catalog_derives_from_details(
+            &self.checkpoint.edge_schema_sha256,
+            ConstructionChunkKind::Edge,
+        );
         let mut catalog_authority = Sha256::new();
         let shape_intent = ShapeIntent {
             format_version: self.checkpoint.format_version,
@@ -360,30 +381,32 @@ impl GraphConstructionSession {
             // reason those two are. Edge-kind groups stay on the joint
             // `plan`, which their key domain already matches well since
             // edges dominate it.
-            let row_plan = match receipt.kind {
-                ConstructionChunkKind::Node => &node_plan,
-                ConstructionChunkKind::Edge => &plan,
+            let (row_plan, route_rows) = match receipt.kind {
+                ConstructionChunkKind::Node => (&node_plan, !node_catalog_from_details),
+                ConstructionChunkKind::Edge => (&plan, !edge_catalog_from_details),
             };
-            if !row_groups.contains_key(&group) {
-                row_groups.insert(
-                    group.clone(),
-                    RowRangePartitioner::new(
-                        &self.root,
-                        &format!("{kind}-{}", receipt.schema_sha256),
-                        row_plan.partitions(),
-                    )?,
-                );
+            if route_rows {
+                if !row_groups.contains_key(&group) {
+                    row_groups.insert(
+                        group.clone(),
+                        RowRangePartitioner::new(
+                            &self.root,
+                            &format!("{kind}-{}", receipt.schema_sha256),
+                            row_plan.partitions(),
+                        )?,
+                    );
+                }
+                row_groups
+                    .get_mut(&group)
+                    .ok_or_else(|| storage("row partitioner is absent"))?
+                    .push(
+                        row_plan,
+                        &receipt.parquet.name,
+                        self.checkpoint.budgets.max_batch_rows,
+                        &mut cancelled,
+                        &mut self.checkpoint.evidence,
+                    )?;
             }
-            row_groups
-                .get_mut(&group)
-                .ok_or_else(|| storage("row partitioner is absent"))?
-                .push(
-                    row_plan,
-                    &receipt.parquet.name,
-                    self.checkpoint.budgets.max_batch_rows,
-                    &mut cancelled,
-                    &mut self.checkpoint.evidence,
-                )?;
             route_identity_run(
                 &self.root,
                 &plan,
@@ -567,8 +590,17 @@ impl GraphConstructionSession {
         let runtime_catalog = build_runtime_catalog(
             self.parent_catalog.clone(),
             &self.root,
-            &node_rows,
-            &edge_rows,
+            if node_catalog_from_details {
+                CatalogSource::Details(node_details.as_deref())
+            } else {
+                CatalogSource::Rows(&node_rows)
+            },
+            if edge_catalog_from_details {
+                CatalogSource::Details(edge_details.as_deref())
+            } else {
+                CatalogSource::Rows(&edge_rows)
+            },
+            detail_codec,
             self.checkpoint.session_now_micros,
             self.checkpoint.budgets,
             &mut cancelled,
@@ -677,6 +709,18 @@ impl GraphConstructionSession {
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
         Ok(shape)
     }
+}
+
+/// Whether every staged chunk of `kind` carried the bare canonical schema
+/// (#1455). An empty set -- no chunk of that kind -- trivially qualifies and
+/// has no rows to route either way.
+fn catalog_derives_from_details(
+    schema_sha256: &std::collections::BTreeSet<String>,
+    kind: ConstructionChunkKind,
+) -> bool {
+    schema_sha256
+        .iter()
+        .all(|digest| digest == property_free_schema_sha256(kind))
 }
 
 pub(super) fn validate_shape_binding(

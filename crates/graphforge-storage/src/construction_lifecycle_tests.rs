@@ -254,20 +254,52 @@ mod lifecycle_budget {
                 std::fs::write(&path, corrupt).unwrap();
             }
             let allocation = session.evidence().storage_current.clone();
-            let error = session.prepare_canonical_encoding(1).unwrap_err();
+            let error = if case == "encoding" {
+                // A same-inode, same-length encoded payload mutation is not
+                // the reclaim sweep's to refuse: it checks identity, link
+                // count and length only (the #1392 pattern applied to the
+                // encoded branch). Preparation succeeds; the CAS install at
+                // publication hashes the artifact and refuses it there.
+                let prepared = session.prepare_canonical_encoding(1).unwrap();
+                session
+                    .publish_canonical(
+                        &prepared,
+                        Uuid::from_u128(119_601),
+                        Uuid::from_u128(119_602),
+                    )
+                    .unwrap_err()
+            } else {
+                session.prepare_canonical_encoding(1).unwrap_err()
+            };
             assert!(
                 error.to_string().contains(match case {
                     // #1392: the completed-shape trust boundary refuses this
                     // deliberately now, instead of incidentally at retirement.
                     "shape" => "shape manifest output payload changed",
-                    "encoding" => "canonical artifact differs",
+                    "encoding" => "graph object source digest or length changed during install",
                     "replacement" => "predecessor identity changed",
                     "receipt_chain" => "receipt tail changed",
                     _ => unreachable!(),
                 }),
                 "{case}: {error}"
             );
-            assert_eq!(session.evidence().storage_current, allocation);
+            if case == "encoding" {
+                // The accepted trade: the sweep retired the staged predecessors
+                // before publication refused, so the session cannot be
+                // re-encoded from them and the import is re-run from source.
+                let staging = crate::ArtifactCategory::ConstructionStaging;
+                assert!(
+                    session.evidence().storage_current[&staging].logical_references
+                        < allocation[&staging].logical_references,
+                    "{case}: predecessors were not retired"
+                );
+                assert_ne!(
+                    session.checkpoint.publication_state,
+                    Some(ConstructionPublicationState::Published)
+                );
+            } else {
+                assert_eq!(session.evidence().storage_current, allocation);
+            }
             assert_eq!(
                 std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
                 prior
