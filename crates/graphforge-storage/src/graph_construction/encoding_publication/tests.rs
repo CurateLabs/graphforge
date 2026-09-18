@@ -2359,7 +2359,10 @@ fn publication_refuses_same_inode_encoded_payload_corruption_at_cas_install() {
         file.write_all(&[first[0] ^ 0xff]).unwrap();
         file.sync_all().unwrap();
     }
-    assert_eq!(std::fs::metadata(&artifact_path).unwrap().len(), length_before);
+    assert_eq!(
+        std::fs::metadata(&artifact_path).unwrap().len(),
+        length_before
+    );
     assert_eq!(
         graphforge_filesystem::path_identity(&artifact_path).unwrap(),
         identity_before
