@@ -381,8 +381,9 @@ fn catalog_shape_preserves_parent_ids_history_and_ignores_null_observations() {
     let output = build_runtime_catalog(
         parent_catalog,
         &private,
-        &["nodes.parquet".to_owned()],
-        &[],
+        CatalogSource::Rows(&["nodes.parquet".to_owned()]),
+        CatalogSource::Rows(&[]),
+        DetailCodec::from_version(FORMAT_VERSION).unwrap(),
         42,
         GraphConstructionBudgets::default(),
         &mut || false,
@@ -542,7 +543,12 @@ fn staged_catalog_cardinality_is_bounded_at_one_and_two_windows() {
             session.evidence().peak_catalog_identifier_bytes,
             expected_identifier_bytes as u64
         );
-        assert!(session.evidence().peak_catalog_decoded_batch_bytes > 0);
+        // Property-free chunks derive the catalog from the details family
+        // (#1455): no row Parquet is scanned, so no batch is decoded. The
+        // admission budgets above are what this test defends; the
+        // property-bearing path's decode is asserted in `catalog::tests`.
+        assert_eq!(session.evidence().peak_catalog_decoded_batch_bytes, 0);
+        assert!(session.evidence().merge_read_records > 0);
         assert!(session.evidence().shape_input_validation_read_bytes > 0);
     }
 }
@@ -680,17 +686,29 @@ fn crash_subprocess_helper() {
         GraphConstructionBudgets::default(),
     )
     .unwrap();
+    // `GF_CONSTRUCTION_SHAPE_CRASH=rows` stages property-bearing chunks so
+    // shaping takes the row path; any other value stages bare chunks, whose
+    // catalog is derived from the details family and which install no row
+    // artifact (#1455). The crash fixtures mirror this choice exactly.
+    let shape_crash = std::env::var("GF_CONSTRUCTION_SHAPE_CRASH").ok();
+    let batch = |first: u128| {
+        if shape_crash.as_deref() == Some("rows") {
+            node_property_batch(first, 8)
+        } else {
+            node_batch(first, 8)
+        }
+    };
     session
-        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
+        .append(ConstructionChunkKind::Node, "nodes", &batch(1))
         .unwrap();
     if std::env::var_os("GF_CONSTRUCTION_UUID_ENCODE_CRASH").is_some() {
         session.seal().unwrap();
         let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
         session.encode_canonical(&shape, 1).unwrap();
     }
-    if std::env::var_os("GF_CONSTRUCTION_SHAPE_CRASH").is_some() {
+    if shape_crash.is_some() {
         session
-            .append(ConstructionChunkKind::Node, "nodes-2", &node_batch(9, 8))
+            .append(ConstructionChunkKind::Node, "nodes-2", &batch(9))
             .unwrap();
         session.seal().unwrap();
         session.shape_canonical_with_cancellation(|| false).unwrap();
@@ -994,69 +1012,93 @@ fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
         evidence.storage_allocation_transitions.clear();
         evidence
     }
-    let reference_root = TempDir::new().unwrap();
-    let mut reference = GraphConstructionSession::open(
-        reference_root.path(),
-        Uuid::from_u128(600),
-        0,
-        GraphConstructionBudgets::default(),
-    )
-    .unwrap();
-    reference
-        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 8))
-        .unwrap();
-    reference
-        .append(ConstructionChunkKind::Node, "nodes-2", &node_batch(9, 8))
-        .unwrap();
-    reference.seal().unwrap();
-    reference
-        .shape_canonical_with_cancellation(|| false)
-        .unwrap();
-    let expected = without_native_identities(reference.evidence().clone());
-
-    for failpoint in [
+    const ROW_INSTALL: &str = "shape.row_partition.after_install";
+    const FAILPOINTS: [&str; 5] = [
         "shape.partition_spill.after_install",
         "shape.partition_output.after_install",
-        "shape.row_partition.after_install",
+        ROW_INSTALL,
         "shape.after_complete_inventory",
         "shape.after_evidence_checkpoint",
-    ] {
-        let root = TempDir::new().unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("graph_construction::tests::crash_subprocess_helper")
-            .arg("--nocapture")
-            .env("GF_CONSTRUCTION_CRASH_ROOT", root.path())
-            .env("GF_CONSTRUCTION_SHAPE_CRASH", "1")
-            .env(
-                "GF_CONSTRUCTION_FAILPOINT_COOKIE",
-                "graphforge-construction-test-v1",
-            )
-            .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
-            .status()
-            .unwrap();
-        assert_eq!(status.code(), Some(86), "{failpoint}");
-        let mut expected_recovered = expected.clone();
-        expected_shape_recovery_delta(
-            &root
-                .path()
-                .join(PRIVATE_ROOT)
-                .join(Uuid::from_u128(600).simple().to_string()),
-            &mut expected_recovered,
-        );
-        let mut resumed = GraphConstructionSession::open(
-            root.path(),
+    ];
+    // Both shaping paths (#1455): bare chunks derive the catalog from the
+    // details family and never install a row artifact, so the row-partition
+    // install point is not on their path and the helper runs to completion
+    // there; property-bearing chunks take the row path and crash at all five
+    // points. Every point that is reached must recover to the uninterrupted
+    // run's evidence, counted once.
+    for fixture in ["bare", "rows"] {
+        let batch = |first: u128| {
+            if fixture == "rows" {
+                node_property_batch(first, 8)
+            } else {
+                node_batch(first, 8)
+            }
+        };
+        let reference_root = TempDir::new().unwrap();
+        let mut reference = GraphConstructionSession::open(
+            reference_root.path(),
             Uuid::from_u128(600),
             0,
             GraphConstructionBudgets::default(),
         )
         .unwrap();
-        resumed.shape_canonical_with_cancellation(|| false).unwrap();
-        assert_eq!(
-            without_native_identities(resumed.evidence().clone()),
-            expected_recovered,
-            "{failpoint}"
-        );
+        reference
+            .append(ConstructionChunkKind::Node, "nodes", &batch(1))
+            .unwrap();
+        reference
+            .append(ConstructionChunkKind::Node, "nodes-2", &batch(9))
+            .unwrap();
+        reference.seal().unwrap();
+        let reference_shape = reference
+            .shape_canonical_with_cancellation(|| false)
+            .unwrap();
+        assert_eq!(reference_shape.node_rows.is_empty(), fixture == "bare");
+        let expected = without_native_identities(reference.evidence().clone());
+
+        for failpoint in FAILPOINTS {
+            let root = TempDir::new().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("graph_construction::tests::crash_subprocess_helper")
+                .arg("--nocapture")
+                .env("GF_CONSTRUCTION_CRASH_ROOT", root.path())
+                .env("GF_CONSTRUCTION_SHAPE_CRASH", fixture)
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            if fixture == "bare" && failpoint == ROW_INSTALL {
+                // Not reached: no row artifact is installed on this path, so
+                // the helper shapes to completion instead of crashing.
+                assert_eq!(status.code(), Some(0), "{fixture} {failpoint}");
+                continue;
+            }
+            assert_eq!(status.code(), Some(86), "{fixture} {failpoint}");
+            let mut expected_recovered = expected.clone();
+            expected_shape_recovery_delta(
+                &root
+                    .path()
+                    .join(PRIVATE_ROOT)
+                    .join(Uuid::from_u128(600).simple().to_string()),
+                &mut expected_recovered,
+            );
+            let mut resumed = GraphConstructionSession::open(
+                root.path(),
+                Uuid::from_u128(600),
+                0,
+                GraphConstructionBudgets::default(),
+            )
+            .unwrap();
+            resumed.shape_canonical_with_cancellation(|| false).unwrap();
+            assert_eq!(
+                without_native_identities(resumed.evidence().clone()),
+                expected_recovered,
+                "{fixture} {failpoint}"
+            );
+        }
     }
 }
 

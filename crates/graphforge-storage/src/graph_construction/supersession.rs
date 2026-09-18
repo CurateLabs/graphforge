@@ -3,11 +3,11 @@
 use super::{
     ArtifactReceipt, BLOCK_BYTES, Digest, GfError, GraphConstructionEncoding,
     GraphConstructionEvidence, GraphConstructionSession, OsStr, Read, ReadWork, Sha256,
-    StableDirectory, account_cache_release, account_encoding_cache_release,
-    canonical_artifact_target, checked_category_remove, compact_parent_inventory,
-    construction_failpoint, control_sha256, decode_bounded, file_identity, file_link_count, hex,
-    is_shape_artifact_name, read_completed_shape, read_completed_shape_outputs,
-    record_active_identity_remove, replace_checkpoint_control, shape_receipt_name, storage,
+    StableDirectory, account_cache_release, canonical_artifact_target, checked_category_remove,
+    compact_parent_inventory, construction_failpoint, control_sha256, decode_bounded,
+    file_identity, file_link_count, hex, is_shape_artifact_name, read_completed_shape,
+    read_completed_shape_outputs, record_active_identity_remove, replace_checkpoint_control,
+    shape_receipt_name, storage,
 };
 
 impl GraphConstructionSession {
@@ -56,11 +56,24 @@ impl GraphConstructionSession {
             {
                 return Err(storage("supersession encoding authority changed"));
             }
-            let work = crate::graph_construction_encoding::authenticate_inventory_payloads(
-                &output, &inventory, cancelled,
+            // The encoded inventory is the successor authority here. Its
+            // artifacts are checked by identity, link count and length against
+            // the checkpoint's active-identity ledger, which the encoder wrote
+            // in the same checkpoint that pinned `encoding_inventory_sha256`.
+            // Their *content* is authenticated by the boundary that consumes
+            // it: the CAS install at publication copies and hashes every
+            // artifact against this inventory and refuses a mismatch
+            // (`install_graph_object_file_with_lease`). A full re-read here
+            // ran up to three times per ingest (encode exit, session reopen,
+            // prepare) on the same bytes and named no failure the install
+            // does not already refuse (#1384; the reasoning #1392 applied to
+            // the shape branch below).
+            authenticate_encoded_artifact_identities(
+                &output,
+                &inventory,
+                &self.checkpoint.evidence,
+                cancelled,
             )?;
-            self.record_supersession_reads(work.input_read_bytes, work.input_read_operations)?;
-            account_encoding_cache_release(&work, &mut self.checkpoint.evidence)?;
             self.authenticate_retained_successors(&inventory, cancelled)?
         } else {
             // The shape manifest is the successor authority here. Its retained
@@ -316,10 +329,11 @@ impl GraphConstructionSession {
                 // deleted", which cannot change any already-produced output
                 // and is invisible to the user. Every payload that is still
                 // *consumed* is authenticated at the boundary that consumes
-                // it: shape outputs by `authenticate_shaped_output`, encoded
-                // artifacts by `authenticate_inventory_payloads`, both of
-                // which run above before a single predecessor is unlinked
-                // (#1384; the corruption refusal itself is #1269 / #1392).
+                // it: shape outputs by `authenticate_shaped_output` at the
+                // replay/recovery boundary, encoded artifacts by the CAS
+                // install at publication (#1384; the corruption refusals
+                // themselves are #1269 / #1392 and
+                // `install_graph_object_file_with_lease`).
                 if !receipt.identity.matches(identity)
                     || file_link_count(&file).map_err(storage)? != 1
                     || file.metadata().map_err(storage)?.len() != receipt.bytes
@@ -453,6 +467,60 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn set_returned_failure(point: Option<&str>) {
     RETURNED_FAILURE.with(|current| *current.borrow_mut() = point.map(str::to_owned));
+}
+
+/// Identity, link count and length of every encoded artifact the inventory
+/// names, against the checkpoint's active-identity ledger. No payload byte is
+/// read. The ledger entry was recorded by `record_encoded_active_artifacts`
+/// in the same checkpoint write that pinned the inventory authority, so a
+/// replaced inode, an extra link, or a length change is refused here with its
+/// own message; a same-inode, same-length content mutation is refused by the
+/// CAS install at publication, which hashes every artifact it copies.
+fn authenticate_encoded_artifact_identities(
+    output: &StableDirectory,
+    inventory: &GraphConstructionEncoding,
+    evidence: &GraphConstructionEvidence,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GfError> {
+    let graph = output
+        .open_child_directory(OsStr::new("graph"))
+        .map_err(storage)?;
+    for expected in &inventory.artifacts {
+        super::reject_cancelled(cancelled)?;
+        let path = std::path::Path::new(&expected.path);
+        let mut components = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(name) => components.push(name),
+                _ => {
+                    return Err(storage(
+                        "supersession encoded artifact path is not normalized",
+                    ));
+                }
+            }
+        }
+        let Some((name, directories)) = components.split_last() else {
+            return Err(storage("supersession encoded artifact path is empty"));
+        };
+        let mut directory = graph.try_clone().map_err(storage)?;
+        for child in directories {
+            directory = directory.open_child_directory(child).map_err(storage)?;
+        }
+        let file = directory.open_child_file(name).map_err(storage)?;
+        let identity = file_identity(&file).map_err(storage)?;
+        let usage = graphforge_filesystem::file_space_usage(&file).map_err(storage)?;
+        let key = format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id));
+        if evidence
+            .storage_active_identity_allocated_bytes
+            .get(&key)
+            .is_none_or(|allocated| *allocated != usage.allocated_bytes)
+            || file_link_count(&file).map_err(storage)? != 1
+            || usage.logical_bytes != expected.bytes
+        {
+            return Err(storage("supersession encoded artifact identity changed"));
+        }
+    }
+    Ok(())
 }
 
 /// Identity, link count and length of a retained payload that this session
