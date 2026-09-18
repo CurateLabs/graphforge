@@ -447,7 +447,10 @@ fn file_install_receipts_count_actual_cache_window_synchronizations() {
     let window = graphforge_filesystem::cache_release_window_for_streams(2)
         .unwrap()
         .get();
-    assert_eq!(window, 32 * 1024 * 1024);
+    assert_eq!(
+        window,
+        graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES / 2
+    );
     for bytes in [window - 1, window, window + 1] {
         let root = tempfile::tempdir().unwrap();
         let source_root = tempfile::tempdir().unwrap();
