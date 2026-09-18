@@ -1,7 +1,13 @@
+---
+title: "ADR 0020: NTFS write-through namespace durability"
+adr: "0020"
+status: "Accepted"
+date: "2026-08-16"
+superseded_by: null
+---
+
 # ADR 0020: NTFS write-through namespace durability
 
-**Status:** Accepted
-**Date:** 2026-08-16
 **Build target:** v0.5.x (M6 native filesystem admission)
 **Decision approval:** Maintainer-approved on 2026-08-16
 **Amends:** ADR 0013 (Windows publication primitive), ADR 0018 (Windows

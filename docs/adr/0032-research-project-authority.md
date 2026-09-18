@@ -1,10 +1,14 @@
+---
+title: "ADR 0032: Research Branches share Project publication authority"
+adr: "0032"
+status: "Accepted"
+date: "2026-09-16"
+superseded_by: null
+---
+
 # ADR 0032: Research Branches share Project publication authority
 
-**Status:** Accepted
-
 **Implementation:** Accepted design; M11 implementation pending.
-
-**Date:** 2026-09-16
 
 **Decider:** Project maintainer, through the approved #1346 repair plan
 

@@ -316,12 +316,23 @@ impl PartitionBalance {
     /// Returns an error when the partition is out of range or the count
     /// overflows.
     pub(crate) fn record(&mut self, partition: usize) -> Result<(), GfError> {
+        self.record_many(partition, 1)
+    }
+
+    /// Charge `count` rows to `partition` in one step (#1439 follow-up: the
+    /// caller batching a contiguous same-partition run charges it once
+    /// rather than once per record).
+    ///
+    /// # Errors
+    /// Returns an error when the partition is out of range or the count
+    /// overflows.
+    pub(crate) fn record_many(&mut self, partition: usize, count: u64) -> Result<(), GfError> {
         let slot = self
             .rows
             .get_mut(partition)
             .ok_or_else(|| storage("partition index is out of range"))?;
         *slot = slot
-            .checked_add(1)
+            .checked_add(count)
             .ok_or_else(|| storage("partition row count overflows"))?;
         Ok(())
     }
@@ -347,6 +358,16 @@ impl PartitionBalance {
     /// The check is skipped below [`BALANCE_MIN_MEAN_ROWS`] rows per partition,
     /// where the quantile estimate has fewer points than partitions and the
     /// ratio carries no information.
+    ///
+    /// "Rows" are whatever the caller recorded. The splitters are quantiles
+    /// of the *key* domain, so the quantity they promise to balance is the
+    /// number of distinct keys per partition, not records: a range partition
+    /// cannot split one key, and a family with several records per key
+    /// (staged endpoints, keyed by node, hold one record per incident edge)
+    /// is expected to be row-skewed exactly as much as its key degrees are.
+    /// Such a family records its distinct-key counts here instead of its row
+    /// counts (`FixedRangePartitioner::finish_optional`, #1439); for a
+    /// unique-key family the two are the same number.
     ///
     /// # Errors
     /// Returns an error when the partitioning is skewed beyond the tolerance.

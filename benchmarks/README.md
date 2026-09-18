@@ -675,6 +675,17 @@ or contradictory storage, construction, or query receipts cause a typed first
 failure; the controller never manufactures values from command counts,
 recursive file scans, portable payload size, or synthetic labels.
 
+Each read phase opens its project once per process rather than once per
+receipt: one `gf query` carries every `--cypher`/`--output` pair of `recount`,
+`query`, and the `reopen_proof` statements, emitting one result-sink receipt
+line per statement whose `application_io` covers only the I/O since the
+previous line, and `gf storage-attribution --recovery` emits the reopen
+phase's recovery receipt ahead of its attribution receipt from the same first
+open. The receipts the controller consumes are unchanged in count, order, and
+content; `reopen_proof` still runs against the clean import in its own phase
+and its digests must still equal the source phases' byte for byte. The
+storage-attribution reopen-agreement comparison is never skipped.
+
 Two complete adjacent S20/S22 or S22/S24 `/2` rungs can be adapted to the
 versioned `/3` storage qualification without restoring retired root
 orchestration:

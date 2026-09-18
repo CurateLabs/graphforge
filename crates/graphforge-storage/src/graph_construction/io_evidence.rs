@@ -346,6 +346,19 @@ pub struct GraphConstructionEvidence {
     /// Identity keys retained as splitter sample points.
     #[serde(default)]
     pub splitter_sample_records: u64,
+    /// Effective range partitions produced by the node-only splitter set
+    /// (#1439), used to route node-keyed families (node details, endpoints,
+    /// node rows) instead of the joint identity splitters.
+    #[serde(default)]
+    pub shape_node_partitions: u64,
+    /// Node identity records observed by the node-only splitter sampling
+    /// pass (#1439).
+    #[serde(default)]
+    pub node_splitter_sampled_source_records: u64,
+    /// Node identity keys retained as node-only splitter sample points
+    /// (#1439).
+    #[serde(default)]
+    pub node_splitter_sample_records: u64,
     /// Rows routed into the largest identity partition.
     #[serde(default)]
     pub max_partition_identity_rows: u64,
@@ -1340,8 +1353,27 @@ pub(super) fn open_counted_fixed_reader(
     ),
     GfError,
 > {
+    let (reader, counter, length) = open_fixed_reader(root, name)?;
+    account_sequential_read(length, evidence)?;
+    Ok((reader, counter))
+}
+
+/// Open a fixed-width run for counted reading without touching the shared
+/// evidence; the third value is the file length the caller credits later.
+/// This is the worker-side half of [`open_counted_fixed_reader`].
+pub(super) fn open_fixed_reader(
+    root: &StableDirectory,
+    name: &str,
+) -> Result<
+    (
+        BufReader<CountingRead<graphforge_filesystem::FileCacheReleasingReader>>,
+        IoCounter,
+        u64,
+    ),
+    GfError,
+> {
     let file = root.open_child_file(OsStr::new(name)).map_err(storage)?;
-    account_sequential_read(file.metadata().map_err(storage)?.len(), evidence)?;
+    let length = file.metadata().map_err(storage)?.len();
     let counter = IoCounter::default();
     let cache_window =
         graphforge_filesystem::cache_release_window_for_streams(4).map_err(storage)?;
@@ -1359,15 +1391,16 @@ pub(super) fn open_counted_fixed_reader(
             },
         ),
         counter,
+        length,
     ))
 }
 
-pub(super) fn release_counted_reader_cache(
-    reader: &mut BufReader<CountingRead<graphforge_filesystem::FileCacheReleasingReader>>,
-    evidence: &mut GraphConstructionEvidence,
-) -> Result<(), GfError> {
-    let released = reader.get_mut().inner.finish().map_err(storage)?;
-    account_cache_release(released, evidence)?;
+/// Test-only injected failure for the input-release step. It is a
+/// thread-local, so it is consumed on the thread that armed it: a partition
+/// loaded on a worker thread reports it through the coordinator's merge step
+/// rather than from the worker.
+#[allow(clippy::unnecessary_wraps)]
+pub(super) fn injected_input_release_failure() -> Result<(), GfError> {
     #[cfg(test)]
     SHAPE_CLEANUP_FAILURES.with(|failures| {
         if failures.borrow().input_release {
@@ -1377,6 +1410,15 @@ pub(super) fn release_counted_reader_cache(
         Ok(())
     })?;
     Ok(())
+}
+
+pub(super) fn release_counted_reader_cache(
+    reader: &mut BufReader<CountingRead<graphforge_filesystem::FileCacheReleasingReader>>,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    let released = reader.get_mut().inner.finish().map_err(storage)?;
+    account_cache_release(released, evidence)?;
+    injected_input_release_failure()
 }
 
 pub(super) fn combine_cache_cleanup<T>(

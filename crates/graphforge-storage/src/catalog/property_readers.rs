@@ -389,7 +389,9 @@ where
             &mut file,
             metadata.len(),
         )?);
-        let mut builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        let mut builder =
+            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+                .map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         if let Some(columns) = projected_columns {
             use parquet::arrow::ProjectionMask;

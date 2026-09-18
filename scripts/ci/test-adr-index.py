@@ -149,7 +149,10 @@ def _(root: Path) -> None:
 @case("new record in no index at all", "0099")
 def _(root: Path) -> None:
     (root / "docs/adr/0099-untracked-record.md").write_text(
-        "# ADR 0099: Untracked record\n\n**Status:** Accepted\n", encoding="utf-8"
+        '---\ntitle: "ADR 0099: Untracked record"\nadr: "0099"\n'
+        'status: "Accepted"\nsuperseded_by: null\n---\n\n'
+        "# ADR 0099: Untracked record\n",
+        encoding="utf-8",
     )
 
 
@@ -205,18 +208,53 @@ def _(root: Path) -> None:
     )
 
 
-@case("a record loses its status line", "no '**Status:**' line")
+@case("a record loses its status field", "missing 'status'")
 def _(root: Path) -> None:
-    drop_line(root / "docs/adr/0026-read-plan-resources.md", "**Status:**")
+    drop_line(root / "docs/adr/0026-read-plan-resources.md", "status:")
+
+
+@case("a record loses its frontmatter entirely", "no YAML frontmatter")
+def _(root: Path) -> None:
+    path = root / "docs/adr/0026-read-plan-resources.md"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text[text.index("\n---\n", 4) + 5 :].lstrip("\n"), encoding="utf-8")
+
+
+@case("frontmatter adr number disagrees with the filename", "filename says")
+def _(root: Path) -> None:
+    substitute(root / "docs/adr/0026-read-plan-resources.md", 'adr: "0026"', 'adr: "0077"')
+
+
+@case("frontmatter title loses its 'ADR NNNN:' prefix", "must start with")
+def _(root: Path) -> None:
+    path = root / "docs/adr/0026-read-plan-resources.md"
+    text = path.read_text(encoding="utf-8")
+    line = next(line for line in text.splitlines() if line.startswith("title:"))
+    substitute(path, line, 'title: "Read plan resources"')
+
+
+@case("the body heading drifts from the frontmatter title", "must carry the heading")
+def _(root: Path) -> None:
+    path = root / "docs/adr/0026-read-plan-resources.md"
+    text = path.read_text(encoding="utf-8")
+    heading = next(line for line in text.splitlines() if line.startswith("# ADR "))
+    substitute(path, heading, "# Something else entirely")
+
+
+@case("superseded_by disagrees with the status line", "but the status says")
+def _(root: Path) -> None:
+    substitute(
+        root / "docs/adr/superseded/0033-prerelease-version-identity.md",
+        'superseded_by: "0036"',
+        'superseded_by: "0077"',
+    )
 
 
 @case("supersession points at a record that does not exist", "which does not exist")
 def _(root: Path) -> None:
-    substitute(
-        root / "docs/adr/superseded/0033-prerelease-version-identity.md",
-        "**Status:** Superseded by ADR 0036",
-        "**Status:** Superseded by ADR 0077",
-    )
+    path = root / "docs/adr/superseded/0033-prerelease-version-identity.md"
+    substitute(path, 'status: "Superseded by ADR 0036"', 'status: "Superseded by ADR 0077"')
+    substitute(path, 'superseded_by: "0036"', 'superseded_by: "0077"')
 
 
 @case("an index row loses a cell", "cells, expected")

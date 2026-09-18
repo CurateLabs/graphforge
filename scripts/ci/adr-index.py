@@ -11,10 +11,17 @@ Four hand-maintained places have to agree with the ADR directory:
 ``docs-site/astro.config.mjs``       published site sidebar
 ==================================== ==========================================
 
-The last two are machine-consumed by the docs build and carry no human prose, so
-they are *generated* from the directory between marker comments rather than
-checked: drift is removed instead of detected. The two markdown tables carry
-hand-written titles and statuses, so they are checked.
+All four are *generated* from the directory itself, so drift is removed rather
+than detected. The docs-site files are rewritten between marker comments; the
+two markdown tables have their row bodies rewritten in place, leaving the
+header and separator alone.
+
+The markdown tables were hand-maintained until #1390: their titles and statuses
+were assumed to be human prose, but every cell is derivable from the ADR file
+(``# ADR NNNN: Title`` and ``**Status:**``). Hand-maintaining four copies of one
+fact produced exactly the drift this script exists to catch. ``check`` is kept
+and still fails closed, so a hand edit is reported rather than silently
+overwritten on the next run.
 
 Usage::
 
@@ -85,56 +92,123 @@ class Record:
         return f"{self.number} — {self.title}"
 
 
+def _frontmatter(path: Path) -> tuple[dict[str, object], list[str]]:
+    """Split YAML frontmatter from the body. Returns ({}, lines) when absent."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, lines
+    try:
+        close = lines.index("---", 1)
+    except ValueError as exc:
+        raise AdrError(f"{path.relative_to(ROOT)}: frontmatter is not closed by '---'") from exc
+
+    fields: dict[str, object] = {}
+    for raw in lines[1:close]:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        key, sep, value = raw.partition(":")
+        if not sep:
+            raise AdrError(
+                f"{path.relative_to(ROOT)}: frontmatter line {raw!r} is not 'key: value'"
+            )
+        key = key.strip()
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1].strip()
+            fields[key] = [item.strip().strip('"') for item in inner.split(",") if item.strip()]
+        elif value in ("null", "~", ""):
+            fields[key] = None
+        else:
+            fields[key] = value.strip('"')
+    return fields, lines[close + 1 :]
+
+
 def _parse_record(path: Path, *, superseded: bool) -> Record:
     match = FILENAME_RE.match(path.name)
     if match is None:
         raise AdrError(f"{path.relative_to(ROOT)}: filename is not NNNN-slug.md")
     number = match.group(1)
-    lines = path.read_text(encoding="utf-8").splitlines()
-
-    title_match = next((TITLE_RE.match(line) for line in lines[:1]), None)
-    if title_match is None:
-        raise AdrError(f"{path.relative_to(ROOT)}: first line must be '# ADR {number}: <title>'")
-    if title_match.group(1) != number:
+    fields, body = _frontmatter(path)
+    if not fields:
         raise AdrError(
-            f"{path.relative_to(ROOT)}: title says ADR {title_match.group(1)}, "
+            f"{path.relative_to(ROOT)}: no YAML frontmatter. Every ADR carries "
+            "title / adr / status / supersedes / superseded_by (ADR 0038, #1390)"
+        )
+
+    for required in ("title", "adr", "status"):
+        if not fields.get(required):
+            raise AdrError(f"{path.relative_to(ROOT)}: frontmatter is missing {required!r}")
+
+    if fields["adr"] != number:
+        raise AdrError(
+            f"{path.relative_to(ROOT)}: frontmatter says adr {fields['adr']!r}, "
             f"filename says {number}"
         )
 
-    status: str | None = None
-    for line in lines:
-        status_match = STATUS_RE.match(line)
-        if status_match is not None:
-            status = status_match.group(1)
-            break
-    if status is None:
-        raise AdrError(f"{path.relative_to(ROOT)}: no '**Status:**' line")
+    full_title = str(fields["title"])
+    prefix = f"ADR {number}: "
+    if not full_title.startswith(prefix):
+        raise AdrError(
+            f"{path.relative_to(ROOT)}: frontmatter title must start with {prefix!r}, "
+            f"got {full_title!r}"
+        )
+    title = full_title[len(prefix) :]
 
-    superseded_by = SUPERSEDED_STATUS_RE.match(status)
-    if superseded_by is None and status not in SIMPLE_STATUSES:
+    heading = f"# {full_title}"
+    if not any(line.strip() == heading for line in body):
+        raise AdrError(f"{path.relative_to(ROOT)}: body must carry the heading {heading!r}")
+
+    status = str(fields["status"])
+    superseded_by_match = SUPERSEDED_STATUS_RE.match(status)
+    if superseded_by_match is None and status not in SIMPLE_STATUSES:
         raise AdrError(
             f"{path.relative_to(ROOT)}: status {status!r} is not one of "
             "Proposed / Accepted / Deprecated / 'Superseded by ADR NNNN'"
         )
-    if superseded and superseded_by is None:
+    if superseded and superseded_by_match is None:
         raise AdrError(
             f"{path.relative_to(ROOT)}: lives under superseded/ but its status is "
             f"{status!r}, not 'Superseded by ADR NNNN'"
         )
-    if not superseded and superseded_by is not None:
+    if not superseded and superseded_by_match is not None:
         raise AdrError(
             f"{path.relative_to(ROOT)}: status is {status!r} but the record is still "
             "in the active directory; move it to docs/adr/superseded/"
         )
 
+    declared = fields.get("superseded_by")
+    expected = superseded_by_match.group(1) if superseded_by_match else None
+    if declared != expected:
+        raise AdrError(
+            f"{path.relative_to(ROOT)}: frontmatter superseded_by is {declared!r}, "
+            f"but the status says {expected!r}"
+        )
+
     return Record(
         number=number,
         filename=path.name,
-        title=title_match.group(2),
+        title=title,
         status=status,
         superseded=superseded,
-        superseded_by=superseded_by.group(1) if superseded_by else None,
+        superseded_by=expected,
     )
+
+
+def supersession_graph(records: list[Record]) -> dict[str, list[str]]:
+    """What each ADR currently supersedes, derived from ``superseded_by``.
+
+    Deliberately not stored in frontmatter. Supersession here is transitive and
+    flattened -- 0017 -> 0033 -> 0034 -> 0036, with 0017's status rewritten to
+    name the final successor -- so an ADR's prose ``**Supersedes:**`` records
+    *history* while ``superseded_by`` records *current state*. Storing both
+    invites precisely the drift this script exists to remove; one direction is
+    the source and the other is derived.
+    """
+    graph: dict[str, list[str]] = {record.number: [] for record in records}
+    for record in records:
+        if record.superseded_by is not None:
+            graph[record.superseded_by].append(record.number)
+    return {number: sorted(targets) for number, targets in graph.items()}
 
 
 def load_records(root: Path = ROOT) -> list[Record]:
@@ -236,14 +310,89 @@ GENERATED = (
 )
 
 
+def _adr_readme_rows(records: list[Record]) -> tuple[list[str], list[str]]:
+    """Row bodies for the two tables in ``docs/adr/README.md``."""
+    live = [f"| {r.number} | [{r.title}]({r.relpath}) | `{r.relpath}` |" for r in active(records)]
+    dead = [
+        f"| {r.number} | [{r.title}]({r.relpath}) | ADR {r.superseded_by} | `{r.relpath}` |"
+        for r in superseded(records)
+    ]
+    return live, dead
+
+
+def _engineering_rows(records: list[Record]) -> tuple[list[str], list[str]]:
+    """Row bodies for the two tables in ``docs/engineering/adrs/README.md``."""
+
+    def row(r: Record) -> str:
+        path = f"../../adr/{r.relpath}"
+        return f"| {r.number} | {r.title} | {r.status} | [`{path}`]({path}) |"
+
+    return [row(r) for r in active(records)], [row(r) for r in superseded(records)]
+
+
+def _replace_table_body(path: Path, header: str, which: int, rows: list[str]) -> bool:
+    """Rewrite the ``which``-th body of the table headed by ``header``.
+
+    The header and its separator are left alone; only the row block between the
+    separator and the first non-row line is replaced. Returns True if the file
+    changed.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    seen = -1
+    for index, line in enumerate(lines):
+        if line.strip() != header:
+            continue
+        seen += 1
+        if seen != which:
+            continue
+        start = index + 2  # skip the header and the |---| separator
+        end = start
+        while end < len(lines) and lines[end].startswith("|"):
+            end += 1
+        if lines[start:end] == rows:
+            return False
+        lines[start:end] = rows
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    raise AdrError(f"{path.relative_to(ROOT)}: table {which} headed {header!r} not found")
+
+
+def write_markdown_indexes(records: list[Record]) -> list[Path]:
+    """Regenerate every row body in the two hand-readable ADR indexes."""
+    live, dead = _adr_readme_rows(records)
+    eng_live, eng_dead = _engineering_rows(records)
+    changed: list[Path] = []
+    for path, jobs in (
+        (
+            ADR_README,
+            (
+                (("| ADR | Title | File |"), 0, live),
+                ("| ADR | Title | Superseded by | File |", 0, dead),
+            ),
+        ),
+        (
+            ENGINEERING_README,
+            (
+                ("| ADR | Title | Status | Path |", 0, eng_live),
+                ("| ADR | Title | Status | Path |", 1, eng_dead),
+            ),
+        ),
+    ):
+        for header, which, rows in jobs:
+            if _replace_table_body(path, header, which, rows) and path not in changed:
+                changed.append(path)
+    return changed
+
+
 def generate(records: list[Record]) -> list[Path]:
-    """Rewrite the generated regions in place; return the files that changed."""
+    """Rewrite every generated region in place; return the files that changed."""
     changed: list[Path] = []
     for path, builder in GENERATED:
         wanted = render(path, builder(records))
         if path.read_text(encoding="utf-8") != wanted:
             path.write_text(wanted, encoding="utf-8")
             changed.append(path)
+    changed.extend(write_markdown_indexes(records))
     return changed
 
 

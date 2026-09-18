@@ -1,6 +1,12 @@
+---
+title: "ADR 0029: Compile against immutable schema and catalog data"
+adr: "0029"
+status: "Accepted"
+superseded_by: null
+---
+
 # ADR 0029: Compile against immutable schema and catalog data
 
-**Status:** Accepted
 **Implementation:** Accepted for #1148, the first slice of #1006.
 **Related:** #1148, #1006
 

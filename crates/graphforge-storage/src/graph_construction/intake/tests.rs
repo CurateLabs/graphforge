@@ -239,7 +239,11 @@ fn schema_group_admission_is_constant_and_budgeted() {
         .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
         .unwrap();
     let error = session
-        .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(100, 1, 2, 1),
+        )
         .unwrap_err();
     assert!(error.to_string().contains("schema-group budget"));
     assert_eq!(session.checkpoint.node_schema_sha256.len(), 1);

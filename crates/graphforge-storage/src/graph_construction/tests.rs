@@ -58,14 +58,34 @@ fn distinct_label_batch(first: u128, rows: usize) -> RecordBatch {
     .unwrap()
 }
 
-pub(super) fn edge_batch(first: u128, rows: usize) -> RecordBatch {
+/// `first` is this batch's edge-UUID base. `node_start` and `node_count`
+/// (#1439) describe where this batch's src/dst references begin and how
+/// many nodes exist to reference, 1-indexed: every reference wraps modulo
+/// `node_count`, so it is always a valid node id regardless of chunk
+/// position. A caller with more than one chunk must vary `node_start` per
+/// chunk, or every chunk in the loop references the same low node-UUID band
+/// no matter how many nodes or chunks actually exist. That was invisible
+/// while endpoints were routed with the joint identity splitters, which
+/// never resolve node UUIDs finely enough to notice; routing them with
+/// node-only splitters surfaces it as a real (fixture-caused, not
+/// production) skew. Single-chunk callers keep passing `node_start: 1`,
+/// matching this function's previous fixed behaviour exactly whenever
+/// `rows <= node_count`.
+pub(super) fn edge_batch(
+    first: u128,
+    node_start: u128,
+    node_count: u128,
+    rows: usize,
+) -> RecordBatch {
     let edges = (first..first + rows as u128)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
-    let src = (1..=rows as u128)
+    let src = (0..rows as u128)
+        .map(|offset| 1 + (node_start - 1 + offset) % node_count)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
-    let dst = (2..=rows as u128 + 1)
+    let dst = (0..rows as u128)
+        .map(|offset| 1 + (node_start + offset) % node_count)
         .map(u128::to_be_bytes)
         .collect::<Vec<_>>();
     RecordBatch::try_new(
@@ -223,7 +243,11 @@ pub(super) fn nonempty_project_with_nodes(node_count: u64) -> TempDir {
         )
         .unwrap();
     session
-        .append(ConstructionChunkKind::Edge, "edge", &edge_batch(100, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edge",
+            &edge_batch(100, 1, u128::from(node_count), 1),
+        )
         .unwrap();
     session.seal().unwrap();
     let encoded = session.prepare_canonical_encoding(1).unwrap();
@@ -248,7 +272,11 @@ pub(super) fn nonempty_project_generation_two() -> TempDir {
         .append(ConstructionChunkKind::Node, "node", &node_batch(3, 1))
         .unwrap();
     session
-        .append(ConstructionChunkKind::Edge, "edge", &edge_batch(101, 1))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edge",
+            &edge_batch(101, 1, 3, 1),
+        )
         .unwrap();
     session.seal().unwrap();
     let encoded = session.prepare_canonical_encoding(2).unwrap();
@@ -592,7 +620,11 @@ fn node_after_edge_and_concurrent_same_process_open_fail_closed() {
         .is_err()
     );
     session
-        .append(ConstructionChunkKind::Edge, "edges", &edge_batch(100, 2))
+        .append(
+            ConstructionChunkKind::Edge,
+            "edges",
+            &edge_batch(100, 1, 2, 2),
+        )
         .unwrap();
     assert!(
         session
@@ -1091,4 +1123,121 @@ pub(super) fn construction_session_root(root: &TempDir, operation: Uuid) -> Path
     root.path()
         .join(PRIVATE_ROOT)
         .join(operation.simple().to_string())
+}
+
+/// Endpoint-shaped fixture for the partition balance check: 64 partitions of
+/// exactly 32 node keys each, so the key domain is perfectly balanced, with
+/// the node keys in `hubs` referencing `hub_degree` edges apiece and every
+/// other node exactly one. A route plan that agrees with that key layout is
+/// built by the caller.
+fn route_endpoint_fixture(
+    root: &StableDirectory,
+    plan: &super::partition::PartitionPlan,
+    hubs: &[u16],
+    hub_degree: u32,
+    evidence: &mut GraphConstructionEvidence,
+) -> Result<Option<String>, GfError> {
+    use super::partition_shaping::{FixedRangePartitioner, PartitionFamily};
+    use crate::construction_record_layout::ENDPOINT_WIDTH;
+    const PARTITIONS: usize = 64;
+    const KEYS_PER_PARTITION: u16 = 32;
+    let mut partitioner = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
+        root,
+        PartitionFamily::Endpoints,
+        PARTITIONS,
+        None,
+        false,
+    )?;
+    let mut edge = 0_u128;
+    for node in 0..(PARTITIONS as u16 * KEYS_PER_PARTITION) {
+        let degree = if hubs.contains(&node) { hub_degree } else { 1 };
+        let mut key = [0_u8; 16];
+        key[..2].copy_from_slice(&node.to_be_bytes());
+        for _ in 0..degree {
+            edge += 1;
+            let mut record = [0_u8; ENDPOINT_WIDTH];
+            record[..16].copy_from_slice(&key);
+            record[16..32].copy_from_slice(&edge.to_be_bytes());
+            partitioner.route(plan, &key, &record, evidence)?;
+        }
+    }
+    partitioner.seal(evidence)?;
+    partitioner.finish_optional("shaped-fixture-endpoints.run", &mut || false, evidence)
+}
+
+/// Splitters at every 32nd node key: the plan the fixture's keys are laid out
+/// for, so each partition owns exactly 32 distinct keys.
+fn endpoint_fixture_plan() -> super::partition::PartitionPlan {
+    let splitters = (1_u16..64)
+        .map(|partition| {
+            let mut splitter = [0_u8; 16];
+            splitter[..2].copy_from_slice(&(partition * 32).to_be_bytes());
+            splitter
+        })
+        .collect();
+    super::partition::PartitionPlan::from_recorded(64, splitters).unwrap()
+}
+
+#[test]
+fn hub_heavy_endpoints_over_balanced_keys_are_accepted() {
+    // Three hubs in partition 0 and two elsewhere, each with 400 incident
+    // edges against a mean of ~63 rows per partition: partition 0 holds 1,229
+    // of 4,043 rows, more than 4x the mean even after discounting any one
+    // hub. That is the Graph500 shape (`scale_g500_ladder` at scale 10:
+    // "largest partition holds 315 of 1858 rows across 64 partitions,
+    // largest single-key run 91"), and it is not a splitter defect: every
+    // partition owns exactly 32 distinct keys.
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_041);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let output = route_endpoint_fixture(
+        session_root,
+        &endpoint_fixture_plan(),
+        &[5, 6, 7, 700, 1_500],
+        400,
+        &mut checkpoint.evidence,
+    )
+    .unwrap();
+    assert!(output.is_some());
+}
+
+#[test]
+fn collapsed_endpoint_splitters_are_still_refused() {
+    // The same 2,048 keys, one record each, under a splitter set that lies
+    // entirely above the key domain: every key lands in partition 0. No hub
+    // is involved, so the refusal can only come from key concentration --
+    // the property the balance check exists to guarantee.
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_042);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let collapsed = (1_u8..64)
+        .map(|partition| {
+            let mut splitter = [0xff_u8; 16];
+            splitter[1] = partition;
+            splitter
+        })
+        .collect();
+    let plan = super::partition::PartitionPlan::from_recorded(64, collapsed).unwrap();
+    let error = route_endpoint_fixture(session_root, &plan, &[], 1, &mut checkpoint.evidence)
+        .expect_err("a collapsed key partitioning must be refused")
+        .to_string();
+    assert!(error.contains("endpoints distinct keys"), "{error}");
+    assert!(error.contains("skewed"), "{error}");
+    assert!(error.contains("2048 of 2048"), "{error}");
 }

@@ -1,7 +1,13 @@
+---
+title: "ADR 0003: Progressive Ontology — Exploration First"
+adr: "0003"
+status: "Accepted"
+date: "2026-05-31"
+superseded_by: null
+---
+
 # ADR 0003: Progressive Ontology — Exploration First
 
-**Status:** Accepted
-**Date:** 2026-05-31  
 **Supersedes:** Implicit ontology-required assumption in ADR 0001
 
 ---

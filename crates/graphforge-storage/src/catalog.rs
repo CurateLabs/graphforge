@@ -379,9 +379,11 @@ fn count_edge_paths(
         let file = File::open(&path).map_err(|error| {
             crate::GfError::Storage(format!("open edge footer {}: {error}", path.display()))
         })?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|error| {
-            crate::GfError::Storage(format!("read edge footer {}: {error}", path.display()))
-        })?;
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+                .map_err(|error| {
+                    crate::GfError::Storage(format!("read edge footer {}: {error}", path.display()))
+                })?;
         if stem == "_exploratory" && rel_name != "*" {
             let relation_column = builder
                 .schema()
@@ -719,7 +721,9 @@ fn max_ordered_u64_tail(path: &Path, column: &str) -> Result<u64, DataFusionErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(io_err(&error)),
     };
-    let builder = ParquetRecordBatchReaderBuilder::try_new(input).map_err(parquet_err)?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(input))
+            .map_err(parquet_err)?;
     let row_groups = builder.metadata().num_row_groups();
     if row_groups == 0 {
         return Ok(0);
@@ -754,7 +758,7 @@ const MAX_ADMITTED_COLUMN_BYTES: i64 = 64 * 1024 * 1024;
 /// Open one path through the storage-wide fail-closed Parquet admission policy.
 pub(crate) fn admitted_parquet(
     path: &Path,
-) -> Result<ParquetRecordBatchReaderBuilder<File>, DataFusionError> {
+) -> Result<ParquetRecordBatchReaderBuilder<crate::lifecycle_io::ReadPathFile>, DataFusionError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -771,7 +775,9 @@ pub(crate) fn admitted_parquet(
         )));
     }
     preflight_parquet_handle(&mut file, metadata.len())?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            .map_err(parquet_err)?;
     admit_decoded_parquet(&builder)?;
     Ok(builder)
 }
@@ -808,8 +814,8 @@ fn preflight_parquet_handle(file: &mut File, length: u64) -> Result<(), DataFusi
     Ok(())
 }
 
-fn admit_decoded_parquet(
-    builder: &ParquetRecordBatchReaderBuilder<File>,
+fn admit_decoded_parquet<T: parquet::file::reader::ChunkReader + 'static>(
+    builder: &ParquetRecordBatchReaderBuilder<T>,
 ) -> Result<(), DataFusionError> {
     if builder.schema().fields().len() > MAX_ADMITTED_PARQUET_COLUMNS {
         return Err(DataFusionError::ResourcesExhausted(
@@ -880,7 +886,9 @@ where
             &mut file,
             metadata.len(),
         )?);
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+                .map_err(parquet_err)?;
         admit_decoded_parquet(&builder)?;
         for batch in builder
             .with_batch_size(batch_size.max(1))
@@ -1012,11 +1020,12 @@ where
     let mut any = false;
     for path in paths {
         let file = File::open(&path).map_err(|e| io_err(&e))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .map_err(parquet_err)?
-            .with_batch_size(batch_size.max(1))
-            .build()
-            .map_err(parquet_err)?;
+        let reader =
+            ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+                .map_err(parquet_err)?
+                .with_batch_size(batch_size.max(1))
+                .build()
+                .map_err(parquet_err)?;
         for batch in reader {
             any = true;
             let normalized = normalize_topology_nodes(vec![batch.map_err(parquet_err)?])?;
@@ -1084,8 +1093,9 @@ pub(crate) fn discover_parquet_schema(path: &Path) -> Option<SchemaRef> {
 /// error string for scale-host diagnostics.
 pub(crate) fn discover_parquet_schema_detailed(path: &Path) -> Result<SchemaRef, String> {
     let file = File::open(path).map_err(|error| format!("open failed: {error}"))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
     Ok(builder.schema().clone())
 }
 

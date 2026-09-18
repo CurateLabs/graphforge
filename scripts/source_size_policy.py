@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path, PurePosixPath
-import re
 import subprocess
 import sys
 from typing import NamedTuple
@@ -124,6 +123,29 @@ def _read(root: Path, path: str) -> bytes:
         raise PolicyError(f"{path}: cannot read tracked file: {error}") from error
 
 
+def _adr_statuses(text: str) -> list[str]:
+    """Every status an ADR declares, read from its YAML frontmatter.
+
+    ADRs carry ``status:`` in frontmatter (ADR 0038, #1390). The prose
+    ``**Status:**`` line they used to carry was removed when the frontmatter
+    landed, and this gate reads the same field the ADR index does so the two
+    cannot disagree.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    try:
+        close = lines.index("---", 1)
+    except ValueError:
+        return []
+    found = []
+    for raw in lines[1:close]:
+        key, sep, value = raw.partition(":")
+        if sep and key.strip() == "status":
+            found.append(value.strip().strip('"'))
+    return found
+
+
 def check(root: Path, policy_path: Path) -> tuple[list[Measurement], list[str]]:
     default, exemptions = load_policy(policy_path)
     tracked = tracked_paths(root)
@@ -137,9 +159,9 @@ def check(root: Path, policy_path: Path) -> tuple[list[Measurement], list[str]]:
             continue
         try:
             text = _read(root, adr).decode("utf-8")
-            statuses = re.findall(r"^\*\*Status:\*\*[ \t]*([^\r\n]+)\r?$", text, re.M)
+            statuses = _adr_statuses(text)
             if statuses != ["Accepted"]:
-                errors.append(f"{path}: ADR={adr} must have one **Status:** Accepted line")
+                errors.append(f"{path}: ADR={adr} must have one accepted status; got {statuses}")
         except (PolicyError, UnicodeError) as error:
             errors.append(f"{path}: ADR={adr}: {error}")
     measurements = []

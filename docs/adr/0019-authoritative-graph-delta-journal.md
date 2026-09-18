@@ -1,3 +1,11 @@
+---
+title: "ADR 0019: Authoritative durable graph delta journal"
+adr: "0019"
+status: "Accepted"
+date: "2026-08-15"
+superseded_by: null
+---
+
 # ADR 0019: Authoritative durable graph delta journal
 
 > Current contract amendment (#1221): GFDR supports only node/edge property
@@ -9,8 +17,6 @@
 > is authoritative for supported operation kinds and conformance.
 
 
-**Status:** Accepted
-**Date:** 2026-08-15
 **Build target:** v0.5.x (M6)
 **Related:** ADR 0013 (publication protocol), ADR 0018 (acknowledgement),
 ADR 0004 (derived adjacency), issues #747 / #752 / #753

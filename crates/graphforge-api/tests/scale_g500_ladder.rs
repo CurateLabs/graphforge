@@ -4462,6 +4462,7 @@ const fn phase_name(phase: graphforge_storage::StorageIoPhase) -> &'static str {
         StorageIoPhase::HydrationVerification => "hydration_verification",
         StorageIoPhase::FsyncSynchronization => "fsync_synchronization",
         StorageIoPhase::RecoveryReauthentication => "recovery_reauthentication",
+        StorageIoPhase::ReadPathScan => "read_path_scan",
     }
 }
 
@@ -5281,6 +5282,23 @@ fn validate_affine_metric(
 enum PhaseMetricPolicy {
     ScaleBearing,
     NodeBearingBytes,
+    /// Hydration read bytes reconcile exactly to the single-link copy
+    /// protocol (#1433, #1435) instead of scaling with retained payload.
+    /// `materialize_graph_objects` reads the route table once to
+    /// authenticate routes, then for every object that
+    /// `requires_single_link_materialization` (the route table itself, the
+    /// UUID-membership controls and the private ordinal-v4 authority) reads
+    /// it once while copying (`copy_and_authenticate_materialized_object`)
+    /// and once more to verify the installed copy (`verify_file_counted`),
+    /// writing it exactly once. Every other object is hard-linked from the
+    /// CAS and contributes zero reads here: its content admission happens
+    /// once, in `graph_files_inventory()`, and is not attributed to this
+    /// phase. So `read_bytes == 2 * write_bytes + route_table_bytes`, where
+    /// the residual is one bounded control read, on both axes. See
+    /// `validate_hydration_read_reconciliation`.
+    HydrationReadReconciliation {
+        max_route_table_bytes: u64,
+    },
     BufferedCalls {
         byte_field: usize,
         max_bytes_per_call: u64,
@@ -5353,6 +5371,16 @@ const RECOVERY_REAUTHENTICATION_CALL_GROWTH_PERCENT: u64 = 20;
 // (materialization gone). 55 sits below the full total's observed jitter
 // but above what any single dropped contributor would leave.
 const RECOVERY_REAUTHENTICATION_MIN_ABSOLUTE_CALLS: u64 = 55;
+// The only hydration read that is neither a copy nor a copy verification is
+// the single authentication read of the manifest route table
+// (`MaterializationRoutes::prepare`). Like the UUID control JSON that
+// `NodeBearingBytes` subtracts exactly, it is a control document whose size
+// follows the fixed file set of the fixture, not its payload; the same 2 KiB
+// fixture bound used for the UUID controls applies. Any per-byte re-read of
+// the hard-linked payload - the 3 of 4 redundant sweeps per open that #1435
+// removed from this phase, or a reintroduced post-hardlink re-hash - lands in
+// this residual and exceeds the bound by the size of the retained graph.
+const HYDRATION_ROUTE_TABLE_CONTROL_BYTES: u64 = 2 * 1024;
 
 // This is deliberately exhaustive: adding a storage phase or counter requires
 // choosing semantics here instead of silently inheriting an affine assertion.
@@ -5435,7 +5463,22 @@ const PHASE_METRIC_POLICIES: [PhasePolicyRow; 9] = [
     PhasePolicyRow {
         phase: "hydration_verification",
         fields: [
-            SCALE,
+            // Hydration verification is bounded, not proportional (#1433).
+            // Before #1435 this field was SCALE because `materialize_from_cas`
+            // re-hashed every hard-linked object after linking it - the
+            // fourth full sweep of the same immutable generation per open.
+            // Content admission now happens once, in the memoized
+            // `graph_files_inventory()`, and is not this phase's I/O. What
+            // remains here is exactly the copy protocol for single-link
+            // controls, so the field reconciles to `write_bytes` (which
+            // `NodeBearingBytes` already polices exactly) plus one bounded
+            // route-table read rather than asserting growth that would only
+            // return if the redundant sweep did. A held-constant value is
+            // therefore correct on the edge axis; a value that tracks
+            // retained bytes is the regression.
+            PhaseMetricPolicy::HydrationReadReconciliation {
+                max_route_table_bytes: HYDRATION_ROUTE_TABLE_CONTROL_BYTES,
+            },
             PhaseMetricPolicy::NodeBearingBytes,
             PhaseMetricPolicy::BufferedCalls {
                 byte_field: 0,
@@ -5521,6 +5564,47 @@ fn validate_fixed_protocol_metric(
         return Err(format!(
             "{name} is outside fixed protocol bounds {minimum}..={maximum}: {values:?}"
         ));
+    }
+    Ok(())
+}
+
+/// Hydration read bytes are structurally `2 * write_bytes + route_table`
+/// (see `PhaseMetricPolicy::HydrationReadReconciliation`): every private
+/// copy is read once to copy and once to verify the installed file, and the
+/// one read that is not a copy is the bounded route-table authentication.
+/// Two regressions this must fail, both proven by mutation in
+/// `lifecycle_hydration_read_policy_reconciles_to_the_copy_protocol`:
+///
+/// * "did more": a per-byte pass over the hard-linked payload returns to
+///   this phase. The residual then carries the retained graph's bytes and
+///   exceeds `max_route_table_bytes` (a 2 KiB control bound) many times
+///   over, at any rung.
+/// * "stopped running": the post-install verification re-read of copied
+///   controls is skipped, or copies stop being read at all. Then
+///   `read_bytes < 2 * write_bytes` and the residual underflows.
+fn validate_hydration_read_reconciliation(
+    name: &str,
+    read_bytes: [u64; 3],
+    write_bytes: [u64; 3],
+    max_route_table_bytes: u64,
+) -> Result<(), String> {
+    if max_route_table_bytes == 0 {
+        return Err(format!("{name} has an invalid route-table bound"));
+    }
+    for (rung, (reads, writes)) in read_bytes.into_iter().zip(write_bytes).enumerate() {
+        let copies = writes
+            .checked_mul(2)
+            .ok_or_else(|| format!("{name} rung {rung} copy reconciliation overflows"))?;
+        let residual = reads.checked_sub(copies).ok_or_else(|| {
+            format!(
+                "{name} rung {rung} reads fewer bytes than its copy-and-verify protocol: reads={reads} writes={writes}"
+            )
+        })?;
+        if !(1..=max_route_table_bytes).contains(&residual) {
+            return Err(format!(
+                "{name} rung {rung} residual beyond copy-and-verify is outside the route-table bound 1..={max_route_table_bytes}: reads={reads} writes={writes} residual={residual}"
+            ));
+        }
     }
     Ok(())
 }
@@ -6056,6 +6140,20 @@ fn validate_lifecycle_metric_policies_for_axis(
                         )?;
                     }
                 }
+                PhaseMetricPolicy::HydrationReadReconciliation {
+                    max_route_table_bytes,
+                } => {
+                    validate_hydration_read_reconciliation(
+                        &name,
+                        values,
+                        [
+                            baseline.phases[phase][1],
+                            observations[1].phases[phase][1],
+                            observations[2].phases[phase][1],
+                        ],
+                        max_route_table_bytes,
+                    )?;
+                }
                 PhaseMetricPolicy::BufferedCalls {
                     byte_field,
                     max_bytes_per_call,
@@ -6490,22 +6588,16 @@ fn synthetic_linearity_observations_for_axis(
                         60,
                     ],
                 ),
-                (
-                    "hydration_verification".into(),
-                    [
-                        100 + 900 * factor,
-                        if matches!(axis, LinearityAxis::Nodes) {
-                            100 + 800 * factor
-                        } else {
-                            900
-                        },
-                        factor,
-                        factor,
-                        0,
-                        0,
-                        38,
-                    ],
-                ),
+                ("hydration_verification".into(), {
+                    let copied = if matches!(axis, LinearityAxis::Nodes) {
+                        100 + 800 * factor
+                    } else {
+                        900
+                    };
+                    // Reads reconcile to the copy protocol: each private
+                    // copy read twice, plus one bounded route-table read.
+                    [2 * copied + 64, copied, factor, factor, 0, 0, 38]
+                }),
                 (
                     "fsync_synchronization".into(),
                     [0, 0, 0, 0, 0, 0, 2 * factor],
@@ -7066,6 +7158,89 @@ fn lifecycle_hydration_policy_accounts_exact_uuid_controls() {
         assert!(
             validate_lifecycle_metric_policies_for_axis(LinearityAxis::Edges, &invalid).is_err()
         );
+    }
+}
+
+#[test]
+fn lifecycle_hydration_read_policy_reconciles_to_the_copy_protocol() {
+    for axis in [LinearityAxis::Edges, LinearityAxis::Nodes] {
+        let observations = synthetic_linearity_observations_for_axis(axis);
+        validate_lifecycle_metric_policies_for_axis(axis, &observations)
+            .expect("reads that reconcile to copy-and-verify plus a route-table read pass");
+
+        // The route table is a control document, not a payload: its size may
+        // move between rungs (digits, route names) as long as it stays inside
+        // the control bound.
+        let mut moving_route_table = observations.clone();
+        for (rung, observation) in moving_route_table.iter_mut().enumerate() {
+            observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap()[0] += 7 * rung as u64;
+        }
+        validate_lifecycle_metric_policies_for_axis(axis, &moving_route_table)
+            .expect("a route table that moves within the control bound passes");
+
+        // "Did more": the per-byte sweep of the hard-linked payload that
+        // #1435 removed from this phase comes back. Model it as reads that
+        // additionally track the retained logical bytes, exactly as the
+        // pre-#1435 post-hardlink re-hash did.
+        let mut sweep_reintroduced = observations.clone();
+        for observation in &mut sweep_reintroduced {
+            let retained = observation.retained["source.logical_bytes"];
+            observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap()[0] += retained;
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &sweep_reintroduced)
+            .expect_err("reads tracking retained bytes must fail the route-table bound");
+        assert!(
+            error.contains("hydration_verification.read_bytes")
+                && error.contains("route-table bound"),
+            "{error}"
+        );
+
+        // "Stopped running": the post-install verification re-read of every
+        // private copy is skipped. Reads drop to one pass per copy.
+        let mut verification_skipped = observations.clone();
+        for observation in &mut verification_skipped {
+            let phase = observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap();
+            phase[0] -= phase[1];
+        }
+        let error = validate_lifecycle_metric_policies_for_axis(axis, &verification_skipped)
+            .expect_err("skipping the copy verification re-read must fail");
+        assert!(
+            error.contains("hydration_verification.read_bytes")
+                && error.contains("fewer bytes than its copy-and-verify protocol"),
+            "{error}"
+        );
+
+        // A uniform total loss of reads is a "stopped running" too, and the
+        // spread-blind failure mode the absolute relation exists to catch.
+        let mut no_reads = observations.clone();
+        for observation in &mut no_reads {
+            observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap()[0] = 0;
+        }
+        assert!(validate_lifecycle_metric_policies_for_axis(axis, &no_reads).is_err());
+
+        // Exactly the copies with no route-table read at all is also a lost
+        // authentication step: the residual floor is 1, not 0.
+        let mut no_route_table_read = observations;
+        for observation in &mut no_route_table_read {
+            let phase = observation
+                .phases
+                .get_mut("hydration_verification")
+                .unwrap();
+            phase[0] = 2 * phase[1];
+        }
+        assert!(validate_lifecycle_metric_policies_for_axis(axis, &no_route_table_read).is_err());
     }
 }
 

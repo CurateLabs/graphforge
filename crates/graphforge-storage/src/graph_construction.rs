@@ -23,10 +23,10 @@ use io_evidence::{
     account_merge_read_bytes, account_merge_write, account_merge_write_bytes, account_probe_work,
     account_sequential_read, account_sequential_write, checked_category_remove,
     checked_evidence_sum, combine_cache_cleanup, combine_secondary_cleanup, copy_post_shape_io,
-    merge_cache_release_evidence, open_counted_fixed_reader, read_run_record,
-    record_active_identity_install, record_active_identity_remove, record_category_install,
-    record_encoded_active_artifacts, record_encoding_io_evidence, record_shape_artifact_install,
-    release_counted_reader_cache,
+    injected_input_release_failure, merge_cache_release_evidence, open_counted_fixed_reader,
+    open_fixed_reader, read_run_record, record_active_identity_install,
+    record_active_identity_remove, record_category_install, record_encoded_active_artifacts,
+    record_encoding_io_evidence, record_shape_artifact_install, release_counted_reader_cache,
 };
 pub(crate) struct AuthenticatedShapeSource {
     pub(crate) file: File,
@@ -68,6 +68,7 @@ mod partition;
 use catalog::{
     build_runtime_catalog, load_parent_runtime_catalog, load_parent_runtime_catalog_from_compact,
 };
+mod partition_load;
 mod partition_shaping;
 mod supersession;
 
@@ -822,6 +823,16 @@ struct ShapeIntent {
     /// partition writes a byte.
     #[serde(default)]
     splitters: Vec<String>,
+    /// Recorded range-partition splitters over the staged **node** identity
+    /// domain only (#1439), canonical lower hex, strictly increasing.
+    /// Endpoints, node details and node-kind rows are keyed by node UUID and
+    /// are routed with these instead of `splitters`: Graph500-shaped input
+    /// puts nodes and edges in disjoint UUID bands, so the joint splitters
+    /// above route almost every node-keyed record into a handful of
+    /// partitions. A pure function of the same recorded chunk receipts as
+    /// `splitters`, so R1 holds for this set too.
+    #[serde(default)]
+    node_splitters: Vec<String>,
     /// Measured identity rows per effective partition, in partition order.
     #[serde(default)]
     partition_identity_rows: Vec<u64>,

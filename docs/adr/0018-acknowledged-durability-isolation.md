@@ -1,7 +1,13 @@
+---
+title: "ADR 0018: Acknowledged durability and isolation contract"
+adr: "0018"
+status: "Accepted"
+date: "2026-08-15"
+superseded_by: null
+---
+
 # ADR 0018: Acknowledged durability and isolation contract
 
-**Status:** Accepted
-**Date:** 2026-08-15
 **Build target:** v0.5.x (M6 foundations)
 **Related:** ADR 0013 (publication protocol), ADR 0014 (checkpoints),
 ADR 0015 (write modes), ADR 0020 (NTFS write-through namespace durability

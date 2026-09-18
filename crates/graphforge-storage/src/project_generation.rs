@@ -9,10 +9,10 @@ use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(windows)]
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex};
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,15 @@ pub struct ResolvedProjectGeneration {
     manifest_sha256: [u8; 32],
     manifest: Arc<GenerationManifest>,
     _lease_handle: Arc<GenerationLease>,
+    /// Memoized result of [`Self::graph_files_inventory`]. A resolved
+    /// generation is immutable by construction (`CURRENT` is never
+    /// re-consulted after resolution, and generations are never mutated in
+    /// place), so the manifest-authenticated inventory this computes is the
+    /// same value on every call. `Arc<OnceLock<..>>` lets every clone of this
+    /// `ResolvedProjectGeneration` — and there are many, one per call site —
+    /// share one computation instead of independently re-running the full
+    /// per-entry admission sweep.
+    inventory_cache: Arc<OnceLock<Result<Option<Arc<crate::GraphFilesInventory>>, GfError>>>,
 }
 
 #[derive(Debug)]
@@ -320,6 +329,28 @@ impl ResolvedProjectGeneration {
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
     pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        // Memoized: a resolved generation never mutates and `CURRENT` is not
+        // re-consulted after resolution (see `inventory_cache`'s doc comment
+        // on the struct), so this admits the manifest-authenticated
+        // inventory at most once per generation, regardless of how many
+        // call sites or clones of this `ResolvedProjectGeneration` ask for
+        // it within a single open.
+        match self.inventory_cache.get_or_init(|| {
+            self.compute_graph_files_inventory()
+                .map(|opt| opt.map(Arc::new))
+        }) {
+            Ok(Some(inventory)) => Ok(Some((**inventory).clone())),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    /// Uncached body of [`Self::graph_files_inventory`]. Every call performs
+    /// the full manifest decode plus, for the V2/mapped-root participant, a
+    /// presence-and-length check and a full streamed SHA-256 admission per
+    /// declared graph payload object. Call only through the memoized public
+    /// method above.
+    fn compute_graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
         let Some(participant) = self.declared_graph_files_participant()? else {
             return Ok(None);
         };
@@ -341,6 +372,44 @@ impl ResolvedProjectGeneration {
                         )
                     },
                 )?;
+                // Full presence, length AND content admission, once per
+                // resolved generation. #1425/cd964b69 (O3) deleted the
+                // `verify_graph_object` call below on the theory that every
+                // real consumer re-authenticates lazily on first touch via
+                // `open_graph_object_by_digest`/`read_graph_object_by_digest`
+                // (`graph_object_store.rs`). That is false for Topology-role
+                // objects: after hydration, the query engine
+                // (`PersistentAdjacencyProvider`, Parquet reads) opens the
+                // materialized workspace files by path, never by CAS digest
+                // lookup, so neither of those functions is ever called on
+                // the ordinary query path — confirmed empirically by
+                // `hardlinked_topology_payload_corruption_is_refused`
+                // (workspace_hydration/tests.rs), which flips one byte in a
+                // hardlinked `topology/nodes.parquet` (same inode, same
+                // length) and shows a fresh open plus an ordinary
+                // `MATCH (n) RETURN count(n)` both succeeding, silently,
+                // over the corrupted data, with O3 applied. Properties-role
+                // objects happened to stay covered only because
+                // `property_overlay::inventory` independently re-hashes
+                // every property/edge_properties route file on every open —
+                // a wholly separate mechanism this function does not call
+                // and that does not reach Topology.
+                //
+                // Restored: this is #1388's O1 (memoization, kept — see
+                // `graph_files_inventory`'s doc comment) doing the real work.
+                // Before O1, this full sweep ran 3-4 times per open because
+                // `hydrate_graph_workspace` and
+                // `property_and_graph_inventory_for_hydrated_generation`
+                // both called `graph_files_inventory()` independently. With
+                // O1, `get_or_init` means it runs exactly once per resolved
+                // generation regardless of how many call sites ask — the
+                // same reduction #1425 was chasing, achieved without
+                // deleting the only check that ever covered Topology data.
+                // `entry.content_sha256` is this object's content-addressed
+                // CAS lookup key, not merely a corruption checksum, so this
+                // stays a full cryptographic digest rather than becoming a
+                // fast checksum (that tradeoff, and the durable-format work
+                // it needs, belongs to #1417, not here).
                 for entry in &files {
                     let path =
                         crate::graph_object_path(self.container_root(), &entry.content_sha256)?;
@@ -828,6 +897,7 @@ pub fn resolve_project_generation(
             manifest_sha256: actual_digest,
             manifest: Arc::new(manifest),
             _lease_handle: Arc::new(lease),
+            inventory_cache: Arc::new(OnceLock::new()),
         });
     }
 }
@@ -876,6 +946,7 @@ pub fn resolve_verified_generation(
         manifest_sha256: actual_digest,
         manifest: Arc::new(manifest),
         _lease_handle: Arc::new(lease),
+        inventory_cache: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1722,6 +1793,11 @@ fn read_bounded_regular_file(path: &Path, maximum: u64) -> Result<Vec<u8>, std::
     if bytes.len() as u64 > maximum {
         return Err(std::io::Error::other("file exceeds bounded read limit"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::PublicationPreauthentication,
+        bytes.len() as u64,
+        1,
+    );
     Ok(bytes)
 }
 
@@ -1766,6 +1842,7 @@ fn read_stable_graph_control(
     let mut bytes = Vec::with_capacity(capacity);
     let mut reader = file.take(expected_length.saturating_add(1));
     let mut buffer = vec![0; 64 * 1024];
+    let mut control_read_calls = 0_u64;
     loop {
         let count = reader
             .read(&mut buffer)
@@ -1781,11 +1858,19 @@ fn read_stable_graph_control(
             .read_calls
             .checked_add(1)
             .ok_or_else(|| corrupt("control read calls overflow"))?;
+        control_read_calls = control_read_calls
+            .checked_add(1)
+            .ok_or_else(|| corrupt("control read calls overflow"))?;
         bytes.extend_from_slice(&buffer[..count]);
     }
     if bytes.len() as u64 != expected_length {
         return Err(corrupt("selected graph control changed while reading"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        expected_length,
+        control_read_calls,
+    );
     directory
         .revalidate_named()
         .map_err(|_| corrupt("selected graph control parent identity changed"))?;
@@ -1810,6 +1895,11 @@ fn read_exact_participant(path: &Path, expected_length: u64) -> Result<Vec<u8>, 
     if u64::try_from(bytes.len()).ok() != Some(expected_length) {
         return Err(corrupt("participant byte length changed while reading"));
     }
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::PublicationPreauthentication,
+        expected_length,
+        1,
+    );
     Ok(bytes)
 }
 

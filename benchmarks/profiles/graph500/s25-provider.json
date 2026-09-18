@@ -104,13 +104,8 @@
             "--json",
             "--project",
             "workspace/s25/source",
-            "recovery"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/source",
-            "storage-attribution"
+            "storage-attribution",
+            "--recovery"
           ]
         ]
       }
@@ -128,13 +123,7 @@
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s25/node-count.arrow"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/source",
-            "query",
+            "workspace/s25/node-count.arrow",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
@@ -156,13 +145,7 @@
             "--cypher",
             "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
-            "workspace/s25/one-hop.arrow"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/source",
-            "query",
+            "workspace/s25/one-hop.arrow",
             "--cypher",
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
@@ -230,33 +213,15 @@
             "--cypher",
             "MATCH (n) RETURN count(n)",
             "--output",
-            "workspace/s25/imported-node-count.arrow"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/imported",
-            "query",
+            "workspace/s25/imported-node-count.arrow",
             "--cypher",
             "MATCH ()-[r]->() RETURN count(r)",
             "--output",
-            "workspace/s25/imported-edge-count.arrow"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/imported",
-            "query",
+            "workspace/s25/imported-edge-count.arrow",
             "--cypher",
             "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",
-            "workspace/s25/imported-one-hop.arrow"
-          ],
-          [
-            "--json",
-            "--project",
-            "workspace/s25/imported",
-            "query",
+            "workspace/s25/imported-one-hop.arrow",
             "--cypher",
             "MATCH (a)-[r1]->(b)-[r2]->(c) RETURN c.node_uuid AS id ORDER BY id LIMIT 1000",
             "--output",

@@ -1,7 +1,13 @@
+---
+title: "ADR 0007: Runtime Temporal Values"
+adr: "0007"
+status: "Accepted"
+date: "2026-06-24"
+superseded_by: null
+---
+
 # ADR 0007: Runtime Temporal Values
 
-**Status:** Accepted
-**Date:** 2026-06-24
 **Build target:** v0.5.0 (conformance hardening); openCypher `Temporal3`–`Temporal10`
 **Related:** builds on the lowering-time construction of temporal values (ADR-less, `graphforge-rel::temporal`)
 

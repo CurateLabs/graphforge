@@ -375,11 +375,17 @@ def run(args: argparse.Namespace, scale: int) -> dict[str, object]:
                 "MATCH (n) RETURN n.node_uuid AS id ORDER BY id",
                 "MATCH ()-[r]->() RETURN r.edge_uuid AS id ORDER BY id",
             ]
+            # One `gf query` process carries every statement of a read phase; the
+            # hop statements are pairs 0-1 of the source query phase and 2-3 of
+            # the imported reopen proof.
             for phase_name, indices in (("query", (0, 1)), ("reopen_proof", (2, 3))):
                 phase = next(item for item in profile["phases"] if item["phase"] == phase_name)
+                command = next(item for item in phase["action"]["commands"] if "query" in item)
+                statements = [
+                    position for position, argument in enumerate(command) if argument == "--cypher"
+                ]
                 for index, query in zip(indices, payloads, strict=True):
-                    command = phase["action"]["commands"][index]
-                    command[command.index("--cypher") + 1] = query
+                    command[statements[index] + 1] = query
         profile_path = work / "profile.json"
         profile_path.write_text(json.dumps(profile))
         completed = subprocess.run(

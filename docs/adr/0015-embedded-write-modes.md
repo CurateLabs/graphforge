@@ -1,6 +1,11 @@
-# ADR 0015: Three embedded project-write modes
+---
+title: "ADR 0015: Three embedded project-write modes"
+adr: "0015"
+status: "Accepted"
+superseded_by: null
+---
 
-**Status:** Accepted
+# ADR 0015: Three embedded project-write modes
 
 **Build target:** v0.5.0
 

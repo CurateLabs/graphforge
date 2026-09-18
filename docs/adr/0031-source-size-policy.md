@@ -1,8 +1,12 @@
+---
+title: "ADR 0031: Reviewed source file size bounds"
+adr: "0031"
+status: "Accepted"
+date: "2026-09-16"
+superseded_by: null
+---
+
 # ADR 0031: Reviewed source file size bounds
-
-**Status:** Accepted
-
-**Date:** 2026-09-16
 
 ## Context
 

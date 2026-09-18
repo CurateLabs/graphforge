@@ -1,10 +1,14 @@
+---
+title: "ADR 0006: Append-only epistemic interpretation"
+adr: "0006"
+status: "Accepted"
+date: "2026-06-07"
+superseded_by: null
+---
+
 # ADR 0006: Append-only epistemic interpretation
 
-**Status:** Accepted
-
 **Implementation:** Implemented (epistemic model).
-
-**Date:** 2026-06-07
 
 **Reconciled:** 2026-07-25
 

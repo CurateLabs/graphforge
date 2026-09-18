@@ -1,12 +1,18 @@
+---
+title: "ADR 0021: Portable project v2 package layout and identity"
+adr: "0021"
+status: "Accepted"
+date: "2026-08-19"
+superseded_by: null
+---
+
 # ADR 0021: Portable project v2 package layout and identity
 
-**Status:** Accepted  
 **Implementation:** Shipped across storage, API, CLI and both bindings
 (#784, #827, #829, #849, #850). Two decided details are not yet
 implemented: the `application/vnd.graphforge.project.manifest.v2+json`
 media type, and the typed `unsupported_legacy` disposition for a v1
 envelope read by a v2 reader.  
-**Date:** 2026-08-19  
 **Build target:** v0.5.x (M5 portable project v2)  
 **Related:** #783, parent #740; consumers #741, #742, #784–#787, #744
 
