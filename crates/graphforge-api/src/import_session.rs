@@ -1843,7 +1843,16 @@ mod tests {
         let chunk = (0_u32..(1 << 18))
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
-        let length = 129_u64 * 1024 * 1024 + 17;
+        // Derived from the live per-stream window rather than a fixed byte
+        // count: the length must exceed one full window so that (a) the
+        // combined reader+writer window genuinely peaks at the shared
+        // aggregate budget and (b) at least one rollover plus a final
+        // partial window occurs, regardless of how the budget is priced.
+        let window = graphforge_filesystem::cache_release_window_for_streams(2)
+            .unwrap()
+            .get();
+        let length = window + 17;
+        let expected_release_operations = (length + window - 1) / window;
         let mut output = File::create(&source).unwrap();
         let mut remaining = length;
         while remaining > 0 {
@@ -1859,8 +1868,14 @@ mod tests {
         assert_eq!(destination.metadata().unwrap().len(), length);
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(evidence.reader.release_operations, 5);
-            assert_eq!(evidence.writer.release_operations, 5);
+            assert_eq!(
+                evidence.reader.release_operations,
+                expected_release_operations
+            );
+            assert_eq!(
+                evidence.writer.release_operations,
+                expected_release_operations
+            );
             assert_eq!(evidence.reader.released_bytes, length);
             assert_eq!(evidence.writer.released_bytes, length);
             assert_eq!(

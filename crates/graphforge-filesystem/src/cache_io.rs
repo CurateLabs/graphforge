@@ -6,9 +6,9 @@ use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 
 /// Default maximum dirty/file-cache window retained by one durable writer.
-pub const DEFAULT_CACHE_RELEASE_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_CACHE_RELEASE_WINDOW_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Derive one non-zero per-stream window from the shared 64 MiB operation budget.
+/// Derive one non-zero per-stream window from the shared 1 GiB operation budget.
 ///
 /// # Errors
 /// Returns an error for zero streams, an unrepresentable stream count, or when
@@ -40,7 +40,7 @@ pub fn cache_release_window_for_streams(active_streams: usize) -> io::Result<Non
 ///
 /// # Errors
 /// Returns an error on arithmetic overflow, an empty stream set, or an
-/// aggregate above the shared 64 MiB operation budget.
+/// aggregate above the shared 1 GiB operation budget.
 pub fn validate_cache_release_operation_windows(windows: &[NonZeroU64]) -> io::Result<u64> {
     if windows.is_empty() {
         return Err(io::Error::other(
@@ -317,7 +317,7 @@ pub struct DurableFileCacheWriter {
 }
 
 impl DurableFileCacheWriter {
-    /// Wrap `file` with the default 64 MiB durable cache window.
+    /// Wrap `file` with the default 1 GiB durable cache window.
     ///
     /// # Errors
     /// Returns an error when the current descriptor offset cannot be observed.
