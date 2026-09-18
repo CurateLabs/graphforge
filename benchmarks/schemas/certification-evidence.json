@@ -68,10 +68,19 @@
       "properties": {
         "calls": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "errors": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
-        "elapsed_ns": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
+        "elapsed_ns": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "cpu_ns": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "cpu_unmeasured_calls": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
       },
       "if": { "properties": { "calls": { "const": 0 } } },
-      "then": { "properties": { "errors": { "const": 0 }, "elapsed_ns": { "const": 0 } } }
+      "then": {
+        "properties": {
+          "errors": { "const": 0 },
+          "elapsed_ns": { "const": 0 },
+          "cpu_ns": { "const": 0 },
+          "cpu_unmeasured_calls": { "const": 0 }
+        }
+      }
     },
     "importOperationTimings": {
       "type": "object",
