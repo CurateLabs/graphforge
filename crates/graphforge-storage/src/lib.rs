@@ -28,6 +28,7 @@ mod allocation_operation;
 mod construction_directory;
 #[doc(hidden)]
 pub use allocation_operation::StorageAllocationOperation;
+pub mod concurrency_attribution;
 mod private_storage_ownership;
 pub mod storage_attribution;
 pub mod transient_composition;
