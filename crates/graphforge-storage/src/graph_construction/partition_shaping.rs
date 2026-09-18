@@ -20,7 +20,7 @@
 
 use super::partition::{PartitionBalance, PartitionPlan};
 use super::partition_load::{
-    PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order,
+    PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order, partition_load_workers,
 };
 use super::{
     ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
@@ -420,7 +420,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             sealed: (0..partitions).map(|_| None).collect(),
             balance: PartitionBalance::new(partitions),
             records: 0,
-            load_workers: PARTITION_LOAD_WORKERS,
+            load_workers: partition_load_workers(),
         })
     }
 

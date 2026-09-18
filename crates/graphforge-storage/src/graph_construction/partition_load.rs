@@ -56,6 +56,27 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 /// [`consume_in_partition_order`].
 pub(super) const PARTITION_LOAD_WORKERS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
+/// The load-worker count to use, honouring a measurement override.
+///
+/// `finish_optional` is **44.2% of shaping at 0.60 effective cores** on a
+/// 16-thread host (#1464), and this constant is why: the window is the worker
+/// count, so two workers cap that region at two cores' worth however many the
+/// machine has. Raising it also raises resident partitions, since the bound is
+/// `min(workers, partitions) x global max` (#1459), which is the trade-off that
+/// has to be measured rather than assumed.
+///
+/// `GRAPHFORGE_PARTITION_LOAD_WORKERS` exists to take that measurement. It is
+/// deliberately not a product setting: the durable partition layout must stay a
+/// pure function of recorded data (R1), and this is an execution choice that
+/// changes no output. Absent or unparseable, the default above applies.
+pub(super) fn partition_load_workers() -> NonZeroUsize {
+    std::env::var("GRAPHFORGE_PARTITION_LOAD_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(NonZeroUsize::new)
+        .unwrap_or(PARTITION_LOAD_WORKERS)
+}
+
 /// How often a load polls the stop flag, in records.
 const STOP_POLL_RECORDS: usize = 4096;
 
