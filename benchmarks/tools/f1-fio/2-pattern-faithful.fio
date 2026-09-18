@@ -1,0 +1,28 @@
+# F1 job 2 — the S20 ingest pattern at the device (O_DIRECT, page cache bypassed).
+# Every parameter below is derived by derive-params.py from
+# storage_attribution.construction.application_io in the S20 rung JSON:
+#   rwmixread    = read_calls / (read_calls + write_calls)            = 59 (bytes: 63% read)
+#   fsync        = write_calls / fsync_calls                           = 6.63 -> 7
+#   bssplit      = per-phase mean read/write call size, weighted by call count
+# Not recorded in the evidence and therefore *not* derived: the offset pattern
+# (sequential within each object is assumed: GraphForge appends to and streams
+# back whole objects) and the number of concurrent I/O threads (run at 1, 4, 16).
+[global]
+directory=${F1_DIR}
+ioengine=psync
+iodepth=1
+direct=1
+rw=readwrite
+rwmixread=${F1_RWMIXREAD}
+bssplit=${F1_BSSPLIT}
+fsync=${F1_FSYNC_EVERY}
+nrfiles=4
+filesize=${F1_FILESIZE}
+size=${F1_JOBSIZE}
+filename_format=pat.$jobnum.$filenum
+numjobs=${F1_NUMJOBS}
+group_reporting=1
+time_based=1
+runtime=120
+
+[p-pattern-direct]

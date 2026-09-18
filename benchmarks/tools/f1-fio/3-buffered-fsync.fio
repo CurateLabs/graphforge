@@ -1,0 +1,22 @@
+# F1 job 3 — the same S20 pattern through the page cache (direct=0), the path
+# GraphForge's std::fs I/O actually takes. Same derived parameters as job 2;
+# same file set (filename_format) so the working set is identical.
+[global]
+directory=${F1_DIR}
+ioengine=psync
+iodepth=1
+direct=0
+rw=readwrite
+rwmixread=${F1_RWMIXREAD}
+bssplit=${F1_BSSPLIT}
+fsync=${F1_FSYNC_EVERY}
+nrfiles=4
+filesize=${F1_FILESIZE}
+size=${F1_JOBSIZE}
+filename_format=pat.$jobnum.$filenum
+numjobs=${F1_NUMJOBS}
+group_reporting=1
+time_based=1
+runtime=120
+
+[b-pattern-buffered]
