@@ -1,3 +1,11 @@
+---
+title: "ADR 0037: Derived adjacency is published with the generation"
+adr: "0037"
+status: "Accepted"
+date: "2026-09-17"
+superseded_by: null
+---
+
 # ADR 0037: Derived adjacency is published with the generation
 
 **Status:** Accepted
