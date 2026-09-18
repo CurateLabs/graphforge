@@ -84,6 +84,8 @@ mod transient_peak_composition {
                     &format!("edges-{chunk}"),
                     &edge_batch(
                         1_000_000_000 + u128::from(chunk) * BATCH_ROWS as u128,
+                        1,
+                        node_batches * BATCH_ROWS as u128,
                         BATCH_ROWS,
                     ),
                 )

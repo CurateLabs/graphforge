@@ -62,6 +62,15 @@ pub enum TransientComponent {
     MergeTreeLevel,
     /// Shaped canonical output (`shaped-*`).
     ShapedOutput,
+    /// Fixed-width per-partition spills written while shaping range-partitions
+    /// a family (`part-<family>-p<NNNNN>.run`).
+    ShapedPartitionRun,
+    /// Row-batch per-partition spills written while shaping range-partitions a
+    /// row namespace (`part-rows-<digest>-p<NNNNN>.arrow`).
+    ShapedPartitionRows,
+    /// Whole-domain runs assembled by concatenating sorted partition spills
+    /// (`staged-identities.run`, `staged-endpoints.run`).
+    StagedDomainRun,
     /// Canonical encoded artifacts staged in the construction root before
     /// publication installs them.
     EncodedWorkspace,
@@ -82,7 +91,7 @@ pub enum TransientComponent {
 
 impl TransientComponent {
     /// Canonical component inventory, including components with zero bytes.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 19] = [
         Self::SourceParquet,
         Self::ExternalArtifact,
         Self::RegisteredSourceCopy,
@@ -92,6 +101,9 @@ impl TransientComponent {
         Self::MergeSourceCopy,
         Self::MergeTreeLevel,
         Self::ShapedOutput,
+        Self::ShapedPartitionRun,
+        Self::ShapedPartitionRows,
+        Self::StagedDomainRun,
         Self::EncodedWorkspace,
         Self::ConstructionControl,
         Self::ContentAddressedStore,
@@ -116,6 +128,9 @@ impl TransientComponent {
             Self::MergeSourceCopy => "merge-source-copy",
             Self::MergeTreeLevel => "merge-tree-level",
             Self::ShapedOutput => "shaped-output",
+            Self::ShapedPartitionRun => "shaped-partition-run",
+            Self::ShapedPartitionRows => "shaped-partition-rows",
+            Self::StagedDomainRun => "staged-domain-run",
             Self::EncodedWorkspace => "encoded-workspace",
             Self::ConstructionControl => "construction-control",
             Self::ContentAddressedStore => "content-addressed-store",
@@ -221,6 +236,18 @@ fn classify_construction(tail: &[String]) -> TransientComponent {
     }
     if name.starts_with("shaped-") {
         return TransientComponent::ShapedOutput;
+    }
+    // Per-partition shaping spills. The grammar lives with the writer so the
+    // two cannot drift apart again; only the payload split is decided here.
+    if crate::graph_construction::partition_shaping::is_partition_artifact_name(name) {
+        return if name.ends_with(".arrow") {
+            TransientComponent::ShapedPartitionRows
+        } else {
+            TransientComponent::ShapedPartitionRun
+        };
+    }
+    if name.starts_with("staged-") && name.ends_with(".run") {
+        return TransientComponent::StagedDomainRun;
     }
     if let Some(body) = name.strip_prefix("merge-") {
         for prefix in [
