@@ -119,6 +119,14 @@ pub(super) fn encode_adjacency(
         let file = directory
             .open_child_file(OsStr::new(&name))
             .map_err(storage)?;
+        // The CSR is a published artifact like any other, so the allocation
+        // tracker has to own it. Registering here rather than inside the
+        // builder keeps the bounded builder's own writes unattributed, which
+        // is deliberate, while still accounting for the files it leaves
+        // behind -- `matches_file_inventory` admits no untracked file.
+        if let Some(allocation) = output.allocation() {
+            allocation.replace_file_at(&graph_root.join(&relative), &file)?;
+        }
         let (artifact, released, _) = authenticate_file_cancellable(&relative, file, cancelled)?;
         add_evidence_counter(
             &mut evidence.adjacency.write_bytes,
