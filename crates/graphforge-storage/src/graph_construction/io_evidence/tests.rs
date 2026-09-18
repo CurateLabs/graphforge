@@ -10,7 +10,10 @@ fn fixed_run_receipts_count_cache_rollovers_and_preserve_reopened_bytes() {
     let window = graphforge_filesystem::cache_release_window_for_streams(4)
         .unwrap()
         .get();
-    assert_eq!(window, 16 * 1024 * 1024);
+    assert_eq!(
+        window,
+        graphforge_filesystem::DEFAULT_CACHE_RELEASE_WINDOW_BYTES / 4
+    );
     let supported = cfg!(target_os = "linux");
     for bytes in [window - 1, window, window + 1] {
         let temporary = TempDir::new().unwrap();
