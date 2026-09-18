@@ -1868,8 +1868,14 @@ mod tests {
         assert_eq!(destination.metadata().unwrap().len(), length);
         #[cfg(target_os = "linux")]
         {
-            assert_eq!(evidence.reader.release_operations, expected_release_operations);
-            assert_eq!(evidence.writer.release_operations, expected_release_operations);
+            assert_eq!(
+                evidence.reader.release_operations,
+                expected_release_operations
+            );
+            assert_eq!(
+                evidence.writer.release_operations,
+                expected_release_operations
+            );
             assert_eq!(evidence.reader.released_bytes, length);
             assert_eq!(evidence.writer.released_bytes, length);
             assert_eq!(
