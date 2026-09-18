@@ -1122,10 +1122,8 @@ fn encode_nodes(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<Option<crate::uuid_membership::V4ConstructionArtifactBundle>, GfError> {
-    // "No staged nodes" is the details family being absent -- its finish
-    // returns `None` at zero records. `node_rows` is not a count: a
-    // property-free session stages nodes and produces no row artifacts
-    // (#1455), and an empty-rows guard would encode it as an empty graph.
+    // The details family is `None` exactly at zero staged nodes. `node_rows`
+    // is not a count: a property-free session has none (#1455).
     if shape.node_details.is_none() {
         if !build_v4 {
             return Ok(None);
@@ -1493,9 +1491,8 @@ fn encode_edges(
     evidence: &mut GraphConstructionEncodingEvidence,
     route_table: &mut crate::route_component::RouteTable,
 ) -> Result<(), GfError> {
-    // Same count guard as `encode_nodes`: the details family is absent only
-    // when no edge was staged, whereas `edge_rows` is empty for every
-    // property-free session (#1455).
+    // Same count guard as `encode_nodes`: `edge_rows` is empty for every
+    // property-free session (#1455); the details family is not.
     let Some(details_name) = shape.edge_details.as_deref() else {
         return Ok(());
     };

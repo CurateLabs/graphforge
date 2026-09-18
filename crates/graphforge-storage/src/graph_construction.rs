@@ -561,8 +561,12 @@ pub struct ConstructionShape {
     /// UUID-sorted edge endpoint and relation records, when edges were staged.
     pub edge_details: Option<String>,
     /// UUID-sorted normalized node row artifacts, partitioned by exact schema.
+    /// Empty when every node chunk carried the bare canonical schema (#1455):
+    /// the catalog is then derived from `node_details`, and this is not a
+    /// count of staged nodes.
     pub node_rows: Vec<String>,
     /// UUID-sorted normalized edge row artifacts, partitioned by exact schema.
+    /// Empty when every edge chunk carried the bare canonical schema (#1455).
     pub edge_rows: Vec<String>,
     /// Edge-UUID regrouped `(edge, role, node_surrogate)` endpoint run.
     pub edge_endpoints: Option<String>,
@@ -570,7 +574,8 @@ pub struct ConstructionShape {
     pub runtime_catalog_now_micros: i64,
     /// Authority digest of the exact normalized row artifacts that feed the catalog.
     pub runtime_catalog_inputs_sha256: String,
-    /// Serialized RuntimeCatalog produced once from the normalized row stream.
+    /// Serialized RuntimeCatalog produced once from the normalized row stream,
+    /// or from the details families for property-free kinds (#1455).
     pub runtime_catalog: String,
     /// Live retained plus staged nodes.
     pub node_count: u64,
