@@ -17,7 +17,10 @@ SCRATCH=/home/ubuntu/gf-redteam-scratch/f2   # ints.txt (GNU sort input) lives h
 PASS_A="cycles,instructions,stalled-cycles-frontend,cache-references,cache-misses,branches,branch-misses"
 PASS_B="cycles,instructions,l2_latency.l2_cycles_waiting_on_fills,ls_refills_from_sys.ls_mabresp_lcl_dram,ls_refills_from_sys.ls_mabresp_lcl_cache,ls_refills_from_sys.ls_mabresp_lcl_l2,ls_dc_accesses"
 PASS_C="cycles,instructions,de_dis_dispatch_token_stalls1.load_queue_token_stall,de_dis_dispatch_token_stalls1.store_queue_token_stall,de_dis_dispatch_token_stalls0.retire_token_stall,ls_l1_d_tlb_miss.all,ic_fetch_stall.ic_stall_any"
-METRICS="nps1_die_to_dram,l3_read_miss_latency,l1d_miss_rate,llc_miss_rate,dtlb_miss_rate,branch_misprediction_ratio"
+# nps1_die_to_dram is omitted: it needs the data-fabric PMU (dram_channel_data_controller_*), absent on this desktop Ryzen.
+METRICS="l3_read_miss_latency,l1d_miss_rate,llc_miss_rate,dtlb_miss_rate,branch_misprediction_ratio"
+# PASSES: which subject passes to run (default all). SKIP_ANCHORS=1 skips the anchors (for a second scale).
+PASSES=${PASSES:-A A2 B C M}
 
 {
   echo "# host state, $(date -u +%FT%TZ)"; uname -a; sudo -n perf --version
@@ -31,6 +34,10 @@ METRICS="nps1_die_to_dram,l3_read_miss_latency,l1d_miss_rate,llc_miss_rate,dtlb_
 
 wait_quiet() {
   local n=0
+  # also wait for our own workloads from any previous pass/run to be gone
+  while pgrep -x perf >/dev/null || pgrep -x sort >/dev/null || pgrep -x openssl >/dev/null || pgrep -x gf >/dev/null; do
+    echo "$(date -u +%FT%TZ) $1: previous workload still running, waiting"; sleep 2
+  done
   until out=$("$QUIET" 2>&1) && [ "${out%%$'\n'*}" = QUIET ]; do
     n=$((n+1)); echo "$(date -u +%FT%TZ) $1: host busy, waiting (#$n)"; echo "$out" | head -4; sleep 30
   done
@@ -42,32 +49,36 @@ pstat() { # name pass events-or-metrics -- cmd...
   local flag=-e; [ "$pass" = M ] && flag="-a -M"
   echo "$(date -u +%FT%TZ) $name-$pass: sudo perf stat $flag $spec -- $*" | tee -a "$OUT/runs.log"
   # shellcheck disable=SC2086
-  sudo -n perf stat $flag "$spec" -o "$OUT/$name.pass$pass.txt" -- "$@" > "$OUT/$name.pass$pass.stdout" 2>&1 || echo "exit $? for $name-$pass" | tee -a "$OUT/runs.log"
+  # perf runs as root (perf_event_paranoid=4); the measured command is dropped back to $USER
+  # with an explicit environment so its files are user-owned and TMPDIR is the ext4 path.
+  sudo -n perf stat $flag "$spec" -o "$OUT/$name.pass$pass.txt" -- sudo -n -u "$USER" env HOME="$HOME" PATH="$PATH" TMPDIR="$TMPDIR" "$@" > "$OUT/$name.pass$pass.stdout" 2>&1 || echo "exit $? for $name-$pass" | tee -a "$OUT/runs.log"
 }
-all_passes() { local name=$1; shift; pstat "$name" A "$PASS_A" "$@"; pstat "$name" B "$PASS_B" "$@"; pstat "$name" C "$PASS_C" "$@"; pstat "$name" M "$METRICS" "$@"; }
+all_passes() { local name=$1; shift; for p in $PASSES; do spec=PASS_${p%2}; [ "$p" = M ] && spec=METRICS; pstat "$name" "$p" "${!spec}" "$@"; done; }
 
 sudo -n sysctl -q kernel.nmi_watchdog=0
 trap 'sudo -n sysctl -q kernel.nmi_watchdog=1' EXIT
 
+if [ -z "${SKIP_ANCHORS:-}" ]; then
 # Anchor A: compute-bound. Same command as /home/ubuntu/gf-redteam-scratch/f2-probe.sh, N=16.
 all_passes anchorA-sha256 openssl speed -seconds 3 -bytes 65536 -multi 16 sha256
 # Anchor B: memory-bound. Same command as f2-probe-b.sh: 16 concurrent single-threaded GNU sorts.
 all_passes anchorB-sort bash -c "for i in \$(seq 1 16); do sort -n -S 1G --parallel=1 -o /dev/null $SCRATCH/ints.txt & done; wait"
+fi
 
 # Subject: gf import-session validate at S$SCALE, exactly the ladder profile's commands.
 UUID=$(printf '00000000-0000-4000-8000-%012d' "$SCALE")
-rm -rf "$WS/s$SCALE"; mkdir -p "$WS/s$SCALE"
+sudo -n rm -rf "$WS/s$SCALE"; mkdir -p "$WS/s$SCALE"
 "$GEN" --scale "$SCALE" --edge-factor 16 --seed 13907095936298285200 --nodes "$WS/s$SCALE/nodes.parquet" --edges "$WS/s$SCALE/edges.parquet"
 ls -l "$WS/s$SCALE" >> "$OUT/host-state.txt"
 prep() { # fresh project, session begun, parquet registered — not measured
-  rm -rf "$WS/s$SCALE/source"
+  sudo -n rm -rf "$WS/s$SCALE/source"
   "$GF" --json --project "$WS/s$SCALE/source" import-session begin --operation-uuid "$UUID" > "$OUT/subject-prep.$1.json"
   "$GF" --json --project "$WS/s$SCALE/source" import-session register-parquet --session-uuid "$UUID" --path "$WS/s$SCALE/nodes.parquet" --kind nodes >> "$OUT/subject-prep.$1.json"
   "$GF" --json --project "$WS/s$SCALE/source" import-session register-parquet --session-uuid "$UUID" --path "$WS/s$SCALE/edges.parquet" --kind edges >> "$OUT/subject-prep.$1.json"
 }
-for pass in A B C M; do
+for pass in $PASSES; do
   prep "$pass"; sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null
-  spec=PASS_$pass; [ "$pass" = M ] && spec=METRICS
+  spec=PASS_${pass%2}; [ "$pass" = M ] && spec=METRICS
   pstat "subject-validate-s$SCALE" "$pass" "${!spec}" "$GF" --json --project "$WS/s$SCALE/source" import-session validate --session-uuid "$UUID"
   cp "$OUT/subject-validate-s$SCALE.pass$pass.stdout" "$OUT/subject-validate-s$SCALE.pass$pass.receipt.json"
 done

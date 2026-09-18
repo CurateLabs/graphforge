@@ -15,11 +15,11 @@ export F1_BSSPLIT_WRITES=${F1_BSSPLIT#*,}
 {
   echo "# host state, $(date -u +%FT%TZ)"; uname -a; fio --version
   lscpu | grep -E "Model name|^CPU\(s\)|Thread|Core|Socket|L3"
-  free -h; df -h "$F1_DIR"; findmnt -no SOURCE,FSTYPE,OPTIONS "$F1_DIR"
-  lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,ROTA,MODEL; cat /proc/mdstat
+  free -h; df -h "$F1_DIR"; findmnt -T "$F1_DIR" -no SOURCE,FSTYPE,OPTIONS || true
+  lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,ROTA,MODEL || true; cat /proc/mdstat
   sudo -n mdadm --detail /dev/md3 || true
   for d in nvme0n1 nvme1n1 md3; do echo "$d scheduler: $(cat /sys/block/$d/queue/scheduler 2>/dev/null)"; done
-  cat /sys/block/md3/queue/read_ahead_kb | sed 's/^/md3 read_ahead_kb: /'
+  cat /sys/block/md3/queue/read_ahead_kb 2>/dev/null | sed 's/^/md3 read_ahead_kb: /'
   echo "derived params: F1_RWMIXREAD=$F1_RWMIXREAD F1_FSYNC_EVERY=$F1_FSYNC_EVERY F1_BSSPLIT=$F1_BSSPLIT"
 } > "$OUT/host-state.txt" 2>&1
 
@@ -35,7 +35,7 @@ run() { # name jobfile [extra fio args]
   wait_quiet "$name"
   sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null
   echo "$(date -u +%FT%TZ) START $name: fio $job $* (NUMJOBS=${F1_NUMJOBS:-} FILESIZE=${F1_FILESIZE:-} JOBSIZE=${F1_JOBSIZE:-})" | tee -a "$OUT/runs.log"
-  fio --output-format=normal,json --output="$OUT/$name.out" "$@" "$job" || echo "fio exit $? for $name" | tee -a "$OUT/runs.log"
+  fio --output-format=normal,json --output="$OUT/$name.out" "$@" "$job" || { echo "fio exit $? for $name -- aborting" | tee -a "$OUT/runs.log"; exit 1; }
   echo "$(date -u +%FT%TZ) END   $name" | tee -a "$OUT/runs.log"
 }
 # 1. control
