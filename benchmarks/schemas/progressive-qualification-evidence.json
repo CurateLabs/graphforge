@@ -18,11 +18,12 @@
     "rss_growth_fraction": {"type": "number"},
     "checks": {
       "type": "object", "additionalProperties": false,
-      "required": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "rss_bounded_or_plateaued", "io_reader_publication_capacity_measured", "io_reader_publication_headroom", "correctness"],
+      "required": ["time_headroom", "rss_headroom", "retained_storage_headroom", "transient_storage_headroom", "storage_headroom", "io_reader_publication_capacity_measured", "io_reader_publication_headroom", "correctness"],
       "properties": {
         "time_headroom": {"type": "boolean"}, "rss_headroom": {"type": "boolean"},
         "retained_storage_headroom": {"type": "boolean"}, "transient_storage_headroom": {"type": "boolean"},
-        "storage_headroom": {"type": "boolean"}, "rss_bounded_or_plateaued": {"type": "boolean"},
+        "storage_headroom": {"type": "boolean"},
+        "rss_bounded_or_plateaued": {"type": "boolean"},
         "io_reader_publication_capacity_measured": {"type": "boolean"},
         "io_reader_publication_headroom": {"type": "boolean"},
         "correctness": {"const": true}
@@ -69,7 +70,7 @@
             "properties": {
               "time_headroom": {"const": true}, "rss_headroom": {"const": true},
               "retained_storage_headroom": {"const": true}, "transient_storage_headroom": {"const": true},
-              "storage_headroom": {"const": true}, "rss_bounded_or_plateaued": {"const": true},
+              "storage_headroom": {"const": true},
               "io_reader_publication_capacity_measured": {"const": true},
               "io_reader_publication_headroom": {"const": true}, "correctness": {"const": true}
             }

@@ -41,14 +41,13 @@
       "io_reader_publication_capacity_measured": true,
       "io_reader_publication_headroom": true,
       "retained_storage_headroom": true,
-      "rss_bounded_or_plateaued": false,
       "rss_headroom": true,
       "storage_headroom": true,
       "time_headroom": true,
       "transient_storage_headroom": true
     },
     "claim": "engineering_evidence_only",
-    "decision": "refused",
+    "decision": "admitted",
     "headroom": {
       "rss_fraction": 0.2,
       "storage_fraction": 0.20188791896366037,

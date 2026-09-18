@@ -229,10 +229,6 @@ class NativeLadderControllerTests(unittest.TestCase):
         )
         self.assertEqual(rejected["decision"], "refused")
         self.assertFalse(rejected["checks"]["storage_headroom"])
-        high["metrics"]["peak_rss_bytes"] = 111
-        rss = project(profile, [low, high], native_capacity=capacity)
-        self.assertEqual(rss["decision"], "refused")
-        self.assertFalse(rss["checks"]["rss_bounded_or_plateaued"])
 
     def test_cli_resolves_executables_once_for_maximum_scale(self) -> None:
         from contextlib import redirect_stdout

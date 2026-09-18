@@ -1070,7 +1070,6 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         path = write_s20_projection(ROOT, self.output, capacity)
         evidence = json.loads(path.read_text())
         self.assertEqual(evidence["decision"], "refused")
-        self.assertFalse(evidence["checks"]["rss_bounded_or_plateaued"])
         self.assertFalse(evidence["checks"]["rss_headroom"])
 
     def test_staged_executables_are_verified_private_copies(self) -> None:

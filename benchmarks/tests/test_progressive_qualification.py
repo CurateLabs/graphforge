@@ -432,14 +432,18 @@ class ProgressiveQualificationTests(unittest.TestCase):
                 self.assertEqual(evidence["decision"], "refused")
                 self.assertFalse(evidence["checks"][check])
 
-    def test_material_adjacent_rss_growth_is_architectural_refusal(self) -> None:
+    def test_material_adjacent_rss_growth_is_recorded_but_no_longer_refuses(self) -> None:
+        # The growth-shape gate was dropped (#1387): RSS is governed by the
+        # absolute 4 GiB limit alone. The fraction is still measured and
+        # reported so the architectural signal survives the gate's removal.
         evidence = project(
             self.profiles[2],
             [rung(18, rss=1_000_000_000), rung(19, rss=1_300_000_000)],
             CAPACITY,
         )
-        self.assertFalse(evidence["checks"]["rss_bounded_or_plateaued"])
-        self.assertEqual(evidence["decision"], "refused")
+        self.assertNotIn("rss_bounded_or_plateaued", evidence["checks"])
+        self.assertAlmostEqual(evidence["rss_growth_fraction"], 0.3)
+        self.assertTrue(evidence["checks"]["rss_headroom"])
 
     def test_io_reader_and_publication_slopes_are_independently_preserved(self) -> None:
         evidence = project(self.profiles[2], [rung(18), rung(19)], CAPACITY)

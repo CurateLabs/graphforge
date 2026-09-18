@@ -240,7 +240,6 @@ CHECK_FIELDS = (
     "retained_storage_headroom",
     "transient_storage_headroom",
     "storage_headroom",
-    "rss_bounded_or_plateaued",
     "io_reader_publication_capacity_measured",
     "io_reader_publication_headroom",
     "correctness",

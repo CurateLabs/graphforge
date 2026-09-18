@@ -64,12 +64,11 @@
         },
         "headroom": {
           "type": "object", "additionalProperties": false,
-          "required": ["time_fraction", "rss_fraction", "storage_fraction", "max_adjacent_rss_growth_fraction"],
+          "required": ["time_fraction", "rss_fraction", "storage_fraction"],
           "properties": {
             "time_fraction": {"const": 0.2},
             "rss_fraction": {"const": 0.2},
-            "storage_fraction": {"const": 0.15},
-            "max_adjacent_rss_growth_fraction": {"const": 0.1}
+            "storage_fraction": {"const": 0.15}
           }
         }
       }
