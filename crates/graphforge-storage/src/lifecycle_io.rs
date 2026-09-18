@@ -28,11 +28,21 @@
 //! owning phase is only known to the caller — the recovery-on-open pass being
 //! the clear case, since it reuses the ordinary generation readers.
 //!
+//! # Test isolation
+//! The counters being process-global means one test's instrumented I/O lands in
+//! another test's measured region, which is a race no amount of locking in the
+//! reading tests can close — every *producer* would have to take the same lock
+//! (#1460). [`CaptureScope`] closes it structurally instead: while a capture is
+//! installed, recording on that thread goes into it and nothing else can reach
+//! it, so a region measured inline is isolated by construction.
+//!
 //! # Cost
-//! One thread-local read plus two relaxed atomic adds per instrumented
+//! Two thread-local reads plus two relaxed atomic adds per instrumented
 //! operation, against operations that already read a file and usually hash it.
+//! The second read is a `None` match unless a capture is installed, which
+//! production never does.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -101,6 +111,64 @@ static PHASES: [PhaseCounters; PHASE_COUNT] = [ZERO_COUNTERS; PHASE_COUNT];
 
 thread_local! {
     static ACTIVE_PHASE: Cell<Option<StorageIoPhase>> = const { Cell::new(None) };
+    static CAPTURE: RefCell<Option<Box<CaptureRows>>> = const { RefCell::new(None) };
+}
+
+/// One plain counter row per lifecycle phase. Not atomic: a capture is only
+/// ever reachable from the thread that installed it.
+type CaptureRows = [PhaseIoTotals; PHASE_COUNT];
+
+/// Divert instrumented recording on this thread into a private capture for as
+/// long as the guard is held.
+///
+/// The counters are process-global by design, which means a test measuring a
+/// region it performs inline can be polluted by any other test in the process
+/// doing real I/O. Serialising the *reading* tests does not fix that, because
+/// the writers are every other test in the crate. A capture fixes it
+/// structurally: while one is installed, recording on this thread goes into it
+/// and no other thread can reach it.
+///
+/// Tests only — production never installs one. The guard is deliberately
+/// `!Send`, because a capture belongs to the thread that installed it.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct CaptureScope {
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl CaptureScope {
+    /// Install a zeroed capture on this thread, replacing any already present.
+    #[must_use]
+    pub fn install() -> Self {
+        CAPTURE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(std::array::from_fn(|_| PhaseIoTotals::default())));
+        });
+        Self {
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for CaptureScope {
+    fn drop(&mut self) {
+        CAPTURE.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+/// Route one record into this thread's capture when a capture is installed.
+///
+/// Returns `true` when the capture took it, so the caller skips the global
+/// counters entirely.
+fn record_captured(phase: StorageIoPhase, apply: impl FnOnce(&mut PhaseIoTotals)) -> bool {
+    CAPTURE.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(rows) => {
+            apply(&mut rows[phase.lifecycle_index()]);
+            true
+        }
+        None => false,
+    })
 }
 
 /// Override the phase attributed to instrumented storage I/O on this thread for
@@ -140,7 +208,14 @@ pub fn record_read(default: StorageIoPhase, bytes: u64, calls: u64) {
     if bytes == 0 || calls == 0 {
         return;
     }
-    let counters = &PHASES[effective_phase(default).lifecycle_index()];
+    let phase = effective_phase(default);
+    if record_captured(phase, |row| {
+        row.read_bytes += bytes;
+        row.read_calls += calls;
+    }) {
+        return;
+    }
+    let counters = &PHASES[phase.lifecycle_index()];
     counters.read_bytes.fetch_add(bytes, Ordering::Relaxed);
     counters.read_calls.fetch_add(calls, Ordering::Relaxed);
 }
@@ -152,7 +227,14 @@ pub fn record_write(default: StorageIoPhase, bytes: u64, calls: u64) {
     if bytes == 0 || calls == 0 {
         return;
     }
-    let counters = &PHASES[effective_phase(default).lifecycle_index()];
+    let phase = effective_phase(default);
+    if record_captured(phase, |row| {
+        row.write_bytes += bytes;
+        row.write_calls += calls;
+    }) {
+        return;
+    }
+    let counters = &PHASES[phase.lifecycle_index()];
     counters.write_bytes.fetch_add(bytes, Ordering::Relaxed);
     counters.write_calls.fetch_add(calls, Ordering::Relaxed);
 }
@@ -162,7 +244,11 @@ pub fn record_fsync(default: StorageIoPhase, calls: u64) {
     if calls == 0 {
         return;
     }
-    PHASES[effective_phase(default).lifecycle_index()]
+    let phase = effective_phase(default);
+    if record_captured(phase, |row| row.fsync_calls += calls) {
+        return;
+    }
+    PHASES[phase.lifecycle_index()]
         .fsync_calls
         .fetch_add(calls, Ordering::Relaxed);
 }
@@ -172,7 +258,11 @@ pub fn record_objects(default: StorageIoPhase, objects: u64) {
     if objects == 0 {
         return;
     }
-    PHASES[effective_phase(default).lifecycle_index()]
+    let phase = effective_phase(default);
+    if record_captured(phase, |row| row.object_count += objects) {
+        return;
+    }
+    PHASES[phase.lifecycle_index()]
         .object_count
         .fetch_add(objects, Ordering::Relaxed);
 }
@@ -182,7 +272,11 @@ pub fn record_blocks(default: StorageIoPhase, blocks: u64) {
     if blocks == 0 {
         return;
     }
-    PHASES[effective_phase(default).lifecycle_index()]
+    let phase = effective_phase(default);
+    if record_captured(phase, |row| row.block_count += blocks) {
+        return;
+    }
+    PHASES[phase.lifecycle_index()]
         .block_count
         .fetch_add(blocks, Ordering::Relaxed);
 }
@@ -190,23 +284,36 @@ pub fn record_blocks(default: StorageIoPhase, blocks: u64) {
 /// Point-in-time copy of every lifecycle phase counter.
 #[must_use]
 pub fn snapshot() -> LifecyclePhaseAttribution {
-    let mut phases = BTreeMap::new();
-    let mut totals = PhaseIoTotals::default();
-    for phase in StorageIoPhase::LIFECYCLE {
-        let value = PHASES[phase.lifecycle_index()].totals();
-        accumulate(&mut totals, &value);
-        phases.insert(phase, value);
-    }
-    LifecyclePhaseAttribution { phases, totals }
+    CAPTURE.with(|slot| {
+        let captured = slot.borrow();
+        let mut phases = BTreeMap::new();
+        let mut totals = PhaseIoTotals::default();
+        for phase in StorageIoPhase::LIFECYCLE {
+            let value = match captured.as_ref() {
+                Some(rows) => rows[phase.lifecycle_index()].clone(),
+                None => PHASES[phase.lifecycle_index()].totals(),
+            };
+            accumulate(&mut totals, &value);
+            phases.insert(phase, value);
+        }
+        LifecyclePhaseAttribution { phases, totals }
+    })
 }
 
-/// Zero every counter. Tests that assert on a region reset immediately before
-/// it and keep that region single-threaded.
+/// Zero every counter, or this thread's [`CaptureScope`] when one is installed.
 #[doc(hidden)]
 pub fn reset() {
-    for counters in &PHASES {
-        counters.reset();
-    }
+    CAPTURE.with(|slot| {
+        if let Some(rows) = slot.borrow_mut().as_mut() {
+            for row in rows.iter_mut() {
+                *row = PhaseIoTotals::default();
+            }
+            return;
+        }
+        for counters in &PHASES {
+            counters.reset();
+        }
+    });
 }
 
 /// Closed, reconciled phase attribution for one lifecycle region.
@@ -382,12 +489,44 @@ fn validation(message: &str) -> GfError {
 mod tests {
     use super::*;
 
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn a_capture_is_isolated_from_every_other_thread() {
+        // The defect this closes: another thread's instrumented I/O landing in
+        // a measured region. Without the capture, the spawned thread's 999
+        // bytes reach the same global counter the region reads, and the final
+        // assertion sees 40 + 999.
+        let _capture = CaptureScope::install();
+        let before = snapshot();
+        record_read(StorageIoPhase::ReadPathScan, 40, 1);
 
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        std::thread::spawn(|| {
+            record_read(StorageIoPhase::ReadPathScan, 999, 7);
+            record_write(StorageIoPhase::CasInstallReadWrite, 999, 7);
+            record_fsync(StorageIoPhase::FsyncSynchronization, 99);
+        })
+        .join()
+        .expect("recording thread");
+
+        let region = snapshot().since(&before).expect("region attribution");
+        assert_eq!(region.phases[&StorageIoPhase::ReadPathScan].read_bytes, 40);
+        assert_eq!(region.totals.read_bytes, 40);
+        assert_eq!(region.totals.write_bytes, 0);
+        assert_eq!(region.totals.fsync_calls, 0);
+    }
+
+    #[test]
+    fn a_capture_is_removed_on_drop_and_a_fresh_one_starts_clean() {
+        {
+            let _capture = CaptureScope::install();
+            record_read(StorageIoPhase::ReadPathScan, 1_234, 5);
+            assert_eq!(snapshot().totals.read_bytes, 1_234);
+        }
+        // A second capture must not inherit the first one's rows. Asserting
+        // against the process-global counters here instead would reintroduce
+        // exactly the cross-test race this change exists to remove, so the
+        // scoping is proven from inside captures only.
+        let _capture = CaptureScope::install();
+        assert_eq!(snapshot().totals.read_bytes, 0);
     }
 
     #[test]
@@ -407,8 +546,7 @@ mod tests {
 
     #[test]
     fn snapshot_difference_attributes_only_the_measured_region() {
-        let _guard = guard();
-        reset();
+        let _capture = CaptureScope::install();
         record_read(StorageIoPhase::HydrationVerification, 100, 2);
         let before = snapshot();
         record_read(StorageIoPhase::ReadPathScan, 40, 1);
@@ -429,13 +567,11 @@ mod tests {
         );
         assert_eq!(region.totals.fsync_calls, 3);
         assert_eq!(region.totals.read_bytes, 40);
-        reset();
     }
 
     #[test]
     fn an_active_scope_overrides_the_primitive_default() {
-        let _guard = guard();
-        reset();
+        let _capture = CaptureScope::install();
         {
             let _scope = PhaseScope::enter(StorageIoPhase::RecoveryReauthentication);
             record_read(StorageIoPhase::PublicationPreauthentication, 64, 1);
@@ -459,13 +595,11 @@ mod tests {
             taken.phases[&StorageIoPhase::PublicationPreauthentication].read_bytes,
             4
         );
-        reset();
     }
 
     #[test]
     fn reconciliation_rejects_a_missing_phase_and_a_wrong_total() {
-        let _guard = guard();
-        reset();
+        let _capture = CaptureScope::install();
         record_read(StorageIoPhase::ReadPathScan, 10, 1);
         let mut taken = snapshot();
         taken
@@ -476,13 +610,11 @@ mod tests {
         assert!(missing.validate_reconciliation().is_err());
         taken.totals.read_bytes += 1;
         assert!(taken.validate_reconciliation().is_err());
-        reset();
     }
 
     #[test]
     fn qualification_rejects_an_unpaired_byte_only_row() {
-        let _guard = guard();
-        reset();
+        let _capture = CaptureScope::install();
         let mut taken = snapshot();
         let row = taken
             .phases
@@ -492,6 +624,5 @@ mod tests {
         taken.totals.read_bytes = 9;
         assert!(taken.validate_reconciliation().is_ok());
         assert!(taken.validate_for_qualification().is_err());
-        reset();
     }
 }
