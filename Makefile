@@ -219,6 +219,9 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@echo "━━━ Source size policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/source_size_policy.py
 	@python3 scripts/ci/test-source-size-policy.py
+	@echo "━━━ Benchmark measurement policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@python3 scripts/ci/benchmark-measurement-policy.py
+	@python3 scripts/ci/test-benchmark-measurement-policy.py
 	@echo "━━━ Public API BDD policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/ci/api-bdd-policy.py --check-issues
 	@python3 scripts/ci/test-api-bdd-policy.py

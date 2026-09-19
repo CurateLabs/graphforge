@@ -116,6 +116,11 @@ while IFS= read -r -d '' path; do
       tests/contracts/api-bdd-exclusions.json)
       api_bdd=true
       ;;
+    scripts/ci/benchmark-measurement-policy.py | \
+      scripts/ci/test-benchmark-measurement-policy.py | \
+      config/benchmark-measurement-inventory.json | \
+      docs/development/benchmarking.md)
+      ;;
     scripts/ci/test-binding-release-candidate.py | \
       scripts/ci/test-release-load-matrix.py | scripts/ci/test-release-load-executor.py | \
       scripts/ci/test-release-certification.py | \
