@@ -8,17 +8,26 @@ fn fixture_uuid(value: u128) -> Uuid {
 }
 
 fn graph(workers: usize) -> GraphForge {
-    GraphForge::new_with_options(
-        None,
+    graph_at(None, workers)
+}
+
+fn graph_at(path: Option<&str>, workers: usize) -> GraphForge {
+    let mut graph = GraphForge::new_with_options(
+        path,
         crate::GraphForgeOptions {
             resource: crate::ExecutionResourcePolicy {
-                compute_threads: Some(workers),
+                compute_threads: Some(1),
                 ..Default::default()
             },
             ..Default::default()
         },
     )
-    .unwrap()
+    .unwrap();
+    // Force scheduling cases even on one/two-CPU CI hosts. Resource-policy
+    // admission is tested separately; this fixture exercises the private pool.
+    graph.compute_pool = Arc::new(graphforge_exec::ComputePool::new(workers).unwrap());
+    graph.resource_policy.compute_threads = workers;
+    graph
 }
 
 fn nodes(ids: &[Option<Uuid>], properties: usize) -> RecordBatch {
@@ -228,17 +237,7 @@ fn cancellation_after_first_consumed_result_never_appends_later_results() {
 fn failed_parallel_import_keeps_the_same_durable_prefix_after_reopen() {
     for workers in [1, 4] {
         let directory = tempfile::tempdir().unwrap();
-        let graph = GraphForge::new_with_options(
-            directory.path().to_str(),
-            crate::GraphForgeOptions {
-                resource: crate::ExecutionResourcePolicy {
-                    compute_threads: Some(workers),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let graph = graph_at(directory.path().to_str(), workers);
         let operation = crate::OperationId(fixture_uuid(1472));
         let mut session = graph
             .begin_import_session(operation, crate::ImportSessionLimits::default())
@@ -312,17 +311,7 @@ fn serial_and_parallel_import_publish_identical_payloads_with_recorded_clock_fix
     let mut fingerprints = Vec::new();
     for workers in [1, 4] {
         let directory = tempfile::tempdir().unwrap();
-        let graph = GraphForge::new_with_options(
-            directory.path().to_str(),
-            crate::GraphForgeOptions {
-                resource: crate::ExecutionResourcePolicy {
-                    compute_threads: Some(workers),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let graph = graph_at(directory.path().to_str(), workers);
         let mut session = graph
             .begin_import_session(
                 crate::OperationId(fixture_uuid(1472)),
