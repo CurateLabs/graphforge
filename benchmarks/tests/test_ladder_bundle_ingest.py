@@ -100,6 +100,7 @@ class ParityGateHarnessAuthorityTests(unittest.TestCase):
     def test_harness_authority_met_after_ingested_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base = Path(temp_name)
+            (base.parent / "Makefile").write_text("safe-target:\n\t@true\n", encoding="utf-8")
             fixtures = base / "fixtures" / "parity"
             shutil.copytree(workspace_root() / "fixtures" / "parity", fixtures)
             source = base / "bundle-source"
@@ -122,8 +123,8 @@ class ParityGateHarnessAuthorityTests(unittest.TestCase):
                 for row in status["criteria"]
                 if row["name"] == "harness_authoritative_after_ladder_comparison"
             )
-            self.assertFalse(harness["met"])
-            self.assertEqual(harness["blocked_by"], "#900")
+            self.assertTrue(harness["met"])
+            self.assertIsNone(harness["blocked_by"])
             self.assertTrue(status["prefix_parity_ready"])
             self.assertFalse(status["full_ladder_evidence_complete"])
             self.assertNotIn("ready_for_retirement", status)
