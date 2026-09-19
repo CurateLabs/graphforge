@@ -316,6 +316,11 @@ pub(super) fn logical_records(
                         &snapshot.bytes,
                     )?;
                 }
+                graphforge_storage::WORKSPACE_RESEARCH_METADATA_FAMILY => {
+                    graphforge_storage::WorkspaceResearchMetadata::from_canonical_json(
+                        &snapshot.bytes,
+                    )?;
+                }
                 _ => {
                     return Err(schema_mismatch(
                         "unregistered workspace checkpoint diff participant",

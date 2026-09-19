@@ -739,7 +739,7 @@ class GraphForge:
         temporal_label: str | None = None,
         max_projects: int = 1024,
         max_candidates: int = 1024,
-    ) -> pa.Table: ...
+    ) -> pyarrow.Table: ...
     def adopt_ontology(
         self,
         path: str,
