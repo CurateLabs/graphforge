@@ -1099,7 +1099,7 @@ pub(super) fn route_fixed_run<const N: usize>(
 }
 
 /// Maximum wire bytes retained by one routing accumulator.
-const PARTITION_RUN_BYTES: usize = 1024 * 1024;
+const PARTITION_RUN_BYTES: usize = 64 * 1024;
 
 /// Accumulates bounded same-partition slices of wire bytes, amortizing writes
 /// without retaining a whole partition run (#1445).
