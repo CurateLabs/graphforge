@@ -635,10 +635,12 @@ fn has_exact_pristine_layout(target: &Path, generation_uuid: Uuid) -> Result<boo
     if directory_names(&participants)? != ["workspace"] {
         return Ok(false);
     }
-    Ok(
-        directory_names(&participants.join("workspace"))?
-            == ["configuration.json", "ontology.json", "research_metadata.json"],
-    )
+    Ok(directory_names(&participants.join("workspace"))?
+        == [
+            "configuration.json",
+            "ontology.json",
+            "research_metadata.json",
+        ])
 }
 
 fn directory_names(path: &Path) -> Result<Vec<String>, GfError> {
