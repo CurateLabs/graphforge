@@ -26,10 +26,7 @@ POLICY_DOC = ROOT / "docs/development/benchmarking.md"
 CANONICAL_BENCH = ROOT / "crates/graphforge-core/benches/canonical.rs"
 
 CUSTOM_TIMER_FIXTURE = (
-    "fn sample() {\n"
-    "    let start = std::time::Instant::now();\n"
-    "    let _ = start.elapsed();\n"
-    "}\n"
+    "fn sample() {\n    let start = std::time::Instant::now();\n    let _ = start.elapsed();\n}\n"
 )
 LEGACY_TIMER_WITH_MEDIAN_FIXTURE = (
     "fn median_expand() {}\n"
