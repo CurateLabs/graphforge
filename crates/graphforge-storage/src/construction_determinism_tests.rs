@@ -69,6 +69,8 @@ mod determinism {
     use crate::graph_construction::shape::{SHAPED_RUNTIME_CATALOG, decode_splitters};
     use tempfile::TempDir;
 
+    include!("construction_clock_tests.rs");
+
     /// A UUIDv7-shaped identity: 48 bits of Unix-millisecond timestamp, then
     /// entropy. `graphforge-core/src/uuid.rs` mints this shape on every write
     /// path, so it is the distribution partitioning actually has to handle.
