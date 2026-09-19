@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "3a1ef807a314823589c657fd7973c3ff9a74d55703be90a00aad42d221ca95eb",
+  "public_method_digest": "f07050c29e4fe957fd056a9408b1fa7fb91b11630899aa37ac8165c23a94aa21",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -252,6 +252,20 @@
         {
           "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
           "symbol": "replace_and_remove_are_safe_only_without_retained_semantic_data"
+        }
+      ]
+    },
+    "research-project": {
+      "ids": [
+        "GraphForge.discover_research_projects",
+        "GraphForge.research_project_metadata",
+        "GraphForge.research_project_summary",
+        "GraphForge.update_research_metadata"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/research_project.rs",
+          "symbol": "metadata_survives_reopen_and_discovery_filters_without_graph_open"
         }
       ]
     },
