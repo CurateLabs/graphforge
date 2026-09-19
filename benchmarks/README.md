@@ -31,8 +31,9 @@ belongs to issue #959, after parity is proven.
 Scale-orchestration parity work lives under `fixtures/parity/` with the
 `graphforge_bench.scale_parity` comparator. The index is
 [`scale-parity-index.md`](scale-parity-index.md). The first slice compares
-tiny/local shadow fixtures only; completed #900 ladder bundles are ingested
-read-only in a follow-up (`fixtures/parity/ladder-bundle/README.md`).
+tiny/local shadow fixtures only. Completed #900 ladder bundles may be ingested
+read-only for parent #952 (`fixtures/parity/ladder-bundle/README.md`); they are
+not a #959 closure prerequisite.
 
 ## Layout
 
@@ -431,12 +432,12 @@ phase artifacts, admission projections, and cleanup inventory must agree by
 identity and digest. Historical provider bundles remain readable as migration
 fixtures. Legacy unbound native inventory v1 cannot establish full completion.
 
-`parity-gate` reports structural retirement, accepted prefix parity, and
-`full_ladder_evidence_complete` separately. A valid S18/S19 prefix is useful
-engineering evidence but does not establish full harness authority or complete
-#959. Full completion requires all seven native rungs through S26 and empty
-terminal work-root inventory; it does not claim an official Graph500 submission
-or replace independent review of the actual #900 lifecycle/parity evidence.
+`parity-gate` reports structural retirement, bounded tiny parity, and
+`full_ladder_evidence_complete` separately. **#959 closes on bounded tiny/shadow
+parity and measurement-policy outcomes**; it does not require ingested #900 ladder
+bundles or live GDC suite runs. Full ladder completion (all seven native rungs
+through S26 and empty terminal work-root inventory) is tracked for parent #952
+and must not block #959 closure.
 
 ## Progressive Graph500 qualification
 

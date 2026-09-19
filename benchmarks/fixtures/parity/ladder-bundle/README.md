@@ -1,7 +1,8 @@
-# Completed #900 ladder bundle ingestion (#959)
+# Completed #900 ladder bundle ingestion (#952 / #900)
 
 This directory holds **read-only** sanitized rung bundles produced by issue #900.
-Do not generate synthetic ladder evidence here and do not rerun S18–S26 solely for parity (#959).
+Do not generate synthetic ladder evidence here and do not rerun S18–S26 solely for parity.
+Ingestion is optional engineering evidence for parent **#952**; it is **not** a #959 closure prerequisite.
 
 ## Expected layout
 
@@ -26,10 +27,10 @@ Once bundles are present, `graphforge_bench.scale_parity.compare_ladder_bundle` 
 each rung against preserved legacy migration fixtures under `fixtures/parity/legacy/` and
 declared accepted differences in `fixtures/parity/accepted-differences.json`.
 
-Until #900 completes, parity work uses only tiny/local shadow fixtures in
+**#959 bounded migration** uses only tiny/local shadow fixtures in
 `fixtures/parity/legacy/tiny-pass.json` and `fixtures/parity/new/tiny-pass.json`.
 
-After #900 completes, validate and ingest the sanitized bundle read-only:
+After #900 completes, validate and ingest the sanitized bundle read-only for #952:
 
 ```bash
 make -C benchmarks ingest-ladder-bundle SOURCE=/path/to/#900-output VALIDATE_ONLY=1

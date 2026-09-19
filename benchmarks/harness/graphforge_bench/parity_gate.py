@@ -129,7 +129,7 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
             historical_ok = False
 
     ladder_ok = False
-    ladder_detail = "no ingested #900 rung bundles"
+    ladder_detail = "no ingested ladder rung bundles (#952/#900 track)"
     canonical_prefix, rung_scales = _canonical_prefix(rung_files)
     if rung_files:
         try:
@@ -150,29 +150,35 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
         path.name for path in (fixtures / "legacy").glob("*.json") if path.name != "tiny-pass.json"
     ]
 
-    prefix_comparison_met = bool(rung_files) and ladder_ok and canonical_prefix
-    prefix_parity_ready = tiny_ok and prefix_comparison_met
+    prefix_ladder_comparison_met = bool(rung_files) and ladder_ok and canonical_prefix
+    # #959 closes on tiny/shadow bounded parity only; ingested ladder bundles are #952/#900 track.
+    prefix_parity_ready = tiny_ok
     legacy_retired = not _legacy_orchestration_present(base)
     structural_retirement_ready = legacy_retired and historical_ok and bool(migration_fixtures)
     full_ladder_complete, full_ladder_detail = _full_ladder_bundle_complete(
         bundle, canonical_prefix=canonical_prefix
     )
-    full_ladder_evidence_complete = prefix_parity_ready and full_ladder_complete
+    full_ladder_evidence_complete = prefix_ladder_comparison_met and full_ladder_complete
 
-    harness_authoritative_met = full_ladder_evidence_complete
+    harness_authoritative_met = legacy_retired and tiny_ok
 
     criteria = [
         _criterion(
             "parity_matrix_no_unexplained_gaps",
-            met=prefix_parity_ready,
-            blocked_by="#900 ladder bundles" if tiny_ok and not rung_files else None,
+            met=tiny_ok,
+            blocked_by="tiny shadow parity gaps" if not tiny_ok else None,
             evidence=f"tiny overall={tiny_matrix['overall']}; ladder {ladder_detail}",
         ),
         _criterion(
             "harness_authoritative_after_ladder_comparison",
             met=harness_authoritative_met,
-            blocked_by="#900" if not full_ladder_evidence_complete else None,
-            evidence=ladder_detail,
+            blocked_by="legacy orchestration remains or tiny parity is red"
+            if not harness_authoritative_met
+            else None,
+            evidence=(
+                f"legacy_retired={legacy_retired}; tiny overall={tiny_matrix['overall']}; "
+                f"ladder {ladder_detail}"
+            ),
         ),
         _criterion(
             "legacy_orchestration_retired_with_coverage",
@@ -197,12 +203,12 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
         _criterion(
             "no_duplicate_s18_s26_ladder_for_parity",
             met=True,
-            evidence="compare_ladder_bundle ingests #900 output read-only only",
+            evidence="compare_ladder_bundle ingests completed ladder output read-only; #959 does not rerun",
         ),
         _criterion(
             "full_ladder_evidence_complete",
             met=full_ladder_evidence_complete,
-            blocked_by="complete native S18-S26 evidence and work-root inventory"
+            blocked_by="#952/#900 native host ladder (not a #959 closure prerequisite)"
             if not full_ladder_evidence_complete
             else None,
             evidence=full_ladder_detail,

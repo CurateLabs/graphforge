@@ -1,8 +1,8 @@
 """Scale orchestration parity matrix for legacy vs benchmark harness evidence.
 
 Compares normalized lifecycle evidence without rerunning provider-scale ladders.
-Issue #959 uses tiny/local shadow fixtures first; completed #900 ladder bundles
-can be ingested read-only in a follow-up.
+Issue #959 uses tiny/local shadow fixtures for bounded migration proof; completed
+#900 ladder bundles may be ingested read-only for parent #952 only.
 """
 
 from __future__ import annotations
