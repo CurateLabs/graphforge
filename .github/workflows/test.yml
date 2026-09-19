@@ -82,6 +82,12 @@ jobs:
           python3 scripts/ci/test-source-size-policy.py
           python3 scripts/ci/test-pre-push-validation.py
 
+      - name: Validate benchmark measurement policy
+        run: python3 scripts/ci/benchmark-measurement-policy.py
+
+      - name: Test benchmark measurement policy
+        run: python3 scripts/ci/test-benchmark-measurement-policy.py
+
       - name: Classify Repository Policy suites
         id: policy-suites
         shell: bash

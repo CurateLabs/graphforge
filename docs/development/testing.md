@@ -168,6 +168,8 @@ and storage consistency invariants.
 #### 5. Performance Benchmarks (`tests/benchmarks/`)
 
 Real-dataset benchmarks tracked over time. Not part of the standard CI run.
+Measurement authority, inventory, and validation commands are documented in
+[`benchmarking.md`](benchmarking.md).
 
 ### Pytest Configuration
 

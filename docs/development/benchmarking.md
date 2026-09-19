@@ -1,14 +1,73 @@
+# Benchmark measurement policy
+
+GraphForge values correctness over performance, but performance claims still
+require comparable evidence with explicit scope and provenance. The canonical
+inventory lives in `config/benchmark-measurement-inventory.json`; fast CI enforces
+it through `scripts/ci/benchmark-measurement-policy.py`.
+
+## Execution boundaries
+
+Choose the framework by **execution boundary**, not an arbitrary duration cutoff:
+
+| Boundary | Authority | Typical workloads |
+| --- | --- | --- |
+| Whole command / process tree | **BenchExec** | Certification ladder, lifecycle/GDC orchestration, external runners |
+| In-process benchmark target | **Divan** (CodSpeed optional) | Parser, storage CPU simulation, traversal/MERGE scaling |
+| Product semantic counters | **Direct deterministic evidence** | Logical bytes, reader calls, publication counts, ingest floor gates |
+| Shared internal phase timing | **Diagnostic only** | BDD/TCK scenario timings, certify phase telemetry, construction receipts |
+
+BenchExec owns command/process-tree timing and resource measurements. Divan owns
+in-process benchmark sampling and timing. CodSpeed may execute and report Divan
+benchmarks but is diagnostic, not a merge authority.
+
+Every performance **gate** must consume framework-produced measurements for the
+timing and resource quantities those frameworks own. Shared diagnostics cannot
+substitute for gate input. Product semantic counters remain allowed when they are
+distinctly named deterministic evidence, not relabeled physical resource
+measurements.
+
+Ordinary deadlines, cancellation tests, and approved shared diagnostics remain
+allowed. `Instant` / `Duration` in product control paths are not banned globally.
+
+## Inventory and enforcement
+
+The inventory records each measurement site, its boundary, disposition, migration
+owner, and any reviewed legacy signals still present. Dispositions:
+
+- `framework_authority` — timing/resources come only from Divan or BenchExec.
+- `framework_consumer` — outer orchestration consumes BenchExec evidence.
+- `mixed_authority` — Divan plus reviewed nested product counters pending migration.
+- `migrate` — custom in-process timers/statistics scheduled for Divan migration.
+- `diagnostic_only` — informational timings that must not drive performance gates.
+
+CI rejects new unclassified benchmark clocks, sampling loops, or homegrown
+statistics in the scanned in-process benchmark surfaces (`crates/*/benches/`,
+`crates/*/tests/bench_*`, traversal/MERGE scaling tests). Update the inventory
+when adding a reviewed legacy exception or completing a migration; stale entries
+fail closed.
+
+Validation:
+
+```bash
+python3 scripts/ci/benchmark-measurement-policy.py
+python3 scripts/ci/test-benchmark-measurement-policy.py
+```
+
+Functional benchmark checks (correctness, read counts, topology/I/O invariants)
+stay in ordinary product CI (`//:ci_rust_tests`, release-only scaling tests).
+Comparable performance measurements use Divan (`cargo bench`, CodSpeed) or
+BenchExec (native Linux cgroups-v2 hosts). Durable temp-root and admitted-host
+requirements are documented per workload in `benchmarks/README.md`.
+
 # Benchmarking with CodSpeed
 
 **Status:** Continuous on every pull request to `main` (`CodSpeed` workflow)
 
-GraphForge values correctness over performance, but performance claims still
-require comparable evidence. The `CodSpeed` workflow measures a fixed set of
-Rust benchmarks on every pull request and reports the delta against the base
-commit. It is not part of the `CI Gate` aggregate, but the PR must still reach
-the repository's required `CLEAN` state: a red **CodSpeed Performance Analysis**
-check must be resolved or receive an explicit, evidence-backed maintainer
-disposition.
+The `CodSpeed` workflow measures a fixed set of Rust benchmarks on every pull
+request and reports the delta against the base commit. It is not part of the
+`CI Gate` aggregate, but the PR must still reach the repository's required
+`CLEAN` state: a red **CodSpeed Performance Analysis** check must be resolved or
+receive an explicit, evidence-backed maintainer disposition.
 
 ## What is measured
 

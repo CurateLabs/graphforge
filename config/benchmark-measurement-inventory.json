@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "policy_doc": "docs/development/benchmarking.md",
+  "sites": [
+    {
+      "path": "crates/graphforge-core/benches/canonical.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "CodSpeed CPU-simulation divan targets; timing from Divan only."
+    },
+    {
+      "path": "crates/graphforge-cypher/benches/compile.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "Parser/compiler divan targets; timing from Divan only."
+    },
+    {
+      "path": "crates/graphforge-storage/benches/m6_storage.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "Synthetic M6 CPU-simulation fixtures; correctness outside timed closures."
+    },
+    {
+      "path": "crates/graphforge-storage/benches/m6_storage_io.rs",
+      "boundary": "in_process",
+      "authority": "divan",
+      "disposition": "mixed_authority",
+      "owner_issue": 1476,
+      "allowed_signals": [
+        "custom_wall_clock",
+        "custom_cpu_sampling",
+        "product_semantic_counter_gate"
+      ],
+      "notes": "Divan owns durable walltime benches; ingest_generation nested wall/CPU and GF_INGEST_FLOOR_GATE product-counter mode migrate under #1476."
+    },
+    {
+      "path": "crates/graphforge-exec/tests/bench_traversal_scaling.rs",
+      "boundary": "in_process",
+      "authority": "custom",
+      "disposition": "migrate",
+      "owner_issue": 1485,
+      "allowed_signals": [
+        "custom_wall_clock",
+        "homegrown_statistics",
+        "manual_sampling_loop"
+      ],
+      "notes": "Traversal scaling uses median_expand and Instant sampling; migrate to Divan under #1485."
+    },
+    {
+      "path": "crates/graphforge-exec/tests/merge_scaling_bench.rs",
+      "boundary": "in_process",
+      "authority": "custom",
+      "disposition": "migrate",
+      "owner_issue": 1485,
+      "allowed_signals": [
+        "custom_wall_clock"
+      ],
+      "notes": "MERGE scaling uses per-sample Instant timing; migrate to Divan under #1485."
+    },
+    {
+      "path": "crates/graphforge-exec/tests/persistent_adjacency.rs",
+      "boundary": "in_process",
+      "authority": "custom",
+      "disposition": "migrate",
+      "owner_issue": 1485,
+      "allowed_signals": [
+        "custom_wall_clock"
+      ],
+      "notes": "One ignored manual timing probe; fold into Divan migration or drop timing-only coverage."
+    },
+    {
+      "path": "benchmarks/runners/certify",
+      "boundary": "process_tree",
+      "authority": "benchexec",
+      "disposition": "framework_consumer",
+      "owner_issue": 959,
+      "notes": "Rust certification runner emits per-phase product telemetry; BenchExec owns wall/RSS/physical I/O."
+    },
+    {
+      "path": "benchmarks/harness/graphforge_bench/progressive_run.py",
+      "boundary": "process_tree",
+      "authority": "benchexec",
+      "disposition": "framework_consumer",
+      "owner_issue": 959,
+      "notes": "Progressive ladder controller; BenchExec authority normalizes mandatory resource fields."
+    },
+    {
+      "path": "benchmarks/harness/graphforge_bench/lifecycle_runtime.py",
+      "boundary": "process_tree",
+      "authority": "benchexec",
+      "disposition": "framework_consumer",
+      "owner_issue": 959,
+      "notes": "Lifecycle evidence assembly; distinguishes BenchExec cgroup memory from process RSS."
+    },
+    {
+      "path": "benchmarks/runners/gdc-graphalytics",
+      "boundary": "in_process",
+      "authority": "product_semantic",
+      "disposition": "diagnostic_only",
+      "owner_issue": 959,
+      "notes": "GDC Graphalytics live runner; resource timings are engineering proof with certification: false."
+    },
+    {
+      "path": "benchmarks/runners/gdc-snb-interactive",
+      "boundary": "in_process",
+      "authority": "product_semantic",
+      "disposition": "diagnostic_only",
+      "owner_issue": 959,
+      "notes": "SNB Interactive live lane; timing is observational, not a performance gate input."
+    },
+    {
+      "path": "benchmarks/runners/gdc-finbench-transaction",
+      "boundary": "in_process",
+      "authority": "product_semantic",
+      "disposition": "diagnostic_only",
+      "owner_issue": 959,
+      "notes": "FinBench Transaction live lane; timing is observational, not a performance gate input."
+    },
+    {
+      "path": "crates/graphforge-api/tests/scale_g500_ladder.rs",
+      "boundary": "process_tree",
+      "authority": "diagnostic_attribution",
+      "disposition": "diagnostic_only",
+      "owner_issue": 959,
+      "notes": "Phase Instant telemetry for ladder assembly; BenchExec remains wall/RSS authority for gates."
+    },
+    {
+      "path": "crates/graphforge-api/tests/bdd",
+      "boundary": "in_process",
+      "authority": "diagnostic_only",
+      "disposition": "diagnostic_only",
+      "owner_issue": 1467,
+      "notes": "BDD scenario timings are informational; TCK baseline comparisons migrate under #1467."
+    },
+    {
+      "path": "scripts/tck_perf_report.py",
+      "boundary": "process_tree",
+      "authority": "diagnostic_only",
+      "disposition": "diagnostic_only",
+      "owner_issue": 1467,
+      "notes": "JUnit wall-clock reporter for slow TCK tests; not a performance gate authority."
+    },
+    {
+      "path": "tests/tck/performance_baseline.json",
+      "boundary": "in_process",
+      "authority": "diagnostic_only",
+      "disposition": "diagnostic_only",
+      "owner_issue": 1467,
+      "notes": "TCK timing baseline artifact; refreshed only from complete passing BDD runs."
+    }
+  ]
+}

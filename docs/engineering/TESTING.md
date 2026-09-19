@@ -23,6 +23,10 @@ end-to-end evidence. Command recipes and historical suite layout live in
 [`../development/testing.md`](../development/testing.md). Workflow mechanics live
 in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
+Benchmark measurement authority (BenchExec vs Divan vs diagnostic-only phase
+timing) is defined in [`../development/benchmarking.md`](../development/benchmarking.md)
+and enforced from `config/benchmark-measurement-inventory.json`.
+
 ## Dual-track objectives (PR / publish-track / human close)
 
 | Surface | Objective | Required when | Wall-clock target | Must keep | Shed / defer |
