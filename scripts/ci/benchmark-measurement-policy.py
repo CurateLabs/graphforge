@@ -166,7 +166,7 @@ def validate(root: Path) -> tuple[dict, list[str]]:
     tracked = tracked_paths(root)
     sites = inventory_by_path(payload)
 
-    for path, site in sorted(sites.items()):
+    for path, _site in sorted(sites.items()):
         target = root / path
         descendants = [item for item in tracked if item.startswith(f"{path}/")]
         if path in tracked:

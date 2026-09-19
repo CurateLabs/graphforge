@@ -25,6 +25,26 @@ SPEC.loader.exec_module(POLICY)
 POLICY_DOC = ROOT / "docs/development/benchmarking.md"
 CANONICAL_BENCH = ROOT / "crates/graphforge-core/benches/canonical.rs"
 
+CUSTOM_TIMER_FIXTURE = (
+    "fn sample() {\n"
+    "    let start = std::time::Instant::now();\n"
+    "    let _ = start.elapsed();\n"
+    "}\n"
+)
+LEGACY_TIMER_WITH_MEDIAN_FIXTURE = (
+    "fn median_expand() {}\n"
+    "fn sample() {\n"
+    "    let start = std::time::Instant::now();\n"
+    "    let _ = start.elapsed();\n"
+    "}\n"
+)
+DEADLINE_TIMER_FIXTURE = (
+    "pub fn wait() {\n"
+    "    let start = std::time::Instant::now();\n"
+    "    while start.elapsed().as_secs() < 1 {}\n"
+    "}\n"
+)
+
 MINIMAL_INVENTORY = {
     "version": 1,
     "policy_doc": "docs/development/benchmarking.md",
@@ -108,19 +128,13 @@ class BenchmarkMeasurementPolicyTests(unittest.TestCase):
 
     def test_unclassified_custom_timer_is_rejected(self) -> None:
         relative = "crates/graphforge-exec/tests/bench_new_workload.rs"
-        self._write(
-            relative,
-            "fn sample() {\n    let start = std::time::Instant::now();\n    let _ = start.elapsed();\n}\n",
-        )
+        self._write(relative, CUSTOM_TIMER_FIXTURE)
         self._git("add", relative)
         self.assert_rejected("unclassified benchmark measurement machinery")
 
     def test_reviewed_legacy_exception_passes(self) -> None:
         relative = "crates/graphforge-exec/tests/merge_scaling_bench.rs"
-        self._write(
-            relative,
-            "fn sample() {\n    let start = std::time::Instant::now();\n    let _ = start.elapsed();\n}\n",
-        )
+        self._write(relative, CUSTOM_TIMER_FIXTURE)
         self._git("add", relative)
         self.assert_passes()
 
@@ -144,19 +158,13 @@ class BenchmarkMeasurementPolicyTests(unittest.TestCase):
 
     def test_untracked_exception_signal_is_rejected(self) -> None:
         relative = "crates/graphforge-exec/tests/merge_scaling_bench.rs"
-        self._write(
-            relative,
-            "fn median_expand() {}\nfn sample() {\n    let start = std::time::Instant::now();\n    let _ = start.elapsed();\n}\n",
-        )
+        self._write(relative, LEGACY_TIMER_WITH_MEDIAN_FIXTURE)
         self._git("add", relative)
         self.assert_rejected("homegrown_statistics is not allowed")
 
     def test_deadline_style_instant_outside_scan_surface_passes(self) -> None:
         relative = "crates/graphforge-exec/src/deadline.rs"
-        self._write(
-            relative,
-            "pub fn wait() {\n    let start = std::time::Instant::now();\n    while start.elapsed().as_secs() < 1 {}\n}\n",
-        )
+        self._write(relative, DEADLINE_TIMER_FIXTURE)
         self._git("add", relative)
         self.assert_passes()
 
