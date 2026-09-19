@@ -277,6 +277,7 @@ pub use project_portable_v2_subset::{
 pub mod portable_bytes;
 
 pub mod workspace_participants;
+pub mod workspace_research_metadata;
 pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
     MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
@@ -289,6 +290,16 @@ pub use workspace_participants::{
     WorkspacePortableOntologyStaging, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
+};
+pub use workspace_research_metadata::{
+    MAX_RESEARCH_METADATA_EXTENSION_FIELDS, MAX_RESEARCH_METADATA_LIST_ENTRIES,
+    MAX_RESEARCH_METADATA_STRING_BYTES, MAX_WORKSPACE_RESEARCH_METADATA_BYTES,
+    ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
+    ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,
+    ResearchProjectIdentity, ResearchProjectSummary, ResearchTemporalCoverage,
+    WORKSPACE_RESEARCH_METADATA_FAMILY, WORKSPACE_RESEARCH_METADATA_VERSION,
+    WorkspaceResearchMetadata, discover_research_projects, read_workspace_research_metadata,
+    summarize_research_project,
 };
 
 pub mod embedding_identity;
