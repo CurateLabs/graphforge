@@ -69,6 +69,25 @@ impl ComputePool {
             None => op(),
         }
     }
+
+    /// Map admitted independent inputs on this private pool, retaining input order.
+    ///
+    /// The caller bounds input and result retention. A one-thread policy stays
+    /// inline and never enters Rayon's process-global pool.
+    pub fn map_ordered<T, R, F>(&self, inputs: &[T], operation: F) -> Vec<R>
+    where
+        T: Sync,
+        R: Send,
+        F: Fn(&T) -> R + Send + Sync,
+    {
+        match &self.pool {
+            Some(pool) => pool.install(|| {
+                use rayon::prelude::*;
+                inputs.par_iter().map(operation).collect()
+            }),
+            None => inputs.iter().map(operation).collect(),
+        }
+    }
 }
 
 /// Shared handle stored on the facade and passed into algorithm controls.
@@ -106,5 +125,30 @@ mod tests {
                 .sum::<usize>()
         });
         assert_eq!(sum, (0..32).map(|value| value * value).sum::<usize>());
+    }
+
+    #[test]
+    fn ordered_map_keeps_serial_policy_inline_and_parallel_results_ordered() {
+        let caller = std::thread::current().id();
+        assert_eq!(
+            ComputePool::new(1).unwrap().map_ordered(&[3, 1], |value| {
+                assert_eq!(std::thread::current().id(), caller);
+                value * 2
+            }),
+            [6, 2]
+        );
+        let barrier = std::sync::Barrier::new(2);
+        let result = ComputePool::new(2).unwrap().map_ordered(&[3, 1], |value| {
+            assert!(
+                std::thread::current()
+                    .name()
+                    .unwrap()
+                    .starts_with("graphforge-compute-")
+            );
+            // Neither input can finish until both private workers are active.
+            barrier.wait();
+            value * 2
+        });
+        assert_eq!(result, [6, 2]);
     }
 }
