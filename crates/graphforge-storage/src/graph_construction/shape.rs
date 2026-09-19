@@ -1098,9 +1098,11 @@ pub(super) fn route_fixed_run<const N: usize>(
     combine_cache_cleanup(routed, released, "construction partition source")
 }
 
-/// Accumulates one contiguous same-partition run of wire bytes so the
-/// caller writes it in a single call instead of once per record (#1439
-/// follow-up).
+/// Maximum wire bytes retained by one routing accumulator.
+const PARTITION_RUN_BYTES: usize = 1024 * 1024;
+
+/// Accumulates bounded same-partition slices of wire bytes, amortizing writes
+/// without retaining a whole partition run (#1445).
 ///
 /// The staged runs routed through [`route_fixed_run`] and
 /// [`route_identity_run`] are UUID-sorted and the partition function is
@@ -1109,6 +1111,7 @@ pub(super) fn route_fixed_run<const N: usize>(
 /// [`RowRangePartitioner::route_batch`] already exploits for Arrow rows;
 /// this is its fixed-width-record equivalent.
 struct PartitionRun {
+    bound: usize,
     partition: Option<usize>,
     bytes: Vec<u8>,
     records: u64,
@@ -1116,7 +1119,12 @@ struct PartitionRun {
 
 impl PartitionRun {
     fn new() -> Self {
+        Self::with_bound(PARTITION_RUN_BYTES)
+    }
+
+    fn with_bound(bound: usize) -> Self {
         Self {
+            bound,
             partition: None,
             bytes: Vec::new(),
             records: 0,
@@ -1130,8 +1138,17 @@ impl PartitionRun {
         target: &mut FixedRangePartitioner<N>,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<(), GfError> {
-        if self.partition.is_some_and(|current| current != partition) {
+        if self.partition.is_some_and(|current| current != partition)
+            || wire.len() > self.bound - self.bytes.len()
+        {
             self.flush(target, evidence)?;
+        }
+        // Keep an oversized record whole without growing the accumulator.
+        if wire.len() >= self.bound {
+            return target.route_slice(partition, wire, 1, evidence);
+        }
+        if self.bytes.capacity() == 0 {
+            self.bytes.reserve_exact(self.bound);
         }
         self.partition = Some(partition);
         self.bytes.extend_from_slice(wire);
