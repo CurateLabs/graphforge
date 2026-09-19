@@ -710,3 +710,82 @@ fn resolved_endpoints_never_cost_one_write_submission_each() {
         "shaping submitted {submissions} writes for {resolved_endpoints} resolved endpoints"
     );
 }
+
+/// A single partition larger than every candidate buffer must stream without
+/// growing the accumulator or changing its authenticated bytes/row counts.
+#[test]
+fn partition_run_bounds_fixed_records_without_changing_output() {
+    let records = (1_u128..=131_073)
+        .map(u128::to_be_bytes)
+        .collect::<Vec<_>>();
+    for bound in [64 * 1024, 256 * 1024, 1024 * 1024] {
+        assert_bounded_partition_run(&records, None, bound);
+    }
+}
+
+#[test]
+fn partition_run_keeps_compact_records_whole_across_flushes() {
+    let records = (1_u128..=512)
+        .map(|key| {
+            let mut record = [0; NODE_DETAIL_WIDTH];
+            record[..16].copy_from_slice(&key.to_be_bytes());
+            let length = if key % 2 == 0 { 255 } else { 1 };
+            record[16] = length;
+            record[17..17 + usize::from(length)].fill(b'x');
+            record
+        })
+        .collect::<Vec<_>>();
+    // The 64-byte case also exercises a record larger than the buffer.
+    for bound in [64, 1024, 64 * 1024] {
+        assert_bounded_partition_run(&records, Some(DetailCodec::Compact), bound);
+    }
+}
+
+fn assert_bounded_partition_run<const N: usize>(
+    records: &[[u8; N]],
+    codec: Option<DetailCodec>,
+    bound: usize,
+) {
+    let root = TempDir::new().unwrap();
+    crate::open_or_initialize_project(root.path()).unwrap();
+    let mut session = open(&root, 0x1445);
+    let mut target =
+        FixedRangePartitioner::<N>::new(&session.root, PartitionFamily::Identities, 2, codec, true)
+            .unwrap();
+    let evidence = &mut session.checkpoint.evidence;
+    let mut run = PartitionRun::with_bound(bound);
+    let mut expected = Vec::new();
+    // Two equally populated partitions exercise partition changes as well as
+    // byte-triggered flushes. Partition changes must retain partial buffers.
+    for (index, record) in records.iter().enumerate() {
+        let wire = codec
+            .map_or(Ok(record.as_slice()), |codec| codec.bytes(record))
+            .unwrap();
+        expected.extend_from_slice(wire);
+        run.push(
+            index / records.len().div_ceil(2),
+            wire,
+            &mut target,
+            evidence,
+        )
+        .unwrap();
+        assert!(run.bytes.len() <= bound);
+        assert!(run.bytes.capacity() <= bound);
+    }
+    run.flush(&mut target, evidence).unwrap();
+    run.flush(&mut target, evidence).unwrap(); // Empty flush cannot duplicate rows.
+    assert_eq!(target.balance().total(), records.len() as u64);
+    let output = target
+        .finish_optional("staged-identities.run", &mut || false, evidence)
+        .unwrap()
+        .unwrap();
+    let mut actual = Vec::new();
+    session
+        .root
+        .open_child_file(OsStr::new(&output))
+        .unwrap()
+        .read_to_end(&mut actual)
+        .unwrap();
+    assert_eq!(actual, expected, "bound={bound}");
+    assert_eq!(evidence.partition_rows, records.len() as u64);
+}
