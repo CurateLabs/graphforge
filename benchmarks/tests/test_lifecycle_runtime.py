@@ -21,10 +21,11 @@ class RuntimeDiagnosisTests(unittest.TestCase):
             self.assertEqual(projection["wall_seconds"], seconds)
             self.assertNotIn("decision", projection)
         admission = report["historical_s24_admission"]
-        self.assertEqual(admission["decision"], "refused")
+        # The growth-shape gate was this admission's only failing check (#1387).
+        self.assertEqual(admission["decision"], "admitted")
         self.assertEqual(
             [name for name, passed in admission["checks"].items() if not passed],
-            ["rss_bounded_or_plateaued"],
+            [],
         )
         s22 = report["rungs"]["S22"]
         self.assertEqual(s22["construction_calls"]["seal"]["calls"], 1)

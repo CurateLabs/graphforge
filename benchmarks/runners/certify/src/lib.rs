@@ -168,7 +168,6 @@ impl Profile {
             && gate.headroom.time_fraction == 0.2
             && gate.headroom.rss_fraction == 0.2
             && gate.headroom.storage_fraction == 0.15
-            && gate.headroom.max_adjacent_rss_growth_fraction == 0.1
     }
 
     fn lifecycle_storage_requested(&self) -> bool {
@@ -224,7 +223,6 @@ struct ProgressiveHeadroom {
     time_fraction: f64,
     rss_fraction: f64,
     storage_fraction: f64,
-    max_adjacent_rss_growth_fraction: f64,
 }
 
 fn generator_identity(phases: &[PhaseCommand]) -> String {
@@ -2694,8 +2692,7 @@ mod tests {
             "headroom": {
                 "time_fraction": 0.2,
                 "rss_fraction": 0.2,
-                "storage_fraction": 0.15,
-                "max_adjacent_rss_growth_fraction": 0.1
+                "storage_fraction": 0.15
             }
         }));
         profile

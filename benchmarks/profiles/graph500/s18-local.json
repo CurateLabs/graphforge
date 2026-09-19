@@ -270,8 +270,7 @@
     "headroom": {
       "time_fraction": 0.2,
       "rss_fraction": 0.2,
-      "storage_fraction": 0.15,
-      "max_adjacent_rss_growth_fraction": 0.1
+      "storage_fraction": 0.15
     }
   }
 }

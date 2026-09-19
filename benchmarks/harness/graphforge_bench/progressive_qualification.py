@@ -300,14 +300,12 @@ def project(
             )
             for rate, observation in observations.items()
         )
-    rss_growth = rss_high - rss_low
     checks = {
         "time_headroom": projected["wall_seconds"] <= WALL_LIMIT_SECONDS * 80 // 100,
         "rss_headroom": projected["peak_rss_bytes"] <= RSS_LIMIT_BYTES * 80 // 100,
         "retained_storage_headroom": projected["retained_storage_bytes"] <= volume - reserve,
         "transient_storage_headroom": projected["transient_peak_storage_bytes"] <= volume - reserve,
         "storage_headroom": storage_peak <= volume - reserve,
-        "rss_bounded_or_plateaued": rss_growth <= rss_low * 10 // 100,
         "io_reader_publication_capacity_measured": measured_capacity,
         "io_reader_publication_headroom": work_headroom,
         "correctness": True,

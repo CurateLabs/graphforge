@@ -401,7 +401,13 @@ mod tests {
     fn defaults_and_bounds_are_stable() {
         let defaults = GraphForgeOptions::default();
         assert_eq!(defaults.write_mode, ProjectWriteMode::SingleWriter);
-        assert_eq!(defaults.resource.tokio_worker_threads, Some(2));
+        // Unpinned in #1387: the default policy derives concurrency from the
+        // machine rather than requesting a fixed worker count.
+        assert_eq!(defaults.resource.tokio_worker_threads, None);
+        assert_eq!(
+            defaults.resource.mode,
+            crate::resource_policy::ResourcePolicyMode::Automatic
+        );
         assert!(defaults.clone().validate().is_ok());
         assert!(
             GraphForgeOptions {
