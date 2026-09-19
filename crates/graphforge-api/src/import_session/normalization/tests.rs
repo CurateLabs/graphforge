@@ -146,6 +146,34 @@ fn late_duplicate_preserves_successful_prefix_and_earliest_refusal() {
 }
 
 #[test]
+fn normalization_work_counts_successful_rows_in_the_closed_receipt_contract() {
+    let graph = graph(4);
+    let mut window = window(&graph, usize::MAX);
+    let duplicate = fixture_uuid(22);
+    let capture =
+        graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+    let mut consume = |_, _| Ok(());
+    window
+        .push(0, nodes(&[None, None], 0), &mut consume)
+        .unwrap();
+    window
+        .push(
+            1,
+            nodes(&[Some(duplicate), Some(duplicate)], 0),
+            &mut consume,
+        )
+        .unwrap();
+    assert!(window.flush(&mut consume).is_err());
+    let snapshot = serde_json::to_value(capture.finish()).unwrap();
+    // The failed batch contributes no successfully normalized rows. The
+    // certification contract exposes only its established work units.
+    assert_eq!(
+        snapshot["regions"]["import_command/normalization"]["work"],
+        serde_json::json!({"rows": 2}),
+    );
+}
+
+#[test]
 fn wide_bitmap_properties_and_oversized_singletons_obey_byte_admission() {
     let graph = graph(4);
     let ids = vec![None; 256];

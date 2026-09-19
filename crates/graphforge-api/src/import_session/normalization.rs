@@ -95,7 +95,7 @@ impl Window<'_> {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending);
-        let admitted = std::mem::take(&mut self.admitted_bytes);
+        self.admitted_bytes = 0;
         let region = RegionScope::named("normalization");
         let normalized = self
             .graph
@@ -116,8 +116,14 @@ impl Window<'_> {
                 };
                 (*index, result)
             });
-        RegionScope::record_work("admitted_bytes", admitted as u64);
-        RegionScope::record_work("batches", pending.len() as u64);
+        RegionScope::record_work(
+            "rows",
+            normalized
+                .iter()
+                .filter_map(|(_, result)| result.as_ref().ok())
+                .map(|batch| batch.num_rows() as u64)
+                .sum(),
+        );
         drop(region);
         drop(pending);
         // Keep individual Results ordered. Collecting Result<Vec<_>> instead
