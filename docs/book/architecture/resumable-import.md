@@ -5,7 +5,7 @@ to the current project generation. Arrow batches are copied to Arrow IPC and
 Parquet files are copied into session ownership; callers may then checkpoint,
 drop the handle, and resume by UUID.
 
-Bulk rows do not supply observation timestamps. New bulk catalog observations
+Resumable construction rows do not supply observation timestamps. Their catalog observations
 use the greatest `last_seen` in the authenticated parent runtime catalog across
 labels, relation types, and properties. An empty catalog uses Unix epoch zero
 (`1970-01-01T00:00:00Z`). These non-null UTC values are deterministic placeholders
@@ -13,8 +13,8 @@ for missing observation time, not claims about when an import ran. Nonempty
 pre-epoch catalogs retain their negative maximum; the value is never incremented.
 Existing entries retain `first_seen`; observed entries increment their counts and
 receive the derived `last_seen`, while unobserved entries remain unchanged. New
-entries receive the derived value for both timestamps. Ordinary timestamped
-runtime observations keep their existing behavior.
+entries receive the derived value for both timestamps. Direct runtime writes
+keep their existing clock-based observation behavior.
 
 The recorded session clock remains in the checkpoint and shape manifest as a
 recovery binding. It is not written into newly shaped catalog payloads. Encoded
