@@ -100,6 +100,20 @@ gf_rust_integration_test(
     deps = _STORAGE_DEPS,
 )
 
+# Two-sided ingest gate verdict (#1476): pure judgment logic shared verbatim
+# with the m6_storage_io bench through the benches/ingest_gate.rs module, so
+# both file sets are the target's srcs.
+gf_rust_integration_test(
+    name = "ingest_gate_verdict",
+    srcs = [
+        "benches/ingest_gate.rs",
+        "tests/ingest_gate_verdict.rs",
+    ],
+    crate = ":graphforge_storage",
+    size = "small",
+    deps = _STORAGE_DEPS,
+)
+
 gf_rust_integration_test(
     name = "io_stats",
     srcs = ["tests/io_stats.rs"],
@@ -130,6 +144,7 @@ test_suite(
         ":graph_delta_compaction",
         ":graph_delta_journal",
         ":graph_writer",
+        ":ingest_gate_verdict",
         ":io_stats",
         ":property_overlay_scale",
     ],

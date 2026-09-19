@@ -132,6 +132,25 @@ cargo bench -p graphforge-storage --bench m6_storage
 cargo bench -p graphforge-storage --bench m6_storage_io -- --sample-count 1
 ```
 
+## The ingest floor gate is a ratchet
+
+`GF_INGEST_FLOOR_GATE=1 cargo bench -p graphforge-storage --bench
+m6_storage_io` runs the bulk-ingest gate instead of the divan benchmarks. Its
+banked constants fail in **both** directions (#1476): a measurement past its
+constant the wrong way is a regression, and a measurement beating its constant
+by more than that metric's margin is an **unbanked gain** — the gate fails and
+prints the exact constant to write, so an improvement cannot land without the
+pull request that won it recording the new constant. Margins are per metric,
+from each metric's recorded reproducibility (bytes and the growth ratio
+reproduce to the byte: 10%; CPU moves ±15% under load: 25%); wall-clock
+throughput is excluded from the ratchet side until its baseline is banked from
+the isolated `codspeed-macro` runner. Each banked constant documents its host
+class, build profile and the change that set it, and every metric records its
+execution scope, denominator and units — do not transfer a number between
+scopes. The gate's judgment is unit-tested in `tests/ingest_gate_verdict.rs`:
+a deliberate regression and a deliberate improvement must each fail in the
+expected direction before a clean pass is trusted.
+
 ## M6 storage evidence
 
 `m6_storage` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`

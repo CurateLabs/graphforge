@@ -24,6 +24,15 @@ use graphforge_storage::{
 };
 use uuid::Uuid;
 
+mod ingest_gate;
+
+use ingest_gate::{
+    GateLimits, GateVerdict, INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE,
+    INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE, INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO,
+    IngestObservation, METRIC_DESCRIPTORS, MetricDescriptor, RatchetPolicy,
+    THROUGHPUT_RATCHET_EXCLUSION, evaluate_ingest_gate, limits_report,
+};
+
 fn main() {
     if std::env::var_os(INGEST_GATE_ENV).is_some() {
         ingest_floor_gate();
@@ -295,17 +304,26 @@ const INGEST_DENSITY_EDGES: u64 = 131_072;
 ///
 /// This is deliberately **not** the epic's 1,000,000 edges/sec target. A gate
 /// set at a value the code cannot meet is switched off within a week and then
-/// protects nothing. It **ratchets up as each #1387 workstream lands**: raise
-/// it in the same pull request that wins the gain, or the gain is unprotected.
+/// protects nothing, and an unmet floor is not wording to retire: the 1M
+/// acceptance gate lives in #1478 and stays separate from this interim
+/// regression floor (#1476).
 ///
-/// It is provisional and deliberately coarse. Wall-clock throughput is the only
-/// metric here that a busy host can depress without any code change, and the
-/// value below was calibrated on a shared development host carrying other
-/// builds: across repeated runs the same code measured between 23,285 and
-/// 65,155 edges/sec purely on how much of a core it got. Its CI home is the
-/// isolated CodSpeed Macro Runner, whose first nightly run supplies a baseline
-/// free of that; raise this to just under it then. Until that happens the
-/// contention-independent limits below, not this floor, are what hold the line.
+/// **Banked: 15,000 edges/sec.** Host class: shared development Linux x86_64
+/// host carrying unrelated builds. Build profile: `cargo bench --release`
+/// (divan, bench profile). Set by #1476, carrying forward the value the
+/// pre-#1476 gate used unchanged; `git blame` this line for the exact banking
+/// commit. Across repeated runs of this same workload that host measured
+/// between 23,285 and 65,155 edges/sec purely on how much of a core the run
+/// got, which is why this constant stays coarse.
+///
+/// **One-sided by policy (#1476).** Wall-clock throughput is the only metric
+/// here that a busy host can depress without any code change (±48% observed),
+/// so unlike the other three gates this one does **not** fail when the
+/// measurement improves; an unbanked gain is reported as a note instead. The
+/// exclusion lifts in the pull request that banks this floor's baseline from
+/// the isolated `codspeed-macro` runner the nightly already runs on — until
+/// then this limit is still ratcheted by hand exactly as before: raise it in
+/// the same pull request that wins the gain, or the gain is unprotected.
 const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 15_000.0;
 
 /// Ceiling on bytes read per published edge, enforced at every swept size.
@@ -315,28 +333,59 @@ const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 15_000.0;
 /// at the 67.1M-edge reference scale, 4,579 bytes read for authentication
 /// against 265 bytes retained, a factor of 17.3. This benchmark measures 2,139
 /// at 524,288 edges and 2,412 at 8,388,608, so the same overhead is already
-/// visible an order of magnitude smaller. Workstream 1 (#1384) targets an order
-/// of magnitude off it; lower this ceiling in that pull request.
-const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 3_000.0;
+/// visible an order of magnitude smaller.
+///
+/// **Banked: 2,500 bytes/edge**, lowered from 3,000 by #1476. Host class:
+/// shared development Linux x86_64 host. Build profile: `cargo bench
+/// --release` (divan, bench profile). Derived from this benchmark's own
+/// matched workload — repeated runs reproduced 2,138.937 bytes/edge at
+/// 524,288 edges and 2,412.016 at 8,388,608 **to the byte** — with 3.6%
+/// regression headroom over the observed worst. The 3,000 it replaces was a
+/// ladder-era figure carried over from a different measurement scope; #1476
+/// requires constants to be calibrated from the gate's own workload. `git
+/// blame` this line for the exact banking commit.
+///
+/// **Two-sided (#1476).** Measured above this ceiling is a regression.
+/// Measured more than [`INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE`] — 10%,
+/// for a metric that reproduces to the byte — below it is an **unbanked
+/// gain**: the gate fails and prints the constant to write. Workstream 1
+/// (#1384) targets an order of magnitude off it; that pull request lowers
+/// this ceiling, and the ratchet side now holds it to that.
+///
+/// Scope: application-observed **device** read bytes summed over every
+/// construction phase of one complete generation publication from an empty
+/// parent, divided by published edges. These are storage-layer attribution
+/// counters, not logical record sizes and not harness or whole-rung traffic;
+/// do not transfer them across rung / ingest / validate scopes (#1476).
+const INGEST_CEILING_BYTES_READ_PER_EDGE: f64 = 2_500.0;
 
 /// Ceiling on process CPU microseconds per published edge, enforced at every
 /// swept size.
 ///
 /// CPU consumed per edge barely moves with host contention, so unlike wall
 /// clock it means roughly the same thing on a loaded developer machine and on
-/// an isolated runner. The epic measured 11.93 µs/edge on `fa6447cc` and
-/// 15.14 µs before the two storage improvements that preceded it; this
-/// benchmark measured 9.84 to 13.82 across repeated runs. The ceiling sits just
-/// under that 15.14, so the 21% those two changes won cannot be given back
-/// silently. The #1387 acceptance criterion is under 9.0; ratchet this down as
-/// the redesign lands.
+/// an isolated runner.
+///
+/// **Banked: 14.0 µs/edge**, lowered from 15.0 by #1476. Host class: shared
+/// development Linux x86_64 host. Build profile: `cargo bench --release`
+/// (divan, bench profile). Derived from this benchmark's matched workload:
+/// repeated runs of the same commit measured 9.84–13.82 µs/edge, so the
+/// ceiling sits 1.3% over the observed worst — replacing the 15.14 anchor the
+/// 15.0 was set under, which came from the epic's ladder measurement rather
+/// than this benchmark (#1476). Because the metric still moves ±15% under
+/// load, the ratchet margin below it is deliberately the widest here (25%).
+/// `git blame` this line for the exact banking commit.
+///
+/// The #1387 acceptance criterion is under 9.0; ratchet this down as the
+/// redesign lands — the ratchet side now enforces that a winning pull request
+/// writes the new constant instead of leaving the gain unbanked.
 ///
 /// It is the one limit here that is not architecture-independent, and the
-/// nightly runs on ARM64. If the first isolated run reports above it, the
-/// correct response is to re-baseline this constant against that measurement in
-/// a follow-up, not to remove the gate — a first failure that hands us the
-/// runner's real baseline is the gate working.
-const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 15.0;
+/// nightly runs on ARM64. If the first isolated run reports outside the
+/// observed band, the correct response is to re-baseline this constant
+/// against that measurement in a follow-up, not to remove the gate — a first
+/// failure that hands us the runner's real baseline is the gate working.
+const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 14.0;
 
 /// Maximum tolerated growth in bytes read per edge from the smallest swept size
 /// to the largest.
@@ -358,63 +407,23 @@ const INGEST_CEILING_CPU_MICROS_PER_EDGE: f64 = 15.0;
 /// separate runs. Failing above 1.20 forbids a redesign from buying a better
 /// absolute number with a steeper curve.
 ///
+/// **Two-sided (#1476).** Measured above this limit is a regression. Measured
+/// more than [`INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO`] — 10%, same
+/// rationale as the absolute read-byte ceiling — below it is an **unbanked
+/// gain**: the gate fails and prints the constant to write, so a redesign
+/// that flattens the curve must bank the flatter limit in the same pull
+/// request.
+///
 /// This limit and the read-byte ceiling above are the two that hold the line
 /// today: both are deterministic and independent of host, load and
 /// architecture, which the throughput floor and the CPU ceiling are not.
+///
+/// Scope: the same application-observed device read bytes as
+/// [`INGEST_CEILING_BYTES_READ_PER_EDGE`], taken as the ratio of per-edge
+/// means between the largest and smallest swept size of this benchmark's
+/// sixteen-fold sweep; not transferable to other rungs, workloads or byte
+/// scopes (#1476).
 const INGEST_MAX_READ_DEGRADATION_RATIO: f64 = 1.20;
-
-/// One measured bulk-ingest publication.
-struct IngestObservation {
-    edges: u64,
-    vertices: u64,
-    wall: std::time::Duration,
-    /// Process CPU consumed inside the measured region, where the platform can
-    /// report it. `None` means the platform exposes no per-process CPU clock,
-    /// and the CPU columns are then reported as unavailable rather than faked.
-    cpu: Option<std::time::Duration>,
-    /// Application-observed read bytes across every construction phase.
-    read_bytes: u64,
-    /// Application-observed write bytes across every construction phase.
-    write_bytes: u64,
-    /// High-water mark of simultaneously retained construction artifacts. This
-    /// is the transient disk the runner has to have; it is reported so the
-    /// nightly budget is visible, and is not gated.
-    transient_peak_bytes: u64,
-}
-
-impl IngestObservation {
-    fn edges_per_second(&self) -> f64 {
-        #[allow(clippy::cast_precision_loss, reason = "reporting-only ratio")]
-        let edges = self.edges as f64;
-        edges / self.wall.as_secs_f64()
-    }
-
-    fn bytes_read_per_edge(&self) -> f64 {
-        #[allow(clippy::cast_precision_loss, reason = "reporting-only ratio")]
-        let (read, edges) = (self.read_bytes as f64, self.edges as f64);
-        read / edges
-    }
-
-    fn bytes_written_per_edge(&self) -> f64 {
-        #[allow(clippy::cast_precision_loss, reason = "reporting-only ratio")]
-        let (written, edges) = (self.write_bytes as f64, self.edges as f64);
-        written / edges
-    }
-
-    /// Microseconds of process CPU per published edge.
-    fn cpu_micros_per_edge(&self) -> Option<f64> {
-        #[allow(clippy::cast_precision_loss, reason = "reporting-only ratio")]
-        let edges = self.edges as f64;
-        self.cpu.map(|cpu| cpu.as_secs_f64() * 1e6 / edges)
-    }
-
-    /// Effective cores: process CPU divided by elapsed wall time. 1.0 means the
-    /// whole ingest ran on one core. #1387 targets at least 12 of 16.
-    fn effective_cores(&self) -> Option<f64> {
-        self.cpu
-            .map(|cpu| cpu.as_secs_f64() / self.wall.as_secs_f64())
-    }
-}
 
 /// Process CPU time (user + system) sampled at a point, where available.
 #[cfg(unix)]
@@ -614,24 +623,35 @@ const INGEST_GATE_ENV: &str = "GF_INGEST_FLOOR_GATE";
 /// Optional path for the machine-readable gate report.
 const INGEST_GATE_JSON_ENV: &str = "GF_INGEST_FLOOR_GATE_JSON";
 
-/// Measure the size sweep once and fail closed on any breach.
+/// Measure the size sweep once and fail closed on any breach in **either**
+/// direction.
 ///
 /// CodSpeed compares each nightly run against the previous one, which catches a
 /// step regression and nothing else: a benchmark that only compares against the
 /// previous run passes indefinitely through a slow drift that never regresses
-/// in a single step. This gate is the other half, and it fails when
+/// in a single step. This gate is the other half. Judgment lives in
+/// `ingest_gate::evaluate_ingest_gate`; it fails when
 ///
 /// - throughput at **any** swept size falls below
-///   [`INGEST_FLOOR_EDGES_PER_SECOND`],
+///   [`INGEST_FLOOR_EDGES_PER_SECOND`] (regression side),
 /// - bytes read per edge at any size exceeds
-///   [`INGEST_CEILING_BYTES_READ_PER_EDGE`],
+///   [`INGEST_CEILING_BYTES_READ_PER_EDGE`] (regression side),
 /// - CPU per edge at any size exceeds
-///   [`INGEST_CEILING_CPU_MICROS_PER_EDGE`], or
+///   [`INGEST_CEILING_CPU_MICROS_PER_EDGE`] (regression side),
 /// - bytes read per edge grows from the smallest swept size to the largest by
-///   more than [`INGEST_MAX_READ_DEGRADATION_RATIO`].
+///   more than [`INGEST_MAX_READ_DEGRADATION_RATIO`] (regression side), **or**
+/// - any of the three contention-independent limits is beaten by more than
+///   that metric's ratchet margin — an **unbanked gain** (#1476). The failure
+///   prints the exact constant to write, and the gate stays red until the
+///   pull request that won the gain records it. Wall-clock throughput is
+///   excluded from this side (see [`INGEST_FLOOR_EDGES_PER_SECOND`]).
+///
+/// A clean pass is only trusted because `tests/ingest_gate_verdict.rs` proves
+/// a deliberate regression and a deliberate improvement each fail the gate in
+/// the expected direction.
 ///
 /// Set `GF_INGEST_FLOOR_GATE` to run it and `GF_INGEST_FLOOR_GATE_JSON` to also
-/// write the measurements as JSON.
+/// write the measurements and the verdict as JSON.
 #[allow(
     clippy::too_many_lines,
     reason = "one linear gate: measure, report, judge"
@@ -646,6 +666,7 @@ fn ingest_floor_gate() {
         .collect();
 
     println!("ingest floor gate (#1387 workstream 6)");
+    print_metric_descriptors();
     println!(
         "{:>10}  {:>9}  {:>8}  {:>10}  {:>11}  {:>12}  {:>11}  {:>6}  {:>10}",
         "edges",
@@ -677,15 +698,17 @@ fn ingest_floor_gate() {
     let last = rows.last().expect("swept at least one size");
     let span = last.edges / first.edges;
     let throughput_ratio = first.edges_per_second() / last.edges_per_second();
-    let read_ratio = last.bytes_read_per_edge() / first.bytes_read_per_edge();
     let cpu_ratio = first
         .cpu_micros_per_edge()
         .zip(last.cpu_micros_per_edge())
         .map(|(small, large)| large / small);
+    let limits = gate_limits();
+    let verdict = evaluate_ingest_gate(&rows, &limits);
     println!(
-        "{span}x size span: bytes read per edge {read_ratio:.3}x \
+        "{span}x size span: bytes read per edge {:.3}x \
          (limit {INGEST_MAX_READ_DEGRADATION_RATIO:.2}x), throughput {throughput_ratio:.3}x, \
          cpu per edge {}x",
+        verdict.read_degradation_ratio,
         optional(cpu_ratio, 3),
     );
 
@@ -693,56 +716,65 @@ fn ingest_floor_gate() {
         write_gate_report(
             std::path::Path::new(&path),
             &rows,
-            read_ratio,
+            &limits,
+            &verdict,
             throughput_ratio,
             cpu_ratio,
         );
     }
 
-    let mut breaches = Vec::new();
-    for row in &rows {
-        if row.edges_per_second() < INGEST_FLOOR_EDGES_PER_SECOND {
-            breaches.push(format!(
-                "{} edges: {:.0} edges/sec is below the {INGEST_FLOOR_EDGES_PER_SECOND:.0} \
-                 edges/sec floor",
-                row.edges,
-                row.edges_per_second(),
-            ));
-        }
-        if row.bytes_read_per_edge() > INGEST_CEILING_BYTES_READ_PER_EDGE {
-            breaches.push(format!(
-                "{} edges: {:.0} bytes read per edge exceeds the \
-                 {INGEST_CEILING_BYTES_READ_PER_EDGE:.0} byte ceiling",
-                row.edges,
-                row.bytes_read_per_edge(),
-            ));
-        }
-        if let Some(cpu) = row.cpu_micros_per_edge()
-            && cpu > INGEST_CEILING_CPU_MICROS_PER_EDGE
-        {
-            breaches.push(format!(
-                "{} edges: {cpu:.2} us CPU per edge exceeds the \
-                 {INGEST_CEILING_CPU_MICROS_PER_EDGE:.2} us ceiling",
-                row.edges,
-            ));
-        }
+    for note in &verdict.notes {
+        println!("ingest floor gate: {note}");
     }
-    if read_ratio > INGEST_MAX_READ_DEGRADATION_RATIO {
-        breaches.push(format!(
-            "bytes read per edge grows {read_ratio:.3}x from {} to {} edges, \
-             over the {INGEST_MAX_READ_DEGRADATION_RATIO:.2}x limit",
-            first.edges, last.edges,
-        ));
+    if verdict.must_fail() {
+        for breach in &verdict.breaches {
+            eprintln!("ingest floor gate: {breach}");
+        }
+        for breach in &verdict.ratchet_breaches {
+            eprintln!("ingest floor gate: {breach}");
+        }
+        std::process::exit(1);
     }
+    println!("ingest floor gate: pass");
+}
 
-    if breaches.is_empty() {
-        println!("ingest floor gate: pass");
-        return;
+/// The banked constants of this bench, wired to their per-metric ratchet
+/// policies. The constants stay in this file (frozen there by
+/// `scripts/ci/check-m6-benchmarks.py`); the judgment is shared and tested.
+fn gate_limits() -> GateLimits {
+    GateLimits {
+        floor_edges_per_second: INGEST_FLOOR_EDGES_PER_SECOND,
+        ceiling_bytes_read_per_edge: INGEST_CEILING_BYTES_READ_PER_EDGE,
+        ceiling_cpu_micros_per_edge: INGEST_CEILING_CPU_MICROS_PER_EDGE,
+        max_read_degradation_ratio: INGEST_MAX_READ_DEGRADATION_RATIO,
+        ratchet_edges_per_second: RatchetPolicy::Excluded {
+            reason: THROUGHPUT_RATCHET_EXCLUSION,
+        },
+        ratchet_bytes_read_per_edge: RatchetPolicy::Margin(
+            INGEST_RATCHET_MARGIN_BYTES_READ_PER_EDGE,
+        ),
+        ratchet_cpu_micros_per_edge: RatchetPolicy::Margin(
+            INGEST_RATCHET_MARGIN_CPU_MICROS_PER_EDGE,
+        ),
+        ratchet_read_degradation_ratio: RatchetPolicy::Margin(
+            INGEST_RATCHET_MARGIN_READ_DEGRADATION_RATIO,
+        ),
     }
-    for breach in &breaches {
-        eprintln!("ingest floor gate: {breach}");
+}
+
+/// Print each gated metric's execution scope, denominator and units (#1476):
+/// a number measured in one scope must never be silently transferred into
+/// another.
+fn print_metric_descriptors() {
+    for MetricDescriptor {
+        metric,
+        execution_scope,
+        denominator,
+        units,
+    } in METRIC_DESCRIPTORS
+    {
+        println!("  {metric}: {execution_scope}; denominator: {denominator}; units: {units}");
     }
-    std::process::exit(1);
 }
 
 /// Render a metric the platform may not be able to report, without inventing a
@@ -757,62 +789,52 @@ fn mebibytes(bytes: u64) -> f64 {
     bytes / 1_048_576.0
 }
 
-/// Serialize the gate's measurements so a nightly run can keep them as an
-/// artifact and the ratchet can be argued from recorded numbers.
+/// Serialize the gate's measurements, limits and verdict so a nightly run can
+/// keep them as an artifact and the ratchet can be argued from recorded
+/// numbers. Schema /2 adds the ratchet policies, per-metric scopes and the
+/// breach lists (#1476); the /1 shape carried measurements only.
 fn write_gate_report(
     path: &std::path::Path,
     rows: &[IngestObservation],
-    read_ratio: f64,
+    limits: &GateLimits,
+    verdict: &GateVerdict,
     throughput_ratio: f64,
     cpu_ratio: Option<f64>,
 ) {
-    let measurements = rows
-        .iter()
-        .map(|row| {
-            format!(
-                concat!(
-                    "{{\"edges\":{},\"vertices\":{},\"wall_seconds\":{:.6},",
-                    "\"edges_per_second\":{:.3},\"bytes_read_per_edge\":{:.3},",
-                    "\"bytes_written_per_edge\":{:.3},\"cpu_micros_per_edge\":{},",
-                    "\"effective_cores\":{},\"transient_peak_bytes\":{}}}"
-                ),
-                row.edges,
-                row.vertices,
-                row.wall.as_secs_f64(),
-                row.edges_per_second(),
-                row.bytes_read_per_edge(),
-                row.bytes_written_per_edge(),
-                json_optional(row.cpu_micros_per_edge()),
-                json_optional(row.effective_cores()),
-                row.transient_peak_bytes,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let report = format!(
-        concat!(
-            "{{\"schema\":\"graphforge-ingest-floor-gate/1\",",
-            "\"floor_edges_per_second\":{:.1},",
-            "\"ceiling_bytes_read_per_edge\":{:.1},",
-            "\"ceiling_cpu_micros_per_edge\":{:.2},",
-            "\"max_read_degradation_ratio\":{:.3},",
-            "\"read_degradation_ratio\":{:.3},",
-            "\"throughput_ratio\":{:.3},",
-            "\"cpu_degradation_ratio\":{},",
-            "\"measurements\":[{}]}}\n"
-        ),
-        INGEST_FLOOR_EDGES_PER_SECOND,
-        INGEST_CEILING_BYTES_READ_PER_EDGE,
-        INGEST_CEILING_CPU_MICROS_PER_EDGE,
-        INGEST_MAX_READ_DEGRADATION_RATIO,
-        read_ratio,
-        throughput_ratio,
-        json_optional(cpu_ratio),
-        measurements,
-    );
-    std::fs::write(path, report).unwrap();
-}
-
-fn json_optional(value: Option<f64>) -> String {
-    value.map_or_else(|| "null".to_owned(), |value| format!("{value:.3}"))
+    let report = serde_json::json!({
+        "schema": "graphforge-ingest-floor-gate/2",
+        "limits": limits_report(limits),
+        "metric_scopes": METRIC_DESCRIPTORS
+            .iter()
+            .map(|descriptor| serde_json::json!({
+                "metric": descriptor.metric,
+                "execution_scope": descriptor.execution_scope,
+                "denominator": descriptor.denominator,
+                "units": descriptor.units,
+            }))
+            .collect::<Vec<_>>(),
+        "read_degradation_ratio": verdict.read_degradation_ratio,
+        "throughput_ratio": throughput_ratio,
+        "cpu_degradation_ratio": cpu_ratio,
+        "breaches": verdict.breaches,
+        "ratchet_breaches": verdict.ratchet_breaches,
+        "notes": verdict.notes,
+        "measurements": rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "edges": row.edges,
+                    "vertices": row.vertices,
+                    "wall_seconds": row.wall.as_secs_f64(),
+                    "edges_per_second": row.edges_per_second(),
+                    "bytes_read_per_edge": row.bytes_read_per_edge(),
+                    "bytes_written_per_edge": row.bytes_written_per_edge(),
+                    "cpu_micros_per_edge": row.cpu_micros_per_edge(),
+                    "effective_cores": row.effective_cores(),
+                    "transient_peak_bytes": row.transient_peak_bytes,
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    std::fs::write(path, format!("{report}\n")).unwrap();
 }
