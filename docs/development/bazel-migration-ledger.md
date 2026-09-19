@@ -137,6 +137,8 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | `//crates/graphforge-exec:graphforge_exec` | `mapped` | #9; unit tests `//crates/graphforge-exec:graphforge_exec_test` |
 | `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | `//crates/graphforge-exec:adjacency_expand` | `mapped` | #8 |
 | `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | `//crates/graphforge-exec:bench_traversal_scaling` | `mapped` | #8 |
+| `graphforge-exec` | `merge_scaling` | `bench` | `crates/graphforge-exec/benches/merge_scaling.rs` | — | `exception` | RT-codspeed-bench; #1485 Divan MERGE scaling benchmark |
+| `graphforge-exec` | `traversal_scaling` | `bench` | `crates/graphforge-exec/benches/traversal_scaling.rs` | — | `exception` | RT-codspeed-bench; #1485 Divan traversal scaling benchmark |
 | `graphforge-exec` | `create_execution` | `integration-test` | `crates/graphforge-exec/tests/create_execution.rs` | `//crates/graphforge-exec:create_execution` | `mapped` | #8 |
 | `graphforge-exec` | `create_input_driven` | `integration-test` | `crates/graphforge-exec/tests/create_input_driven.rs` | `//crates/graphforge-exec:create_input_driven` | `mapped` | #8 |
 | `graphforge-exec` | `differential_traversal` | `integration-test` | `crates/graphforge-exec/tests/differential_traversal.rs` | `//crates/graphforge-exec:differential_traversal` | `mapped` | #8 |

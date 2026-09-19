@@ -32,9 +32,18 @@ tempfile = "3"
 
 [dev-dependencies]
 graphforge-cypher = { path = "../graphforge-cypher" }
+divan = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 tokio = { workspace = true }
 parquet = { workspace = true }
+
+[[bench]]
+name = "traversal_scaling"
+harness = false
+
+[[bench]]
+name = "merge_scaling"
+harness = false
 
 [[test]]
 name = "differential_traversal"
