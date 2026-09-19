@@ -322,7 +322,8 @@
         "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
         "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
       }
-    }
+    },
+    "bounded_rendezvous": "Final test-only review correction preserves overlap assertion with a bounded wait; temporary serial-map mutation fails in 10 seconds; restored implementation passes."
   },
   "decision": "Adopt bounded original-batch normalization windows; no input/append overlap or floor qualification claimed",
   "raw_root": "/home/ubuntu/gf-1472-final-evidence",

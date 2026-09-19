@@ -137,7 +137,8 @@ mod tests {
             }),
             [6, 2]
         );
-        let barrier = std::sync::Barrier::new(2);
+        let arrivals = std::sync::Mutex::new(0);
+        let ready = std::sync::Condvar::new();
         let result = ComputePool::new(2).unwrap().map_ordered(&[3, 1], |value| {
             assert!(
                 std::thread::current()
@@ -145,8 +146,18 @@ mod tests {
                     .unwrap()
                     .starts_with("graphforge-compute-")
             );
-            // Neither input can finish until both private workers are active.
-            barrier.wait();
+            // Prove overlap, but fail instead of hanging if mapping becomes serial.
+            let mut arrived = arrivals.lock().unwrap();
+            *arrived += 1;
+            ready.notify_all();
+            let (arrived, _) = ready
+                .wait_timeout_while(arrived, std::time::Duration::from_secs(10), |count| {
+                    *count < 2
+                })
+                .unwrap();
+            let count = *arrived;
+            drop(arrived);
+            assert_eq!(count, 2, "both private workers must reach the rendezvous");
             value * 2
         });
         assert_eq!(result, [6, 2]);

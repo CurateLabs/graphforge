@@ -39,7 +39,7 @@ The candidate uses 23 normalization windows versus 68 baseline batches at S18. B
 With an isolated Cargo target and ext4 `TMPDIR`:
 
 - `cargo test --release -p graphforge-api --lib`: 753 passed, no failures, two existing ignored tests before the counter correction. After correction, `cargo test --release -p graphforge-api --lib import_session -- --nocapture`: 27 passed, including the new closed work-counter contract regression.
-- `cargo test --release -p graphforge-exec --lib ordered_map_keeps_serial_policy_inline_and_parallel_results_ordered`: passed.
+- `cargo test --release -p graphforge-exec --lib ordered_map_keeps_serial_policy_inline_and_parallel_results_ordered`: passed. After CodeRabbit review, the test uses a bounded rendezvous while retaining the overlap assertion. A temporary serial-map mutation fails that assertion in 10 seconds; the restored implementation passes. This final edit is test-only and does not alter the measured production binary.
 - `cargo clippy --release -p graphforge-api -p graphforge-exec --lib -- -D warnings`: passed.
 - `taskset -c 0 target/release/deps/graphforge_api-24430acb605070f2 import_session --nocapture` after rebuilding final fixtures: 26 passed on a single logical CPU.
 - `make pre-push-fast`, `make gate-registry-check`, final formatting and source-size policy: passed.
