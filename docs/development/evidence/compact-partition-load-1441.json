@@ -1,0 +1,315 @@
+{
+  "base_sha": "19b5c7cf1f8a2505af169fe702f50a8cf1714743",
+  "records_per_observation": 1048576,
+  "name_bytes": 4,
+  "sha256": {
+    "bin/gf-compact": "5e3921c9647087468f57df862ce719c8e8d012f40c13100ae88feafe68cb6f8a",
+    "bin/gf-padded": "fe9cee547bb62a9b15e45912ef726927ac22a1cead5e52341fb26b639f01daaf",
+    "runexec-rss.py": "eb8262c805ea1109010be7144f4661fe3a02ec7bb946a3f679a6ea0f8a85f1ce",
+    "run-measured.sh": "abf7f780510710013ccf2ac99929dd9fe8eaf030fccca7ea4a34fc93818690ab",
+    "quiet.py": "332032d30227a3e9777cf48481d05dcf7a38ccbcc5a18d3b10f1060a9656899d",
+    "measurement-plan.txt": "18d0d0e220a47e00f179ac61897d2e9d908350a84e01920bebe8da30159be64e",
+    "crates/graphforge-storage/src/graph_construction/partition_records.rs": "c2ae0221e5e1bad3da212fc2b1e16f9e3b441e7860882cf96fadbc434e082d08",
+    "crates/graphforge-storage/src/graph_construction/partition_records/tests.rs": "14f5681f47e34e4e5ca99a68475eef4f99f46101545380cd1ae0a726543e281d",
+    "crates/graphforge-storage/src/graph_construction/partition_shaping/tests.rs": "5fd39134568c729eac61695de8cdaf75c6ae4f9e174a385c01c7ffda7894beb3"
+  },
+  "families": {
+    "node": {
+      "padded": {
+        "samples": [
+          {
+            "label": "padded-node-round1-attempt2",
+            "rss_bytes": 310939648,
+            "cgroup_memory_bytes": 314687488,
+            "wall_s": 0.47711951681412756,
+            "cpu_s": 0.456547
+          },
+          {
+            "label": "padded-node-round2-attempt1",
+            "rss_bytes": 311083008,
+            "cgroup_memory_bytes": 314613760,
+            "wall_s": 0.47534210211597383,
+            "cpu_s": 0.454247
+          },
+          {
+            "label": "padded-node-round3-attempt1",
+            "rss_bytes": 310968320,
+            "cgroup_memory_bytes": 314617856,
+            "wall_s": 0.48570684203878045,
+            "cpu_s": 0.463694
+          }
+        ],
+        "rss_bytes": 310968320,
+        "cgroup_memory_bytes": 314617856,
+        "wall_s": 0.47711951681412756,
+        "cpu_s": 0.456547
+      },
+      "compact": {
+        "samples": [
+          {
+            "label": "compact-node-round1-attempt1",
+            "rss_bytes": 57155584,
+            "cgroup_memory_bytes": 59285504,
+            "wall_s": 0.2863630410283804,
+            "cpu_s": 0.26508
+          },
+          {
+            "label": "compact-node-round2-attempt1",
+            "rss_bytes": 57487360,
+            "cgroup_memory_bytes": 59342848,
+            "wall_s": 0.28494996414519846,
+            "cpu_s": 0.264498
+          },
+          {
+            "label": "compact-node-round3-attempt1",
+            "rss_bytes": 57614336,
+            "cgroup_memory_bytes": 59043840,
+            "wall_s": 0.28750211419537663,
+            "cpu_s": 0.267472
+          }
+        ],
+        "rss_bytes": 57487360,
+        "cgroup_memory_bytes": 59285504,
+        "wall_s": 0.2863630410283804,
+        "cpu_s": 0.26508
+      },
+      "output_sha256": "9b64d8ade71eb2e752f916c88efabe49e47e825865b70d1262efa24649aaefea",
+      "rss_factor": 5.409333808336302
+    },
+    "edge": {
+      "padded": {
+        "samples": [
+          {
+            "label": "padded-edge-round1-attempt1",
+            "rss_bytes": 344002560,
+            "cgroup_memory_bytes": 381755392,
+            "wall_s": 0.5963260389398783,
+            "cpu_s": 0.519678
+          },
+          {
+            "label": "padded-edge-round2-attempt1",
+            "rss_bytes": 344363008,
+            "cgroup_memory_bytes": 381489152,
+            "wall_s": 0.6069749149028212,
+            "cpu_s": 0.528355
+          },
+          {
+            "label": "padded-edge-round3-attempt1",
+            "rss_bytes": 344559616,
+            "cgroup_memory_bytes": 382324736,
+            "wall_s": 0.601855335989967,
+            "cpu_s": 0.523504
+          }
+        ],
+        "rss_bytes": 344363008,
+        "cgroup_memory_bytes": 381755392,
+        "wall_s": 0.601855335989967,
+        "cpu_s": 0.523504
+      },
+      "compact": {
+        "samples": [
+          {
+            "label": "compact-edge-round1-attempt1",
+            "rss_bytes": 90648576,
+            "cgroup_memory_bytes": 126681088,
+            "wall_s": 0.4229005288798362,
+            "cpu_s": 0.344498
+          },
+          {
+            "label": "compact-edge-round2-attempt1",
+            "rss_bytes": 90865664,
+            "cgroup_memory_bytes": 126476288,
+            "wall_s": 0.41993845300748944,
+            "cpu_s": 0.341389
+          },
+          {
+            "label": "compact-edge-round3-attempt1",
+            "rss_bytes": 90480640,
+            "cgroup_memory_bytes": 126775296,
+            "wall_s": 0.42038447107188404,
+            "cpu_s": 0.344159
+          }
+        ],
+        "rss_bytes": 90648576,
+        "cgroup_memory_bytes": 126681088,
+        "wall_s": 0.42038447107188404,
+        "cpu_s": 0.344159
+      },
+      "output_sha256": "9f026c8ee5b2359d7c1dd31649e3b13bc2d5f23fbb78d07ce1f5dff443d2574b",
+      "rss_factor": 3.7988793999367405
+    }
+  },
+  "shaped_encoded_comparison": {
+    "identical": true,
+    "fingerprint": {
+      "encoded": [
+        [
+          "indexes/adjacency/index_manifest.parquet",
+          2032,
+          "cf1ed85415ef99df4bd2de28e95b7901f36f607ed127dc8891a2755c0613bf19"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.in.csr.json",
+          515,
+          "ca6829f9ccfcb7e5976623d3c369ddc557feb6331e19ba91695032582cc83e4b"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.in.csr.shards-73e37b1e5531180ce28cf1e8.d/00000000000000000000.csr",
+          6666,
+          "11f65aa4bd6dd7e18c7e06b5e80a77ce5f184ff429fc862e1a51da047df92f8d"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.out.csr.json",
+          516,
+          "5149de793c5a22acdcc15a246e675e738b8735e7e7ef39ef100526ccc4a8986d"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.out.csr.shards-1f33ba8f6313643fb0abd12d.d/00000000000000000000.csr",
+          6730,
+          "c04150a59b235aa8b67f003c6fd23d8760fa014e88dc98e9edc0bd9859445cf7"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.in.csr.json",
+          515,
+          "c617508a86bbd2866e58f088873e06bf01e6e8497844f1a34883964ad9482246"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.in.csr.shards-73e37b1e5531180ce28cf1e8.d/00000000000000000000.csr",
+          6666,
+          "11f65aa4bd6dd7e18c7e06b5e80a77ce5f184ff429fc862e1a51da047df92f8d"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.out.csr.json",
+          516,
+          "eeb9a4f61387b4374c09f784826d17e5e8cbde9285c447c2d67fc311e4b44f53"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.out.csr.shards-1f33ba8f6313643fb0abd12d.d/00000000000000000000.csr",
+          6730,
+          "c04150a59b235aa8b67f003c6fd23d8760fa014e88dc98e9edc0bd9859445cf7"
+        ],
+        [
+          "semantic-routes.json",
+          177,
+          "e89f6e446520ec6669f4c8b27486370fabd8c152a409d1363efcd9b32d2b15e6"
+        ],
+        [
+          "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000512.parquet",
+          20483,
+          "bff3736a9744f0dc35562dcfa53fab3c55e60253a6b6ee54efdaa17575c7fa38"
+        ],
+        [
+          "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000513-00000000000000001024.parquet",
+          19797,
+          "d5c27e645d5e55cbb407a7f7eecd03182ae7a2f736e08c51ab66c6e1fa0f00ab"
+        ],
+        [
+          "topology/generation.json",
+          72,
+          "83628bb4c0ac01773986d43b0bda4eaba2769c8330ca13757e5cde14a2289fae"
+        ],
+        [
+          "topology/nodes/00000000000000000001-00000000000000000512.parquet",
+          8124,
+          "221e3535aad6ea442c721d7f1e52c8807e78d275f3a000ad2f6eafb017af04b7"
+        ],
+        [
+          "topology/nodes/00000000000000000513-00000000000000001024.parquet",
+          7894,
+          "1aa8924826f078956b7926980d6a7bd397262f207c1e293a13cccbeafe2b1bbb"
+        ],
+        [
+          "topology/runtime_catalog.parquet",
+          2369,
+          "9ad2a8fa8a4be2130bb0a99a2ea02bd9ebc1f8cd7e629395ed3bda31f63c255a"
+        ],
+        [
+          "topology/runtime_entity_label_encoding.json",
+          74,
+          "a688960f0b7533d9b63091e0f3508bb309a31e01e5d849c2db2cd276e52c98bd"
+        ],
+        [
+          "topology/surrogate_tails.parquet",
+          817,
+          "d666b40f7a00959b10f6939986d327f2d771ec6571ab8ea06ce5e1997132ed97"
+        ],
+        [
+          "topology/uuid-membership/forward-v4-1-74daa3430c775f3b.uuidx",
+          24576,
+          "74daa3430c775f3b5d77b4f4198f46a1f1976fffab1e4282561f4f0bcfbdd8b1"
+        ],
+        [
+          "topology/uuid-membership/identities-v5-1-ac162f135776f229.uuidx",
+          43008,
+          "ac162f135776f229b0b88d902e9f1bcaa6cd61dda7944b844660e38dfa5b0be9"
+        ],
+        [
+          "topology/uuid-membership/identities-v5-base-0-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/manifest.json",
+          1441,
+          "ef04077a16240e16e1a6126ce4078162743e64e1acfa0750c219d0bdb8e8d485"
+        ],
+        [
+          "topology/uuid-membership/node-surrogates-v5-1-3d61e2f0ef9cc86d.uuidx",
+          24576,
+          "3d61e2f0ef9cc86de301b6a956de0ee60c2618ff2c77369d8e51300059af3268"
+        ],
+        [
+          "topology/uuid-membership/node-surrogates-v5-base-0-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4-1-e3c36f9b0ac3cf96.uuidx",
+          16384,
+          "e3c36f9b0ac3cf96ce6f7b7f0893a7fe37b6d8963a92c0fa79ae6282ee570742"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4-manifest.json",
+          829,
+          "21048c1d8fe25ead8230139e0f0ece5f20f654b8c49898c5225bff7ee279d00d"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4.lock",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/tombstones-v4-1-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      ],
+      "partitions": 64,
+      "shaped": [
+        [
+          "shaped-edge-details.run",
+          "f663cd8489a1610f623e1d9c52d4e34ccf00497b35cafc7e43e5147e80062dcc"
+        ],
+        [
+          "shaped-edge-endpoints.run",
+          "14a3c60b71fdeed5257dcb2a930ec72bbb5869cc4fc477759d636d304e74a6bc"
+        ],
+        [
+          "shaped-identities.run",
+          "6ea5b8462fc1b5d19b1a084b17b84d59fb76c3a988dd385d4a675d6cad1cb660"
+        ],
+        [
+          "shaped-node-details.run",
+          "d7eac2fdc3d4e0e35907ac487e49a344d66c147bbb65dee571a7861d02418899"
+        ],
+        [
+          "shaped-runtime-catalog.parquet",
+          "9ad2a8fa8a4be2130bb0a99a2ea02bd9ebc1f8cd7e629395ed3bda31f63c255a"
+        ]
+      ]
+    }
+  },
+  "excluded_attempts": [
+    "padded-node-round1-attempt1"
+  ]
+}

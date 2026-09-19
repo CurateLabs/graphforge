@@ -69,6 +69,7 @@ use catalog::{
     load_parent_runtime_catalog_from_compact,
 };
 mod partition_load;
+mod partition_records;
 pub(crate) mod partition_shaping;
 mod supersession;
 
