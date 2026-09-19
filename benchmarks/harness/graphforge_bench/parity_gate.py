@@ -203,7 +203,10 @@ def parity_gate_status(root: Path | None = None) -> dict[str, Any]:
         _criterion(
             "no_duplicate_s18_s26_ladder_for_parity",
             met=True,
-            evidence="compare_ladder_bundle ingests completed ladder output read-only; #959 does not rerun",
+            evidence=(
+                "compare_ladder_bundle ingests completed ladder output read-only; "
+                "#959 does not rerun"
+            ),
         ),
         _criterion(
             "full_ladder_evidence_complete",
