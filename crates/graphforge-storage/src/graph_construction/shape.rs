@@ -193,7 +193,6 @@ impl GraphConstructionSession {
         &mut self,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ConstructionShape, GfError> {
-        #[cfg(any(test, feature = "test-support"))]
         let _diagnostic_scope = crate::graph_construction::diagnostics::Scope::start("shaping");
         self.revalidate_authority()?;
         if self.checkpoint.state != GraphConstructionState::Sealed
@@ -707,6 +706,8 @@ impl GraphConstructionSession {
         replace_checkpoint_control(&self.root, &self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
+        crate::concurrency_attribution::RegionScope::record_work("nodes", shape.node_count);
+        crate::concurrency_attribution::RegionScope::record_work("edges", shape.edge_count);
         Ok(shape)
     }
 }

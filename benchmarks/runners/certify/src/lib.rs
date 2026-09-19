@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod region_diagnostics;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -571,6 +573,7 @@ impl PhaseExecutor for PublicProcessExecutor {
         let produce_lifecycle_storage = profile.lifecycle_storage_requested();
         if let PhaseAction::GraphForgeCliWorkflow { commands } = &command.action {
             let started = Instant::now();
+            let workflow = region_diagnostics::WorkflowSample::start(started);
             let mut peak_rss_bytes = None;
             let mut receipts = Vec::new();
             for args in commands {
@@ -581,6 +584,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 } {
                     Ok(execution) => execution,
                     Err(_) => {
+                        receipts.push(workflow.finish());
                         return Ok(Execution {
                             exit_code: None,
                             duration_ms: millis(started.elapsed()),
@@ -594,6 +598,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 peak_rss_bytes = max_optional(peak_rss_bytes, execution.peak_rss_bytes);
                 receipts.extend(execution.receipts);
                 if execution.exit_code != Some(0) || execution.failure.is_some() {
+                    receipts.push(workflow.finish());
                     return Ok(Execution {
                         exit_code: execution.exit_code,
                         duration_ms: millis(started.elapsed()),
@@ -604,6 +609,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                     });
                 }
             }
+            receipts.push(workflow.finish());
             let mut result = Execution {
                 exit_code: Some(0),
                 duration_ms: millis(started.elapsed()),
@@ -1016,6 +1022,12 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
             }) {
                 return None;
             }
+            if object
+                .get("region_diagnostics")
+                .is_some_and(|value| !region_diagnostics::valid_snapshot(value))
+            {
+                return None;
+            }
             let mut receipt = serde_json::Map::new();
             for key in [
                 "contract",
@@ -1025,6 +1037,7 @@ fn sanitize_receipt(value: &serde_json::Value) -> Option<serde_json::Value> {
                 "bytes_accepted",
                 "construction",
                 "operation_timings",
+                "region_diagnostics",
             ] {
                 if let Some(item) = object.get(key) {
                     receipt.insert(key.to_owned(), item.clone());
@@ -1248,8 +1261,7 @@ fn sanitized_lifecycle_application_io(value: &serde_json::Value) -> bool {
         }
     }
     LIFECYCLE_IO_COUNTERS.iter().all(|counter| {
-        totals.get(*counter).and_then(serde_json::Value::as_u64)
-            == reconciled.get(counter).copied()
+        totals.get(*counter).and_then(serde_json::Value::as_u64) == reconciled.get(counter).copied()
     })
 }
 
@@ -1289,8 +1301,8 @@ fn sanitized_import_operation_timings(value: &serde_json::Value) -> bool {
                     return false;
                 };
                 // Three fields before #1462, five after: `cpu_ns` and
-                // `cpu_unmeasured_calls` carry process CPU so the serialized
-                // fraction #1387 budgets can be read off a run. Both shapes are
+                // `cpu_unmeasured_calls` carry process CPU for CPU/wall, not a
+                // serialized fraction or throughput speedup. Both shapes are
                 // accepted, because rejecting the old one would invalidate every
                 // bundle recorded before the change, and rejecting the new one
                 // fails every rung after it.
@@ -3192,8 +3204,19 @@ fi
                 execution.failure,
                 reject_second.then_some(FailureKind::EvidenceInvalid)
             );
-            assert_eq!(execution.receipts.len(), if reject_second { 1 } else { 5 });
-            assert!(execution.receipts.iter().all(|receipt| {
+            let workflow = execution
+                .receipts
+                .iter()
+                .find(|receipt| receipt["contract"] == "graphforge-workflow-timing/1")
+                .unwrap();
+            assert!(workflow["wall_ns"].as_u64().unwrap() > 0);
+            let imports: Vec<_> = execution
+                .receipts
+                .iter()
+                .filter(|receipt| receipt["contract"] == "graphforge-import-session/1")
+                .collect();
+            assert_eq!(imports.len(), if reject_second { 1 } else { 5 });
+            assert!(imports.iter().all(|receipt| {
                 receipt["contract"] == "graphforge-import-session/1"
                     && receipt["outcome"] == "begun"
             }));

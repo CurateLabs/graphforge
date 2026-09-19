@@ -27,10 +27,12 @@ pub(crate) fn try_lock_shared(file: &File) -> io::Result<bool> {
 }
 
 pub(crate) fn lock_exclusive(file: &File) -> io::Result<()> {
+    let _wait = crate::concurrency_attribution::RegionScope::named("lock_wait");
     FileExt::lock(file)
 }
 
 pub(crate) fn lock_shared(file: &File) -> io::Result<()> {
+    let _wait = crate::concurrency_attribution::RegionScope::named("lock_wait");
     FileExt::lock_shared(file)
 }
 

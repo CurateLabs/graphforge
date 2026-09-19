@@ -9,6 +9,7 @@ from typing import Any
 
 from graphforge_bench.native_rung import read_native_rung
 from graphforge_bench.progressive_qualification import METRICS, Profile, _project, project
+from graphforge_bench.region_diagnostics import summarize_regions
 
 
 def summarize(documents: dict[str, Any]) -> dict[str, Any]:
@@ -27,18 +28,14 @@ def summarize(documents: dict[str, Any]) -> dict[str, Any]:
     if not calls:
         raise ValueError("runtime diagnosis requires operation timing receipts")
     call_ns = sum(timing["elapsed_ns"] for timing in calls.values())
-    # Process CPU over elapsed wall, per construction operation: how many cores'
-    # worth each used (#1462). This is the figure #1387's serialized-fraction
-    # budget is read from -- `seal` is 68-80% of ingest, so its value is the one
-    # that matters. Omitted per operation when CPU was unavailable, rather than
-    # reported as zero, and absent entirely for evidence recorded before the
-    # receipt carried CPU, so historical bundles stay comparable.
+    # Process CPU/wall is cores, not a serialized fraction or throughput speedup.
     effective_cores = {
         operation: timing["cpu_ns"] / timing["elapsed_ns"]
         for operation, timing in calls.items()
         if timing.get("elapsed_ns") and not timing.get("cpu_unmeasured_calls", 1)
     }
     return {
+        **summarize_regions(ingest.get("receipts", [])),
         "identities": documents["result"]["identities"],
         "whole_lifecycle_benchexec": documents["benchexec"]["authority"],
         "phase_wall_ms": {phase["phase"]: phase["duration_ms"] for phase in phases},

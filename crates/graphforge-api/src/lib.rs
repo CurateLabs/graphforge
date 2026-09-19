@@ -53,6 +53,8 @@ pub use graphforge_ontology::{
 };
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::ResolvedProjectGeneration;
+/// Non-durable lifecycle region diagnostics for stock callers.
+pub use graphforge_storage::concurrency_attribution;
 pub use graphforge_storage::{
     CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ConstructionChunkReceipt,
     GraphConstructionBudgets, GraphConstructionEvidence, GraphConstructionState,

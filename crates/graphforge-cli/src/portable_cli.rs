@@ -642,6 +642,25 @@ pub(crate) fn run_import_session(
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
+    if !json {
+        return run_import_session_inner(graph, command, json, output);
+    }
+    let capture = graphforge_api::concurrency_attribution::RegionCapture::start("import_command");
+    let mut buffer = Vec::new();
+    run_import_session_inner(graph, command, json, &mut buffer)?;
+    let mut receipt: serde_json::Value = serde_json::from_slice(&buffer)
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    receipt["region_diagnostics"] = serde_json::to_value(capture.finish())
+        .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
+    write_json(&receipt, output)
+}
+
+fn run_import_session_inner(
+    graph: &GraphForge,
+    command: ImportSessionCommand,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
     match command {
         ImportSessionCommand::Begin(args) => {
             let session = graph.begin_import_session(

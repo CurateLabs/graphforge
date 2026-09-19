@@ -1,8 +1,10 @@
 //! Opt-in, non-durable measurements for the ingestion attribution study.
-//! Compiled only with test support; no paths, UUIDs, schema contents or payloads.
+//! Stock-build scopes; optional event output contains no paths, UUIDs or payloads.
 
+#[cfg(any(test, feature = "test-support"))]
 use super::GraphConstructionEvidence;
 use serde_json::json;
+#[cfg(any(test, feature = "test-support"))]
 use std::cell::Cell;
 use std::io::Write;
 use std::sync::OnceLock;
@@ -15,20 +17,35 @@ fn clock_ns() -> u128 {
 
 pub(crate) struct Scope {
     name: &'static str,
+    _region: crate::concurrency_attribution::RegionScope,
     started_ns: u128,
 }
 
 impl Scope {
-    pub(crate) fn start(name: &'static str) -> Option<Self> {
-        enabled().then(|| Self {
+    pub(crate) fn start(name: &'static str) -> Self {
+        use crate::storage_attribution::StorageIoPhase;
+        let phase = match name {
+            "shaping" => StorageIoPhase::ShapeConsumeReauthentication,
+            "canonical_encoding"
+            | "inventory_authentication"
+            | "inventory_payload_authentication" => {
+                StorageIoPhase::EncodeWritePostwriteAuthentication
+            }
+            _ => StorageIoPhase::SealAuthentication,
+        };
+        Self {
             name,
+            _region: crate::concurrency_attribution::RegionScope::enter_named(phase, name),
             started_ns: clock_ns(),
-        })
+        }
     }
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
+        if !enabled() {
+            return;
+        }
         emit(
             &json!({"event":"scope", "scope":self.name, "start_ns":self.started_ns,
             "end_ns":clock_ns()}),
@@ -36,6 +53,7 @@ impl Drop for Scope {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static ROW_GROUP: Cell<u64> = const { Cell::new(0) };
 }
@@ -44,6 +62,7 @@ fn enabled() -> bool {
     std::env::var_os("GRAPHFORGE_INGEST_DIAGNOSTICS").is_some_and(|v| v == "1282")
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn row_family(authority: &str) -> String {
     let kind = if authority.starts_with("0-") {
         "node-rows"
@@ -63,12 +82,14 @@ fn emit(value: &serde_json::Value) {
     let _ = writeln!(std::io::stderr().lock(), "INGEST_DIAGNOSTIC {value}");
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn inputs(family: &str, count: u64) {
     if enabled() {
         emit(&json!({"event":"inputs", "family":family, "runs":count}));
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn counters(e: &GraphConstructionEvidence) -> [u64; 7] {
     [
         e.merge_read_records,
@@ -81,12 +102,14 @@ fn counters(e: &GraphConstructionEvidence) -> [u64; 7] {
     ]
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) struct Group {
     started: Instant,
     start_ns: u128,
     before: [u64; 7],
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Group {
     pub(super) fn start(e: &GraphConstructionEvidence) -> Option<Self> {
         enabled().then(|| Self {
