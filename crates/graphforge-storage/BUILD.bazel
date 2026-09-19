@@ -1,6 +1,6 @@
 """Bazel targets for graphforge-storage (#10/#9 + #8 integration)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_binary", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -27,6 +27,13 @@ gf_rust_library(
         "test-support",
     ],
     deps = _STORAGE_DEPS,
+)
+
+# Run manually on a quiet Linux host with schedstats enabled and CPU affinity.
+gf_rust_binary(
+    name = "region_controls",
+    srcs = ["examples/region_controls.rs"],
+    deps = [":graphforge_storage"],
 )
 
 gf_rust_test(

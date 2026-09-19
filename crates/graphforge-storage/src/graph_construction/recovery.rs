@@ -800,7 +800,6 @@ pub(super) fn authenticate_artifact(
     receipt: &ArtifactReceipt,
     codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
-    #[cfg(any(test, feature = "test-support"))]
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("artifact_authentication");
     validate_artifact_name(receipt)?;

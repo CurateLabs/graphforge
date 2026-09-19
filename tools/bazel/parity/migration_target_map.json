@@ -1263,6 +1263,16 @@
       "notes": "#940; bounded property-overlay scale qualification"
     },
     {
+      "package": "graphforge-storage",
+      "target": "region_controls",
+      "class": "example",
+      "source": "crates/graphforge-storage/examples/region_controls.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:region_controls",
+      "exception_id": null,
+      "notes": "#1477 manual quiet-host scheduler calibration"
+    },
+    {
       "package": "graphforge-value",
       "target": "graphforge_value",
       "class": "lib",

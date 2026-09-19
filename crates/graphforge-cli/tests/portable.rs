@@ -549,8 +549,9 @@ fn import_operation_timings_survive_separate_cli_processes() {
             &operation,
         ],
     ));
+    assert!(begun["region_diagnostics"]["regions"]["import_command/begin_import"].is_object());
     let session = begun["session_uuid"].as_str().unwrap();
-    json(&gf(
+    let registered = json(&gf(
         &project,
         &[
             "--json",
@@ -564,6 +565,13 @@ fn import_operation_timings_survive_separate_cli_processes() {
             input.to_str().unwrap(),
         ],
     ));
+    assert!(
+        registered["region_diagnostics"]["regions"]["import_command/resume_import"].is_object()
+    );
+    assert_eq!(
+        registered["region_diagnostics"]["regions"]["import_command/register_parquet"]["work"]["bytes"],
+        fs::metadata(&input).unwrap().len()
+    );
     let validated = json(&gf(
         &project,
         &[
@@ -574,6 +582,19 @@ fn import_operation_timings_survive_separate_cli_processes() {
             session,
         ],
     ));
+    let regions = &validated["region_diagnostics"]["regions"];
+    assert_eq!(validated["region_diagnostics"]["complete"], true);
+    assert!(regions["import_command/validate/seal/shaping"].is_object());
+    let root = regions["import_command"]["inclusive"]["wall_ns"]
+        .as_u64()
+        .unwrap();
+    let residuals: u64 = regions
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|row| row["residual"]["wall_ns"].as_u64().unwrap())
+        .sum();
+    assert_eq!(root, residuals);
     let timing = &validated["operation_timings"];
     assert_eq!(timing["begin"]["calls"], 1);
     assert_eq!(timing["resume"]["calls"], 0);
@@ -594,6 +615,9 @@ fn import_operation_timings_survive_separate_cli_processes() {
             session,
         ],
     ));
+    assert!(
+        committed["region_diagnostics"]["regions"]["import_command/commit/publish"].is_object()
+    );
     let timing = &committed["operation_timings"];
     assert_eq!(timing["begin"]["calls"], 0);
     assert_eq!(timing["resume"]["calls"], 1);

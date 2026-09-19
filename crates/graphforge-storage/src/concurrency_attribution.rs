@@ -20,9 +20,10 @@
 //! not instead of it.
 //!
 //! **Serial fraction is derived, not measured.** [`serial_fraction`] inverts
-//! Amdahl's law for a known worker count. It inherits Amdahl's assumptions and
+//! Amdahl's law for a matched throughput speedup and known worker count.
+//! It inherits Amdahl's assumptions and
 //! is only as good as the worker count handed to it, so it is reported as an
-//! estimate and labelled as one wherever it is surfaced.
+//! estimate, never from CPU/wall. Stock region receipts do not emit it.
 //!
 //! # This is a process-level measurement
 //! `process_cpu_time` is process-wide, so a region's CPU delta includes **every
@@ -53,8 +54,14 @@
 //! ```
 //!
 //! # Cost
-//! Two `getrusage` calls and two `Instant` reads per region, where a region is a
-//! whole lifecycle phase rather than an operation.
+//! Boundary reads of Linux proc counters and `Instant`, per region. Captures
+//! report their sampling windows; they are not atomic or zero-overhead.
+//! Named scopes are inert without a capture. Global snapshots are inclusive
+//! shared-process totals and must never be summed across overlapping phases.
+
+mod capture;
+mod scheduler;
+pub use capture::{RegionCapture, RegionMeasurement, RegionRow, RegionSnapshot};
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -106,12 +113,12 @@ impl RegionConcurrency {
 /// means the observation does not fit the model rather than that the region is
 /// perfectly parallel.
 #[must_use]
-pub fn serial_fraction(effective_cores: f64, workers: u32) -> Option<f64> {
-    if workers <= 1 || effective_cores <= 0.0 {
+pub fn serial_fraction(speedup: f64, workers: u32) -> Option<f64> {
+    if workers <= 1 || speedup <= 0.0 {
         return None;
     }
     let n = f64::from(workers);
-    let fraction = (1.0 / effective_cores - 1.0 / n) / (1.0 - 1.0 / n);
+    let fraction = (1.0 / speedup - 1.0 / n) / (1.0 - 1.0 / n);
     (0.0..=1.0).contains(&fraction).then_some(fraction)
 }
 
@@ -190,6 +197,21 @@ pub fn measure<T>(region: impl FnOnce() -> T) -> (T, RegionConcurrency) {
     )
 }
 
+fn phase_name(phase: StorageIoPhase) -> &'static str {
+    match phase {
+        StorageIoPhase::AppendMerge => "append_merge",
+        StorageIoPhase::SealAuthentication => "seal_authentication",
+        StorageIoPhase::ShapeConsumeReauthentication => "shaping",
+        StorageIoPhase::EncodeWritePostwriteAuthentication => "canonical_encoding",
+        StorageIoPhase::PublicationPreauthentication => "publication",
+        StorageIoPhase::CasInstallReadWrite => "cas_install",
+        StorageIoPhase::HydrationVerification => "hydration",
+        StorageIoPhase::FsyncSynchronization => "fsync",
+        StorageIoPhase::RecoveryReauthentication => "recovery",
+        StorageIoPhase::ReadPathScan => "read_path",
+    }
+}
+
 static PHASES: Mutex<BTreeMap<StorageIoPhase, RegionConcurrency>> = Mutex::new(BTreeMap::new());
 
 /// Time a lifecycle phase and fold the result into the process-wide table when
@@ -197,16 +219,33 @@ static PHASES: Mutex<BTreeMap<StorageIoPhase, RegionConcurrency>> = Mutex::new(B
 #[derive(Debug)]
 pub struct RegionScope {
     phase: StorageIoPhase,
+    capture: Option<capture::CaptureRegion>,
     started: Instant,
     cpu_before: Option<Duration>,
 }
 
 impl RegionScope {
+    /// Count successfully completed work in the innermost captured region.
+    pub fn record_work(unit: &'static str, amount: u64) {
+        capture::record_work(unit, amount);
+    }
+
+    /// Record a named region in the current thread capture, if one is active.
+    #[must_use]
+    pub fn named(name: &'static str) -> Option<impl Drop> {
+        capture::CaptureRegion::enter(name)
+    }
+
     /// Begin timing `phase`.
     #[must_use]
     pub fn enter(phase: StorageIoPhase) -> Self {
+        Self::enter_named(phase, phase_name(phase))
+    }
+
+    pub(crate) fn enter_named(phase: StorageIoPhase, name: &'static str) -> Self {
         Self {
             phase,
+            capture: capture::CaptureRegion::enter(name),
             started: Instant::now(),
             cpu_before: process_cpu_time(),
         }
@@ -215,6 +254,7 @@ impl RegionScope {
 
 impl Drop for RegionScope {
     fn drop(&mut self) {
+        drop(self.capture.take());
         let wall = self.started.elapsed();
         let (cpu_nanos, cpu_available) = match (self.cpu_before, process_cpu_time()) {
             (Some(before), Some(after)) => (
@@ -229,7 +269,10 @@ impl Drop for RegionScope {
             cpu_available,
         };
         if let Ok(mut phases) = PHASES.lock() {
-            phases.entry(self.phase).or_default().merge(&region);
+            phases
+                .entry(self.phase)
+                .and_modify(|total| total.merge(&region))
+                .or_insert(region);
         }
     }
 }
@@ -325,6 +368,15 @@ mod tests {
             region.wall_nanos >= 150_000_000,
             "wall time was still elapsed"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn first_valid_global_sample_preserves_cpu_availability() {
+        {
+            let _scope = RegionScope::enter(StorageIoPhase::RecoveryReauthentication);
+        }
+        assert!(snapshot()[&StorageIoPhase::RecoveryReauthentication].cpu_available);
     }
 
     #[test]

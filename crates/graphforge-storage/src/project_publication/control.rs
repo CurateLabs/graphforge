@@ -566,6 +566,7 @@ pub(super) fn canonical_line<T: Serialize>(value: &T) -> Result<Vec<u8>, GfError
 
 #[cfg(unix)]
 pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
+    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(publication_io)
@@ -573,6 +574,7 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
 
 #[cfg(windows)]
 pub(crate) fn sync_directory(path: &Path) -> Result<(), GfError> {
+    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     use std::os::windows::fs::OpenOptionsExt;
 
     // FILE_FLAG_BACKUP_SEMANTICS permits opening a directory handle. The

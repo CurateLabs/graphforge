@@ -52,6 +52,7 @@ impl ConstructionDirectory {
         self.directory.revalidate_named()
     }
     pub(crate) fn sync(&self) -> io::Result<()> {
+        let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
         self.directory.sync()
     }
     pub(crate) fn try_clone(&self) -> io::Result<Self> {

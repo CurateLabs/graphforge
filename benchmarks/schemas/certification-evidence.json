@@ -22,6 +22,225 @@
   "required": ["schema", "profile_id", "status", "phases", "failed_phase"],
   "additionalProperties": false,
   "$defs": {
+    "regionDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "cpu_scope",
+        "scheduler_scope",
+        "regions",
+        "complete"
+      ],
+      "properties": {
+        "contract": {
+          "const": "graphforge-region-diagnostics/1"
+        },
+        "cpu_scope": {
+          "const": "shared_process_inclusive_do_not_sum"
+        },
+        "scheduler_scope": {
+          "const": "calling_thread_only_unknown_is_not_blocked_or_psi"
+        },
+        "regions": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^import_command(/(begin_import|resume_import|register_arrow|register_parquet|checkpoint|validate|commit|open_construction|append|seal|publish|shaping|canonical_encoding|seal_authentication|fsync|normalization|lock_wait|artifact_authentication|inventory_authentication|inventory_payload_authentication)){0,15}$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "calls",
+              "inclusive",
+              "residual",
+              "work"
+            ],
+            "properties": {
+              "calls": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "inclusive": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "wall_ns",
+                  "process_cpu_ns",
+                  "thread_running_ns",
+                  "thread_runnable_ns",
+                  "thread_unknown_ns",
+                  "sampling_uncertainty_ns",
+                  "thread_sleeping_ns",
+                  "thread_uninterruptible_ns",
+                  "thread_iowait_ns"
+                ],
+                "properties": {
+                  "sampling_uncertainty_ns": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "wall_ns": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "process_cpu_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_running_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_runnable_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_unknown_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_sleeping_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_uninterruptible_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_iowait_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                }
+              },
+              "residual": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "wall_ns",
+                  "process_cpu_ns",
+                  "thread_running_ns",
+                  "thread_runnable_ns",
+                  "thread_unknown_ns",
+                  "sampling_uncertainty_ns",
+                  "thread_sleeping_ns",
+                  "thread_uninterruptible_ns",
+                  "thread_iowait_ns"
+                ],
+                "properties": {
+                  "wall_ns": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "process_cpu_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_running_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_runnable_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_unknown_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "sampling_uncertainty_ns": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "thread_sleeping_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_uninterruptible_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "thread_iowait_ns": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                }
+              },
+              "work": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "nodes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "edges": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "complete": {
+          "const": true
+        }
+      }
+    },
     "lifecycleIoCounters": {
       "type": "object",
       "additionalProperties": false,
@@ -138,13 +357,55 @@
           "items": {
             "type": "object",
             "propertyNames": {
-              "enum": ["retained_owners", "contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "operation_timings", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects", "integrity", "compatibility", "idempotent_replay", "application_io"]
+              "enum": ["retained_owners", "contract", "outcome", "rows_accepted", "rows_rejected", "bytes_accepted", "construction", "operation_timings", "region_diagnostics", "cpu_scope", "wall_ns", "sampling_uncertainty_ns", "runner_cpu_ns", "children_cpu_ns", "format", "rows", "batches", "bytes", "complete", "result_sha256", "scalar_u64", "query_evidence", "storage", "reopen_agrees", "source_project_current_allocated_bytes", "retained_storage_bytes", "transient_peak_storage_bytes", "transient_peak_allocated_bytes", "logical_read_bytes", "logical_write_bytes", "reader_calls", "publication_work_units", "live_nodes", "live_edges", "one_hop_rows", "two_hop_rows", "source_fingerprint", "imported_fingerprint", "equivalent", "kind", "selected_generation_class", "work_detected", "repaired_journals", "aborted_journals", "removed_generations", "preserved_unknown_entries", "deferred", "elapsed_ms", "package_digest", "transport_digest", "entry_count", "payload_bytes", "representation", "selection_fingerprint", "allocation_logical_bytes", "allocation_allocated_bytes", "allocation_physical_objects", "integrity", "compatibility", "idempotent_replay", "application_io"]
             },
             "properties": {
+              "region_diagnostics": { "$ref": "#/$defs/regionDiagnostics" },
+              "sampling_uncertainty_ns": { "type": "integer", "minimum": 0 },
+              "wall_ns": { "type": "integer", "minimum": 0 },
+              "runner_cpu_ns": { "type": ["integer", "null"], "minimum": 0 },
+              "children_cpu_ns": { "type": ["integer", "null"], "minimum": 0 },
               "operation_timings": { "$ref": "#/$defs/importOperationTimings" },
               "application_io": { "$ref": "#/$defs/lifecycleApplicationIo" }
             },
             "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "contract": {
+                      "const": "graphforge-workflow-timing/1"
+                    }
+                  },
+                  "required": [
+                    "contract"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "contract",
+                    "cpu_scope",
+                    "wall_ns",
+                    "sampling_uncertainty_ns",
+                    "runner_cpu_ns",
+                    "children_cpu_ns"
+                  ],
+                  "propertyNames": {
+                    "enum": [
+                      "contract",
+                      "cpu_scope",
+                      "wall_ns",
+                      "sampling_uncertainty_ns",
+                      "runner_cpu_ns",
+                      "children_cpu_ns"
+                    ]
+                  },
+                  "properties": {
+                    "cpu_scope": {
+                      "const": "runner_and_waited_children_shared"
+                    }
+                  }
+                }
+              },
               {
                 "if": { "required": ["operation_timings"] },
                 "then": {

@@ -10,6 +10,7 @@ use arrow::ipc::writer::FileWriter as ArrowFileWriter;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use graphforge_core::GfError;
+use graphforge_storage::concurrency_attribution::RegionScope;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{ChunkReader, Length};
 use serde::{Deserialize, Serialize};
@@ -331,10 +332,8 @@ struct SessionManifest {
 /// Monotonic wall time and process CPU for attempted calls, including returned
 /// errors. These observations are not durable progress or performance limits.
 ///
-/// CPU is here so that [`ImportCallTiming::effective_cores`] can answer how much
-/// of the machine an operation used. #1387 budgets a serialized fraction of the
-/// ingest path, and `seal` is 68-80% of it, so `seal.effective_cores()` is the
-/// figure that budget is read from.
+/// [`ImportCallTiming::effective_cores`] reports process CPU/wall for the
+/// operation. It does not identify a serial fraction or throughput speedup.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ImportCallTiming {
     /// Number of attempted calls.
@@ -442,6 +441,7 @@ impl GraphForge {
         operation_uuid: OperationId,
         limits: ImportSessionLimits,
     ) -> Result<GraphImportSession, GfError> {
+        let _region = RegionScope::named("begin_import");
         let limits = limits.validate()?;
         let session_uuid = operation_uuid.0;
         let root = import_root(self, session_uuid)?;
@@ -481,6 +481,7 @@ impl GraphForge {
 
     /// Resume one durable, non-terminal session after process interruption.
     pub fn resume_import_session(&self, session_uuid: Uuid) -> Result<GraphImportSession, GfError> {
+        let _region = RegionScope::named("resume_import");
         let root = import_root(self, session_uuid)?;
         let manifest = read_manifest(&root)?;
         if manifest.format_version != FORMAT_VERSION || manifest.session_uuid != session_uuid {
@@ -626,6 +627,7 @@ impl GraphImportSession {
         kind: BulkInputKind,
         batches: &[RecordBatch],
     ) -> Result<(), GfError> {
+        let _region = RegionScope::named("register_arrow");
         self.ensure_open()?;
         if batches.is_empty() {
             return Ok(());
@@ -673,12 +675,15 @@ impl GraphImportSession {
         );
         if result.is_err() {
             self.cleanup_source(&destination)?;
+        } else {
+            RegionScope::record_work("rows", rows);
         }
         result
     }
 
     /// Register a local Parquet source by copying it into durable session ownership.
     pub fn register_parquet(&mut self, kind: BulkInputKind, source: &Path) -> Result<(), GfError> {
+        let _region = RegionScope::named("register_parquet");
         self.ensure_open()?;
         reject_unsafe_path(source)?;
         let metadata = fs::symlink_metadata(source).map_err(storage)?;
@@ -732,12 +737,15 @@ impl GraphImportSession {
         );
         if result.is_err() {
             self.cleanup_source(&destination)?;
+        } else {
+            RegionScope::record_work("bytes", bytes);
         }
         result
     }
 
     /// Persist counters and source ordering without publishing graph state.
     pub fn checkpoint(&mut self) -> Result<ImportProgress, GfError> {
+        let _region = RegionScope::named("checkpoint");
         self.manifest.progress.elapsed_millis =
             self.manifest.progress.elapsed_millis.saturating_add(
                 u64::try_from(self.observed.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -759,6 +767,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        let _region = RegionScope::named("validate");
         self.operation_timings = ImportOperationTimings::default();
         self.ensure_open()?;
         self.ensure_base(graph)?;
@@ -785,11 +794,7 @@ impl GraphImportSession {
                         source.sequence,
                         batch_index,
                     );
-                    let batch = match input_kind {
-                        BulkInputKind::Node => graph.normalize_import_node_chunk(operation, &batch),
-                        BulkInputKind::Edge => graph.normalize_import_edge_chunk(operation, &batch),
-                    }
-                    .map_err(|error| validation(error.to_string()))?;
+                    let batch = normalize_batch(graph, operation, input_kind, &batch)?;
                     if batch.num_rows() == 0 {
                         batch_index += 1;
                         self.manifest.sources[source_index].batches_staged = batch_index;
@@ -803,6 +808,7 @@ impl GraphImportSession {
                         self.persist_manifest()?;
                     }
                     let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
+                    let region = RegionScope::named("append");
                     let started = CallStart::now();
                     let staged = match (input_kind, cancellation) {
                         (BulkInputKind::Node, Some(token)) => {
@@ -817,6 +823,10 @@ impl GraphImportSession {
                     self.operation_timings
                         .append
                         .record(started, staged.is_err());
+                    if staged.is_ok() {
+                        RegionScope::record_work("rows", batch.num_rows() as u64);
+                    }
+                    drop(region);
                     if let Err(error) = staged {
                         self.manifest.sources[source_index].inflight_batch = None;
                         let remaining = self
@@ -863,6 +873,7 @@ impl GraphImportSession {
         construction: &mut crate::GraphConstructionSession<'_>,
         cancellation: Option<&CancellationToken>,
     ) -> Result<ImportProgress, GfError> {
+        let _region = RegionScope::named("seal");
         let started = CallStart::now();
         let sealed = construction.validate_and_seal(cancellation);
         self.operation_timings.seal.record(started, sealed.is_err());
@@ -909,6 +920,7 @@ impl GraphImportSession {
         graph: &GraphForge,
         cancellation: Option<&CancellationToken>,
     ) -> Result<Uuid, GfError> {
+        let _region = RegionScope::named("commit");
         self.operation_timings = ImportOperationTimings::default();
         if self.manifest.phase != ImportPhase::Validated
             || self.manifest.progress.files_pending != 0
@@ -918,6 +930,7 @@ impl GraphImportSession {
         self.ensure_base(graph)?;
         let mut construction = self.open_construction(graph)?;
         let started = CallStart::now();
+        let region = RegionScope::named("publish");
         let publication = match cancellation {
             Some(token) => construction.seal_and_publish_with_cancellation(token),
             None => construction.seal_and_publish(),
@@ -925,6 +938,7 @@ impl GraphImportSession {
         self.operation_timings
             .publish
             .record(started, publication.is_err());
+        drop(region);
         let publication = publication?;
         self.update_construction_progress(&construction.progress())?;
         self.manifest.phase = ImportPhase::Committed;
@@ -967,6 +981,7 @@ impl GraphImportSession {
         &mut self,
         graph: &'a GraphForge,
     ) -> Result<crate::GraphConstructionSession<'a>, GfError> {
+        let _region = RegionScope::named("open_construction");
         let budgets = self.construction_budgets();
         let started = CallStart::now();
         if let Some(session_uuid) = self.manifest.construction_session_uuid {
@@ -1401,6 +1416,20 @@ fn reject_unsafe_path(path: &Path) -> Result<(), GfError> {
     Ok(())
 }
 
+fn normalize_batch(
+    graph: &GraphForge,
+    operation: OperationId,
+    kind: BulkInputKind,
+    batch: &RecordBatch,
+) -> Result<RecordBatch, GfError> {
+    let _region = RegionScope::named("normalization");
+    match kind {
+        BulkInputKind::Node => graph.normalize_import_node_chunk(operation, batch),
+        BulkInputKind::Edge => graph.normalize_import_edge_chunk(operation, batch),
+    }
+    .map_err(|error| validation(error.to_string()))
+}
+
 fn import_batch_operation(base: Uuid, source: u64, batch: u64) -> OperationId {
     let mut digest = Sha256::new();
     digest.update(b"graphforge.import.batch.v1\0");
@@ -1501,11 +1530,8 @@ mod tests {
 
     #[test]
     fn operation_timings_carry_process_cpu_for_every_measured_call() {
-        // #1462: #1387 budgets a serialized fraction of ingest and nothing on
-        // the path computed one. This is the end-to-end check that a real
-        // import now carries CPU, so `seal.effective_cores()` -- the figure the
-        // budget is read from, seal being 68-80% of ingest -- is available off
-        // an ordinary run rather than inferred from phase totals.
+        // Real import operations carry process CPU in ordinary receipts;
+        // CPU/wall is effective cores, never an inferred serial fraction.
         let (_directory, _project, graph) = fixture();
         let mut session = graph
             .begin_import_session(

@@ -62,7 +62,6 @@ use controls::{
 };
 
 mod catalog;
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod diagnostics;
 mod partition;
 use catalog::{
@@ -1706,7 +1705,6 @@ impl GraphConstructionSession {
     }
 
     fn seal_inner(&mut self, authenticate_artifacts: bool) -> Result<(), GfError> {
-        #[cfg(any(test, feature = "test-support"))]
         let _diagnostic_scope =
             crate::graph_construction::diagnostics::Scope::start("seal_authentication");
         self.revalidate_authority()?;

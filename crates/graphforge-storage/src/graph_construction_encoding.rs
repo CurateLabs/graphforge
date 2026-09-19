@@ -527,7 +527,6 @@ pub(crate) fn encode(
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncoding, GfError> {
-    #[cfg(any(test, feature = "test-support"))]
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("canonical_encoding");
     if shape.ontology_mode != ontology_mode {
@@ -873,6 +872,8 @@ pub(crate) fn encode(
         reused: false,
         evidence: invocation,
     };
+    crate::concurrency_attribution::RegionScope::record_work("nodes", shape.node_count);
+    crate::concurrency_attribution::RegionScope::record_work("edges", shape.edge_count);
     Ok(completed)
 }
 
@@ -2585,7 +2586,6 @@ pub(crate) fn authenticate_inventory(
     inventory: &GraphConstructionEncoding,
     parent_index: Option<&AuthenticatedUuidIndexSnapshot>,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    #[cfg(any(test, feature = "test-support"))]
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("inventory_authentication");
     let evidence = authenticate_inventory_payloads(root, inventory, &mut || false)?;
@@ -2688,7 +2688,6 @@ pub(crate) fn authenticate_inventory_payloads(
     inventory: &GraphConstructionEncoding,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<GraphConstructionEncodingEvidence, GfError> {
-    #[cfg(any(test, feature = "test-support"))]
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("inventory_payload_authentication");
     validate_inventory_invariants(inventory)?;

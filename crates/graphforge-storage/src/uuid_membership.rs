@@ -101,6 +101,7 @@ fn create_uuid_file(path: &Path) -> Result<File, GfError> {
 }
 
 fn sync_uuid_file(file: &File) -> Result<(), GfError> {
+    let _wait = crate::concurrency_attribution::RegionScope::named("fsync");
     file.sync_all().map_err(storage_err)?;
     crate::io_stats::record_uuid_file_sync();
     Ok(())
