@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use arrow::array::{
@@ -43,7 +43,18 @@ const LIMIT: usize = 1_000;
 const WRITE_WINDOW: usize = 32 * 1024;
 
 /// Serializes the process-global storage counters used by the assertions.
+///
+/// Acquisition deliberately recovers from poisoning: the guard protects only
+/// mutual exclusion, and each test resets the counters before measuring, so a
+/// panic under the guard must fail that test alone rather than cascade into
+/// `PoisonError` failures across the whole binary (#1489).
 static IO_GUARD: Mutex<()> = Mutex::new(());
+
+fn io_guard() -> MutexGuard<'static, ()> {
+    IO_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 const ONE_HOP: &str = "MATCH (a)-[r]->(b) RETURN b.node_uuid AS id LIMIT 1000";
 const TWO_HOP: &str = "MATCH (a)-[r1]->(b)-[r2]->(c) \
@@ -398,8 +409,19 @@ fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uu
 }
 
 #[test]
+fn poisoned_io_guard_recovers_for_subsequent_tests() {
+    let seeded = std::thread::spawn(|| {
+        let _guard = IO_GUARD.lock().unwrap();
+        panic!("panic while holding the guard");
+    })
+    .join();
+    assert!(seeded.is_err(), "the seeded panic must surface");
+    let _guard = io_guard();
+}
+
+#[test]
 fn regression1094_property_free_shortcuts() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     for ordinals in [[3, 1, 2], [1, 2, 3]] {
         let dir = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
@@ -557,7 +579,7 @@ fn regression1094_property_free_shortcuts() {
 
 #[test]
 fn regression1094_recount_and_ordered_frontier_semantics() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = generate_semantic_v4_graph_with_nodes(
         dir.path(),
@@ -651,7 +673,7 @@ fn regression1094_recount_and_ordered_frontier_semantics() {
 
 #[test]
 fn regression1094_identity_lookup_limit_is_chunked() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let limit = graphforge_storage::V4OrdinalIdentityLimits::default().max_requested + 1;
     generate_graph(dir.path(), limit + 1, 1, true);
@@ -672,7 +694,7 @@ fn regression1094_identity_lookup_limit_is_chunked() {
 
 #[test]
 fn regression1094_sharded_hubs_keep_one_and_two_hop_work_bounded() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     for degree in [16_384, 32_768] {
         let dir = TempDir::new().unwrap();
         let workspace = TempDir::new().unwrap();
@@ -925,7 +947,7 @@ fn assert_bounded_demand(snapshot: &DemandSnapshot, expected_hops: usize, requir
 
 #[test]
 fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let small = run_scale(32_768, FAN_OUT);
     let large = run_scale(327_680, FAN_OUT);
     println!("fixed-hop LIMIT structural smoke: small={small:?}, large={large:?}");
@@ -959,7 +981,7 @@ fn terminal_limit_keeps_fixed_hop_io_bounded_as_graph_grows() {
 
 #[test]
 fn scale_fixture_uses_bounded_bulk_publications() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = WRITE_WINDOW + 1;
     let evidence = generate_bulk_graph(dir.path(), nodes, 2);
@@ -1017,7 +1039,7 @@ fn run_scattered_destination_scale(
 
 #[test]
 fn scattered_node_hydration_is_neighborhood_proportional() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let (small_values, small_io, small_demand, small_edges, small_node_shards) =
         run_scattered_destination_scale(16_384);
     let (large_values, large_io, large_demand, large_edges, large_node_shards) =
@@ -1169,7 +1191,7 @@ fn run_ordered_projection_scale(nodes: usize) -> (Vec<Vec<u8>>, DemandSnapshot) 
 
 #[test]
 fn destination_uuid_projection_uses_authenticated_legacy_hydration_without_v4_authority() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     generate_graph(dir.path(), 64, 4, false);
     let result = open_forge(dir.path()).execute(ORDERED_ONE_HOP).unwrap();
@@ -1184,7 +1206,7 @@ fn destination_uuid_projection_uses_authenticated_legacy_hydration_without_v4_au
 
 #[test]
 fn ordered_destination_uuid_projection_is_exact_and_bounded_at_1x_2x_4x() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let mut work = Vec::new();
     for nodes in [4_096, 8_192, 16_384] {
         let (_, snapshot) = run_ordered_projection_scale(nodes);
@@ -1204,7 +1226,7 @@ fn ordered_destination_uuid_projection_is_exact_and_bounded_at_1x_2x_4x() {
 
 #[test]
 fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let root = TempDir::new().unwrap();
     generate_graph(root.path(), 4_096, FAN_OUT, true);
     let forge = open_forge(root.path());
@@ -1300,7 +1322,7 @@ fn ordinary_streaming_sink_exposes_deterministic_query_evidence() {
 
 #[test]
 fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let root = TempDir::new().unwrap();
     let source_path = root.path().join("source");
     generate_graph(&source_path, 4_096, FAN_OUT, true);
@@ -1362,7 +1384,7 @@ fn portable_v2_clean_import_preserves_projected_ordered_hops_and_io() {
 
 #[test]
 fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = 4_096;
     generate_graph(dir.path(), nodes, FAN_OUT, true);
@@ -1487,7 +1509,7 @@ fn optimized_v4_two_hop_direction_type_alias_and_quiescence_are_exact() {
 
 #[test]
 fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let nodes = generate_semantic_v4_graph(dir.path());
     let forge = open_forge(dir.path());
@@ -1566,7 +1588,7 @@ fn optimized_v4_preserves_parallel_self_loop_and_demanded_property_semantics() {
 
 #[test]
 fn limits_sweep_bounded_multi_hop_work_and_repartition() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     generate_graph(dir.path(), 4_096, FAN_OUT, false);
     let forge = open_forge(dir.path());
@@ -1594,7 +1616,7 @@ fn limits_sweep_bounded_multi_hop_work_and_repartition() {
 
 #[test]
 fn selective_filter_tops_up_without_crossing_blockers() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
@@ -1648,7 +1670,7 @@ fn selective_filter_tops_up_without_crossing_blockers() {
 
 #[test]
 fn high_degree_source_resumes_without_losing_neighbors() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
     let mut writer = GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
@@ -1675,7 +1697,7 @@ fn high_degree_source_resumes_without_losing_neighbors() {
 
 #[test]
 fn fixed_hop_limit_preserves_skip_parameters_filters_and_blockers() {
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let dir = TempDir::new().unwrap();
     generate_graph(dir.path(), 64, 4, false);
     let forge = open_forge(dir.path());
@@ -1815,7 +1837,7 @@ fn release_livejournal_fixed_hop_limits() {
         !cfg!(debug_assertions),
         "run with cargo test --release; debug timings are not useful"
     );
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let project = std::env::var_os("GF_LIVEJOURNAL_PROJECT")
         .expect("GF_LIVEJOURNAL_PROJECT must name the cached canonical fixture");
     let project = Path::new(&project);
@@ -1916,7 +1938,7 @@ fn release_fixed_hop_limit_1m_10m() {
         !cfg!(debug_assertions),
         "run with cargo test --release; debug timings are not useful"
     );
-    let _guard = IO_GUARD.lock().unwrap();
+    let _guard = io_guard();
     let fan_out = env_usize("GF_FIXED_HOP_BENCH_FANOUT", 16);
     let small = release_scale(env_usize("GF_FIXED_HOP_BENCH_N1", 62_500), fan_out);
     let large = release_scale(env_usize("GF_FIXED_HOP_BENCH_N2", 625_000), fan_out);
