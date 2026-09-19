@@ -308,7 +308,8 @@ fn regression_breaches(
 }
 
 /// Ratchet side: a measurement beat its banked constant by more than the
-/// metric's margin. Each armed metric fails on its *worst* observation, so a
+/// metric's margin. Each armed metric judges the observation least favorable
+/// to banking — the worst reading for a ceiling, the best for a floor — so a
 /// gain counts only once the whole sweep has improved, and every failure
 /// prints the exact constant to write.
 fn ratchet_breaches(
@@ -366,31 +367,47 @@ fn ratchet_breaches(
     }
 }
 
-/// The throughput ratchet side: armed it fails per row with the constant to
-/// write; excluded it reports every unbanked gain as a note (#1476).
+/// The throughput ratchet side: armed, exactly one breach fires when the
+/// *best* throughput across the whole sweep beats the floor by more than the
+/// margin, printing the constant to write; excluded, every unbanked gain is
+/// reported as a note (#1476).
 fn throughput_ratchet(rows: &[IngestObservation], limits: &GateLimits, verdict: &mut GateVerdict) {
-    for row in rows {
-        if row.edges_per_second() > limits.floor_edges_per_second {
-            match limits.ratchet_edges_per_second {
-                RatchetPolicy::Margin(_) => verdict.ratchet_breaches.push(format!(
-                    "unbanked gain: {} edges: {:.0} edges/sec beats the {:.0} \
-                     edges/sec floor; write const INGEST_FLOOR_EDGES_PER_SECOND: \
-                     f64 = {:.1};",
-                    row.edges,
-                    row.edges_per_second(),
+    match limits.ratchet_edges_per_second {
+        RatchetPolicy::Margin(margin) => {
+            let best = best_of(rows, IngestObservation::edges_per_second);
+            let trigger = limits.floor_edges_per_second * (1.0 + margin);
+            if best > trigger {
+                let suggested = snap_floor(best * (1.0 - margin / 2.0), 0);
+                verdict.ratchet_breaches.push(format!(
+                    "unbanked gain: best {best:.0} edges/sec across the sweep is more \
+                     than {percent:.0}% over the {:.0} edges/sec floor; write const \
+                     INGEST_FLOOR_EDGES_PER_SECOND: f64 = {suggested:.1};",
                     limits.floor_edges_per_second,
-                    snap_ceil(row.edges_per_second(), 0),
-                )),
-                RatchetPolicy::Excluded { reason } => verdict.notes.push(format!(
-                    "unbanked gain not gated: {} edges: {:.0} edges/sec beats \
-                     the {:.0} edges/sec floor ({reason})",
-                    row.edges,
-                    row.edges_per_second(),
-                    limits.floor_edges_per_second,
-                )),
+                    percent = margin * 100.0,
+                ));
+            }
+        }
+        RatchetPolicy::Excluded { reason } => {
+            for row in rows {
+                if row.edges_per_second() > limits.floor_edges_per_second {
+                    verdict.notes.push(format!(
+                        "unbanked gain not gated: {} edges: {:.0} edges/sec beats \
+                         the {:.0} edges/sec floor ({reason})",
+                        row.edges,
+                        row.edges_per_second(),
+                        limits.floor_edges_per_second,
+                    ));
+                }
             }
         }
     }
+}
+
+/// The smallest value a metric reports across the sweep; `INFINITY` when the
+/// sweep is empty, which the callers treat as "nothing to judge".
+#[must_use]
+fn best_of(rows: &[IngestObservation], metric: impl Fn(&IngestObservation) -> f64) -> f64 {
+    rows.iter().map(metric).fold(f64::INFINITY, f64::min)
 }
 
 /// The largest value a metric reports across the sweep; `NEG_INFINITY` when
@@ -445,7 +462,8 @@ pub fn limits_report(limits: &GateLimits) -> HashMap<&'static str, serde_json::V
 
 /// Snap `value` to `decimals` places (so float noise at a decimal boundary
 /// cannot push a suggestion one step high), then round it up at that
-/// precision. The result is the exact constant printed for a ratchet breach.
+/// precision. Used for ceiling suggestions: the new constant must sit above
+/// the measurement.
 pub fn snap_ceil(value: f64, decimals: u32) -> f64 {
     let factor = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
     let scaled = value * factor;
@@ -455,4 +473,17 @@ pub fn snap_ceil(value: f64, decimals: u32) -> f64 {
         scaled
     };
     snapped.ceil() / factor
+}
+
+/// The floor-side mirror of [`snap_ceil`]: snap, then round down, so a floor
+/// suggestion sits below the measurement and unchanged code stays above it.
+pub fn snap_floor(value: f64, decimals: u32) -> f64 {
+    let factor = 10f64.powi(i32::try_from(decimals).unwrap_or(0));
+    let scaled = value * factor;
+    let snapped = if (scaled - scaled.round()).abs() < 1e-6 {
+        scaled.round()
+    } else {
+        scaled
+    };
+    snapped.floor() / factor
 }

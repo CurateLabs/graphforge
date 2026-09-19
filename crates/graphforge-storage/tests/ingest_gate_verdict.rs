@@ -249,7 +249,8 @@ fn throughput_improvement_is_excluded_from_the_ratchet() {
 }
 
 /// The exclusion is a policy, not a missing feature: arming the throughput
-/// ratchet side makes the same improvement fail with the constant to write.
+/// ratchet side makes a sweep-wide improvement fail once, with the constant
+/// to write.
 #[test]
 fn armed_throughput_ratchet_fails_with_constant() {
     let rows = vec![observation(524_288, 2_100.0, 11.93, 40_000.0)];
@@ -260,9 +261,30 @@ fn armed_throughput_ratchet_fails_with_constant() {
     assert_eq!(verdict.ratchet_breaches.len(), 1);
     let ratchet = joined(&verdict.ratchet_breaches);
     assert!(
-        ratchet.contains("write const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 40000.0;"),
+        ratchet.contains("write const INGEST_FLOOR_EDGES_PER_SECOND: f64 = 35000.0;"),
         "{ratchet}"
     );
+
+    // A mixed sweep whose best run still beats the floor by more than the
+    // margin also fails, exactly once.
+    let mixed = vec![
+        observation(524_288, 2_100.0, 11.93, 40_000.0),
+        observation(8_388_608, 2_100.0, 11.93, 30_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&mixed, &limits);
+    assert_eq!(verdict.ratchet_breaches.len(), 1);
+
+    // But a sweep whose *best* run stays inside the margin trigger never
+    // fails, even when individual rows clear the floor.
+    let contained = vec![
+        observation(524_288, 2_100.0, 11.93, 40_000.0),
+        observation(8_388_608, 2_100.0, 11.93, 16_000.0),
+    ];
+    let verdict = evaluate_ingest_gate(&contained, &limits);
+    assert!(verdict.ratchet_breaches.is_empty(), "{verdict:?}");
+    let borderline = vec![observation(524_288, 2_100.0, 11.93, 18_000.0)];
+    let verdict = evaluate_ingest_gate(&borderline, &limits);
+    assert!(verdict.ratchet_breaches.is_empty(), "{verdict:?}");
 }
 
 /// Rows with no platform CPU clock skip both CPU sides instead of inventing a
@@ -296,4 +318,7 @@ fn suggestion_snapping_is_boundary_safe() {
     assert!((ingest_gate::snap_ceil(1.05, 3) - 1.05).abs() < 1e-9);
     assert!((ingest_gate::snap_ceil(1.000_000_000_1, 3) - 1.0).abs() < 1e-9);
     assert!((ingest_gate::snap_ceil(1_999.6, 0) - 2_000.0).abs() < 1e-9);
+    assert!((ingest_gate::snap_floor(35_000.000_000_000_01, 0) - 35_000.0).abs() < 1e-9);
+    assert!((ingest_gate::snap_floor(1_999.6, 0) - 1_999.0).abs() < 1e-9);
+    assert!((ingest_gate::snap_floor(10.125, 2) - 10.12).abs() < 1e-9);
 }
