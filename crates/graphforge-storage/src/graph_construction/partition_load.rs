@@ -169,6 +169,16 @@ impl<T> Shared<T> {
             .wait(guard)
             .unwrap_or_else(PoisonError::into_inner)
     }
+
+    /// Release dispatch capacity only after a successful coordinator consume.
+    fn release_consumed(&self, consumed: Result<(), GfError>) -> Result<(), GfError> {
+        consumed?;
+        let mut state = self.lock();
+        state.released += 1;
+        drop(state);
+        self.changed.notify_all();
+        Ok(())
+    }
 }
 
 /// Decrements the live-worker count however the worker exits.
@@ -280,12 +290,7 @@ where
                         state = shared.wait(state);
                     }
                 };
-                let consumed = consume(index, loaded?);
-                let mut state = shared.lock();
-                state.released += 1;
-                drop(state);
-                shared.changed.notify_all();
-                consumed?;
+                shared.release_consumed(consume(index, loaded?))?;
             }
             Ok(())
         })();
