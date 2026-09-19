@@ -2149,8 +2149,10 @@ fn write_parquet(
     batch: &RecordBatch,
     cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
-    _cancelled: &mut impl FnMut() -> bool,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ConstructionEncodedArtifact, GfError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = cancelled;
     let (directory, name) = directory_for(root, relative)?;
     let temporary = format!(".{}-{}.tmp", name, Uuid::new_v4().simple());
     let file = directory
@@ -2180,7 +2182,7 @@ fn write_parquet(
     .map_err(storage)?;
     #[cfg(any(test, feature = "test-support"))]
     let mut writer = if seam_spike::enabled()? {
-        seam_spike::write(batch, writer, _cancelled)?
+        seam_spike::write(batch, writer, cancelled)?
     } else {
         writer.write(batch).map_err(storage)?;
         writer.into_inner().map_err(storage)?
