@@ -18,6 +18,8 @@ use crate::project_portable_v2::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
     PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
 };
+mod adjacency;
+
 use crate::project_publication::{
     ProjectCapability, ProjectFileParticipant, ProjectGenerationRequest, ProjectParticipant,
     ProjectParticipantEncoding, ProjectPublicationReceipt, ProjectStageOutcome,
@@ -288,6 +290,9 @@ pub fn import_complete_portable_v2_with_allocation(
         package_digest: Some(report.package_digest.clone()),
     });
     let allocation_on_error = materialized_identity_allocated_bytes.clone();
+    // Files the derived adjacency build adds to the stage (#1388); the stage
+    // identity walks below are bounded by the entry count and must include them.
+    let mut added_stage_entries = 0_usize;
     let result = import_materialized(
         &stage,
         target,
@@ -299,6 +304,7 @@ pub fn import_complete_portable_v2_with_allocation(
         &report,
         owned_retry,
         allocation,
+        &mut added_stage_entries,
     )
     .map(|mut receipt| {
         receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
@@ -311,7 +317,7 @@ pub fn import_complete_portable_v2_with_allocation(
             &owner,
             materialized_stage_identity,
             &mut owned_identities,
-            entry_count,
+            entry_count.saturating_add(added_stage_entries),
             allocation,
         ) {
             return cleanup_error.with_allocation_identities(owned_identities);
@@ -331,7 +337,7 @@ pub fn import_complete_portable_v2_with_allocation(
             &owner,
             materialized_stage_identity,
             &mut receipt,
-            entry_count,
+            entry_count.saturating_add(added_stage_entries),
             allocation,
         )?;
         Ok(receipt)
@@ -862,6 +868,7 @@ fn import_materialized(
     report: &PortableV2Report,
     owned_retry: bool,
     allocation: Option<&crate::StorageAllocationOperation>,
+    added_stage_entries: &mut usize,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     if report.package_class != PortableV2PackageClass::Complete {
         return Err(PortableV2Error::new(
@@ -1009,7 +1016,17 @@ fn import_materialized(
     if let Some(graph_tree) = &package_graph_tree {
         validate_import_graph_identities(graph_tree, cancelled)?;
         validate_import_property_values(graph_tree, report.entry_count, cancelled)?;
+        *added_stage_entries =
+            adjacency::persist_import_adjacency(stage, graph_tree, &participants, cancelled)?;
     }
+    let stage_entry_count = usize::try_from(report.entry_count)
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "import entry count exceeds platform capacity",
+            )
+        })?
+        .saturating_add(*added_stage_entries);
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -1049,12 +1066,7 @@ fn import_materialized(
         admission.root(),
         package_graph_tree.as_deref(),
         &mut participants,
-        usize::try_from(report.entry_count).map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::LimitExceeded,
-                "import entry count exceeds platform capacity",
-            )
-        })?,
+        stage_entry_count,
         allocation,
     )?;
     let request = ProjectGenerationRequest {
@@ -1966,7 +1978,7 @@ mod tests {
         assert!(receipt.parent_sync_confirmed);
     }
 
-    fn supported() -> Vec<ProjectCapability> {
+    pub(super) fn supported() -> Vec<ProjectCapability> {
         vec![
             ProjectCapability {
                 capability_id: "graph".into(),

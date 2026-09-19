@@ -3,7 +3,7 @@
 use super::{
     ALL_RELATIONS_STEM, AdjacencyManifestRow, BuildEntry, DEFAULT_ADJACENCY_BATCH_SIZE,
     DEFAULT_CSR_SHARD_EDGES, DEFAULT_CSR_SHARD_NODES, Direction, ShardedCsrWriter, adjacency_dir,
-    csr_path, for_each_adjacency_edge_file, named_column, storage_err, string_column,
+    csr_path, for_each_adjacency_edge_path, named_column, storage_err, string_column,
     uint64_column, usable_stem, write_manifest,
 };
 use graphforge_core::GfError;
@@ -242,6 +242,34 @@ pub fn build_adjacency_index_from_inventory(
     checkpoint()?;
     // Generation BEFORE the scan — see the race note in the doc comment.
     let generation = crate::generation::read_topology_generation(source_project_dir)?;
+    let edge_files = super::resolve_adjacency_edge_files(source_project_dir, inventory)?;
+    build_adjacency_index_for_edge_files(
+        artifact_project_dir,
+        &edge_files,
+        generation,
+        built_at_micros,
+        options,
+        checkpoint,
+    )
+}
+
+/// Build the index from an explicit `(relation, path)` edge-table list already
+/// admitted by the caller, stamping `topology_generation` into the manifest.
+///
+/// This is the publish-side entry (#1388): construction encoding and portable
+/// import hand over the exact edge tables of the generation they are about to
+/// publish, so the CSR ships inside that generation instead of being rebuilt
+/// by every query process. The relation names are the semantic routes the
+/// caller resolved; no inventory or counter file is consulted here.
+pub(crate) fn build_adjacency_index_for_edge_files(
+    artifact_project_dir: &Path,
+    edge_files: &[(String, PathBuf)],
+    topology_generation: u64,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
+    let generation = topology_generation;
     let options = options.effective();
 
     let adjacency = adjacency_dir(artifact_project_dir);
@@ -261,8 +289,7 @@ pub fn build_adjacency_index_from_inventory(
 
     let build_result = (|| {
         let mut groups = stream_build_groups(
-            source_project_dir,
-            inventory,
+            edge_files,
             &options,
             &mut spill,
             &mut metrics,
@@ -782,8 +809,7 @@ fn merge_keyed_runs(
 }
 
 fn stream_build_groups(
-    project_dir: &Path,
-    inventory: Option<&crate::AuthenticatedPropertyInventory>,
+    edge_files: &[(String, PathBuf)],
     options: &AdjacencyBuildOptions,
     spill: &mut SpillSession,
     metrics: &mut AdjacencyBuildMetrics,
@@ -797,9 +823,8 @@ fn stream_build_groups(
         EntryGroup::with_label(ALL_RELATIONS_STEM),
     );
 
-    for_each_adjacency_edge_file(
-        project_dir,
-        inventory,
+    for_each_adjacency_edge_path(
+        edge_files,
         options.batch_size,
         &mut |stem, exploratory, batch| {
             checkpoint()?;

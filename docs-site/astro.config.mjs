@@ -360,6 +360,10 @@ export default defineConfig({
                   slug: 'adr/0036-release-version-contract',
                 },
                 {
+                  label: '0037 — Derived adjacency is published with the generation',
+                  slug: 'adr/0037-adjacency-published-with-generation',
+                },
+                {
                   label: '0038 — Determinism belongs at the publication boundary',
                   slug: 'adr/0038-determinism-at-the-publication-boundary',
                 },

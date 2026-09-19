@@ -366,6 +366,96 @@ mod determinism {
         );
     }
 
+    /// Initial construction publishes the derived adjacency CSR as ordinary
+    /// SHA-256-declared artifacts of the generation (#1388): a query process
+    /// hydrates and opens it instead of rebuilding it into a temporary
+    /// directory. Byte reproducibility of those artifacts is covered by
+    /// `same_input_twice_produces_identical_digests`, which compares every
+    /// encoded artifact; this test pins presence, generation stamp, and that
+    /// the published index validates against the published topology.
+    #[test]
+    fn initial_construction_publishes_a_current_adjacency_index() {
+        use crate::adjacency::{Direction, ShardedCsrIndex, csr_path};
+
+        let nodes = node_ids(256);
+        let edges = edge_ids(1_024);
+        let root = TempDir::new().unwrap();
+        let mut session = pinned_session(&root, 4);
+        append_all(&mut session, &nodes, &edges, 128);
+        session.seal().unwrap();
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        let encoding = session.encode_canonical(&shape, 1).unwrap();
+
+        let published_index = encoding
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.path.as_str())
+            .filter(|path| path.starts_with("indexes/adjacency/"))
+            .collect::<Vec<_>>();
+        let shard_manifest = |stem: &str, direction: Direction| {
+            csr_path(std::path::Path::new(""), stem, direction)
+                .with_extension("csr.json")
+                .to_string_lossy()
+                .into_owned()
+        };
+        let expected_manifests = [
+            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::Out),
+            shard_manifest(crate::adjacency::ALL_RELATIONS_STEM, Direction::In),
+            shard_manifest("R", Direction::Out),
+            shard_manifest("R", Direction::In),
+        ];
+        for expected in std::iter::once("indexes/adjacency/index_manifest.parquet")
+            .chain(expected_manifests.iter().map(String::as_str))
+        {
+            assert!(
+                published_index.contains(&expected),
+                "{expected} is not among {published_index:?}"
+            );
+        }
+        assert!(encoding.evidence.adjacency.write_bytes > 0);
+        assert_eq!(encoding.evidence.adjacency.source_rows, edges.len() as u64);
+        assert!(encoding.evidence.adjacency.csr_shards >= 4);
+
+        let published = session
+            .publish_canonical(&encoding, Uuid::from_u128(0x71), Uuid::from_u128(0x72))
+            .unwrap();
+        let generation = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(generation.generation_uuid(), published.generation_uuid);
+        let inventory = generation.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(
+            inventory
+                .files
+                .iter()
+                .filter(|entry| entry.role == crate::GraphFileRole::Index)
+                .count(),
+            published_index.len()
+        );
+
+        // Hydrate exactly as a query process does, then open presence-only.
+        let workspace = TempDir::new().unwrap();
+        crate::materialize_graph_objects(
+            generation.container_root(),
+            &inventory,
+            workspace.path(),
+        )
+        .unwrap();
+        let rows = crate::adjacency::read_manifest(workspace.path()).unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.topology_generation == 1));
+        assert_eq!(
+            crate::read_topology_generation(workspace.path()).unwrap(),
+            1
+        );
+        let union = ShardedCsrIndex::open(&csr_path(workspace.path(), "_all", Direction::Out))
+            .unwrap();
+        assert_eq!(union.edge_count(), edges.len() as u64);
+        assert!(
+            crate::adjacency::validate_adjacency_index(workspace.path())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// A graph too small to fill one partition shapes into exactly one, and
     /// that is intended rather than a degenerate case to refuse.
     ///

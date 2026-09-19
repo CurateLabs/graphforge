@@ -498,6 +498,99 @@ mod tests {
         .unwrap()
     }
 
+    /// A published construction ships its adjacency CSR (#1388): a fresh
+    /// process finds it current in the hydrated workspace without rebuilding,
+    /// hop queries answer from it, and a corrupted published shard is refused
+    /// by the open-time digest sweep like every other graph object.
+    #[test]
+    fn published_construction_serves_its_adjacency_index_and_refuses_corruption() {
+        use graphforge_storage::adjacency::AdjacencyFreshnessState;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let graph = GraphForge::new(Some(path)).unwrap();
+        let node_ids: Vec<Uuid> = (0..4).map(|_| Uuid::now_v7()).collect();
+        let edge_ids: Vec<Uuid> = (0..3).map(|_| Uuid::now_v7()).collect();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        session.append_nodes("nodes", &nodes(&node_ids)).unwrap();
+        session
+            .append_edges(
+                "edges",
+                &edges(
+                    &edge_ids,
+                    &[
+                        (node_ids[0], node_ids[1]),
+                        (node_ids[1], node_ids[2]),
+                        (node_ids[2], node_ids[3]),
+                    ],
+                ),
+            )
+            .unwrap();
+        session.seal_and_publish().unwrap();
+        drop(session);
+        let inspection = graph.inspect_adjacency().unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Current);
+        assert_eq!(inspection.artifact_source_generation, Some(1));
+        drop(graph);
+
+        let reopened = GraphForge::new(Some(path)).unwrap();
+        assert!(graphforge_storage::adjacency::manifest_path(&reopened.dir()).is_file());
+        let inspection = reopened.inspect_adjacency().unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Current);
+        assert_eq!(inspection.artifact_source_generation, Some(1));
+        assert_construction_relationships(
+            &reopened,
+            &[
+                [node_ids[0], edge_ids[0], node_ids[1]],
+                [node_ids[1], edge_ids[1], node_ids[2]],
+                [node_ids[2], edge_ids[2], node_ids[3]],
+            ],
+        );
+        let hops = reopened
+            .execute("MATCH (a)-[r]->(b)-[s]->(c) RETURN count(*) AS n")
+            .unwrap();
+        assert_eq!(
+            hops.batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0),
+            2
+        );
+        drop(reopened);
+
+        let generation = graphforge_storage::resolve_project_generation(directory.path()).unwrap();
+        let inventory = generation.graph_files_inventory().unwrap().unwrap();
+        let shard = inventory
+            .files
+            .iter()
+            .find(|entry| {
+                entry.relative_path.starts_with("indexes/adjacency/")
+                    && entry.relative_path.ends_with(".csr")
+            })
+            .expect("published CSR shard");
+        let object = graphforge_storage::graph_object_path(
+            generation.container_root(),
+            &shard.content_sha256,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&object).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            permissions.set_mode(0o600);
+        }
+        #[cfg(not(unix))]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&object, permissions).unwrap();
+        let mut bytes = std::fs::read(&object).unwrap();
+        bytes[0] ^= 1;
+        std::fs::write(&object, bytes).unwrap();
+        let error = GraphForge::new(Some(path)).unwrap_err();
+        assert!(error.to_string().contains("digest"), "{error}");
+    }
+
     #[test]
     fn cancelled_public_construction_preserves_current() {
         let graph = GraphForge::new(None).unwrap();
