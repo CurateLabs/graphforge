@@ -50,7 +50,6 @@ They are requirements for implementation, not claims of shipped functionality.
 | [`../development/bazel-migration-parity.md`](../development/bazel-migration-parity.md) | Bazel-migration / #6 same-SHA Cargo/Bazel parity |
 | [`../development/bazel-migration-perf.md`](../development/bazel-migration-perf.md) | Bazel-migration / #5 Blacksmith cache + performance gates |
 | [`../development/bazel-migration-cutover.md`](../development/bazel-migration-cutover.md) | Bazel-migration / #4 CI Gate cutover + Cargo rollback |
-| [`../development/streaming-construction-plan.md`](../development/streaming-construction-plan.md) | M5 / #1387 ingest throughput floor and #1456 construction foundation: the plan of record, per-resource requirements, measured baselines, open decisions |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
 | Root `AGENTS.md` | Agent workflow and validation gates |
