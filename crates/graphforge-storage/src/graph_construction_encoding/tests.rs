@@ -80,7 +80,10 @@ fn encode_seam_matches_bytes_and_cleans_up_refusal_and_cancellation() {
         );
         if mode == "datafusion" {
             let stderr = String::from_utf8(output.stderr).unwrap();
-            assert!(stderr.contains("\"seam_copied_arrow_bytes\":0"), "{stderr}");
+            assert!(
+                stderr.contains("\"changed_column_estimated_bytes\":0"),
+                "{stderr}"
+            );
             assert!(
                 stderr.contains("StreamingTableExec: partition_sizes=1"),
                 "{stderr}"

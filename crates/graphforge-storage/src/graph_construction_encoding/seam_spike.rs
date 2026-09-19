@@ -115,7 +115,7 @@ impl DataSink for ParquetSink {
             .ok_or_else(|| execution("encode sink executed twice"))?;
         let batches = MetricBuilder::new(&self.metrics).counter("input_batches", 0);
         let rows = MetricBuilder::new(&self.metrics).counter("encoded_rows", 0);
-        let copies = MetricBuilder::new(&self.metrics).counter("seam_copied_arrow_bytes", 0);
+        let copies = MetricBuilder::new(&self.metrics).counter("changed_column_estimated_bytes", 0);
         let retained = MetricBuilder::new(&self.metrics).gauge("writer_retained_bytes", 0);
         let mut count = 0_u64;
         while let Some(batch) = data.next().await {
