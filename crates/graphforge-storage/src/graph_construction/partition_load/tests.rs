@@ -445,3 +445,39 @@ fn fixed_partition_finish_is_schedule_independent_across_worker_counts() {
         }
     }
 }
+
+#[test]
+fn failed_consume_cannot_admit_a_replacement_partition() {
+    let shared = Shared::<()> {
+        state: Mutex::new(State {
+            next: 3,
+            released: 0,
+            ready: BTreeMap::new(),
+            live_workers: 3,
+        }),
+        changed: Condvar::new(),
+        stop: AtomicBool::new(false),
+    };
+    let error = shared
+        .release_consumed(Err(storage("injected consume failure")))
+        .unwrap_err();
+    assert!(error.to_string().contains("injected consume failure"));
+    {
+        let state = shared.lock();
+        assert_eq!(
+            state.released, 0,
+            "a failed consume must retain the full dispatch window"
+        );
+        assert!(
+            state.next >= state.released + 3,
+            "replacement work must remain inadmissible"
+        );
+    }
+    shared.release_consumed(Ok(())).unwrap();
+    let state = shared.lock();
+    assert_eq!(state.released, 1);
+    assert!(
+        state.next < state.released + 3,
+        "successful consumption admits the next partition"
+    );
+}
