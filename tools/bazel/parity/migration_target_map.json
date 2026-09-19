@@ -934,6 +934,16 @@
     },
     {
       "package": "graphforge-exec",
+      "target": "merge_scaling",
+      "class": "bench",
+      "source": "crates/graphforge-exec/benches/merge_scaling.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "#1485 Divan MERGE scaling benchmark; Cargo diagnostics surface"
+    },
+    {
+      "package": "graphforge-exec",
       "target": "merge_scaling_bench",
       "class": "integration-test",
       "source": "crates/graphforge-exec/tests/merge_scaling_bench.rs",
@@ -971,6 +981,16 @@
       "bazel_label": "//crates/graphforge-exec:read_execution",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "traversal_scaling",
+      "class": "bench",
+      "source": "crates/graphforge-exec/benches/traversal_scaling.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "#1485 Divan traversal scaling benchmark; Cargo diagnostics surface"
     },
     {
       "package": "graphforge-exec",
