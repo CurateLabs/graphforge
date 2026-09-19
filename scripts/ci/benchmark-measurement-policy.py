@@ -130,9 +130,7 @@ def load_inventory(root: Path) -> dict:
         if owner_issue is not None and type(owner_issue) is not int:
             raise PolicyError(f"{label}: owner_issue must be an integer or null")
         allowed = site.get("allowed_signals", [])
-        if not isinstance(allowed, list) or not all(
-            isinstance(item, str) for item in allowed
-        ):
+        if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
             raise PolicyError(f"{label}: allowed_signals must be a string array")
         unknown = sorted(set(allowed) - {name for name, _ in SIGNAL_PATTERNS})
         if unknown:
@@ -192,9 +190,7 @@ def validate(root: Path) -> tuple[dict, list[str]]:
             continue
         site = sites.get(path)
         if site is None:
-            joined = ", ".join(
-                f"{signal}@{lines[0]}" for signal, lines in sorted(signals.items())
-            )
+            joined = ", ".join(f"{signal}@{lines[0]}" for signal, lines in sorted(signals.items()))
             errors.append(
                 f"{path}: unclassified benchmark measurement machinery ({joined}); "
                 "add a reviewed inventory entry or migrate to BenchExec/Divan"
