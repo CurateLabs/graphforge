@@ -1168,6 +1168,7 @@ fn reset_partial_generation(generations: &Path, generation_uuid: Uuid) -> Result
             "configuration.json",
             "ontology.json",
             "ontology_composition.json",
+            "research_metadata.json",
         ] {
             let path = workspace.join(family);
             if path.exists() {
@@ -1230,6 +1231,12 @@ fn validate_partial_workspace_participants(participants: &Path) -> Result<(), Gf
                 "configuration.json",
                 "ontology.json",
                 "ontology_composition.json",
+            ]
+        || names
+            == [
+                "configuration.json",
+                "ontology.json",
+                "research_metadata.json",
             ];
     if !valid {
         return Err(unsupported(

@@ -637,7 +637,7 @@ fn has_exact_pristine_layout(target: &Path, generation_uuid: Uuid) -> Result<boo
     }
     Ok(
         directory_names(&participants.join("workspace"))?
-            == ["configuration.json", "ontology.json"],
+            == ["configuration.json", "ontology.json", "research_metadata.json"],
     )
 }
 

@@ -86,7 +86,10 @@ test("research metadata and discovery stay metadata-only across reopen", () => {
 
     const reopened = new GraphForge(firstRoot);
     assert.equal(reopened.researchProjectMetadata().title, "Arabian Nights");
-    assert.equal(reopened.researchProjectSummary().metadata.title, "Arabian Nights");
+    assert.equal(
+      reopened.researchProjectSummary().metadata.title,
+      "Arabian Nights",
+    );
 
     const second = new GraphForge(secondRoot);
     second.updateResearchMetadata({
