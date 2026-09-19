@@ -84,3 +84,44 @@ fn current_parent_phase_checkpoint_refuses_omission_without_rewrite() {
     );
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn seal_batch_flushes_once_per_batch_and_counts_only_required_barriers() {
+    let root = TempDir::new().unwrap();
+    let directory = StableDirectory::open(root.path()).unwrap();
+    let mut evidence = GraphConstructionEvidence::default();
+
+    let mut batch = SealDirectoryBatch::new(&directory);
+    // An empty batch costs nothing: no barrier, no count.
+    batch.flush(&mut evidence).unwrap();
+    assert_eq!(evidence.merge_directory_fsync_operations, 0);
+
+    // Names linked in the batch become durable with one flush, and the
+    // count reports batches, not marked names.
+    let target = "part-identities-p00000.run";
+    let temp = artifact_temp(target);
+    std::fs::write(root.path().join(&temp), b"payload").unwrap();
+    let file = std::fs::File::open(root.path().join(&temp)).unwrap();
+    let identity = file_identity(&file).unwrap();
+    drop(file);
+    directory
+        .install_child(temp.as_os_str(), identity, OsStr::new(target))
+        .unwrap();
+    batch.mark();
+    batch.mark();
+    batch.flush(&mut evidence).unwrap();
+    assert_eq!(evidence.merge_directory_fsync_operations, 1);
+    // Idempotent: a second flush without new names issues no barrier.
+    batch.flush(&mut evidence).unwrap();
+    assert_eq!(evidence.merge_directory_fsync_operations, 1);
+
+    // A dropped batch with pending names still makes them durable, without
+    // counting (the drop path cannot report an error anywhere better).
+    let mut batch = SealDirectoryBatch::new(&directory);
+    batch.mark();
+    drop(batch);
+    assert_eq!(evidence.merge_directory_fsync_operations, 1);
+    // The name linked above is visible; the durability of the flush is what
+    // the crash matrix asserts through recovery behavior.
+    assert!(root.path().join(target).exists());
+}

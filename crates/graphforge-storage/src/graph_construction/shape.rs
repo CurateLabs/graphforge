@@ -11,20 +11,20 @@ use super::{
     DetailCodec, DetailValidator, Digest, EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, File, GfError,
     GraphConstructionEvidence, GraphConstructionSession, GraphConstructionState, HashingWriter,
     IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, IoCounter, NODE_DETAIL_WIDTH, OsStr,
-    RESOLVED_ENDPOINT_WIDTH, RESOLVED_SURROGATE_OFFSET, Read, ReadWork, SHAPE_INTENT, Sha256,
-    ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write, account_cache_release,
-    account_fixed_read_operations, account_fixed_write_operations, account_merge_read,
-    account_merge_write, account_probe_work, account_sequential_read, account_sequential_write,
-    artifact_temp, authenticate_artifact, build_runtime_catalog, canonical_artifact_target,
-    checked_evidence_sum, combine_cache_cleanup, compact_parent_surrogate_tails,
-    construction_failpoint, decode_bounded, decode_shape_intent, file_identity, file_link_count,
-    hex, install_control, is_canonical_lower_hex, is_canonical_sha256,
-    merge_cache_release_evidence, open_counted_fixed_reader, property_free_schema_sha256,
-    read_run_record, receipt_for_existing, receipt_for_existing_with_work,
-    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
-    release_counted_reader_cache, replace_checkpoint_control, replace_control, sha256,
-    shape_authority_sha256, shape_publication_failure, storage, unlink_shape_artifact,
-    validate_parquet_metadata,
+    RESOLVED_ENDPOINT_WIDTH, RESOLVED_SURROGATE_OFFSET, Read, ReadWork, SHAPE_INTENT,
+    SealDirectoryBatch, Sha256, ShapeIntent, StableDirectory, Uuid, UuidIndexKind, Write,
+    account_cache_release, account_fixed_read_operations, account_fixed_write_operations,
+    account_merge_read, account_merge_write, account_probe_work, account_sequential_read,
+    account_sequential_write, artifact_temp, authenticate_artifact, build_runtime_catalog,
+    canonical_artifact_target, checked_evidence_sum, combine_cache_cleanup,
+    compact_parent_surrogate_tails, construction_failpoint, decode_bounded, decode_shape_intent,
+    file_identity, file_link_count, hex, install_control, install_control_batched,
+    is_canonical_lower_hex, is_canonical_sha256, merge_cache_release_evidence,
+    open_counted_fixed_reader, property_free_schema_sha256, read_run_record, receipt_for_existing,
+    receipt_for_existing_with_work, record_shape_artifact_install, reject_cancelled,
+    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
+    replace_control, sha256, shape_authority_sha256, shape_publication_failure, storage,
+    unlink_shape_artifact, validate_parquet_metadata,
 };
 use std::io::Seek;
 
@@ -858,6 +858,31 @@ pub(super) fn persist_shape_receipt(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
 ) -> Result<(), GfError> {
+    persist_shape_receipt_with(root, receipt, &mut |root, target, value| {
+        install_control(root, target, value)
+    })
+}
+
+/// [`persist_shape_receipt`] whose containing-directory durability is
+/// provided by the seal batch's flush instead of two per-call directory
+/// syncs (#1452). The receipt body is fsynced before its name is linked;
+/// a crash before the flush loses at most the name, which the incomplete
+/// shape cleanup already tolerates.
+pub(super) fn persist_shape_receipt_in_batch(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+    batch: &mut SealDirectoryBatch,
+) -> Result<(), GfError> {
+    persist_shape_receipt_with(root, receipt, &mut |root, target, value| {
+        install_control_batched(root, target, value, batch)
+    })
+}
+
+fn persist_shape_receipt_with(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+    install: &mut dyn FnMut(&StableDirectory, &str, &ArtifactReceipt) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     if is_shape_artifact_name(&receipt.name) || canonical_artifact_target(&receipt.name) {
         let capability_name = shape_receipt_name(&receipt.name);
         match root.open_child_file(OsStr::new(&capability_name)) {
@@ -871,7 +896,7 @@ pub(super) fn persist_shape_receipt(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                install_control(root, &capability_name, receipt)?;
+                install(root, &capability_name, receipt)?;
             }
             Err(error) => return Err(storage(error)),
         }

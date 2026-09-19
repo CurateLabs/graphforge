@@ -25,14 +25,14 @@ use super::partition_load::{
 use super::partition_records::PartitionRecords;
 use super::{
     ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
-    IoCounter, account_cache_release, account_fixed_write_operations, account_merge_read_bytes,
-    account_merge_write_bytes, account_sequential_write, artifact_temp,
+    IoCounter, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
+    account_merge_read_bytes, account_merge_write_bytes, account_sequential_write, artifact_temp,
     cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, hex, injected_input_release_failure,
-    open_fixed_reader, persist_shape_receipt, read_run_record, record_shape_artifact_install,
-    reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
-    shape_publication_io_failure, unlink_shape_artifact, unlink_writer_capability, uuid_column,
-    uuid_value,
+    open_fixed_reader, persist_shape_receipt, persist_shape_receipt_in_batch, read_run_record,
+    record_shape_artifact_install, reject_cancelled, run_record_bytes, sha256,
+    shape_publication_failure, shape_publication_io_failure, unlink_shape_artifact,
+    unlink_writer_capability, uuid_column, uuid_value,
 };
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
@@ -189,6 +189,7 @@ impl SpillWriter {
         mut self,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
+        batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
         self.writer.flush().map_err(super::storage)?;
         self.writer
@@ -223,9 +224,12 @@ impl SpillWriter {
             OsStr::new(&self.name),
         )
         .map_err(super::storage)?;
-        root.sync().map_err(super::storage)?;
+        // The artifact's name becomes durable with the batch (#1452); the
+        // per-spill directory sync it replaces is what serialized every
+        // family and partition on one inode.
+        batch.mark();
         construction_failpoint("shape.partition_spill.after_install");
-        persist_shape_receipt(root, &receipt)?;
+        persist_shape_receipt_in_batch(root, &receipt, batch)?;
         record_shape_artifact_install(evidence, &receipt)?;
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_fsync_operations = evidence
@@ -330,6 +334,7 @@ impl FixedSpillWriter {
         mut self,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
+        batch: &mut SealDirectoryBatch,
     ) -> Result<ArtifactReceipt, GfError> {
         self.flush_buffer()?;
         self.writer.flush().map_err(super::storage)?;
@@ -362,9 +367,12 @@ impl FixedSpillWriter {
             OsStr::new(&self.name),
         )
         .map_err(super::storage)?;
-        root.sync().map_err(super::storage)?;
+        // The artifact's name becomes durable with the batch (#1452); the
+        // per-spill directory sync it replaces is what serialized every
+        // family and partition on one inode.
+        batch.mark();
         construction_failpoint("shape.partition_spill.after_install");
-        persist_shape_receipt(root, &receipt)?;
+        persist_shape_receipt_in_batch(root, &receipt, batch)?;
         record_shape_artifact_install(evidence, &receipt)?;
         account_fixed_write_operations(&receipt, evidence)?;
         evidence.merge_fsync_operations = evidence
@@ -506,13 +514,21 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
     }
 
     /// Flush, fsync and install every open spill.
+    ///
+    /// The spills seal into one directory-durability batch (#1452): every
+    /// artifact and receipt rename lands in the partition directory during
+    /// the loop, and one flush at the end makes the whole batch durable
+    /// together. A crash before the flush is the incomplete-shape state the
+    /// recovery contract already cleans and re-runs.
     pub(super) fn seal(&mut self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
+        let mut batch = SealDirectoryBatch::new(self.root);
         for partition in 0..self.spills.len() {
             if let Some(spill) = self.spills[partition].take() {
-                self.sealed[partition] = Some(spill.seal(self.root, evidence)?);
+                self.sealed[partition] = Some(spill.seal(self.root, evidence, &mut batch)?);
             }
         }
-        Ok(())
+        construction_failpoint("shape.partition_spill.before_flush");
+        batch.flush(evidence)
     }
 
     /// Sort each partition and concatenate them into one globally ordered run.
@@ -1041,7 +1057,11 @@ impl<'a> RowRangePartitioner<'a> {
     }
 
     /// Seal every open row spill.
+    ///
+    /// Same batched durability as the fixed-width seal: the whole group of
+    /// row spills shares one directory flush (#1452).
     fn seal(&mut self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
+        let mut batch = SealDirectoryBatch::new(self.root);
         for partition in 0..self.spills.len() {
             let Some(spill) = self.spills[partition].take() else {
                 continue;
@@ -1060,10 +1080,11 @@ impl<'a> RowRangePartitioner<'a> {
                     identity,
                     writer: buffered,
                 }
-                .seal(self.root, evidence)?,
+                .seal(self.root, evidence, &mut batch)?,
             );
         }
-        Ok(())
+        construction_failpoint("shape.partition_spill.before_flush");
+        batch.flush(evidence)
     }
 
     /// Sort each partition and write one globally ordered Parquet artifact.

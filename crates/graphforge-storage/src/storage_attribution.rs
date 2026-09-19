@@ -221,10 +221,13 @@ impl ConstructionPhaseAttribution {
             PhaseIoTotals {
                 fsync_calls: checked_add(
                     checked_add(
-                        evidence.fsync_operations,
-                        evidence.recovery_checkpoint_fsync_operations,
+                        checked_add(
+                            evidence.fsync_operations,
+                            evidence.recovery_checkpoint_fsync_operations,
+                        )?,
+                        evidence.merge_fsync_operations,
                     )?,
-                    evidence.merge_fsync_operations,
+                    evidence.merge_directory_fsync_operations,
                 )?,
                 ..Default::default()
             },

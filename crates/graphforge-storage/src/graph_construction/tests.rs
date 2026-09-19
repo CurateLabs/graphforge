@@ -1013,8 +1013,12 @@ fn shape_inventory_and_evidence_commit_recover_without_double_counting() {
         evidence
     }
     const ROW_INSTALL: &str = "shape.row_partition.after_install";
-    const FAILPOINTS: [&str; 5] = [
+    const FAILPOINTS: [&str; 6] = [
         "shape.partition_spill.after_install",
+        // The batch boundary (#1452): renames have landed in the directory
+        // but the batch flush that makes them durable has not run. Recovery
+        // must classify and clean the shape exactly as at after_install.
+        "shape.partition_spill.before_flush",
         "shape.partition_output.after_install",
         ROW_INSTALL,
         "shape.after_complete_inventory",
@@ -1282,4 +1286,41 @@ fn collapsed_endpoint_splitters_are_still_refused() {
     assert!(error.contains("endpoints distinct keys"), "{error}");
     assert!(error.contains("skewed"), "{error}");
     assert!(error.contains("2048 of 2048"), "{error}");
+}
+
+#[test]
+fn seal_batches_report_one_directory_barrier_per_seal_not_per_spill() {
+    // 64 endpoint partitions hold 32 keys each. Sealing one spill used to
+    // cost three directory syncs on the partition directory's inode, all
+    // serialized against every other spill's (#1452); the batched seal
+    // counts its flushes, which are one per seal regardless of how many
+    // spills the batch makes durable.
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 8_043);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let GraphConstructionSession {
+        root: session_root,
+        checkpoint,
+        ..
+    } = &mut session;
+    let before = checkpoint.evidence.merge_directory_fsync_operations;
+    let output = route_endpoint_fixture(
+        session_root,
+        &endpoint_fixture_plan(),
+        &[],
+        1,
+        &mut checkpoint.evidence,
+    )
+    .unwrap();
+    assert!(output.is_some());
+    // One seal of 64 spills flushes once. `finish_optional` seals again with
+    // nothing open, which costs nothing.
+    assert_eq!(
+        checkpoint.evidence.merge_directory_fsync_operations - before,
+        1,
+        "one directory barrier per seal batch"
+    );
 }
