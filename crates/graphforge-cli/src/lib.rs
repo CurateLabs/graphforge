@@ -28,6 +28,7 @@ pub mod hub_fixture_artifacts;
 mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
+mod research_cli;
 mod storage_attribution_cli;
 mod verify_cli;
 
@@ -305,6 +306,11 @@ enum Command {
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
+    },
+    /// Research Project metadata and bounded local discovery.
+    Research {
+        #[command(subcommand)]
+        command: research_cli::ResearchCommand,
     },
     /// Explicit multi-mutation transactions (Rust-owned lifecycle).
     Transaction {
@@ -1353,6 +1359,11 @@ fn run_with_allocation(
         }
         Command::Ontology { command } => {
             return ontology_cli::run_ontology(&mut graph, command, cli.json, output).map(|()| 0);
+        }
+        Command::Research { command } => {
+            return research_cli::run_research(&mut graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
         }
         command => command,
     };

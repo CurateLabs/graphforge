@@ -614,6 +614,8 @@ pub fn empty_workspace_participants() -> Result<Vec<ProjectParticipant>, GfError
             WORKSPACE_ONTOLOGY_FAMILY,
             WorkspaceOntology::none().to_canonical_json()?,
         ),
+        crate::workspace_research_metadata::WorkspaceResearchMetadata::empty()
+            .to_project_participant()?,
     ])
 }
 

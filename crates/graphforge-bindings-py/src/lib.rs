@@ -15,6 +15,7 @@ mod ontology;
 mod providers;
 mod query;
 mod recorded;
+mod research_project;
 
 pub use analyst::PyGraphScaleIndexProfile;
 pub use analyst::PyInvocationDescriptor;
