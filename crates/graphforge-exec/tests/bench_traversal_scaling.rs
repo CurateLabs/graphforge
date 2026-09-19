@@ -18,7 +18,8 @@
 //! checkable. The non-ignored [`io_smoke`] test pins it on a tiny fixture every
 //! CI run; the `#[ignore]`, release-only scaling tests
 //! ([`scaling_localized_traversal_is_neighborhood_proportional`] and the
-//! scattered worst-case counterpart) run via `make bench-traversal`.
+//! scattered worst-case counterpart) assert deterministic I/O shape.
+//! Wall-clock sampling lives in `benches/traversal_scaling.rs` (`make bench-traversal`).
 //!
 //! Counter-soundness constraints honored here (per the #767 completeness audit):
 //! the Miss baseline runs through `VarLenExpandExec`/`ScanBuildAdjacencyProvider`
@@ -329,60 +330,14 @@ fn io_smoke_index_hit_issues_no_full_edge_scan() {
 }
 
 // ---------------------------------------------------------------------------
-// Scaling benchmark (#[ignore], release-only): traversal edge I/O is
-// independent of the total edge count, with the index warm.
+// Scaling gate (#[ignore], release-only): traversal edge I/O is independent of
+// the total edge count, with the index warm.
 // ---------------------------------------------------------------------------
 
-/// Median wall-clock of `runs` traversals (`*1..=hops`) under `provider`,
-/// reusing the provider across runs so its CSR view cache stays warm.
-async fn median_expand(
-    dir: &Path,
-    provider: &Arc<dyn AdjacencyProvider>,
-    seeds: &[u64],
-    hops: u16,
-    runs: usize,
-) -> std::time::Duration {
-    let node = make_node(dir, 1, Some(hops));
-    let mut samples = Vec::with_capacity(runs);
-    for _ in 0..runs {
-        let ctx = SessionContext::new();
-        let batch = RecordBatch::try_new(
-            frontier_schema(),
-            vec![Arc::new(UInt64Array::from(seeds.to_vec()))],
-        )
-        .unwrap();
-        let input: Arc<dyn ExecutionPlan> = ctx
-            .read_batch(batch)
-            .unwrap()
-            .create_physical_plan()
-            .await
-            .unwrap();
-        let exec = Arc::new(VarLenExpandExec::new(
-            &node,
-            input,
-            Arc::clone(provider),
-            dir.to_path_buf(),
-            OntologyMode::Strict,
-        ));
-        let start = std::time::Instant::now();
-        let _ = collect(exec, ctx.task_ctx()).await.unwrap();
-        samples.push(start.elapsed());
-    }
-    samples.sort_unstable();
-    samples[samples.len() / 2]
-}
-
-/// One scale's measurements over a warm index: the `*1..3` I/O snapshot (the
-/// edge-count-independent signal — both edge AND node reads are now
-/// neighborhood-proportional, #830 + #838) plus median wall-clock per hop count
-/// (reported for context; timing in CI is noisy so it is not asserted).
 struct ScaleResult {
     edges: usize,
     nodes: usize,
     io: io_stats::IoSnapshot,
-    h1: std::time::Duration,
-    h2: std::time::Duration,
-    h3: std::time::Duration,
 }
 
 async fn bench_scale(n: usize, fan_out: usize, num_seeds: usize, localized: bool) -> ScaleResult {
@@ -394,10 +349,6 @@ async fn bench_scale(n: usize, fan_out: usize, num_seeds: usize, localized: bool
     };
     build_adjacency_index(dir.path(), TS).unwrap();
     let provider = persistent(dir.path());
-    // Warm the CSR view cache (and the OS page cache) before measuring.
-    let _ = median_expand(dir.path(), &provider, &seeds, 1, 1).await;
-
-    // The edge-count-independent signal: traversed edge records for *1..3.
     let node3 = make_node(dir.path(), 1, Some(3));
     let (_, io) = run_measured(dir.path(), &node3, Arc::clone(&provider), &seeds).await;
 
@@ -405,9 +356,6 @@ async fn bench_scale(n: usize, fan_out: usize, num_seeds: usize, localized: bool
         edges: n * fan_out,
         nodes: n,
         io,
-        h1: median_expand(dir.path(), &provider, &seeds, 1, 5).await,
-        h2: median_expand(dir.path(), &provider, &seeds, 2, 5).await,
-        h3: median_expand(dir.path(), &provider, &seeds, 3, 5).await,
     }
 }
 
@@ -425,28 +373,21 @@ fn env_usize(key: &str, default: usize) -> usize {
     }
 }
 
-fn ms(d: std::time::Duration) -> f64 {
-    d.as_secs_f64() * 1e3
-}
-
 fn print_row(label: &str, t: &ScaleResult) {
     println!(
-        "| {label} | {} | {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.2} |",
+        "| {label} | {} | {} | {} | {} | {} | {} |",
         t.edges,
         t.nodes,
         t.io.edge_filtered_rows,
         t.io.edge_scanned_rows,
         t.io.node_filtered_rows,
         t.io.node_scanned_rows,
-        ms(t.h1),
-        ms(t.h2),
-        ms(t.h3),
     );
 }
 
 /// The headline result (#838): a **localized** k-hop traversal over a warm index
 /// reads — and decodes — work proportional to its neighborhood, **independent of
-/// total graph size**. Wall-clock is therefore ~flat across a 10× growth.
+/// total graph size**.
 ///
 /// `node_filtered_rows`/`edge_filtered_rows` (rows *materialized*) are identical
 /// across scales by the ring's vertex-transitivity. The decode-cost proof is
@@ -456,9 +397,10 @@ fn print_row(label: &str, t: &ScaleResult) {
 /// also bounds scattered node hydration; permuted edge ids remain page-scan
 /// bound (see [`scaling_scattered_node_ids_are_pruned`]).
 ///
-/// Run via `make bench-traversal` (release). Override scale with
-/// `GF_BENCH_N1` / `GF_BENCH_N2` (node counts, fan-out 16).
-#[ignore = "scaling benchmark — run via `make bench-traversal` (release)"]
+/// Run via `cargo test -p graphforge-exec --release --test bench_traversal_scaling -- --ignored`.
+/// Override scale with `GF_BENCH_N1` / `GF_BENCH_N2` (node counts, fan-out 16).
+/// Wall-clock evidence: `make bench-traversal`.
+#[ignore = "release-only I/O scaling gate — see module docs"]
 #[test]
 fn scaling_localized_traversal_is_neighborhood_proportional() {
     let _g = GUARD.lock().unwrap(); // run_measured touches the global counters
@@ -477,15 +419,14 @@ fn scaling_localized_traversal_is_neighborhood_proportional() {
         "\n## Localized traversal scaling (#838, fan-out {fan_out}, 8 clustered seeds, warm index)\n"
     );
     println!(
-        "| scale | edges | nodes | edge_filtered | edge_scanned | node_filtered | \
-         node_scanned | *1..1 ms | *1..2 ms | *1..3 ms |"
+        "| scale | edges | nodes | edge_filtered | edge_scanned | node_filtered | node_scanned |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|");
     print_row("1M", &small);
     print_row("10M", &large);
     println!(
-        "\n_Generated by `cargo test -p graphforge-exec --release --test bench_traversal_scaling \
-         -- --ignored --nocapture --test-threads=1`._\n"
+        "\n_I/O gate: `cargo test -p graphforge-exec --release --test bench_traversal_scaling \
+         -- --ignored --nocapture --test-threads=1`. Timing: `make bench-traversal`._\n"
     );
 
     // No full scan of either table on a Hit.
@@ -525,7 +466,7 @@ fn scaling_localized_traversal_is_neighborhood_proportional() {
 /// row selection keeps node decode proportional to the reached set; edge decode
 /// remains page-scan bound. Rows materialized stay neighborhood-proportional
 /// and neither table uses a full-read fallback.
-#[ignore = "scaling benchmark — run via `make bench-traversal` (release)"]
+#[ignore = "release-only I/O scaling gate — see module docs"]
 #[test]
 fn scaling_scattered_node_ids_are_pruned() {
     let _g = GUARD.lock().unwrap();
@@ -542,10 +483,9 @@ fn scaling_scattered_node_ids_are_pruned() {
 
     println!("\n## Scattered traversal (worst case: 64 spread seeds, permuted edges)\n");
     println!(
-        "| scale | edges | nodes | edge_filtered | edge_scanned | node_filtered | \
-         node_scanned | *1..1 ms | *1..2 ms | *1..3 ms |"
+        "| scale | edges | nodes | edge_filtered | edge_scanned | node_filtered | node_scanned |"
     );
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|");
     print_row("1M", &small);
     print_row("10M", &large);
     println!();

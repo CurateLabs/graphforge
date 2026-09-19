@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "59cee31940b775d6cd3787535e126395d5fec4a06a704df337dde60d164e7e31",
+  "sha256": "c115978db91209335e4a26a58f03706dd3fdd09958a325a4f2fc9214f64ca173",
   "entries": [
     {
       "name": "graphforge-api",
@@ -954,6 +954,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "codspeed-divan-compat",
+          "req": "^5",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {

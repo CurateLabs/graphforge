@@ -17,7 +17,6 @@ SCAN_SUFFIXES = (
     "/benches/",
     "/tests/bench_",
     "/tests/merge_scaling_bench.rs",
-    "/tests/bench_traversal_scaling.rs",
     "/tests/persistent_adjacency.rs",
 )
 

@@ -40,28 +40,20 @@
       "notes": "Divan owns durable walltime benches; ingest_generation nested wall/CPU and GF_INGEST_FLOOR_GATE product-counter mode migrate under #1476."
     },
     {
-      "path": "crates/graphforge-exec/tests/bench_traversal_scaling.rs",
+      "path": "crates/graphforge-exec/benches/traversal_scaling.rs",
       "boundary": "in_process",
-      "authority": "custom",
-      "disposition": "migrate",
-      "owner_issue": 1485,
-      "allowed_signals": [
-        "custom_wall_clock",
-        "homegrown_statistics",
-        "manual_sampling_loop"
-      ],
-      "notes": "Traversal scaling uses median_expand and Instant sampling; migrate to Divan under #1485."
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "Traversal scaling wall-clock workloads; deterministic I/O gates stay in bench_traversal_scaling integration tests."
     },
     {
-      "path": "crates/graphforge-exec/tests/merge_scaling_bench.rs",
+      "path": "crates/graphforge-exec/benches/merge_scaling.rs",
       "boundary": "in_process",
-      "authority": "custom",
-      "disposition": "migrate",
-      "owner_issue": 1485,
-      "allowed_signals": [
-        "custom_wall_clock"
-      ],
-      "notes": "MERGE scaling uses per-sample Instant timing; migrate to Divan under #1485."
+      "authority": "divan",
+      "disposition": "framework_authority",
+      "owner_issue": null,
+      "notes": "Node MERGE scaling wall-clock workloads; topology-read bound stays in merge_scaling_bench integration tests."
     },
     {
       "path": "crates/graphforge-exec/tests/persistent_adjacency.rs",

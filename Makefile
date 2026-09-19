@@ -311,8 +311,11 @@ codspeed-build-walltime:  ## Build only M6 durable I/O benchmarks in walltime mo
 codspeed-run:  ## Run the CodSpeed benchmarks locally (requires the codspeed CLI)
 	codspeed run --mode simulation -- cargo codspeed run
 
-bench-traversal:  ## Run the #767 traversal scaling benchmark (release, manual; see benchmarks/traversal_scaling.md)
-	cargo test -p graphforge-exec --release --test bench_traversal_scaling -- --ignored --nocapture --test-threads=1
+bench-traversal:  ## Run the #767 traversal scaling Divan benchmarks (release, manual; see benchmarks/traversal_scaling.md)
+	cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
+
+bench-merge-scaling:  ## Run the #1400 node MERGE scaling Divan benchmarks (release, manual)
+	cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 
 bench-fixed-hop-limit:  ## Run the #1248 fixed-hop LIMIT benchmark (release, 1M/10M edges)
 	cargo test -p graphforge-api --release --test fixed_hop_limit release_fixed_hop_limit_1m_10m -- --ignored --nocapture --test-threads=1

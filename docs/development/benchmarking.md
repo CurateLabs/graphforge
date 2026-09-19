@@ -130,6 +130,8 @@ cargo bench -p graphforge-core --bench canonical
 cargo bench -p graphforge-cypher --bench compile
 cargo bench -p graphforge-storage --bench m6_storage
 cargo bench -p graphforge-storage --bench m6_storage_io -- --sample-count 1
+cargo bench -p graphforge-exec --bench traversal_scaling -- --sample-count 5
+cargo bench -p graphforge-exec --bench merge_scaling -- --sample-count 5
 ```
 
 ## The ingest floor gate is a ratchet
@@ -150,6 +152,10 @@ execution scope, denominator and units — do not transfer a number between
 scopes. The gate's judgment is unit-tested in `tests/ingest_gate_verdict.rs`:
 a deliberate regression and a deliberate improvement must each fail in the
 expected direction before a clean pass is trusted.
+
+Manual scaling studies also expose Makefile entry points (`make bench-traversal`,
+`make bench-merge-scaling`). Divan test mode (`--sample-count 1`) exercises every
+case without treating the output as performance evidence.
 
 ## M6 storage evidence
 
@@ -202,5 +208,6 @@ tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
 ## Related manual benchmarks
 
 The scaling studies under `benchmarks/` (`make bench-traversal`,
-`make bench-m4-entry`, and the fixed-hop LIMIT matrices) remain hardware-specific
-manual evidence. They are unrelated to the continuous CodSpeed lane.
+`make bench-merge-scaling`, `make bench-m4-entry`, and the fixed-hop LIMIT
+matrices) remain hardware-specific manual evidence. They are unrelated to the
+continuous CodSpeed lane.
