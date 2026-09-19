@@ -955,17 +955,22 @@ fn assess(f: Fixture) {
     construct(&source, f, &nodes, &edges);
     let construction_ns = started.elapsed().as_nanos();
     let graph = GraphForge::new(source.to_str()).unwrap();
-    let unindexed = graph.storage_attribution().unwrap();
-    assert_eq!(
-        unindexed.categories[&graphforge_storage::ArtifactCategory::Adjacency].allocated_bytes,
-        0
+    // ADR 0037: construction publishes the adjacency CSR with the generation, so
+    // a freshly constructed project is already indexed. This previously asserted
+    // the category was empty, which was true only while adjacency did not exist
+    // until some reader built it.
+    let constructed = graph.storage_attribution().unwrap();
+    assert!(
+        constructed.categories[&graphforge_storage::ArtifactCategory::Adjacency].allocated_bytes
+            > 0,
+        "construction must publish adjacency with the generation (ADR 0037)"
     );
     validate_storage_budgets(
         Fixture {
-            adjacency: false,
+            adjacency: true,
             ..f
         },
-        &unindexed,
+        &constructed,
     );
     // Candidate codecs inspect construction's published payload generation.
     // Adjacency publication may switch to a generation-owned graph tree.
@@ -983,7 +988,12 @@ fn assess(f: Fixture) {
     let identity_experiment = identity_padding_experiment(&source);
     let manifest_experiment = bucket_manifest_experiment(&source);
     if f.heterogeneous {
-        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 352);
+        // 352 before ADR 0037. Construction now publishes the adjacency CSR with
+        // the generation, so `indexes/adjacency/**` are graph files, the manifest
+        // Merkle tree covers them, and the authenticated walk visits their leaves
+        // and the interior nodes above them. The count is a pinned observation of
+        // that tree's shape, not an invariant, so it moves when the file set does.
+        assert_eq!(manifest_experiment["authenticated_lookups_checked"], 373);
         assert!(
             manifest_experiment["source_manifest_allocated_bytes"]
                 .as_u64()
@@ -998,18 +1008,27 @@ fn assess(f: Fixture) {
     let adjacency_experiment = f.adjacency.then(|| adjacency_codec_experiment(&source));
     let storage = graph.storage_attribution().unwrap();
     storage.validate_for_qualification().unwrap();
-    validate_storage_budgets(f, &storage);
-    assert_eq!(
+    validate_storage_budgets(
+        Fixture {
+            adjacency: true,
+            ..f
+        },
+        &storage,
+    );
+    // Before ADR 0037 this asserted presence == `f.adjacency`, because an
+    // unbuilt project carried no adjacency. Construction now always publishes
+    // it, so the remaining property is that an explicit rebuild does not
+    // remove it and does not push the category past its budget.
+    assert!(
         storage.categories[&graphforge_storage::ArtifactCategory::Adjacency].allocated_bytes > 0,
-        f.adjacency,
-        "unbuilt and built adjacency are distinct measured capabilities"
+        "a constructed project carries adjacency whether or not it was rebuilt"
     );
     drop(graph);
     let whole_project = whole_project_file_census(&source);
     let fingerprint = round_trip(root.path(), &source, f, &nodes, &edges);
     println!(
         "PERMANENT_STORAGE_ASSESSMENT {}",
-        json!({"fixture":f.name,"nodes":f.nodes,"edges":f.edges,"routes":f.routes,"random_ids":matches!(f.identifiers, Identifiers::Random),"properties":f.properties,"heterogeneous_schemas":f.heterogeneous,"adjacency_built":f.adjacency,"unindexed_allocated_bytes":unindexed.allocated_bytes,"unindexed_categories":unindexed.categories,
+        json!({"fixture":f.name,"nodes":f.nodes,"edges":f.edges,"routes":f.routes,"random_ids":matches!(f.identifiers, Identifiers::Random),"properties":f.properties,"heterogeneous_schemas":f.heterogeneous,"adjacency_built":f.adjacency,"constructed_allocated_bytes":constructed.allocated_bytes,"constructed_categories":constructed.categories,
             "construction_elapsed_ns":construction_ns,"semantic_fingerprint":fingerprint,"whole_project":whole_project,
             "permanent": {"logical_bytes":storage.logical_bytes,"physical_logical_bytes":storage.physical_logical_bytes,"allocated_bytes":storage.allocated_bytes,"physical_objects":storage.physical_objects,"categories":storage.categories},
             "adjacency_codec_experiment":adjacency_experiment,"parquet_experiment":experiment,"identity_padding_experiment":identity_experiment,"manifest_bucket_experiment":manifest_experiment})

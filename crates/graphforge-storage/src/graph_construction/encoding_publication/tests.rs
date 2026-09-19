@@ -351,16 +351,13 @@ fn canonical_encoder_outputs_feed_ordinary_readers_index_and_adjacency() {
     let index = crate::UuidMembershipIndex::open(&graph).unwrap();
     assert_eq!(index.count(crate::UuidIndexKind::Node), 3);
     assert_eq!(index.count(crate::UuidIndexKind::Edge), 2);
-    let adjacency = crate::adjacency::build_adjacency_index_from_inventory(
-        &graph,
-        &graph,
-        Some(&admitted),
-        shape.runtime_catalog_now_micros,
-        &crate::adjacency::AdjacencyBuildOptions::default(),
-        || Ok(()),
-    )
-    .unwrap();
-    assert!(!adjacency.0.is_empty());
+    // ADR 0037: the encoder publishes the adjacency CSR with the generation, so
+    // an ordinary reader reads that index instead of building its own. Rebuilding
+    // here would replace artifacts the checkpoint's identity ledger has already
+    // pinned, and the resume below would then refuse them as changed -- which is
+    // the ledger doing its job, not a defect.
+    let adjacency = crate::adjacency::read_manifest(&graph).unwrap();
+    assert!(!adjacency.is_empty());
 
     drop(session);
     let mut resumed_session = GraphConstructionSession::open_with_semantic_authority(
