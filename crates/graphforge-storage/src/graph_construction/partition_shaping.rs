@@ -22,6 +22,7 @@ use super::partition::{PartitionBalance, PartitionPlan};
 use super::partition_load::{
     PARTITION_LOAD_WORKERS, PartitionLoadCounters, abandon_if_stopped, consume_in_partition_order,
 };
+use super::partition_records::PartitionRecords;
 use super::{
     ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
     IoCounter, account_cache_release, account_fixed_write_operations, account_merge_read_bytes,
@@ -569,7 +570,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             return combine_secondary_cleanup(Err(primary), cleanup, "partition output cleanup");
         }
         let concatenated = (|| -> Result<u64, GfError> {
-            let mut previous: Option<[u8; N]> = None;
+            let mut previous: Option<[u8; 16]> = None;
             let mut written = 0_u64;
             // Distinct keys per partition, counted off the sorted order below
             // (identical keys are contiguous and never span partitions, since
@@ -605,14 +606,14 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                 load_fixed_partition::<N>(root, name, *expected, codec, stop)
             };
             let consume =
-                |job: usize, (records, counters): (Vec<[u8; N]>, PartitionLoadCounters)| {
+                |job: usize, (records, counters): (PartitionRecords<N>, PartitionLoadCounters)| {
                     let partition = jobs[job].0;
                     reject_cancelled(cancelled)?;
                     // The ordered critical section: fold the worker's local
                     // counters into the shared evidence, then write the partition.
                     counters.merge_into(evidence)?;
                     injected_input_release_failure()?;
-                    for record in &records {
+                    for record in records.iter() {
                         // Partition order is key order, so the concatenation is the
                         // global order. Prove it rather than assume it: this is the
                         // invariant the external merge's heap used to provide.
@@ -633,10 +634,10 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
                         } else {
                             keys.record(partition)?;
                         }
-                        let wire = run_record_bytes(record, self.codec)?;
+                        let wire = record;
                         writer.write_all(wire).map_err(super::storage)?;
                         account_merge_write_bytes(evidence, wire.len() as u64)?;
-                        previous = Some(*record);
+                        previous = Some(record[..16].try_into().expect("UUID prefix"));
                         written = written.checked_add(1).ok_or_else(|| {
                             super::storage("partition output record count overflows")
                         })?;
@@ -805,27 +806,23 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 /// comes back as [`PartitionLoadCounters`] for the coordinator to merge, in
 /// partition order, once it consumes the result.
 ///
-/// `expected_records`, when given, pre-sizes the returned `Vec` from the
-/// row count the routing pass already recorded in the balance (#1439),
-/// removing the growth-by-doubling headroom `Vec::new()` would otherwise
-/// carry at the moment a large partition is fully materialized.
+/// Pre-size from the routing row count and spill length. Details retain only
+/// compact wire bytes and one offset per record; other families keep their
+/// fixed-width arrays. Sorting does not change either wire representation.
 fn load_fixed_partition<const N: usize>(
     root: &StableDirectory,
     name: &str,
     expected_records: Option<u64>,
     codec: Option<DetailCodec>,
     stop: &AtomicBool,
-) -> Result<(Vec<[u8; N]>, PartitionLoadCounters), GfError> {
+) -> Result<(PartitionRecords<N>, PartitionLoadCounters), GfError> {
     let (mut reader, counter, spill_bytes) = open_fixed_reader(root, name)?;
     let mut counters = PartitionLoadCounters {
         spill_bytes,
         ..PartitionLoadCounters::default()
     };
-    let loaded = (|| -> Result<Vec<[u8; N]>, GfError> {
-        let mut records = match expected_records.and_then(|count| usize::try_from(count).ok()) {
-            Some(count) => Vec::with_capacity(count),
-            None => Vec::new(),
-        };
+    let loaded = (|| -> Result<PartitionRecords<N>, GfError> {
+        let mut records = PartitionRecords::new(codec, expected_records, spill_bytes)?;
         while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
             records.push(record);
             abandon_if_stopped(records.len(), stop)?;
@@ -844,7 +841,7 @@ fn load_fixed_partition<const N: usize>(
     // The sort key is the whole record, whose leading 16 bytes are the
     // UUID. Records are globally unique on that prefix, so this is a total
     // order and no stability assumption is needed.
-    records.sort_unstable();
+    records.sort();
     Ok((records, counters))
 }
 
@@ -1568,3 +1565,6 @@ mod row_bytes_tests {
         let _ = Field::new("unused", DataType::Null, true);
     }
 }
+
+#[cfg(test)]
+mod tests;
