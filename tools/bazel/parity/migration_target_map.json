@@ -1244,6 +1244,16 @@
     },
     {
       "package": "graphforge-storage",
+      "target": "ingest_gate_verdict",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/ingest_gate_verdict.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:ingest_gate_verdict",
+      "exception_id": null,
+      "notes": "#1476; srcs include the shared benches/ingest_gate.rs module"
+    },
+    {
+      "package": "graphforge-storage",
       "target": "io_stats",
       "class": "integration-test",
       "source": "crates/graphforge-storage/tests/io_stats.rs",
