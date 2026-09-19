@@ -52,9 +52,7 @@ class GdcMeasurementPolicyTests(unittest.TestCase):
             assert_live_diagnostic_boundary(
                 {
                     "certification": False,
-                    "identities": {
-                        "execution_authority": {"caller_supplied_result": True}
-                    },
+                    "identities": {"execution_authority": {"caller_supplied_result": True}},
                 }
             )
         self.assertEqual(error.exception.cause, "caller_supplied_result")
