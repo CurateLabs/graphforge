@@ -280,7 +280,45 @@
     "private_pool_test": "1 passed",
     "equivalence": "same recorded clock and operation; forced 1/4-worker original batches; four shaped content SHA256 receipts and every encoded payload; established nonce-bearing ordinal control excluded; commit and reopen queries pass",
     "limitation": "does not establish cross-session clock determinism or fix #1416",
-    "single_cpu_import_tests": "26 passed on taskset -c 0 after test-only portability edit"
+    "single_cpu_import_tests": "26 passed on taskset -c 0 after test-only portability edit",
+    "rung_fixed_run_digests": {
+      "r1-baseline-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      },
+      "r1-candidate-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      },
+      "r2-baseline-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      },
+      "r2-candidate-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      },
+      "r3-baseline-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      },
+      "r3-candidate-a1": {
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+      }
+    }
   },
   "decision": "Adopt bounded original-batch normalization windows; no input/append overlap or floor qualification claimed",
   "raw_root": "/home/ubuntu/gf-1472-evidence"

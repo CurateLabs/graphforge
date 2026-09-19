@@ -14,6 +14,8 @@ Measurement was predeclared before implementation: Graph500 S18 (262144 nodes,41
 
 The baseline is `9614ffb0`; measured candidate is `1677dca9` on that same base. Later edits only make the forced-worker test fixtures portable to small CI hosts. Measurements freeze both executable hashes; they do not qualify a moving `main` branch.
 
+The four fixed-width shaped-run SHA-256 receipts are also identical across all six full S18 observations, independently of the smaller recorded-clock payload fixture.
+
 All six observations published successfully with 4,456,448 accepted rows and zero rejected rows, exit code zero, equal persisted construction budgets and clean before/during/after contention checks. No observation was excluded.
 
 | Median measurement | Baseline | Candidate |
