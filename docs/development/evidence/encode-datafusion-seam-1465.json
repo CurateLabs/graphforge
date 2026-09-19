@@ -1,0 +1,1085 @@
+{
+  "schema": "graphforge-encode-seam-spike/1",
+  "source_commit": "f5b89e6854b43c34cdfac666a800c219a26b9ec2",
+  "binary_sha256": "7d49d1c27502873f8c80e7be75ff2ce32145590496f238d5f9a2bfaf80f393c9",
+  "seed": 13907095936298285200,
+  "edge_factor": 16,
+  "input_sha256": {
+    "/home/ubuntu/gf-1445-evidence/input/edges.parquet": "30f197e5813adf8e0352d71d4451061686dfb96d267e681524c30344a96a52f4",
+    "/home/ubuntu/gf-1445-evidence/input/nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075"
+  },
+  "limits": {
+    "logical_cpus": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cgroup_memory_bytes": 4294967296,
+    "framework_input_pool_bytes": 67108864
+  },
+  "persisted_construction_budgets": {
+    "max_batch_rows": 65536,
+    "max_batch_bytes": 67108864,
+    "max_chunks": 1000000,
+    "max_run_records": 262144,
+    "merge_fan_in": 32,
+    "max_schema_groups": 256,
+    "max_property_columns": 4096,
+    "max_catalog_entries": 1000000,
+    "max_catalog_decoded_bytes": 268435456,
+    "max_catalog_identifier_bytes": 67108864,
+    "partition_count": 256
+  },
+  "observations": [
+    {
+      "name": "encode-r1-baseline-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 8.068950395099819,
+      "whole_invocation_cpu_s": 7.502345,
+      "cgroup_peak_memory_bytes": 663068672,
+      "canonical_encode_wall_s": 7.627251099,
+      "canonical_encode_process_cpu_s": 7.27,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7270000000,
+        "sampling_uncertainty_ns": 56782,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 7263647721,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 363603378,
+        "wall_ns": 7627251099
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r1-baseline-a1/resume-validate.json",
+          "sha256": "f5eb1ff35c120b0d2f2f381bc3cc87f5e495ac5de277e8c8f7f2254042023617"
+        }
+      ],
+      "raw_sha256": "11e222f58e2aeb7de5f7c9bdd6aed50882eb1944a3d7559642561ce32c1d902b",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "encode-r1-datafusion-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 8.6620071278885,
+      "whole_invocation_cpu_s": 8.117718,
+      "cgroup_peak_memory_bytes": 656715776,
+      "canonical_encode_wall_s": 8.231489571,
+      "canonical_encode_process_cpu_s": 7.88,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7880000000,
+        "sampling_uncertainty_ns": 52682,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5502923527,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2728566044,
+        "wall_ns": 8231489571
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r1-datafusion-a1/resume-validate.json",
+          "sha256": "56a16f36e2d63d4a676e7033573b38c855c605aa6739b0d80b05bace7d3bc5ec"
+        }
+      ],
+      "raw_sha256": "b14f98b5866475cd7bd695d23d1348d02fd2f68ea07f21fde6bf623789f188a9",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "encode-r2-baseline-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 8.039196557132527,
+      "whole_invocation_cpu_s": 7.512865,
+      "cgroup_peak_memory_bytes": 660361216,
+      "canonical_encode_wall_s": 7.593791512,
+      "canonical_encode_process_cpu_s": 7.27,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7270000000,
+        "sampling_uncertainty_ns": 56891,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 7273491430,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 320300082,
+        "wall_ns": 7593791512
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r2-baseline-a1/resume-validate.json",
+          "sha256": "0a74f77340a9b14d015c92a66570fbd9992d8e8e05703335e21b2ce238421e13"
+        }
+      ],
+      "raw_sha256": "f732074fde0cbaf0c4756fd6bb1b9c3d147cead97cd7e558f05889a18d28ba94",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "encode-r2-datafusion-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 8.613808321999386,
+      "whole_invocation_cpu_s": 8.056954,
+      "cgroup_peak_memory_bytes": 650899456,
+      "canonical_encode_wall_s": 8.168943897,
+      "canonical_encode_process_cpu_s": 7.82,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7820000000,
+        "sampling_uncertainty_ns": 51320,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5375429148,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2793514749,
+        "wall_ns": 8168943897
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r2-datafusion-a1/resume-validate.json",
+          "sha256": "f90f0edb6786d77613e37ecf0dc76cfb9bd955ddc9babc3af5f4e058cfaf0011"
+        }
+      ],
+      "raw_sha256": "4f4dece75b8e2a371c5ce99a4da8b2481c1d93fa89fa1de421c2aa33fb69e1a6",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "encode-r3-baseline-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 7.958331230096519,
+      "whole_invocation_cpu_s": 7.384053,
+      "cgroup_peak_memory_bytes": 664494080,
+      "canonical_encode_wall_s": 7.514331052,
+      "canonical_encode_process_cpu_s": 7.15,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7150000000,
+        "sampling_uncertainty_ns": 58341,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 7144791495,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 369539557,
+        "wall_ns": 7514331052
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r3-baseline-a1/resume-validate.json",
+          "sha256": "cec446ba8673011be5ca545bffb129330002524d691f8748a461b5cf6175364b"
+        }
+      ],
+      "raw_sha256": "7ab3bc56f25b253ee9f0aaa3e53fdbe008d34046da933be61d893b12ee44e133",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "encode-r3-datafusion-a1",
+      "boundary": "resume_to_encoded",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 8.472729929955676,
+      "whole_invocation_cpu_s": 7.906214,
+      "cgroup_peak_memory_bytes": 651300864,
+      "canonical_encode_wall_s": 8.038312481,
+      "canonical_encode_process_cpu_s": 7.67,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7670000000,
+        "sampling_uncertainty_ns": 55972,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5291182092,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2747130389,
+        "wall_ns": 8038312481
+      },
+      "encode_io": [
+        {
+          "receipt": "resume-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/encode-r3-datafusion-a1/resume-validate.json",
+          "sha256": "0c006c8d1320e870bb5c76025537f247741c67c28af538f7d839609d0ed0e786"
+        }
+      ],
+      "raw_sha256": "8e962eaafcd97b569603677ed0529dd01917f3795d92d67ca0a54b10d535d60d",
+      "quiet_samples_sha256": "b547624a29b75d8af283b8d718a256a9817d0109768c058ae4ffa5813563ab93"
+    },
+    {
+      "name": "r1-baseline-a1",
+      "boundary": "complete_ingest",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 29.333766884868965,
+      "whole_invocation_cpu_s": 25.490517,
+      "cgroup_peak_memory_bytes": 784982016,
+      "canonical_encode_wall_s": 7.79804104,
+      "canonical_encode_process_cpu_s": 6.71,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 6710000000,
+        "sampling_uncertainty_ns": 50642,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 6704468440,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 1093572600,
+        "wall_ns": 7798041040
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r1-baseline-a1/0-begin.json",
+          "sha256": "07276db22a42c1f5ecc1f634c65073d8f01b0f6f7b0d0377ac9c602d7230cf39"
+        },
+        {
+          "file": "runs/r1-baseline-a1/1-register-parquet.json",
+          "sha256": "58e97581e3b0c2fb00b68cffc47d0e3f0d7d125df8286ef3e42b37129c705c5e"
+        },
+        {
+          "file": "runs/r1-baseline-a1/2-register-parquet.json",
+          "sha256": "d30ea2f5885aae656bc50a4a65a02cefd9fafa6f5dbb49230463323c893e10d9"
+        },
+        {
+          "file": "runs/r1-baseline-a1/3-validate.json",
+          "sha256": "141ae96045051f00a74f128e7d970aaf76db1acff52d5549d89dd4e12331c43a"
+        },
+        {
+          "file": "runs/r1-baseline-a1/4-commit.json",
+          "sha256": "04767f19ec7be84a36c05c8ca9302b48d66b900d7dc56f93a0cef374cd8c4c75"
+        }
+      ],
+      "raw_sha256": "9537d30c9c7dda64e287b104d74e76485d2dc466a90aad522959144c0f0bc8ff",
+      "quiet_samples_sha256": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863"
+    },
+    {
+      "name": "r1-datafusion-a1",
+      "boundary": "complete_ingest",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 29.55634110304527,
+      "whole_invocation_cpu_s": 25.642518,
+      "cgroup_peak_memory_bytes": 790839296,
+      "canonical_encode_wall_s": 7.884694712,
+      "canonical_encode_process_cpu_s": 7.07,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7070000000,
+        "sampling_uncertainty_ns": 50410,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5163710543,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2720984169,
+        "wall_ns": 7884694712
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r1-datafusion-a1/0-begin.json",
+          "sha256": "93e8164be1c407a918bcc3866b9cfa0814255c28407716cd285eff0616b81256"
+        },
+        {
+          "file": "runs/r1-datafusion-a1/1-register-parquet.json",
+          "sha256": "83331e99a3b3083dbdbbeacc802d19a1b70150dab5136a8644a31763efc7f0c2"
+        },
+        {
+          "file": "runs/r1-datafusion-a1/2-register-parquet.json",
+          "sha256": "a4d09968c299445a548e46dbef14dafafaf1429daa642143c6dad44f9826ff7e"
+        },
+        {
+          "file": "runs/r1-datafusion-a1/3-validate.json",
+          "sha256": "c79658956603107c5b71e18c28c73c253762d2a406caaceeadbefa25ef7c51e3"
+        },
+        {
+          "file": "runs/r1-datafusion-a1/4-commit.json",
+          "sha256": "ad62fbe5a5d498aa4d14449598e797deb5b3c267a5577d56eb2a3853046adfa5"
+        }
+      ],
+      "raw_sha256": "4c72472754f8f5b8c0a2deec9fc2e255d8b102b3174d3e1c4e24db84aa734315",
+      "quiet_samples_sha256": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863"
+    },
+    {
+      "name": "r2-baseline-a1",
+      "boundary": "complete_ingest",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 29.372121545951813,
+      "whole_invocation_cpu_s": 25.73653,
+      "cgroup_peak_memory_bytes": 795893760,
+      "canonical_encode_wall_s": 7.821106942,
+      "canonical_encode_process_cpu_s": 7.0,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7000000000,
+        "sampling_uncertainty_ns": 50731,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 7006399216,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 814707726,
+        "wall_ns": 7821106942
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r2-baseline-a1/0-begin.json",
+          "sha256": "b35380dbdc65f50961b58bf6cf06572ed006b298745c09ce50ec9cf435295c3b"
+        },
+        {
+          "file": "runs/r2-baseline-a1/1-register-parquet.json",
+          "sha256": "f1397ee468961b3861c092bfc0293461f21a632114f34dfb05000556e96a90f8"
+        },
+        {
+          "file": "runs/r2-baseline-a1/2-register-parquet.json",
+          "sha256": "13d326c0420b1a80ce97ea338db3ea7e58150addbd10fecbcd581bee29b0d9f3"
+        },
+        {
+          "file": "runs/r2-baseline-a1/3-validate.json",
+          "sha256": "94ea15a3d553ea1ad6bf6a98cc3cfa01ef5c70064e0847ccea5dcde998f3776d"
+        },
+        {
+          "file": "runs/r2-baseline-a1/4-commit.json",
+          "sha256": "45c589604ba9855cab88a65af03dd2260af672e380f4d44dfc79b7ff7d741e44"
+        }
+      ],
+      "raw_sha256": "07ce7f221d052e11f2281424de43f02dc06b4e4f526fca92db918b142982a869",
+      "quiet_samples_sha256": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863"
+    },
+    {
+      "name": "r2-datafusion-a1",
+      "boundary": "complete_ingest",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 29.195935008116066,
+      "whole_invocation_cpu_s": 25.660391,
+      "cgroup_peak_memory_bytes": 787009536,
+      "canonical_encode_wall_s": 7.358452973,
+      "canonical_encode_process_cpu_s": 7.03,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7030000000,
+        "sampling_uncertainty_ns": 54692,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5110644692,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2247808281,
+        "wall_ns": 7358452973
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r2-datafusion-a1/0-begin.json",
+          "sha256": "53f333a4bc7ca4d15901073eedeb18180b67d1bcaf048d3b23c1749199b45907"
+        },
+        {
+          "file": "runs/r2-datafusion-a1/1-register-parquet.json",
+          "sha256": "8bc1b62cfffb599327086f9879fc8f57af92a6fdc189d5d4313cabe9c77cc073"
+        },
+        {
+          "file": "runs/r2-datafusion-a1/2-register-parquet.json",
+          "sha256": "9d578ea6320911fb9778e8ad7659363c51a2fb9c49ae20dc34f24ed2a36a2a59"
+        },
+        {
+          "file": "runs/r2-datafusion-a1/3-validate.json",
+          "sha256": "0565143881039863179409117eca34313617fd7997cb0118cbd9c3737fcdb5ac"
+        },
+        {
+          "file": "runs/r2-datafusion-a1/4-commit.json",
+          "sha256": "53f6f707bbc0ec4693c1c3a5f8609ea5e8042d6d7711086dc03ee5a5d988387b"
+        }
+      ],
+      "raw_sha256": "53fde71a62fb64e335829846e8067cbe059d8368448125c5d4fb0bfd9982030c",
+      "quiet_samples_sha256": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863"
+    },
+    {
+      "name": "r3-baseline-a1",
+      "boundary": "complete_ingest",
+      "mode": "baseline",
+      "whole_invocation_wall_s": 28.7881286109332,
+      "whole_invocation_cpu_s": 25.744617,
+      "cgroup_peak_memory_bytes": 789934080,
+      "canonical_encode_wall_s": 7.320984288,
+      "canonical_encode_process_cpu_s": 6.96,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 6960000000,
+        "sampling_uncertainty_ns": 50781,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 6960928247,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 360056041,
+        "wall_ns": 7320984288
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r3-baseline-a1/0-begin.json",
+          "sha256": "b070441c02442eb837b0e4e2e1ac6fa2096677b21125bb312d10d19c0ce0f724"
+        },
+        {
+          "file": "runs/r3-baseline-a1/1-register-parquet.json",
+          "sha256": "60597eb7ee671238457450e37d0c751afd00c12672a8f88f0bb8359ac2ddf36f"
+        },
+        {
+          "file": "runs/r3-baseline-a1/2-register-parquet.json",
+          "sha256": "7f4d6c85b1a89f977f80f4ee7f15059f3f06292f406097f32b701c84a74f1b39"
+        },
+        {
+          "file": "runs/r3-baseline-a1/3-validate.json",
+          "sha256": "b8bbfc6b2d06b4c941a7174ffffc1d75b4bee42cb49316adfb5bdb07d86af5c3"
+        },
+        {
+          "file": "runs/r3-baseline-a1/4-commit.json",
+          "sha256": "cb7dc58047cf0258ea1d593f8249a1ddaf641f8161c1b01405dc466825b12ff2"
+        }
+      ],
+      "raw_sha256": "10f51e960f5d649823d073df09364bbfb95280e9f90b0eb12a2f690377a1dd2b",
+      "quiet_samples_sha256": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863"
+    },
+    {
+      "name": "r3-datafusion-a1",
+      "boundary": "complete_ingest",
+      "mode": "datafusion",
+      "whole_invocation_wall_s": 30.33419961715117,
+      "whole_invocation_cpu_s": 25.71108,
+      "cgroup_peak_memory_bytes": 776871936,
+      "canonical_encode_wall_s": 8.149505611,
+      "canonical_encode_process_cpu_s": 7.13,
+      "encode_region": {
+        "path": "import_command/validate/seal/canonical_encoding",
+        "process_cpu_ns": 7130000000,
+        "sampling_uncertainty_ns": 61541,
+        "thread_iowait_ns": null,
+        "thread_runnable_ns": null,
+        "thread_running_ns": 5213527562,
+        "thread_sleeping_ns": null,
+        "thread_uninterruptible_ns": null,
+        "thread_unknown_ns": 2935978049,
+        "wall_ns": 8149505611
+      },
+      "encode_io": [
+        {
+          "receipt": "3-validate.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        },
+        {
+          "receipt": "4-commit.json",
+          "block_count": 0,
+          "fsync_calls": 177,
+          "object_count": 0,
+          "read_bytes": 869276687,
+          "read_calls": 1308,
+          "write_bytes": 254061490,
+          "write_calls": 8949
+        }
+      ],
+      "receipts": [
+        {
+          "file": "runs/r3-datafusion-a1/0-begin.json",
+          "sha256": "abb0198c22d81305e355dd86ac7af5ce85b86d8d6ea73c0d471fc859c42256d8"
+        },
+        {
+          "file": "runs/r3-datafusion-a1/1-register-parquet.json",
+          "sha256": "ef0bdc475985b2d4d1db8833784ab3759aa28f77f2d612993d2e74fe4689cdc8"
+        },
+        {
+          "file": "runs/r3-datafusion-a1/2-register-parquet.json",
+          "sha256": "0c0bac56c8552f68a24daf7622d5d0fcc12e9787430381c2c842a1d8fa35723e"
+        },
+        {
+          "file": "runs/r3-datafusion-a1/3-validate.json",
+          "sha256": "1cb29fb4b3d1504c93e4b7af61e97244e98dcdffefe463e01de727f22a266bae"
+        },
+        {
+          "file": "runs/r3-datafusion-a1/4-commit.json",
+          "sha256": "15cbe43508770aed367a18f93f3a62e77e6002f623660a5f3f1c23ddc976763a"
+        }
+      ],
+      "raw_sha256": "547ed354aed2d6d6fb15915cb3371d32b8861120c9378274555ca10d7888451d",
+      "quiet_samples_sha256": "941b1edb42500375660e1c176be06ca342d9a71a082bac428704de63e4bbebfe"
+    }
+  ],
+  "summary": {
+    "complete_ingest": {
+      "baseline": {
+        "n": 3,
+        "whole_invocation_wall_s": {
+          "median": 29.333766884868965,
+          "min": 28.7881286109332,
+          "max": 29.372121545951813
+        },
+        "whole_invocation_cpu_s": {
+          "median": 25.73653,
+          "min": 25.490517,
+          "max": 25.744617
+        },
+        "cgroup_peak_memory_bytes": {
+          "median": 789934080,
+          "min": 784982016,
+          "max": 795893760
+        },
+        "canonical_encode_wall_s": {
+          "median": 7.79804104,
+          "min": 7.320984288,
+          "max": 7.821106942
+        },
+        "canonical_encode_process_cpu_s": {
+          "median": 6.96,
+          "min": 6.71,
+          "max": 7.0
+        }
+      },
+      "datafusion": {
+        "n": 3,
+        "whole_invocation_wall_s": {
+          "median": 29.55634110304527,
+          "min": 29.195935008116066,
+          "max": 30.33419961715117
+        },
+        "whole_invocation_cpu_s": {
+          "median": 25.660391,
+          "min": 25.642518,
+          "max": 25.71108
+        },
+        "cgroup_peak_memory_bytes": {
+          "median": 787009536,
+          "min": 776871936,
+          "max": 790839296
+        },
+        "canonical_encode_wall_s": {
+          "median": 7.884694712,
+          "min": 7.358452973,
+          "max": 8.149505611
+        },
+        "canonical_encode_process_cpu_s": {
+          "median": 7.07,
+          "min": 7.03,
+          "max": 7.13
+        }
+      }
+    },
+    "resume_to_encoded": {
+      "baseline": {
+        "n": 3,
+        "whole_invocation_wall_s": {
+          "median": 8.039196557132527,
+          "min": 7.958331230096519,
+          "max": 8.068950395099819
+        },
+        "whole_invocation_cpu_s": {
+          "median": 7.502345,
+          "min": 7.384053,
+          "max": 7.512865
+        },
+        "cgroup_peak_memory_bytes": {
+          "median": 663068672,
+          "min": 660361216,
+          "max": 664494080
+        },
+        "canonical_encode_wall_s": {
+          "median": 7.593791512,
+          "min": 7.514331052,
+          "max": 7.627251099
+        },
+        "canonical_encode_process_cpu_s": {
+          "median": 7.27,
+          "min": 7.15,
+          "max": 7.27
+        }
+      },
+      "datafusion": {
+        "n": 3,
+        "whole_invocation_wall_s": {
+          "median": 8.613808321999386,
+          "min": 8.472729929955676,
+          "max": 8.6620071278885
+        },
+        "whole_invocation_cpu_s": {
+          "median": 8.056954,
+          "min": 7.906214,
+          "max": 8.117718
+        },
+        "cgroup_peak_memory_bytes": {
+          "median": 651300864,
+          "min": 650899456,
+          "max": 656715776
+        },
+        "canonical_encode_wall_s": {
+          "median": 8.168943897,
+          "min": 8.038312481,
+          "max": 8.231489571
+        },
+        "canonical_encode_process_cpu_s": {
+          "median": 7.82,
+          "min": 7.67,
+          "max": 7.88
+        }
+      }
+    }
+  },
+  "instrumentation": {
+    "events": 69,
+    "encoded_rows_across_sink_calls": 4456449,
+    "changed_column_estimated_bytes": 0,
+    "max_reserved_arrow_bytes": 5768072,
+    "max_observed_post_batch_writer_retained_bytes": 4785261,
+    "plans": [
+      "DataSinkExec: sink=GraphForgeParquetSink\n  StreamingTableExec: partition_sizes=1, projection=[edge_uuid, src_uuid, dst_uuid, edge_id, src_id, dst_id, created_at, rel_type_name]\n",
+      "DataSinkExec: sink=GraphForgeParquetSink\n  StreamingTableExec: partition_sizes=1, projection=[max_node_id, max_edge_id]\n",
+      "DataSinkExec: sink=GraphForgeParquetSink\n  StreamingTableExec: partition_sizes=1, projection=[node_uuid, node_id, type_id, type_ids, created_at, updated_at]\n"
+    ],
+    "separate_worker_captures": 69,
+    "raw_logs": [
+      {
+        "path": "runs/instrumented-datafusion/4-commit.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "runs/instrumented-datafusion/3-validate.stderr",
+        "sha256": "ef12589aaf6b9628a5f93c8ec9f102ae2f048b7c595274c9caca97ca9f0fccac"
+      },
+      {
+        "path": "runs/instrumented-datafusion/2-register-parquet.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "runs/instrumented-datafusion/0-begin.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "runs/instrumented-datafusion/1-register-parquet.stderr",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "determinism": {
+    "identical": true,
+    "artifacts": {
+      "encoded": [
+        [
+          "indexes/adjacency/index_manifest.parquet",
+          2032,
+          "cf1ed85415ef99df4bd2de28e95b7901f36f607ed127dc8891a2755c0613bf19"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.in.csr.json",
+          515,
+          "ca6829f9ccfcb7e5976623d3c369ddc557feb6331e19ba91695032582cc83e4b"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.in.csr.shards-73e37b1e5531180ce28cf1e8.d/00000000000000000000.csr",
+          6666,
+          "11f65aa4bd6dd7e18c7e06b5e80a77ce5f184ff429fc862e1a51da047df92f8d"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.out.csr.json",
+          516,
+          "5149de793c5a22acdcc15a246e675e738b8735e7e7ef39ef100526ccc4a8986d"
+        ],
+        [
+          "indexes/adjacency/r-378b8a288e1c3526513898aee924f16c983083701f73c0d3d643e43d3a668fdd.out.csr.shards-1f33ba8f6313643fb0abd12d.d/00000000000000000000.csr",
+          6730,
+          "c04150a59b235aa8b67f003c6fd23d8760fa014e88dc98e9edc0bd9859445cf7"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.in.csr.json",
+          515,
+          "c617508a86bbd2866e58f088873e06bf01e6e8497844f1a34883964ad9482246"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.in.csr.shards-73e37b1e5531180ce28cf1e8.d/00000000000000000000.csr",
+          6666,
+          "11f65aa4bd6dd7e18c7e06b5e80a77ce5f184ff429fc862e1a51da047df92f8d"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.out.csr.json",
+          516,
+          "eeb9a4f61387b4374c09f784826d17e5e8cbde9285c447c2d67fc311e4b44f53"
+        ],
+        [
+          "indexes/adjacency/r-c1c91a7efa7710d43dbd4bad22399412c85cb2106eabd0c9781f082c6da29a04.out.csr.shards-1f33ba8f6313643fb0abd12d.d/00000000000000000000.csr",
+          6730,
+          "c04150a59b235aa8b67f003c6fd23d8760fa014e88dc98e9edc0bd9859445cf7"
+        ],
+        [
+          "semantic-routes.json",
+          177,
+          "e89f6e446520ec6669f4c8b27486370fabd8c152a409d1363efcd9b32d2b15e6"
+        ],
+        [
+          "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000001-00000000000000000512.parquet",
+          20483,
+          "bff3736a9744f0dc35562dcfa53fab3c55e60253a6b6ee54efdaa17575c7fa38"
+        ],
+        [
+          "topology/edges/r-d418446a2dd7f837aa2867f6d34c26ffd1d4af1cbfa0d506a31c9dd47ed79c22/00000000000000000513-00000000000000001024.parquet",
+          19797,
+          "d5c27e645d5e55cbb407a7f7eecd03182ae7a2f736e08c51ab66c6e1fa0f00ab"
+        ],
+        [
+          "topology/generation.json",
+          72,
+          "83628bb4c0ac01773986d43b0bda4eaba2769c8330ca13757e5cde14a2289fae"
+        ],
+        [
+          "topology/nodes/00000000000000000001-00000000000000000512.parquet",
+          8124,
+          "221e3535aad6ea442c721d7f1e52c8807e78d275f3a000ad2f6eafb017af04b7"
+        ],
+        [
+          "topology/nodes/00000000000000000513-00000000000000001024.parquet",
+          7894,
+          "1aa8924826f078956b7926980d6a7bd397262f207c1e293a13cccbeafe2b1bbb"
+        ],
+        [
+          "topology/runtime_catalog.parquet",
+          2369,
+          "9ad2a8fa8a4be2130bb0a99a2ea02bd9ebc1f8cd7e629395ed3bda31f63c255a"
+        ],
+        [
+          "topology/runtime_entity_label_encoding.json",
+          74,
+          "a688960f0b7533d9b63091e0f3508bb309a31e01e5d849c2db2cd276e52c98bd"
+        ],
+        [
+          "topology/surrogate_tails.parquet",
+          817,
+          "d666b40f7a00959b10f6939986d327f2d771ec6571ab8ea06ce5e1997132ed97"
+        ],
+        [
+          "topology/uuid-membership/forward-v4-1-74daa3430c775f3b.uuidx",
+          24576,
+          "74daa3430c775f3b5d77b4f4198f46a1f1976fffab1e4282561f4f0bcfbdd8b1"
+        ],
+        [
+          "topology/uuid-membership/identities-v5-1-ac162f135776f229.uuidx",
+          43008,
+          "ac162f135776f229b0b88d902e9f1bcaa6cd61dda7944b844660e38dfa5b0be9"
+        ],
+        [
+          "topology/uuid-membership/identities-v5-base-0-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/manifest.json",
+          1441,
+          "ef04077a16240e16e1a6126ce4078162743e64e1acfa0750c219d0bdb8e8d485"
+        ],
+        [
+          "topology/uuid-membership/node-surrogates-v5-1-3d61e2f0ef9cc86d.uuidx",
+          24576,
+          "3d61e2f0ef9cc86de301b6a956de0ee60c2618ff2c77369d8e51300059af3268"
+        ],
+        [
+          "topology/uuid-membership/node-surrogates-v5-base-0-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4-1-e3c36f9b0ac3cf96.uuidx",
+          16384,
+          "e3c36f9b0ac3cf96ce6f7b7f0893a7fe37b6d8963a92c0fa79ae6282ee570742"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4-manifest.json",
+          829,
+          "21048c1d8fe25ead8230139e0f0ece5f20f654b8c49898c5225bff7ee279d00d"
+        ],
+        [
+          "topology/uuid-membership/ordinal-v4.lock",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "topology/uuid-membership/tombstones-v4-1-e3b0c44298fc1c14.uuidx",
+          0,
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ]
+      ],
+      "partitions": 64,
+      "shaped": [
+        [
+          "shaped-edge-details.run",
+          "f663cd8489a1610f623e1d9c52d4e34ccf00497b35cafc7e43e5147e80062dcc"
+        ],
+        [
+          "shaped-edge-endpoints.run",
+          "14a3c60b71fdeed5257dcb2a930ec72bbb5869cc4fc477759d636d304e74a6bc"
+        ],
+        [
+          "shaped-identities.run",
+          "6ea5b8462fc1b5d19b1a084b17b84d59fb76c3a988dd385d4a675d6cad1cb660"
+        ],
+        [
+          "shaped-node-details.run",
+          "d7eac2fdc3d4e0e35907ac487e49a344d66c147bbb65dee571a7861d02418899"
+        ],
+        [
+          "shaped-runtime-catalog.parquet",
+          "9ad2a8fa8a4be2130bb0a99a2ea02bd9ebc1f8cd7e629395ed3bda31f63c255a"
+        ]
+      ]
+    }
+  },
+  "decision": {
+    "seam": "viable for the tested bounded encode surface",
+    "performance": "retain baseline; no optimization adoption",
+    "shaping": "a bounded follow-up experiment is justified only with its own predeclared end-to-end benefit/noise criterion and skew prerequisite before SortExec"
+  },
+  "excluded_timing_observations": [],
+  "instrumented_run_excluded_from_performance_summary": true,
+  "raw_evidence_directory": "/home/ubuntu/gf-1465-evidence",
+  "host": {
+    "name": "OVHC-AGENCY",
+    "kernel": "7.0.0-30-generic",
+    "cpu": "AMD Ryzen 7 3800X 8-Core Processor"
+  },
+  "commands": {
+    "build": "CARGO_TARGET_DIR=/home/ubuntu/code/graphforge-1465/target cargo build --release -p graphforge-cli -p graphforge-storage --features graphforge-storage/test-support",
+    "full_storage": "GF_ENCODE_SEAM_SPIKE=datafusion target/release/deps/graphforge_storage-e0ed9925ea17d1ab --test-threads=4",
+    "focused_tests": "cargo test --release -p graphforge-storage --lib graph_construction_encoding -- --nocapture",
+    "clippy": "cargo clippy --release -p graphforge-storage --features test-support --lib -- -D warnings",
+    "fast": "make pre-push-fast",
+    "gate_registry": "make gate-registry-check",
+    "measure": "systemd-run --user --scope --slice=benchexec -p Delegate=yes runexec --no-container --cores 0-15 --memlimit 4294967296 --output <raw> -- python3 <ingest.py|encode.py> <binary> <name> <input>"
+  },
+  "method_files": {
+    "PLAN.md": "365fb1cea02e0628571c9a01b7fabe128d7d9423e578d6fbd263f84216063ad9",
+    "quiet.py": "a68d6d2598d6584786002fa399615210e1a17aeade3d3b08d6118150c4180520",
+    "ingest.py": "67dbac9cd47e13ab1817f98c8cf5b6b0a007f3c296a20a4fc65161266460be5b",
+    "prepare-encode.py": "78555575bdf26af4e82c68a7c355a4aea739a7afa93500085e2c103196a7a9d9",
+    "encode.py": "910f8d2d87a2bf1198c412bf327d0b56aba20dba7d439482c476d4d079ae49f2",
+    "run-measured.sh": "d526050d531426e120ad3c7cff4fe410c09c7e9f6910505cb86cc37ef844eab0",
+    "run-pairs.py": "55c29da7f109ddf3775608a3e58a82518167880ca7f2fe97f9bbc96167f6f827",
+    "run-encode-pairs.py": "04cf942fba0e080ad9ffd086da84b09e3871758b08435a41e8cc06126761487c",
+    "summarize.py": "7a36049f37a6354a0e0bf415a81642adef8d1d2f39c294b10e8870d6400d9b1f"
+  },
+  "base_commit": "fafa0aba5dd04c253fbfb985ede8f8a44ce75b74",
+  "validation_results": {
+    "full_storage": {
+      "passed": 1210,
+      "ignored_existing": 6,
+      "source_commit": "fe3c8d172a7bfb379ad70df55aa410ee223d4bac"
+    },
+    "final_focused_tests": {
+      "passed": 5
+    },
+    "final_clippy": "passed",
+    "final_fast_checks": "passed",
+    "gate_registry": "passed"
+  },
+  "validation_log_sha256": {
+    "storage-datafusion.log": "30a0c53ffcd92ab48d03803ea239b337b69aa356d616b472c5191c077e07938d",
+    "seam-tests-final.log": "8051f3784deb6b3dd4ac286ab85c75eb298896e26f361d4ed8665538f9569094",
+    "clippy-final-head.log": "4936c72e171ef1675a637a6f50beee1c2cf1fd4569fc850d9dcfa25669dd50a0",
+    "fast-checks-final.log": "926f54b973fe2d6792c7500204308ccd27ca7e3185de793cda0023b72f98daff",
+    "gate-registry-final.log": "e356f4193380eef82e43f827faf003a6120116c818e3b0f01162596ee5eaa596"
+  }
+}

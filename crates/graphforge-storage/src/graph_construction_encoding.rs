@@ -52,6 +52,8 @@ use crate::uuid_membership::{
 use crate::{SemanticRouteKind, SemanticStorageBindings};
 
 mod adjacency;
+#[cfg(any(test, feature = "test-support"))]
+mod seam_spike;
 
 const ENCODED_ROOT: &str = "encoded-v1";
 const INVENTORY: &str = "inventory.json";
@@ -791,6 +793,7 @@ pub(crate) fn encode(
         &output,
         shape.max_node_surrogate,
         shape.max_edge_surrogate,
+        cancelled,
         &mut artifacts,
         &mut evidence,
     )?;
@@ -1254,6 +1257,7 @@ fn encode_nodes(
                 &canonical,
                 cache_window,
                 evidence,
+                cancelled,
             )?);
         }
         if details.next()?.is_some() || next_kind(&mut identities, 0)?.is_some() {
@@ -1413,6 +1417,7 @@ fn encode_node_properties(
                             &property,
                             cache_window,
                             evidence,
+                            cancelled,
                         )?);
                         *ordinal = ordinal
                             .checked_add(1)
@@ -1660,6 +1665,7 @@ fn encode_edges(
                     &selected,
                     cache_window,
                     evidence,
+                    cancelled,
                 )?);
             }
         }
@@ -1826,6 +1832,7 @@ fn encode_edge_properties(
                             &property,
                             cache_window,
                             evidence,
+                            cancelled,
                         )?);
                         *ordinal = ordinal
                             .checked_add(1)
@@ -2107,6 +2114,7 @@ fn write_surrogate_tails(
     output: &StableDirectory,
     max_node_id: u64,
     max_edge_id: u64,
+    cancelled: &mut impl FnMut() -> bool,
     artifacts: &mut Vec<ConstructionEncodedArtifact>,
     evidence: &mut GraphConstructionEncodingEvidence,
 ) -> Result<(), GfError> {
@@ -2130,6 +2138,7 @@ fn write_surrogate_tails(
         &batch,
         cache_window,
         evidence,
+        cancelled,
     )?);
     Ok(())
 }
@@ -2140,7 +2149,10 @@ fn write_parquet(
     batch: &RecordBatch,
     cache_window: std::num::NonZeroU64,
     evidence: &mut GraphConstructionEncodingEvidence,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ConstructionEncodedArtifact, GfError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = cancelled;
     let (directory, name) = directory_for(root, relative)?;
     let temporary = format!(".{}-{}.tmp", name, Uuid::new_v4().simple());
     let file = directory
@@ -2168,8 +2180,18 @@ fn write_parquet(
         Some(crate::permanent_parquet::writer_properties().build()),
     )
     .map_err(storage)?;
-    writer.write(batch).map_err(storage)?;
-    let mut writer = writer.into_inner().map_err(storage)?;
+    #[cfg(any(test, feature = "test-support"))]
+    let mut writer = if seam_spike::enabled()? {
+        seam_spike::write(batch, writer, cancelled)?
+    } else {
+        writer.write(batch).map_err(storage)?;
+        writer.into_inner().map_err(storage)?
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let mut writer = {
+        writer.write(batch).map_err(storage)?;
+        writer.into_inner().map_err(storage)?
+    };
     writer.inner.sync_all_and_release().map_err(storage)?;
     let cache_release = writer.inner.evidence();
     account_cache_release(cache_release, evidence)?;
