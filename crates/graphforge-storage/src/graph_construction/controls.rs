@@ -246,6 +246,106 @@ pub(super) fn install_control<T: Serialize>(
     Ok(())
 }
 
+/// Directory-durability batch for the spill seal path (#1452).
+///
+/// Sealing one spill used to issue three directory syncs on the partition
+/// directory's inode — one after the artifact rename, and two inside the
+/// receipt install — every one serialized against every other family and
+/// partition doing the same work. The batch amortizes them: renames keep
+/// their order and their refusals (`RENAME_NOREPLACE` plus the post-rename
+/// identity reconciliation), receipt content stays fsynced before its name
+/// is linked, and one flush at the batch boundary makes every name linked
+/// by the batch durable together.
+///
+/// A crash before the flush can drop any subset of those names, which is
+/// exactly the incomplete-shape state `recover_shape_intent` already cleans
+/// and re-runs: receipt installs are idempotent, surviving payloads are
+/// authenticated before removal, and a receipt whose artifact name was lost
+/// is tolerated (`NotFound` skips its payload work). The completed-shape
+/// state is unreachable before the flush, because the shape intent is marked
+/// complete only after every seal batch of the shape has flushed and the
+/// outputs have been published durably.
+pub(super) struct SealDirectoryBatch<'a> {
+    root: &'a StableDirectory,
+    pending: bool,
+}
+
+impl<'a> SealDirectoryBatch<'a> {
+    pub(super) fn new(root: &'a StableDirectory) -> Self {
+        Self {
+            root,
+            pending: false,
+        }
+    }
+
+    /// Record that a name was linked into the directory and must become
+    /// durable at the next flush.
+    pub(super) fn mark(&mut self) {
+        self.pending = true;
+    }
+
+    /// Make every name linked since the last flush durable. Idempotent; the
+    /// barrier is counted only when a sync was actually required.
+    pub(super) fn flush(
+        &mut self,
+        evidence: &mut super::GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        if !self.pending {
+            return Ok(());
+        }
+        self.root.sync().map_err(storage)?;
+        self.pending = false;
+        evidence.merge_directory_fsync_operations = evidence
+            .merge_directory_fsync_operations
+            .checked_add(1)
+            .ok_or_else(|| storage("merge directory fsync operations overflows"))?;
+        Ok(())
+    }
+}
+
+impl Drop for SealDirectoryBatch<'_> {
+    fn drop(&mut self) {
+        // Durability before refusal: a failure between renames still leaves
+        // every name the batch already linked as durable as it can be, so the
+        // recovery contract sees no state the unbatched protocol could not
+        // produce. The sync result cannot beat the primary error back to the
+        // caller, and every real consumer re-establishes durability itself
+        // (the same best-effort pattern as spill abandonment).
+        if self.pending {
+            let _ = self.root.sync();
+        }
+    }
+}
+
+/// Install a control whose containing-directory durability is provided by a
+/// later [`SealDirectoryBatch`] flush instead of this call (#1452).
+///
+/// The control body is fsynced before its name is linked, exactly as in
+/// [`install_control`]; only the two per-call directory syncs are deferred
+/// into the batch. A crash in the window loses at most the control's name,
+/// which recovery handles like a control that was never written.
+pub(super) fn install_control_batched<T: Serialize>(
+    root: &StableDirectory,
+    target: &str,
+    value: &T,
+    batch: &mut SealDirectoryBatch,
+) -> Result<(), GfError> {
+    let body = encode_control(value, target)?;
+    let temporary = control_temp(target);
+    let mut file = root
+        .create_replaceable_child_file(OsStr::new(&temporary))
+        .map_err(storage)?;
+    let identity = file_identity(&file).map_err(storage)?;
+    write_control_body(&mut file, &body, target, "install")?;
+    file.sync_all().map_err(storage)?;
+    construction_failpoint(&format!("control.install.after_temp_fsync.{target}"));
+    root.install_child(OsStr::new(&temporary), identity, OsStr::new(target))
+        .map_err(storage)?;
+    batch.mark();
+    construction_failpoint(&format!("control.install.after_install.{target}"));
+    Ok(())
+}
+
 pub(super) fn replace_control<T: Serialize>(
     root: &StableDirectory,
     target: &str,

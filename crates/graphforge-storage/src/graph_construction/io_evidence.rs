@@ -382,8 +382,25 @@ pub struct GraphConstructionEvidence {
     pub peak_catalog_identifier_bytes: u64,
     /// Largest decoded catalog Arrow batch retained during one streaming pass.
     pub peak_catalog_decoded_batch_bytes: u64,
-    /// File and directory durability barriers completed during shaping.
+    /// File durability barriers completed during shaping: spill and shaped
+    /// output payload syncs plus receipt-control temporary syncs. Directory
+    /// barriers on the same paths are reported by
+    /// [`Self::merge_directory_fsync_operations`] and by the per-syscall
+    /// evidence; this counter never included them despite its old name.
     pub merge_fsync_operations: u64,
+    /// Directory durability barriers flushed by spill seal batches (#1452).
+    ///
+    /// Sealing one spill used to issue three directory syncs on the
+    /// partition directory's inode — one after the artifact rename and two
+    /// inside the receipt install — serialized against every other family
+    /// and partition doing the same work. The seal now batches them: one
+    /// flush per seal batch makes every name linked by the batch durable
+    /// together, so this counter reports batches, not spills. Shaping
+    /// barriers outside the seal (retirement unlinks, abandonment, output
+    /// publication, recovery cleanup) stay unattributed here and are
+    /// visible in the per-syscall evidence instead.
+    #[serde(default)]
+    pub merge_directory_fsync_operations: u64,
     /// Bytes returned by instrumented Parquet range/sequential reads in shaping.
     pub parquet_read_bytes: u64,
     /// Instrumented Parquet read calls in shaping.

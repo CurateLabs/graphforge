@@ -38,8 +38,9 @@ pub(crate) struct AuthenticatedShapeSource {
 mod shape;
 use shape::{
     authenticate_shaped_output, authenticate_shaped_output_identity, is_shape_artifact_name,
-    persist_shape_receipt, read_completed_shape, read_completed_shape_outputs, read_fixed,
-    run_record_bytes, shape_receipt_name, validate_shape_binding, validate_sorted_run,
+    persist_shape_receipt, persist_shape_receipt_in_batch, read_completed_shape,
+    read_completed_shape_outputs, read_fixed, run_record_bytes, shape_receipt_name,
+    validate_shape_binding, validate_sorted_run,
 };
 pub(crate) use shape::{open_authenticated_shape_source, shaped_output_sha256};
 mod encoding_publication;
@@ -55,10 +56,10 @@ use recovery::{
 };
 mod controls;
 use controls::{
-    artifact_temp, control_sha256, decode_bounded, decode_shape_intent, initial_checkpoint_format,
-    install_control, is_canonical_lower_hex, is_canonical_sha256, read_bounded_limit,
-    replace_checkpoint_control, replace_control, validate_checkpoint, validate_parent_phase_bytes,
-    validate_sha256,
+    SealDirectoryBatch, artifact_temp, control_sha256, decode_bounded, decode_shape_intent,
+    initial_checkpoint_format, install_control, install_control_batched, is_canonical_lower_hex,
+    is_canonical_sha256, read_bounded_limit, replace_checkpoint_control, replace_control,
+    validate_checkpoint, validate_parent_phase_bytes, validate_sha256,
 };
 
 mod catalog;
