@@ -1,0 +1,657 @@
+{
+  "issue": 1472,
+  "measured_at_utc": {
+    "first_raw_output_mtime": "2026-09-19T19:46:52.022758+00:00",
+    "last_raw_output_mtime": "2026-09-19T19:49:51.265084+00:00"
+  },
+  "base_commit": "43413cf986fa638c0207bc8bc2d4c70445a8a5e4",
+  "candidate_commit": "5d900a34aa8c6d35471bb8fecc55ed8dc58e7adc",
+  "binary_sha256": {
+    "baseline": "7627694c8429cd723c11e441a285da7a64e176d7d1ecee8716c10722b0fd8c8f",
+    "candidate": "c64cd9d2137896871faf39d56ee33d218f2eba07b92841c527cb2164d785d6c8"
+  },
+  "input": {
+    "generator": "Graph500",
+    "scale": 18,
+    "edge_factor": 16,
+    "seed": 13907095936298285200,
+    "nodes": 262144,
+    "edges": 4194304,
+    "sha256": {
+      "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075",
+      "edges.parquet": "30f197e5813adf8e0352d71d4451061686dfb96d267e681524c30344a96a52f4"
+    }
+  },
+  "host": {
+    "name": "OVHC-AGENCY",
+    "cpu": "AMD Ryzen 7 3800X",
+    "logical_cpus": 16,
+    "filesystem": "ext4 /dev/md3"
+  },
+  "measurement": {
+    "boundary": "begin, two Parquet registrations, validate, commit; fresh project per observation",
+    "cores": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "process_tree_memory_limit_bytes": 4294967296,
+    "memory_kind": "cgroup peak including file cache; not RSS",
+    "order": [
+      "r1-baseline-a1",
+      "r1-candidate-a1",
+      "r2-candidate-a1",
+      "r2-baseline-a1",
+      "r3-baseline-a1",
+      "r3-candidate-a1"
+    ],
+    "predeclared_gate": "median validate wall reduction >=3%, every pair positive, normalization process CPU/wall >1",
+    "exclusions": [],
+    "construction_budgets": {
+      "max_batch_rows": 65536,
+      "max_batch_bytes": 67108864,
+      "max_chunks": 1000000,
+      "max_run_records": 262144,
+      "merge_fan_in": 32,
+      "max_schema_groups": 256,
+      "max_property_columns": 4096,
+      "max_catalog_entries": 1000000,
+      "max_catalog_decoded_bytes": 268435456,
+      "max_catalog_identifier_bytes": 67108864,
+      "partition_count": 256
+    }
+  },
+  "samples": [
+    {
+      "name": "r1-baseline-a1",
+      "mode": "baseline",
+      "wall_s": 28.60865170508623,
+      "cpu_s": 25.205591,
+      "cgroup_peak_bytes": 799109120,
+      "validate_wall_s": 25.777188372,
+      "validate_cpu_s": 23.7,
+      "normalization_wall_s": 2.289251355,
+      "normalization_cpu_s": 2.23,
+      "normalization_effective_cores": 0.9741175843925622,
+      "normalization_calls": 68,
+      "commit_outcome": "committed",
+      "validate_sha256": "3ddb33ab8f4df102db4475a2bdbd968192c7a0e38b3ab9765a70707a7e87d927",
+      "quiet_samples": 29,
+      "raw_sha256": {
+        "benchexec": "f75d45cadb318c8e5cfe65418cdb2e60027ffb9bb7d9c706e0444114ec52a72e",
+        "output": "f6a6e5a1b5659780f0604ee5faf687aafbcdb7c92d869f52304b0141054a4e6c",
+        "quiet-samples": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863",
+        "runner-stderr": "a1667400015cf612854b5694d1ef5a328bb5439a133667271b55244b65f5d86f"
+      },
+      "checkpoint_sha256": "e86d788bfa16a092b5d2b65dd95a02063f0c6db6df5b1f808c2adb1a3929a816",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {}
+    },
+    {
+      "name": "r1-candidate-a1",
+      "mode": "candidate",
+      "wall_s": 27.454505166970193,
+      "cpu_s": 25.879506,
+      "cgroup_peak_bytes": 859406336,
+      "validate_wall_s": 24.674307271,
+      "validate_cpu_s": 24.36,
+      "normalization_wall_s": 0.915120273,
+      "normalization_cpu_s": 2.63,
+      "normalization_effective_cores": 2.8739391723649423,
+      "normalization_calls": 23,
+      "commit_outcome": "committed",
+      "validate_sha256": "9852ab4e67c7448d5779d5f70c4725c13e705830da31268194a22b6923210241",
+      "quiet_samples": 27,
+      "raw_sha256": {
+        "benchexec": "94e45d345c24c934dad6197147ed3d8845b5cbab74dc9f96a97220820037cd4a",
+        "output": "2a72fbfa1e56722f552234766b158fef87159fc7fb2bcd266d6d1a8db3b77368",
+        "quiet-samples": "70b301dfb77ffd268ec44fe6e1f68adb187fba683896354b1da48876efa2a69f",
+        "runner-stderr": "08e214fb5309fdf81606093b2c5f7e9fd093d2dc821a0f4827163c7561295eaa"
+      },
+      "checkpoint_sha256": "d128c085286a5bf6634fca8c92678d7aba7a3d20a130d4d0eaed021aa4242216",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {
+        "rows": 4456448
+      }
+    },
+    {
+      "name": "r2-baseline-a1",
+      "mode": "baseline",
+      "wall_s": 28.71054217312485,
+      "cpu_s": 25.511933,
+      "cgroup_peak_bytes": 780201984,
+      "validate_wall_s": 25.949080838,
+      "validate_cpu_s": 24.01,
+      "normalization_wall_s": 2.318125472,
+      "normalization_cpu_s": 2.36,
+      "normalization_effective_cores": 1.0180639609485298,
+      "normalization_calls": 68,
+      "commit_outcome": "committed",
+      "validate_sha256": "bb73f24bc7eff09e71795637b5411d4f4b30d4b288c1cd6d24ee380a66b15b8e",
+      "quiet_samples": 29,
+      "raw_sha256": {
+        "benchexec": "a3e47e7e73f922c808c645de0c0a2eca44026bb6c902580f0e6480ab7254ef96",
+        "output": "05ed3afafa1d881f29077e19eab27df70103c3ac85c6333b57759a3223c07535",
+        "quiet-samples": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863",
+        "runner-stderr": "33e43d660d6f901cedc0764cc1cd42e723f6623a361aaf7a8adbb946a111d005"
+      },
+      "checkpoint_sha256": "c2b76a1db1b5227cf475f8f0a4a50b5a5b135f721ad5b970ca3dad0d19179d74",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {}
+    },
+    {
+      "name": "r2-candidate-a1",
+      "mode": "candidate",
+      "wall_s": 27.238413865910843,
+      "cpu_s": 25.716857,
+      "cgroup_peak_bytes": 855527424,
+      "validate_wall_s": 24.467168215,
+      "validate_cpu_s": 24.2,
+      "normalization_wall_s": 0.923921862,
+      "normalization_cpu_s": 2.66,
+      "normalization_effective_cores": 2.8790313438865245,
+      "normalization_calls": 23,
+      "commit_outcome": "committed",
+      "validate_sha256": "395e7f3a61fe13a5df5d1848f821c592cd34698b022bef3c0ea52af787172545",
+      "quiet_samples": 27,
+      "raw_sha256": {
+        "benchexec": "199d22460985ee091889b94afac74781157600f27508d380c690092a844caf0c",
+        "output": "2d67e4ca354dcf6118cd508e8e17be93e912ae321eb6e2d486e7e7ccc931414a",
+        "quiet-samples": "70b301dfb77ffd268ec44fe6e1f68adb187fba683896354b1da48876efa2a69f",
+        "runner-stderr": "70567f56000ecb591fcef74fb816ab7d05e2028f9ce8daa8964ab1a150f8b27a"
+      },
+      "checkpoint_sha256": "1664f322dfbcad1b84c07ea1e64430f489d2555ebfd3191482d22880fcae80ab",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {
+        "rows": 4456448
+      }
+    },
+    {
+      "name": "r3-baseline-a1",
+      "mode": "baseline",
+      "wall_s": 28.593003663001582,
+      "cpu_s": 25.107199,
+      "cgroup_peak_bytes": 799248384,
+      "validate_wall_s": 25.756542306,
+      "validate_cpu_s": 23.67,
+      "normalization_wall_s": 2.295905273,
+      "normalization_cpu_s": 2.34,
+      "normalization_effective_cores": 1.0192058128523667,
+      "normalization_calls": 68,
+      "commit_outcome": "committed",
+      "validate_sha256": "83c59e347f6e55625998b5ae99f79527eccaedc972d3aa76979d1772ed9b5bca",
+      "quiet_samples": 29,
+      "raw_sha256": {
+        "benchexec": "218f4d0ef04bf14a15b49a27c2a0193b8ac124812fe073769d62c862db91dd11",
+        "output": "850d6a40b1d4fcd5880d6220f632478b4079636f936aeced4fe0eeda62aef3b5",
+        "quiet-samples": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863",
+        "runner-stderr": "d6dda9bb5f60fc8decab682f00c0a23e3540a0327e941ff8f6a984e99cc5a073"
+      },
+      "checkpoint_sha256": "dc06e58822a633fc2f07b4b885bf16f17f2cccaf9e58507fa780166f977bc76a",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {}
+    },
+    {
+      "name": "r3-candidate-a1",
+      "mode": "candidate",
+      "wall_s": 27.696507221087813,
+      "cpu_s": 26.072042,
+      "cgroup_peak_bytes": 870866944,
+      "validate_wall_s": 24.879783331,
+      "validate_cpu_s": 24.56,
+      "normalization_wall_s": 0.924792433,
+      "normalization_cpu_s": 2.69,
+      "normalization_effective_cores": 2.90876082460333,
+      "normalization_calls": 23,
+      "commit_outcome": "committed",
+      "validate_sha256": "43a8b22a5c214c331950bf1dbc44562465700d8c5a6c924a5ce95a382f33c8a1",
+      "quiet_samples": 28,
+      "raw_sha256": {
+        "benchexec": "09ef18434a91b9b3777bdc37f39ab80aa507bec7cc19f4f0ec5e456287fe0d2f",
+        "output": "d590dbbd1ce181aa13d53fda72f5836c61e8e6dd7e5a75efc64464074eb9f719",
+        "quiet-samples": "3d7a6b3f88d3e6c0ff9917e5891f3119ac15b37b75f0e2b8d0dbeab0a5c9c371",
+        "runner-stderr": "4bc8832b044c5d7aab0992a94447cb9768c5581a108480c807e7982c5cb8c99f"
+      },
+      "checkpoint_sha256": "2c834def957321e329d567a779885e2cc4840ddddbdd4b7050fb761f48f51f60",
+      "rows_accepted": 4456448,
+      "rows_rejected": 0,
+      "normalization_work": {
+        "rows": 4456448
+      }
+    }
+  ],
+  "medians": {
+    "baseline": {
+      "wall_s": 28.60865170508623,
+      "cpu_s": 25.205591,
+      "cgroup_peak_bytes": 799109120,
+      "validate_wall_s": 25.777188372,
+      "validate_cpu_s": 23.7,
+      "normalization_wall_s": 2.295905273,
+      "normalization_cpu_s": 2.34,
+      "normalization_effective_cores": 1.0180639609485298
+    },
+    "candidate": {
+      "wall_s": 27.454505166970193,
+      "cpu_s": 25.879506,
+      "cgroup_peak_bytes": 859406336,
+      "validate_wall_s": 24.674307271,
+      "validate_cpu_s": 24.36,
+      "normalization_wall_s": 0.923921862,
+      "normalization_cpu_s": 2.66,
+      "normalization_effective_cores": 2.8790313438865245
+    }
+  },
+  "paired_validate_reduction_percent": [
+    4.278515891973644,
+    5.71084822715523,
+    3.4040243623685407
+  ],
+  "median_validate_reduction_percent": 4.278515891973644,
+  "complete_ingest_reduction_percent": 4.034257014324261,
+  "complete_cpu_increase_percent": 2.6736726784148734,
+  "method_sha256": {
+    "PLAN.md": "868303c785902c60346355736d5a08f292c9caff0b2ac268a36c929805e6b088",
+    "ingest.py": "c40665f2e0a3e29d57da0ed9fd3b746a900de1fc15811205b085a02e4e8a8b96",
+    "quiet.py": "e586f102584ff1fc24501311a8c2962aa214af8f80bd596ce1108214033b52c1",
+    "run-measured.sh": "9e26b61052226493e468916b6a5d0bd2f100eaa81cac0306858cc0fd3cf433ad",
+    "summarize.py": "d430f13bdd5f4d539da722ba39711a9b283e458692bcdf26900416ca1068b1dd"
+  },
+  "correctness": {
+    "api_library": "753 passed, 0 failed, 2 existing ignored",
+    "private_pool_test": "1 passed",
+    "equivalence": "same recorded clock and operation; forced 1/4-worker original batches; four shaped content SHA256 receipts and every encoded payload; established nonce-bearing ordinal control excluded; commit and reopen queries pass",
+    "limitation": "does not establish cross-session clock determinism or fix #1416",
+    "post_counter_fix_import_tests": "27 passed; includes actual normalization receipt closed work-counter contract",
+    "tiny_lifecycle_certification": "passed with corrected frozen candidate",
+    "ownership_growth_certification": "S6/S7/S8 all passed; growth oracle passed with 3 observations",
+    "receipt_schema": "All six validate and commit receipts pass the unchanged closed region diagnostics schema.",
+    "clippy": "cargo clippy --release -p graphforge-api -p graphforge-exec --lib -- -D warnings passed after counter fix",
+    "rung_fixed_run_digests": {
+      "r1-baseline-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      },
+      "r1-candidate-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      },
+      "r2-baseline-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      },
+      "r2-candidate-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      },
+      "r3-baseline-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      },
+      "r3-candidate-a1": {
+        "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+        "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6",
+        "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+        "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552"
+      }
+    }
+  },
+  "decision": "Adopt bounded original-batch normalization windows; no input/append overlap or floor qualification claimed",
+  "raw_root": "/home/ubuntu/gf-1472-final-evidence",
+  "baseline_source_commit": "8f695ad29fa75b3a721a908941d00f099a85becb",
+  "baseline_source_note": "Production code is base_commit; source commit adds only cfg(test) clock regression tests, excluded from the CLI binary.",
+  "initial_series": {
+    "issue": 1472,
+    "measured_at_utc": "2026-09-19T19:02:26Z through 2026-09-19T19:06Z",
+    "base_commit": "9614ffb0c2843b25aecda102639e90e21636a0a1",
+    "candidate_commit": "1677dca90f286039c80ebfe2bcd47327b72c4bfe",
+    "binary_sha256": {
+      "baseline": "70096be66a1810cd483bc1e4c52e49d531ff06615ff00b2da67083b38836e00f",
+      "candidate": "4077c455dce4e9a0557610bb355c4f793742b04f5a56cfff00db18229f84ff6e"
+    },
+    "input": {
+      "generator": "Graph500",
+      "scale": 18,
+      "edge_factor": 16,
+      "seed": 13907095936298285200,
+      "nodes": 262144,
+      "edges": 4194304,
+      "sha256": {
+        "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075",
+        "edges.parquet": "30f197e5813adf8e0352d71d4451061686dfb96d267e681524c30344a96a52f4"
+      }
+    },
+    "host": {
+      "name": "OVHC-AGENCY",
+      "cpu": "AMD Ryzen 7 3800X",
+      "logical_cpus": 16,
+      "filesystem": "ext4 /dev/md3"
+    },
+    "measurement": {
+      "boundary": "begin, two Parquet registrations, validate, commit; fresh project per observation",
+      "cores": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "process_tree_memory_limit_bytes": 4294967296,
+      "memory_kind": "cgroup peak including file cache; not RSS",
+      "order": [
+        "r1-baseline-a1",
+        "r1-candidate-a1",
+        "r2-candidate-a1",
+        "r2-baseline-a1",
+        "r3-baseline-a1",
+        "r3-candidate-a1"
+      ],
+      "predeclared_gate": "median validate wall reduction >=3%, every pair positive, normalization process CPU/wall >1",
+      "exclusions": [],
+      "construction_budgets": {
+        "max_batch_rows": 65536,
+        "max_batch_bytes": 67108864,
+        "max_chunks": 1000000,
+        "max_run_records": 262144,
+        "merge_fan_in": 32,
+        "max_schema_groups": 256,
+        "max_property_columns": 4096,
+        "max_catalog_entries": 1000000,
+        "max_catalog_decoded_bytes": 268435456,
+        "max_catalog_identifier_bytes": 67108864,
+        "partition_count": 256
+      }
+    },
+    "samples": [
+      {
+        "name": "r1-baseline-a1",
+        "mode": "baseline",
+        "wall_s": 28.042233892949298,
+        "cpu_s": 24.956099,
+        "cgroup_peak_bytes": 789217280,
+        "validate_wall_s": 25.269706046,
+        "validate_cpu_s": 23.45,
+        "normalization_wall_s": 2.277006831,
+        "normalization_cpu_s": 2.35,
+        "normalization_effective_cores": 1.032056631542007,
+        "normalization_calls": 68,
+        "commit_outcome": "committed",
+        "validate_sha256": "6945cc48c468e1bcc74a69ec22a0afdb5d2c079abe97000bfddba837b59a3f3a",
+        "quiet_samples": 28,
+        "raw_sha256": {
+          "benchexec": "323544259abfd306a39e5dac719021a215470b94c790d584c8a32894100176cf",
+          "output": "a93170c82bbbd71844b37a5e41040f6fae20c702659f0dd3b4d66c6bd9d742b5",
+          "quiet-samples": "3d7a6b3f88d3e6c0ff9917e5891f3119ac15b37b75f0e2b8d0dbeab0a5c9c371",
+          "runner-stderr": "9c7c5c0d1ae19d6016129cbf752469b0556653bc67fc3c8cb3acbcc7f87ef8f3"
+        },
+        "checkpoint_sha256": "90c6fb9a4f001737d8eb3e76c92595cac53197b20babf19d1f3a1409b3ffc0ed",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {}
+      },
+      {
+        "name": "r1-candidate-a1",
+        "mode": "candidate",
+        "wall_s": 26.901103153126314,
+        "cpu_s": 25.42802,
+        "cgroup_peak_bytes": 861859840,
+        "validate_wall_s": 24.095558653,
+        "validate_cpu_s": 23.91,
+        "normalization_wall_s": 0.916437586,
+        "normalization_cpu_s": 2.6,
+        "normalization_effective_cores": 2.837072638354228,
+        "normalization_calls": 23,
+        "commit_outcome": "committed",
+        "validate_sha256": "464f0ab621b16cdd6a3fdb1e7066f0ca0a2a1f904f74fb77602b1b7b8e4289ff",
+        "quiet_samples": 27,
+        "raw_sha256": {
+          "benchexec": "3caf67215a85eeb4476799edb5c6a81d2c8c89403ebd75ea299e5abe759a89aa",
+          "output": "f1f3d7305482d86f4b7b4666ed2c22fc1553c239caf83ea1a6496cc96ea38214",
+          "quiet-samples": "70b301dfb77ffd268ec44fe6e1f68adb187fba683896354b1da48876efa2a69f",
+          "runner-stderr": "15d153b4775bb640f803ef5441cb11f1de7981b432f44f8eb3fa7a698bb7ae49"
+        },
+        "checkpoint_sha256": "5a71c23c5a5e5f06fc999447418ae0e118021ac9090012d629c6bcae869c9098",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {
+          "admitted_bytes": 2938201104,
+          "batches": 68
+        }
+      },
+      {
+        "name": "r2-baseline-a1",
+        "mode": "baseline",
+        "wall_s": 28.540055540157482,
+        "cpu_s": 24.956457,
+        "cgroup_peak_bytes": 792354816,
+        "validate_wall_s": 25.663117222,
+        "validate_cpu_s": 23.43,
+        "normalization_wall_s": 2.293306083,
+        "normalization_cpu_s": 2.22,
+        "normalization_effective_cores": 0.9680347584025486,
+        "normalization_calls": 68,
+        "commit_outcome": "committed",
+        "validate_sha256": "cce3878cad96981e8fe2f28b2c94ae7618790808a221f73acc9dd6b0f5bf9a67",
+        "quiet_samples": 28,
+        "raw_sha256": {
+          "benchexec": "e156ef341832dcf18174fe90f2d692203c0826d6ca72610205a99521149726d5",
+          "output": "1abaeafa638e60b91db8dde212a208442b3b1648fd0306293ddb8857dbaa34cd",
+          "quiet-samples": "3d7a6b3f88d3e6c0ff9917e5891f3119ac15b37b75f0e2b8d0dbeab0a5c9c371",
+          "runner-stderr": "d71d118e8a0e99658454e0ff0fcd9f9ea17aecc9893ff7d7924d5ebd5e44f953"
+        },
+        "checkpoint_sha256": "0661956510b00bef0d880e9cc9e0b265dec9618d37ca8ed294a99d681d1856bc",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {}
+      },
+      {
+        "name": "r2-candidate-a1",
+        "mode": "candidate",
+        "wall_s": 27.227728992002085,
+        "cpu_s": 25.738191,
+        "cgroup_peak_bytes": 858431488,
+        "validate_wall_s": 24.350592708,
+        "validate_cpu_s": 24.22,
+        "normalization_wall_s": 0.954779758,
+        "normalization_cpu_s": 2.69,
+        "normalization_effective_cores": 2.8174036760423236,
+        "normalization_calls": 23,
+        "commit_outcome": "committed",
+        "validate_sha256": "3c7e8ee4b8847e5c09e77fadce70827130bff6b90833afd30279915e520472cf",
+        "quiet_samples": 27,
+        "raw_sha256": {
+          "benchexec": "1bcce1d4dbda1281ae6e8cdfba105b519290e9e70304f1544cb571dec32607e3",
+          "output": "4ebf0dd91e970254fb82ba98aaddff9837415f1858b7417f0ea80cfac0a55d0a",
+          "quiet-samples": "70b301dfb77ffd268ec44fe6e1f68adb187fba683896354b1da48876efa2a69f",
+          "runner-stderr": "d18147de3927dfbead509d4c2cdfb9f5e54788e7b50d43f4deeb9a094e5c280a"
+        },
+        "checkpoint_sha256": "2d687ec6494b0da53210d7033a04b8384924d6500c653cab17c588dc2172f5cf",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {
+          "admitted_bytes": 2938201104,
+          "batches": 68
+        }
+      },
+      {
+        "name": "r3-baseline-a1",
+        "mode": "baseline",
+        "wall_s": 29.316522826906294,
+        "cpu_s": 25.30832,
+        "cgroup_peak_bytes": 756404224,
+        "validate_wall_s": 26.436843447,
+        "validate_cpu_s": 23.8,
+        "normalization_wall_s": 2.273933192,
+        "normalization_cpu_s": 2.26,
+        "normalization_effective_cores": 0.9938726467211003,
+        "normalization_calls": 68,
+        "commit_outcome": "committed",
+        "validate_sha256": "f4baa0b2b6b7fc870e63589b77c0b1fe482cc92fa9f6134a24d4dd3ef353f8a5",
+        "quiet_samples": 29,
+        "raw_sha256": {
+          "benchexec": "c69657ae0db9b9d7fee94f8379d2a13890291901881cec8af0942b0b69b1b2f6",
+          "output": "dbf70043c14715bf38448990e5608cd2fffb0c5ee5c0253045d52053dc0313d2",
+          "quiet-samples": "9793777d7d68c1926a8f5e6b663dc66d95d1e4e48ad43edded8b26df8f5fe863",
+          "runner-stderr": "6a1e95c5d7bcde76520960258dae9f2ea3cc632724db990ba0a16552cb6f239b"
+        },
+        "checkpoint_sha256": "0367793286db9ea65d6f175bf1d97492b5e856b9b5235e6f7ac6d6c86419e331",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {}
+      },
+      {
+        "name": "r3-candidate-a1",
+        "mode": "candidate",
+        "wall_s": 27.49873694521375,
+        "cpu_s": 25.622982,
+        "cgroup_peak_bytes": 858284032,
+        "validate_wall_s": 24.57858608,
+        "validate_cpu_s": 24.11,
+        "normalization_wall_s": 0.907354803,
+        "normalization_cpu_s": 2.67,
+        "normalization_effective_cores": 2.942619569734068,
+        "normalization_calls": 23,
+        "commit_outcome": "committed",
+        "validate_sha256": "ae099603ac5cddeba126966c923f31ebf2ecaa5e27f0e02a02df40856bc4ee7f",
+        "quiet_samples": 27,
+        "raw_sha256": {
+          "benchexec": "69c1ae0eabb829e1382a3d516f2584adb42f6f63abf79ba10d54baa1af050b5a",
+          "output": "0a47d1520b75ea670922952463ca3ecc9b638c7e9ae025a0733d55e944bf236b",
+          "quiet-samples": "70b301dfb77ffd268ec44fe6e1f68adb187fba683896354b1da48876efa2a69f",
+          "runner-stderr": "91a044b284b3453f7bcb8875b873c037293dad9cc61bec6be177f51de407b9a2"
+        },
+        "checkpoint_sha256": "f162620e08ac58429186a1dc515ded191b473a19a539dc9ed6a36964ba3d8825",
+        "rows_accepted": 4456448,
+        "rows_rejected": 0,
+        "normalization_work": {
+          "admitted_bytes": 2938201104,
+          "batches": 68
+        }
+      }
+    ],
+    "medians": {
+      "baseline": {
+        "wall_s": 28.540055540157482,
+        "cpu_s": 24.956457,
+        "cgroup_peak_bytes": 789217280,
+        "validate_wall_s": 25.663117222,
+        "validate_cpu_s": 23.45,
+        "normalization_wall_s": 2.277006831,
+        "normalization_cpu_s": 2.26,
+        "normalization_effective_cores": 0.9938726467211003
+      },
+      "candidate": {
+        "wall_s": 27.227728992002085,
+        "cpu_s": 25.622982,
+        "cgroup_peak_bytes": 858431488,
+        "validate_wall_s": 24.350592708,
+        "validate_cpu_s": 24.11,
+        "normalization_wall_s": 0.916437586,
+        "normalization_cpu_s": 2.67,
+        "normalization_effective_cores": 2.837072638354228
+      }
+    },
+    "paired_validate_reduction_percent": [
+      4.646462411801011,
+      5.114439148782846,
+      7.029044033662313
+    ],
+    "median_validate_reduction_percent": 5.114439148782846,
+    "complete_ingest_reduction_percent": 4.5981919912835405,
+    "complete_cpu_increase_percent": 2.6707517016538063,
+    "method_sha256": {
+      "PLAN.md": "569b3969f4f45a7780d5bf849d4fbf53277f427eb05836f1e7ae0f765d2927fe",
+      "ingest.py": "15c3faa083a1d315c3b4bfe4c021ad29d8079c84a72943b733de42644cc25c72",
+      "quiet.py": "71aa6ab0c9e52fed91030d52817ffde7907caf725ad5872326689c5d33828757",
+      "run-measured.sh": "ad97400d567f0f1f048fd3798936d0da26fa94dedaf59636b2cf4e1c81cadb07",
+      "summarize.py": "7c7e743763970ed830bf858d99130d62ed026e6e93208e810073e51c4f98e029"
+    },
+    "correctness": {
+      "api_library": "753 passed, 0 failed, 2 existing ignored",
+      "private_pool_test": "1 passed",
+      "equivalence": "same recorded clock and operation; forced 1/4-worker original batches; four shaped content SHA256 receipts and every encoded payload; established nonce-bearing ordinal control excluded; commit and reopen queries pass",
+      "limitation": "does not establish cross-session clock determinism or fix #1416",
+      "single_cpu_import_tests": "26 passed on taskset -c 0 after test-only portability edit",
+      "rung_fixed_run_digests": {
+        "r1-baseline-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        },
+        "r1-candidate-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        },
+        "r2-baseline-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        },
+        "r2-candidate-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        },
+        "r3-baseline-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        },
+        "r3-candidate-a1": {
+          "shaped-identities.run": "f24e51bcc6e998fd4e8bba34bc368df839515545d5d94d75b174e48b4f128552",
+          "shaped-node-details.run": "d12883bb2831b05e6a3b4b1a6d22a5a130cce9a6bc61d3331f41c8fcf994275e",
+          "shaped-edge-details.run": "744520dd25435cc5e23263d11323b288ae020788b7bbb17a88215a74bd8cdefc",
+          "shaped-edge-endpoints.run": "67d85c005ef5a8b831a545c6b544a2fa779d1411e7baa152485d2f717ca815a6"
+        }
+      }
+    },
+    "decision": "Adopt bounded original-batch normalization windows; no input/append overlap or floor qualification claimed",
+    "raw_root": "/home/ubuntu/gf-1472-evidence",
+    "qualification_note": "Historical timing observations only. Candidate emitted unsupported admitted_bytes/batches work counters, causing actual lifecycle certification to reject its receipts. Corrected candidate and final series above supersede this series for adoption."
+  }
+}

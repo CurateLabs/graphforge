@@ -19,6 +19,8 @@ use uuid::Uuid;
 
 use crate::{BulkInputKind, CancellationToken, GraphConstructionBudgets, GraphForge, OperationId};
 
+mod normalization;
+
 const FORMAT_VERSION: u32 = 1;
 const SESSION_DIR: &str = "import-sessions";
 const MANIFEST: &str = "manifest.json";
@@ -780,85 +782,86 @@ impl GraphImportSession {
                 if source.kind.input_kind() != input_kind || source.staged {
                     continue;
                 }
-                let mut batch_index = 0_u64;
-                for_each_source_batch(&session_root, &source, batch_rows, |batch| {
-                    if batch_index < source.batches_staged {
-                        batch_index += 1;
-                        return Ok(());
-                    }
-                    if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                        return Err(cancelled());
-                    }
-                    let operation = import_batch_operation(
-                        self.manifest.operation_uuid,
-                        source.sequence,
-                        batch_index,
-                    );
-                    let batch = normalize_batch(graph, operation, input_kind, &batch)?;
-                    if batch.num_rows() == 0 {
+                normalization::for_each(
+                    graph,
+                    &session_root,
+                    &source,
+                    batch_rows,
+                    self.manifest.operation_uuid,
+                    cancellation,
+                    |index, batch| {
+                        let mut batch_index = index;
+                        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                            return Err(cancelled());
+                        }
+                        if batch.num_rows() == 0 {
+                            batch_index += 1;
+                            self.manifest.sources[source_index].batches_staged = batch_index;
+                            self.manifest.sources[source_index].inflight_batch = None;
+                            self.persist_manifest()?;
+                            return Ok(());
+                        }
+                        let recovering = source.inflight_batch == Some(batch_index);
+                        if !recovering {
+                            self.manifest.sources[source_index].inflight_batch = Some(batch_index);
+                            self.persist_manifest()?;
+                        }
+                        let chunk_id =
+                            format!("import-{:020}-{:020}", source.sequence, batch_index);
+                        let region = RegionScope::named("append");
+                        let started = CallStart::now();
+                        let staged = match (input_kind, cancellation) {
+                            (BulkInputKind::Node, Some(token)) => construction
+                                .append_nodes_with_cancellation(&chunk_id, &batch, token),
+                            (BulkInputKind::Node, None) => {
+                                construction.append_nodes(&chunk_id, &batch)
+                            }
+                            (BulkInputKind::Edge, Some(token)) => construction
+                                .append_edges_with_cancellation(&chunk_id, &batch, token),
+                            (BulkInputKind::Edge, None) => {
+                                construction.append_edges(&chunk_id, &batch)
+                            }
+                        };
+                        self.operation_timings
+                            .append
+                            .record(started, staged.is_err());
+                        if staged.is_ok() {
+                            RegionScope::record_work("rows", batch.num_rows() as u64);
+                        }
+                        drop(region);
+                        if let Err(error) = staged {
+                            self.manifest.sources[source_index].inflight_batch = None;
+                            let remaining = self
+                                .manifest
+                                .limits
+                                .max_rejected_rows
+                                .saturating_sub(self.manifest.progress.rows_rejected);
+                            self.manifest.progress.rows_rejected = self
+                                .manifest
+                                .progress
+                                .rows_rejected
+                                .saturating_add((batch.num_rows() as u64).min(remaining));
+                            self.persist_manifest()?;
+                            return Err(error);
+                        }
                         batch_index += 1;
                         self.manifest.sources[source_index].batches_staged = batch_index;
                         self.manifest.sources[source_index].inflight_batch = None;
-                        self.persist_manifest()?;
-                        return Ok(());
-                    }
-                    let recovering = source.inflight_batch == Some(batch_index);
-                    if !recovering {
-                        self.manifest.sources[source_index].inflight_batch = Some(batch_index);
-                        self.persist_manifest()?;
-                    }
-                    let chunk_id = format!("import-{:020}-{:020}", source.sequence, batch_index);
-                    let region = RegionScope::named("append");
-                    let started = CallStart::now();
-                    let staged = match (input_kind, cancellation) {
-                        (BulkInputKind::Node, Some(token)) => {
-                            construction.append_nodes_with_cancellation(&chunk_id, &batch, token)
-                        }
-                        (BulkInputKind::Node, None) => construction.append_nodes(&chunk_id, &batch),
-                        (BulkInputKind::Edge, Some(token)) => {
-                            construction.append_edges_with_cancellation(&chunk_id, &batch, token)
-                        }
-                        (BulkInputKind::Edge, None) => construction.append_edges(&chunk_id, &batch),
-                    };
-                    self.operation_timings
-                        .append
-                        .record(started, staged.is_err());
-                    if staged.is_ok() {
-                        RegionScope::record_work("rows", batch.num_rows() as u64);
-                    }
-                    drop(region);
-                    if let Err(error) = staged {
-                        self.manifest.sources[source_index].inflight_batch = None;
-                        let remaining = self
-                            .manifest
-                            .limits
-                            .max_rejected_rows
-                            .saturating_sub(self.manifest.progress.rows_rejected);
-                        self.manifest.progress.rows_rejected = self
+                        self.manifest.progress.rows_accepted = self
                             .manifest
                             .progress
-                            .rows_rejected
-                            .saturating_add((batch.num_rows() as u64).min(remaining));
+                            .rows_accepted
+                            .saturating_add(batch.num_rows() as u64);
+                        self.manifest.progress.peak_batch_rows = self
+                            .manifest
+                            .progress
+                            .peak_batch_rows
+                            .max(batch.num_rows() as u64);
+                        self.update_construction_progress(&construction.progress())?;
                         self.persist_manifest()?;
-                        return Err(error);
-                    }
-                    batch_index += 1;
-                    self.manifest.sources[source_index].batches_staged = batch_index;
-                    self.manifest.sources[source_index].inflight_batch = None;
-                    self.manifest.progress.rows_accepted = self
-                        .manifest
-                        .progress
-                        .rows_accepted
-                        .saturating_add(batch.num_rows() as u64);
-                    self.manifest.progress.peak_batch_rows = self
-                        .manifest
-                        .progress
-                        .peak_batch_rows
-                        .max(batch.num_rows() as u64);
-                    self.update_construction_progress(&construction.progress())?;
-                    self.persist_manifest()?;
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 self.manifest.sources[source_index].staged = true;
                 self.manifest.progress.files_pending =
                     self.manifest.progress.files_pending.saturating_sub(1);
@@ -1102,7 +1105,7 @@ fn for_each_source_batch(
     root: &Path,
     source: &SourceRecord,
     batch_rows: usize,
-    mut consume: impl FnMut(RecordBatch) -> Result<(), GfError>,
+    mut consume: impl FnMut(Option<RecordBatch>) -> Result<(), GfError>,
 ) -> Result<(), GfError> {
     let path = root.join("sources").join(&source.name);
     let tracker = graphforge_filesystem::FileCacheReleaseTracker::default();
@@ -1115,12 +1118,12 @@ fn for_each_source_batch(
                     tracker.clone(),
                 )
                 .map_err(storage)?;
-                for batch in
-                    ArrowFileReader::try_new(BufReader::new(reader), None).map_err(storage)?
-                {
-                    consume(batch.map_err(storage)?)?;
-                }
-                Ok(())
+                consume_source_batches(
+                    ArrowFileReader::try_new(BufReader::new(reader), None)
+                        .map_err(storage)?
+                        .map(|batch| batch.map_err(storage)),
+                    &mut consume,
+                )
             })();
             finish_source_cache_release(result, &tracker, "Arrow source")?;
         }
@@ -1133,18 +1136,38 @@ fn for_each_source_batch(
                     .with_batch_size(batch_rows)
                     .build()
                     .map_err(storage)?;
-                for batch in reader {
-                    consume(canonicalize_parquet_batch(
-                        source.kind.input_kind(),
-                        &batch.map_err(storage)?,
-                    )?)?;
-                }
-                Ok(())
+                consume_source_batches(
+                    reader.map(|batch| {
+                        canonicalize_parquet_batch(
+                            source.kind.input_kind(),
+                            &batch.map_err(storage)?,
+                        )
+                    }),
+                    &mut consume,
+                )
             })();
             finish_source_cache_release(result, &tracker, "Parquet source")?;
         }
     }
     Ok(())
+}
+
+/// Drain admitted earlier batches before a later decode error, while still
+/// inside the source reader's cache-cleanup scope. None marks the drain point.
+fn consume_source_batches(
+    batches: impl Iterator<Item = Result<RecordBatch, GfError>>,
+    consume: &mut impl FnMut(Option<RecordBatch>) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    for batch in batches {
+        match batch {
+            Ok(batch) => consume(Some(batch))?,
+            Err(error) => {
+                consume(None)?;
+                return Err(error);
+            }
+        }
+    }
+    consume(None)
 }
 
 #[derive(Clone)]
@@ -1422,7 +1445,6 @@ fn normalize_batch(
     kind: BulkInputKind,
     batch: &RecordBatch,
 ) -> Result<RecordBatch, GfError> {
-    let _region = RegionScope::named("normalization");
     match kind {
         BulkInputKind::Node => graph.normalize_import_node_chunk(operation, batch),
         BulkInputKind::Edge => graph.normalize_import_edge_chunk(operation, batch),
