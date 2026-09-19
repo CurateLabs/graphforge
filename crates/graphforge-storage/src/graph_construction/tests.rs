@@ -384,7 +384,6 @@ fn catalog_shape_preserves_parent_ids_history_and_ignores_null_observations() {
         CatalogSource::Rows(&["nodes.parquet".to_owned()]),
         CatalogSource::Rows(&[]),
         DetailCodec::from_version(FORMAT_VERSION).unwrap(),
-        42,
         GraphConstructionBudgets::default(),
         &mut || false,
         &mut evidence,

@@ -7,56 +7,16 @@
 //
 // # What is being claimed, and what is not
 //
-// Shaped outputs are NOT byte-reproducible across sessions on unmodified main,
-// and were not before this change. `ConstructionShape::runtime_catalog_now_micros`
-// is `session_now_micros`, which is `SystemTime::now()` at session open, and it
-// is written into `shaped-runtime-catalog.parquet` — a shaped output. Measured
-// on `13632d4b` with the external merge tree still in place, two sessions over
-// identical logical input produced identical bytes for every shaped artifact
-// except that one:
+// #1416 separates catalog observation time from the session recovery clock.
+// Identical logical input and parent catalog now produce identical shaped
+// payloads across processes without pinning the session clock. Bulk catalog
+// observations use the parent's greatest last_seen, or epoch for an empty parent.
+// `construction_clock_tests.rs` exercises this cross-process property.
 //
-//     shaped-identities.run          6ea5b846…  ==  6ea5b846…
-//     node details                   d7eac2fd…  ==  d7eac2fd…
-//     edge details                   4b9d9dd1…  ==  4b9d9dd1…
-//     edge endpoints                 0b3c8415…  ==  0b3c8415…
-//     shaped-rows-0-…                0592c6ed…  ==  0592c6ed…
-//     shaped-rows-1-…                437d2b85…  ==  437d2b85…
-//     shaped-runtime-catalog.parquet 195b24f7…  !=  ad153b93…
-//
-// Pinning `session_now_micros` removed that single difference and nothing else.
-// That is a pre-existing durable-format defect, it is not introduced here, and
-// fixing it is a separate concern.
-//
-// The table above is a historical measurement on `13632d4b`, predating S5's
-// external-merge-tree deletion, not a pinned expectation: no test asserts
-// those literal values. Read it for what it demonstrates -- self-consistency
-// across two sessions -- not as a checksum to reproduce. It is stale for two
-// rows as of #1439's follow-up (per-family splitters): routing node-keyed
-// families with node-only splitters changes how edge details and edge
-// endpoints partition, so `edge details` and `edge endpoints` legitimately
-// produce different bytes now. `shaped-identities.run` and `node details`
-// are unchanged, because their routing did not change. The claim this file's
-// tests actually enforce -- stated precisely below -- still holds.
-//
-// So the claim these tests make is precise:
-//
-//   * **Within a fixed set of recorded session parameters** — the session clock
-//     and the operation UUID — identical logical input produces byte-identical
-//     shaped and encoded artifacts, across separate sessions and separate
-//     project directories, at every recorded partition count, and across an
-//     interrupted-and-resumed run.
-//   * **Range partitioning contributes no non-determinism of its own.** The
-//     wall-clock artifact is isolated by
-//     `unpinned_sessions_differ_only_in_the_wall_clock_runtime_catalog`, which
-//     asserts that the *only* cross-session difference under an unpinned clock
-//     is the runtime catalog — exactly the baseline measured above.
-//
-// Two session parameters are therefore pinned so the comparison measures what it
-// claims to. Both are recorded inputs rather than derived state:
-//
-//   * `session_now_micros`. Beyond the shaped catalog, the encoded topology
-//     carries `created_at`/`updated_at` stamped from the session clock.
-//   * The operation UUID, which reaches the ordinal receipt.
+// The broader encoded-artifact comparisons below still pin session_now_micros:
+// encoded topology created_at/updated_at carry that clock. The operation UUID
+// also reaches the ordinal receipt. Those recorded parameters and local receipt
+// identities remain outside the cross-process shaped-payload claim.
 //
 // `shape_authority_sha256` is deliberately *not* compared across projects. It
 // serializes `ArtifactReceipt.identity`, which carries volume serial and inode,
@@ -503,75 +463,6 @@ mod determinism {
         let (explicit, explicit_layout) = ingest(&explicit_root, 1, &nodes, &edges, 8);
         assert_eq!(explicit_layout.partitions, 1);
         assert_eq!(fingerprint, explicit);
-    }
-
-    /// Characterize the one pre-existing cross-session difference, so that it
-    /// cannot be mistaken for a partitioning defect and cannot silently grow.
-    ///
-    /// Everything range partitioning produces — the identity domain, both
-    /// detail domains, the resolved endpoint domain and every shaped row
-    /// Parquet — is byte-identical across two sessions with an ordinary,
-    /// unpinned wall clock. Only `shaped-runtime-catalog.parquet` differs,
-    /// because it embeds `runtime_catalog_now_micros`.
-    #[test]
-    fn unpinned_sessions_differ_only_in_the_wall_clock_runtime_catalog() {
-        fn shaped_digests(nodes: &[[u8; 16]], edges: &[[u8; 16]]) -> Vec<(String, String)> {
-            let root = TempDir::new().unwrap();
-            // Deliberately NOT pinned: this is the ambient-clock behaviour.
-            let mut session = GraphConstructionSession::open(
-                root.path(),
-                Uuid::from_u128(OPERATION),
-                0,
-                budgets(64),
-            )
-            .unwrap();
-            append_all(&mut session, nodes, edges, 128);
-            session.seal().unwrap();
-            let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
-            let mut digests = Vec::new();
-            for name in std::iter::once(&shape.identities)
-                .chain(shape.node_details.iter())
-                .chain(shape.edge_details.iter())
-                .chain(shape.node_rows.iter())
-                .chain(shape.edge_rows.iter())
-                .chain(shape.edge_endpoints.iter())
-                .chain(std::iter::once(&shape.runtime_catalog))
-            {
-                let receipt = receipt_for_existing(&session.root, name).unwrap();
-                digests.push((name.clone(), receipt.sha256));
-            }
-            digests.sort_unstable();
-            digests
-        }
-
-        let nodes = node_ids(1_024);
-        let edges = edge_ids(1_024);
-        let first = shaped_digests(&nodes, &edges);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let second = shaped_digests(&nodes, &edges);
-        assert_eq!(
-            first.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-            second.iter().map(|(name, _)| name).collect::<Vec<_>>()
-        );
-        let differing = first
-            .iter()
-            .zip(second.iter())
-            .filter(|(left, right)| left.1 != right.1)
-            .map(|(left, _)| left.0.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            differing,
-            vec![SHAPED_RUNTIME_CATALOG.to_owned()],
-            "range partitioning must contribute no cross-session variance of its own; \
-             the runtime catalog's wall-clock stamp is the only pre-existing one"
-        );
-        println!(
-            "DETERMINISM_UNPINNED_CLOCK {}",
-            serde_json::json!({
-                "compared": first.len(),
-                "differing": differing,
-            })
-        );
     }
 
     /// Measurement for #1439: at fixed data, what does raising the cut cost?

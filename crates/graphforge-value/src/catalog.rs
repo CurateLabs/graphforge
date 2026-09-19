@@ -132,6 +132,13 @@ impl RuntimeCatalogData {
         self.entries.len()
     }
 
+    /// Latest retained observation across all entry kinds, in UTC microseconds.
+    /// Returns `None` only for an empty catalog; pre-epoch values are preserved.
+    #[must_use]
+    pub fn latest_observation_micros(&self) -> Option<i64> {
+        self.entries.iter().map(|entry| entry.last_seen).max()
+    }
+
     /// Exact UTF-8 bytes retained by entry names and property owners.
     #[must_use]
     pub fn retained_identifier_bytes(&self) -> usize {

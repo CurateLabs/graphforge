@@ -9,6 +9,7 @@
 //! property-bearing -- without adding a single property observation, so the
 //! two catalogs must agree byte for byte.
 
+use super::super::intake::write_parquet;
 use super::super::tests::fixed;
 use super::super::*;
 use arrow::array::{ArrayRef, Int64Array, StringArray};
@@ -19,8 +20,8 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-/// Fixed session clock: the catalog embeds it, so it is a recorded parameter
-/// of every byte comparison below.
+/// Fixed session clock for encoded topology metadata; catalog observations
+/// independently derive their timestamp from the parent catalog.
 const FIXED_NOW_MICROS: i64 = 1_789_000_000_000_000;
 const LABELS: [&str; 3] = ["Person", "Company", "Place"];
 const ROUTES: [&str; 4] = ["KNOWS", "WORKS_AT", "LIVES_IN", "OWNS"];
@@ -361,4 +362,124 @@ fn a_kind_mixing_bare_and_property_schemas_keeps_its_row_artifacts() {
         (shape.node_count, shape.edge_count),
         (2 * CHUNK_ROWS as u64, CHUNK_ROWS as u64)
     );
+}
+
+#[test]
+fn bulk_catalog_observations_use_parent_history_or_epoch_without_advancing_time() {
+    use arrow::array::{TimestampMicrosecondArray, UInt64Array};
+
+    for (times, expected_time) in [
+        (None, 0),
+        (Some([11, 13, 17, 19]), 19),
+        (Some([11, 29, 17, 19]), 29),
+        (Some([11, 13, 29, 19]), 29),
+        (Some([-100, -90, -80, -70]), -70),
+        (Some([11, 13, 17, i64::MAX]), i64::MAX),
+    ] {
+        let root = TempDir::new().unwrap();
+        let directory = StableDirectory::open(root.path()).unwrap();
+        let mut parent = RuntimeCatalog::new();
+        if let Some([first, last, relation, property]) = times {
+            parent.intern_label_at("Person", first).unwrap();
+            parent.intern_label_at("Person", last).unwrap();
+            parent
+                .intern_relation_type_at("UNOBSERVED", relation)
+                .unwrap();
+            parent
+                .intern_property_at("legacy", Some("Person"), property)
+                .unwrap();
+        }
+        // Encode/decode the parent through the durable carrier before deriving time.
+        let parent = RuntimeCatalog::from_record_batch(&parent.to_record_batch()).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("label", DataType::Utf8, false),
+                Field::new("score", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(fixed(&[
+                    1_u128.to_be_bytes(),
+                    2_u128.to_be_bytes(),
+                    3_u128.to_be_bytes(),
+                ])),
+                Arc::new(StringArray::from(vec!["Person", "Person", "New"])),
+                Arc::new(Int64Array::from(vec![Some(7), None, None])),
+            ],
+        )
+        .unwrap();
+        let mut evidence = GraphConstructionEvidence::default();
+        for category in crate::ArtifactCategory::ALL {
+            evidence
+                .storage_current
+                .insert(category, Default::default());
+            evidence
+                .storage_receipt_category_authorities
+                .insert(category, Default::default());
+            evidence
+                .storage_transient_peak_allocated_bytes
+                .insert(category, 0);
+            evidence
+                .storage_receipt_transient_peak_authorities
+                .insert(category, 0);
+        }
+        write_parquet(&directory, "nodes.parquet", &batch, &mut evidence).unwrap();
+        let output = build_runtime_catalog(
+            parent,
+            &directory,
+            CatalogSource::Rows(&["nodes.parquet".to_owned()]),
+            CatalogSource::Rows(&[]),
+            DetailCodec::from_version(FORMAT_VERSION).unwrap(),
+            GraphConstructionBudgets::default(),
+            &mut || false,
+            &mut evidence,
+        )
+        .unwrap();
+        let batches = ParquetRecordBatchReaderBuilder::try_new(
+            directory.open_child_file(OsStr::new(&output)).unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let result = RuntimeCatalog::from_record_batches(batches.iter())
+            .unwrap()
+            .to_record_batch();
+        let names = result
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let counts = result
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let first = result
+            .column(4)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let last = result
+            .column(5)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        for row in 0..result.num_rows() {
+            let expected = match (names.value(row), times) {
+                ("Person", Some(times)) => (4, times[0], expected_time),
+                ("Person", None) => (2, 0, 0),
+                ("UNOBSERVED", Some(times)) => (1, times[2], times[2]),
+                ("legacy", Some(times)) => (1, times[3], times[3]),
+                ("New" | "score", _) => (1, expected_time, expected_time),
+                other => panic!("unexpected catalog entry {other:?}"),
+            };
+            assert_eq!(
+                (counts.value(row), first.value(row), last.value(row)),
+                expected
+            );
+        }
+        assert_eq!(result.num_rows(), if times.is_some() { 5 } else { 3 });
+    }
 }

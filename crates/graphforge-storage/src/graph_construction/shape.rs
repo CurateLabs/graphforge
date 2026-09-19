@@ -600,7 +600,6 @@ impl GraphConstructionSession {
                 CatalogSource::Rows(&edge_rows)
             },
             detail_codec,
-            self.checkpoint.session_now_micros,
             self.checkpoint.budgets,
             &mut cancelled,
             &mut self.checkpoint.evidence,

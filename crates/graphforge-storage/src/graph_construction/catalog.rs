@@ -59,11 +59,14 @@ pub(super) fn build_runtime_catalog(
     node_source: CatalogSource<'_>,
     edge_source: CatalogSource<'_>,
     detail_codec: DetailCodec,
-    now_micros: i64,
     budgets: GraphConstructionBudgets,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<String, GfError> {
+    // Bulk rows carry no observation time. Use the authenticated parent's
+    // latest observation (epoch for an empty catalog), never the session clock.
+    // Compute once before interning; this preserves valid parent histories.
+    let now_micros = catalog.latest_observation_micros().unwrap_or(0);
     let mut catalog_entries = catalog.entry_count();
     let mut identifier_bytes = catalog.retained_identifier_bytes();
     if catalog_entries > budgets.max_catalog_entries

@@ -15,6 +15,20 @@ issues #1416 (a wall clock is written into the runtime catalog), #1387 (ingest
 throughput), #1429 and #1448 (construction concurrency attempts), #1456
 (reuse Arrow/DataFusion where determinism and durability allow)
 
+## Implementation update: deterministic bulk catalog observations (#1416)
+
+Bulk input carries no observation time. Newly shaped catalogs use the greatest
+parent-catalog `last_seen` (all entry kinds), or epoch zero for an empty parent.
+This is a deterministic placeholder, not import wall time. Existing `first_seen`
+and unobserved history remain intact. The checkpoint/manifest session clock and
+its recovery refusal remain unchanged. Cross-process tests compare all shaped
+payload digests without pinning the clock, and mutation proves the recovery
+binding is still required. Encoded topology timestamps remain session metadata;
+this update does not broaden the published-byte boundary below. See
+[resumable import](../book/architecture/resumable-import.md) for the exact policy.
+
+The context below records the defect as it stood when this ADR was accepted.
+
 ## Context
 
 The construction path's determinism contract was written as: *within a fixed set
@@ -112,7 +126,7 @@ terms: a wall clock in a durable artifact is wrong regardless of where the
 determinism contract is drawn.
 
 **Superseded expectation.** Any test, comment or brief asserting that specific
-shaped-artifact digests are fixed values is obsolete. The digest table in the
-header comment of `construction_determinism_tests.rs` documents a measurement
-taken on `13632d4b`, before the external merge tree was removed; two of its four
-rows were already stale. No test asserted those values, and none should.
+shaped-artifact digests are fixed values is obsolete. The former digest table in the header of `construction_determinism_tests.rs`
+recorded a measurement on `13632d4b`, before the external merge tree was removed.
+It was removed when #1416 established the new cross-process property. No test
+asserted those historical values, and none should.
