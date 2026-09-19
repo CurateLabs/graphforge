@@ -24,6 +24,10 @@ from graphforge_bench.gdc_contracts import (
     validate_acquisition,
     workspace_root,
 )
+from graphforge_bench.gdc_measurement_policy import (
+    GdcMeasurementBoundaryError,
+    assert_live_diagnostic_boundary,
+)
 
 COMPLEX_READS = tuple(f"IC{index}" for index in range(1, 15))
 SHORT_READS = tuple(f"IS{index}" for index in range(1, 8))
@@ -44,6 +48,13 @@ class SnbInteractiveSuiteError(ValueError):
     def __init__(self, cause: str, message: str) -> None:
         super().__init__(message)
         self.cause = cause
+
+
+def _enforce_measurement_boundary(evidence: dict[str, Any], *, label: str) -> None:
+    try:
+        assert_live_diagnostic_boundary(evidence, label=label)
+    except GdcMeasurementBoundaryError as error:
+        raise SnbInteractiveSuiteError(error.cause, str(error)) from error
 
 
 def identity_path(root: Path | None = None) -> Path:
@@ -146,11 +157,7 @@ def run_tiny_suite(
                 "invalid_document",
                 "unexpected snb-interactive evidence schema",
             )
-        if evidence.get("certification") is not False:
-            raise SnbInteractiveSuiteError(
-                "invalid_document",
-                "evidence must never claim GDC certification",
-            )
+        _enforce_measurement_boundary(evidence, label="snb-interactive evidence")
         if completed.returncode != 0 and fixture_name == "compatible":
             raise SnbInteractiveSuiteError(
                 "reference_mismatch",
@@ -180,10 +187,11 @@ def run_live_is1(
                 "live_execution",
                 completed.stderr.strip(),
             )
-        if evidence.get("lane") != "live_in_memory" or evidence.get("certification") is not False:
+        if evidence.get("lane") != "live_in_memory":
             raise SnbInteractiveSuiteError(
-                "invalid_document", "live evidence lane or certification marker is invalid"
+                "invalid_document", "live evidence lane marker is invalid"
             )
+        _enforce_measurement_boundary(evidence, label="live snb-interactive evidence")
         return evidence
 
 

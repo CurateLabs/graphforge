@@ -27,6 +27,10 @@ from graphforge_bench.gdc_contracts import (
     validate_acquisition,
     workspace_root,
 )
+from graphforge_bench.gdc_measurement_policy import (
+    GdcMeasurementBoundaryError,
+    assert_live_diagnostic_boundary,
+)
 
 ANALYTICAL_READS = tuple(f"BI{index}" for index in range(1, 21))
 BATCH_INSERTS = tuple(f"INS{index}" for index in range(1, 9))
@@ -53,6 +57,13 @@ class SnbBiSuiteError(ValueError):
     def __init__(self, cause: str, message: str) -> None:
         super().__init__(message)
         self.cause = cause
+
+
+def _enforce_measurement_boundary(evidence: dict[str, Any], *, label: str) -> None:
+    try:
+        assert_live_diagnostic_boundary(evidence, label=label)
+    except GdcMeasurementBoundaryError as error:
+        raise SnbBiSuiteError(error.cause, str(error)) from error
 
 
 def identity_path(root: Path | None = None) -> Path:
@@ -141,8 +152,7 @@ def run_live_bi2(
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     if evidence.get("schema") != LIVE_EVIDENCE_SCHEMA:
         raise SnbBiSuiteError("invalid_document", "unexpected live evidence schema")
-    if evidence.get("certification") is not False:
-        raise SnbBiSuiteError("invalid_document", "live evidence must set certification=false")
+    _enforce_measurement_boundary(evidence, label="live snb-bi evidence")
     return evidence
 
 
@@ -210,11 +220,7 @@ def run_tiny_suite(
                 "invalid_document",
                 "unexpected snb-bi evidence schema",
             )
-        if evidence.get("certification") is not False:
-            raise SnbBiSuiteError(
-                "invalid_document",
-                "evidence must never claim GDC certification",
-            )
+        _enforce_measurement_boundary(evidence, label="snb-bi evidence")
         if "resources" not in evidence or "operations" not in evidence:
             raise SnbBiSuiteError(
                 "invalid_document",

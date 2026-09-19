@@ -99,6 +99,17 @@
       "notes": "GDC Graphalytics live runner; resource timings are engineering proof with certification: false."
     },
     {
+      "path": "benchmarks/runners/gdc-snb-bi",
+      "boundary": "in_process",
+      "authority": "product_semantic",
+      "disposition": "diagnostic_only",
+      "owner_issue": 959,
+      "allowed_signals": [
+        "custom_wall_clock"
+      ],
+      "notes": "SNB BI live lane; per-phase wall_ms is diagnostic with certification:false and resources.correctness_authority:false."
+    },
+    {
       "path": "benchmarks/runners/gdc-snb-interactive",
       "boundary": "in_process",
       "authority": "product_semantic",
