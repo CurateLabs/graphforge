@@ -26,6 +26,10 @@ from graphforge_bench.gdc_contracts import (
     validate_acquisition,
     workspace_root,
 )
+from graphforge_bench.gdc_measurement_policy import (
+    GdcMeasurementBoundaryError,
+    assert_live_diagnostic_boundary,
+)
 
 COMPLEX_READS = tuple(f"TCR{index}" for index in range(1, 13))
 SIMPLE_READS = tuple(f"TSR{index}" for index in range(1, 7))
@@ -66,6 +70,13 @@ class FinBenchTransactionSuiteError(ValueError):
     def __init__(self, cause: str, message: str) -> None:
         super().__init__(message)
         self.cause = cause
+
+
+def _enforce_measurement_boundary(evidence: dict[str, Any], *, label: str) -> None:
+    try:
+        assert_live_diagnostic_boundary(evidence, label=label)
+    except GdcMeasurementBoundaryError as error:
+        raise FinBenchTransactionSuiteError(error.cause, str(error)) from error
 
 
 def identity_path(root: Path | None = None) -> Path:
@@ -162,11 +173,7 @@ def run_tiny_suite(
                 "invalid_document",
                 "unexpected finbench-transaction evidence schema",
             )
-        if evidence.get("certification") is not False:
-            raise FinBenchTransactionSuiteError(
-                "invalid_document",
-                "evidence must never claim GDC certification",
-            )
+        _enforce_measurement_boundary(evidence, label="finbench-transaction evidence")
         if completed.returncode != 0 and fixture_name == "compatible":
             raise FinBenchTransactionSuiteError(
                 "reference_mismatch",
@@ -240,19 +247,7 @@ def run_live_suite(
                 "static_output_rejected",
                 "live lane did not prove live_graphforge execution",
             )
-        if evidence.get("certification") is not False:
-            raise FinBenchTransactionSuiteError(
-                "invalid_document", "live evidence must keep certification=false"
-            )
-        if (
-            evidence.get("identities", {})
-            .get("execution_authority", {})
-            .get("caller_supplied_result")
-        ):
-            raise FinBenchTransactionSuiteError(
-                "static_output_rejected",
-                "live evidence must not accept a caller-supplied result",
-            )
+        _enforce_measurement_boundary(evidence, label="live finbench-transaction evidence")
         return evidence
 
 

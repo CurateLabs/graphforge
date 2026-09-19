@@ -21,6 +21,10 @@ from graphforge_bench.gdc_contracts import (
     validate_suite_acquisition,
     workspace_root,
 )
+from graphforge_bench.gdc_measurement_policy import (
+    GdcMeasurementBoundaryError,
+    assert_live_diagnostic_boundary,
+)
 
 ALGORITHMS = ("bfs", "pr", "wcc", "cdlp", "lcc", "sssp")
 LADDER_SCHEMA = "graphforge-gdc-graphalytics-ladder/1"
@@ -34,6 +38,13 @@ class GraphalyticsSuiteError(ValueError):
     def __init__(self, cause: str, message: str) -> None:
         super().__init__(message)
         self.cause = cause
+
+
+def _enforce_measurement_boundary(evidence: dict[str, Any], *, label: str) -> None:
+    try:
+        assert_live_diagnostic_boundary(evidence, label=label)
+    except GdcMeasurementBoundaryError as error:
+        raise GraphalyticsSuiteError(error.cause, str(error)) from error
 
 
 def ladder_path(root: Path | None = None) -> Path:
@@ -246,11 +257,7 @@ def _validate_evidence_envelope(evidence: dict[str, Any], execution_mode: str) -
         raise GraphalyticsSuiteError(
             "invalid_document", "evidence requires each of the six algorithms exactly once"
         )
-    if evidence.get("certification") is not False:
-        raise GraphalyticsSuiteError(
-            "invalid_document",
-            "engineering Graphalytics evidence must remain certification=false",
-        )
+    _enforce_measurement_boundary(evidence, label="graphalytics evidence")
 
 
 def assert_identity_profiles_are_separated(root: Path | None = None) -> None:
