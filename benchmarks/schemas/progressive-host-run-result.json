@@ -15,6 +15,7 @@
         "staging_failed",
         "execution_boundary_failed",
         "benchexec_failed",
+        "rung_wall_exceeded",
         "ordinary_receipt_missing",
         "stored_plan_mismatch",
         "projection_refused",

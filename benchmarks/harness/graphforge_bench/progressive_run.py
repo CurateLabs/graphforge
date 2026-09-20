@@ -592,11 +592,36 @@ def _benchexec_tool_directory(stage: Path, *, prefer_stage: bool = False) -> Pat
     return stage / "bin"
 
 
-def _stage_benchmark_xml(root: Path, stage: Path) -> None:
+# The checked-in definition carries the 4 h envelope. A rung may stage a
+# tighter per-rung wall (a margin above the last accepted measurement) so a
+# regressed rung stops within minutes instead of holding the ladder for hours.
+BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS = 30
+
+
+def _stage_benchmark_xml(root: Path, stage: Path, *, wall_seconds: int | None = None) -> None:
     text = (root / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
         encoding="utf-8"
     )
+    if wall_seconds is not None:
+        text = _rewrite_benchmark_wall(text, wall_seconds)
     (stage / "benchmark.xml").write_text(text, encoding="utf-8")
+
+
+def _rewrite_benchmark_wall(text: str, wall_seconds: int) -> str:
+    """Bind the staged BenchExec wall limit to `wall_seconds` (never above 4 h)."""
+    if not isinstance(wall_seconds, int) or isinstance(wall_seconds, bool):
+        raise ControllerError("BenchExec wall limit must be an integer")
+    if wall_seconds <= 0 or wall_seconds > 14_400:
+        raise ControllerError("BenchExec wall limit must be within 1..14400 seconds")
+    soft = re.search(r'\btimelimit="14400 s"', text)
+    hard = re.search(r'\bhardtimelimit="14430 s"', text)
+    if soft is None or hard is None:
+        raise ControllerError("BenchExec definition wall limits are not the expected 4 h envelope")
+    text = text[: soft.start()] + f'timelimit="{wall_seconds} s"' + text[soft.end() :]
+    hard = re.search(r'\bhardtimelimit="14430 s"', text)
+    assert hard is not None
+    grace = wall_seconds + BENCHEXEC_HARD_TIMELIMIT_GRACE_SECONDS
+    return text[: hard.start()] + f'hardtimelimit="{grace} s"' + text[hard.end() :]
 
 
 # Host durable writes charge page cache into cgroup memory.peak. Keep the product

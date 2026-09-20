@@ -1244,6 +1244,27 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         with patch("graphforge_bench.progressive_run._provider_volume_mounted", return_value=True):
             self.assertEqual(_benchexec_tool_directory(stage), stage / "bin")
 
+    def test_stage_benchmark_xml_binds_a_per_rung_wall(self) -> None:
+        from graphforge_bench.progressive_run import _rewrite_benchmark_wall, _stage_benchmark_xml
+
+        stage = self.base / "wall-stage"
+        stage.mkdir()
+        _stage_benchmark_xml(ROOT, stage, wall_seconds=102)
+        xml = (stage / "benchmark.xml").read_text(encoding="utf-8")
+        self.assertIn('timelimit="102 s"', xml)
+        self.assertIn('hardtimelimit="132 s"', xml)
+        self.assertNotIn("14400", xml)
+        self.assertNotIn("14430", xml)
+        definition = (ROOT / "definitions/graphforge-progressive-qualification-v1.xml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_rewrite_benchmark_wall(definition, 14_400), definition)
+        for wall in (0, -1, 14_401, True):
+            with self.assertRaises(ControllerError):
+                _rewrite_benchmark_wall(definition, wall)  # type: ignore[arg-type]
+        with self.assertRaises(ControllerError):
+            _rewrite_benchmark_wall(definition.replace('timelimit="14400 s"', 'timelimit="1 s"'), 5)
+
     def test_provider_volume_keeps_four_gib_benchexec_memory(self) -> None:
         stage = self.base / "stage"
         stage.mkdir()
