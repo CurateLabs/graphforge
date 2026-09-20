@@ -468,6 +468,13 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "source_artifact_write",
+    srcs = ["tests/source_artifact_write.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "strict_runtime_properties",
     srcs = ["tests/strict_runtime_properties.rs"],
     crate = ":graphforge_api",

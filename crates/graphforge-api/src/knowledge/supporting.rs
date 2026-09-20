@@ -12,10 +12,10 @@ use super::{
     concat_or_empty, confidence_publication_participants, evidence_publication_participants,
     knowledge_error, knowledge_generation_uuid, lock_graph_visibility, match_requested_edge_uuids,
     match_requested_node_uuids, merged_assertion_evidence_provenance, merged_confidence_provenance,
-    merged_evidence_provenance, not_found_kind, provenance_error, read_confidence_ledger,
-    read_evidence_ledger, read_ledger, read_reasoning_ledger, reasoning_publication_participants,
-    require_uuid, staged_assertion, transaction_conflict, validate_graph_refs,
-    validate_write_context, with_next_token,
+    merged_evidence_provenance, not_found_kind, provenance_error, read_artifact_ledger,
+    read_confidence_ledger, read_evidence_ledger, read_ledger, read_reasoning_ledger,
+    read_source_ledger, reasoning_publication_participants, require_uuid, staged_assertion,
+    transaction_conflict, validate_graph_refs, validate_write_context, with_next_token,
 };
 
 fn publish_reasoning(
@@ -282,10 +282,33 @@ fn validate_evidence_source(
 ) -> Result<(), GfError> {
     let mut pending = HashSet::from([source_uuid]);
     match source_kind {
-        EvidenceSourceKind::Document
-        | EvidenceSourceKind::Observation
-        | EvidenceSourceKind::Source
-        | EvidenceSourceKind::Artifact => return Ok(()),
+        EvidenceSourceKind::Document | EvidenceSourceKind::Observation => return Ok(()),
+        EvidenceSourceKind::Source => {
+            let generation = graphforge_storage::resolve_project_generation(
+                graph.resolved_generation.container_root(),
+            )?;
+            if read_source_ledger(&generation)?
+                .sources
+                .iter()
+                .any(|row| row.source_uuid == source_uuid)
+            {
+                return Ok(());
+            }
+            return Err(not_found_kind("source"));
+        }
+        EvidenceSourceKind::Artifact => {
+            let generation = graphforge_storage::resolve_project_generation(
+                graph.resolved_generation.container_root(),
+            )?;
+            if read_artifact_ledger(&generation)?
+                .artifacts
+                .iter()
+                .any(|row| row.artifact_uuid == source_uuid)
+            {
+                return Ok(());
+            }
+            return Err(not_found_kind("artifact"));
+        }
         EvidenceSourceKind::GraphNode => match_requested_node_uuids(graph, &mut pending)?,
         EvidenceSourceKind::GraphEdge => match_requested_edge_uuids(graph, &mut pending)?,
     }

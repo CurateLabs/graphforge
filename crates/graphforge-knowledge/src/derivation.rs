@@ -3,9 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
-use arrow::array::{
-    FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array,
-};
+use arrow::array::{FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::canonical::{
@@ -16,8 +14,7 @@ use uuid::Uuid;
 use crate::{
     KNOWLEDGE_CAPABILITY_VERSION, KnowledgeError, MAX_KNOWLEDGE_ROWS, SchemaRegistryEntry,
     check_limit, fixed_column, invalid, require_schema, require_uuid, required_i64, required_text,
-    required_u32, string_column, timestamp_column, u32_column,
-    uuid_at, uuid_field,
+    required_u32, string_column, timestamp_column, u32_column, uuid_at, uuid_field,
 };
 
 /// Immutable derivation-edge record contract.
@@ -235,7 +232,11 @@ impl ArtifactDerivationLedger {
     pub fn from_batches(batches: &[RecordBatch]) -> Result<Self, KnowledgeError> {
         let mut derivations = Vec::new();
         for batch in batches {
-            require_schema(batch, &ARTIFACT_DERIVATION_SCHEMA, "artifact_derivations.schema")?;
+            require_schema(
+                batch,
+                &ARTIFACT_DERIVATION_SCHEMA,
+                "artifact_derivations.schema",
+            )?;
             let ids = fixed_column(batch, "derivation_uuid")?;
             let outputs = fixed_column(batch, "output_uuid")?;
             let output_kinds = string_column(batch, "output_kind")?;
@@ -250,16 +251,22 @@ impl ArtifactDerivationLedger {
                 derivations.push(ArtifactDerivation {
                     derivation_uuid: uuid_at(ids, row, "derivation_uuid")?,
                     output_uuid: uuid_at(outputs, row, "output_uuid")?,
-                    output_kind: DerivationSubjectKind::parse(
-                        required_text(output_kinds, row, "output_kind")?,
-                    )?,
+                    output_kind: DerivationSubjectKind::parse(required_text(
+                        output_kinds,
+                        row,
+                        "output_kind",
+                    )?)?,
                     input_uuid: uuid_at(inputs, row, "input_uuid")?,
-                    input_kind: DerivationSubjectKind::parse(
-                        required_text(input_kinds, row, "input_kind")?,
-                    )?,
-                    derivation_role: DerivationRole::parse(
-                        required_text(roles, row, "derivation_role")?,
-                    )?,
+                    input_kind: DerivationSubjectKind::parse(required_text(
+                        input_kinds,
+                        row,
+                        "input_kind",
+                    )?)?,
+                    derivation_role: DerivationRole::parse(required_text(
+                        roles,
+                        row,
+                        "derivation_role",
+                    )?)?,
                     ordinal: required_u32(ordinals, row, "ordinal")?,
                     provenance_uuid: uuid_at(provenance, row, "provenance_uuid")?,
                     recorded_at_micros: required_i64(recorded, row, "recorded_at")?,
@@ -447,7 +454,9 @@ fn derivation_batch(rows: &[ArtifactDerivation]) -> Result<RecordBatch, Knowledg
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|row| row.derivation_role.as_str()),
             )),
-            Arc::new(UInt32Array::from_iter_values(rows.iter().map(|row| row.ordinal))),
+            Arc::new(UInt32Array::from_iter_values(
+                rows.iter().map(|row| row.ordinal),
+            )),
             Arc::new(provenance.finish()),
             Arc::new(
                 TimestampMicrosecondArray::from_iter_values(

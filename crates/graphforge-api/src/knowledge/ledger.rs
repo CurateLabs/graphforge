@@ -11,11 +11,26 @@ use super::{
     Schema, SchemaRef, Sha256, SubjectKind, Uuid, fs, knowledge_error, provenance_error,
     schema_registry,
 };
+use graphforge_knowledge::{
+    ArtifactDerivationLedger, ArtifactLedger, ArtifactPreferenceLedger, RetentionDependencyLedger,
+    SourceLedger,
+};
 
 pub(crate) fn empty_participants() -> Result<Vec<ProjectParticipant>, GfError> {
     let mut participants = encode_ledger(&AssertionLedger::default())?;
     participants.extend(encode_confidence_ledger(&ConfidenceLedger::default())?);
     participants.extend(encode_evidence_ledger(&EvidenceLedger::default())?);
+    participants.extend(encode_source_ledger(&SourceLedger::default())?);
+    participants.extend(encode_artifact_ledger(&ArtifactLedger::default())?);
+    participants.extend(encode_derivation_ledger(
+        &ArtifactDerivationLedger::default(),
+    )?);
+    participants.extend(encode_preference_ledger(
+        &ArtifactPreferenceLedger::default(),
+    )?);
+    participants.extend(encode_retention_ledger(
+        &RetentionDependencyLedger::default(),
+    )?);
     participants.extend(crate::algorithm_runs::empty_participants()?);
     Ok(participants)
 }
@@ -87,6 +102,56 @@ pub(crate) fn read_evidence_ledger(
             require_participant_contract(&snapshot, "evidence")?;
             EvidenceLedger::from_batches(&read_evidence_or_empty(&snapshot)?)
                 .map_err(knowledge_error)
+        }
+    }
+}
+
+pub(crate) fn read_source_ledger(
+    generation: &ResolvedProjectGeneration,
+) -> Result<SourceLedger, GfError> {
+    generation.require_capability("knowledge", 1)?;
+    match generation.participant_snapshot("knowledge", "sources")? {
+        None => SourceLedger::new(Vec::new()).map_err(knowledge_error),
+        Some(snapshot) => {
+            require_participant_contract(&snapshot, "sources")?;
+            SourceLedger::from_batches(&read_family_or_empty(&snapshot, || {
+                SourceLedger::default().batch().map_err(knowledge_error)
+            })?)
+            .map_err(knowledge_error)
+        }
+    }
+}
+
+pub(crate) fn read_artifact_ledger(
+    generation: &ResolvedProjectGeneration,
+) -> Result<ArtifactLedger, GfError> {
+    generation.require_capability("knowledge", 1)?;
+    match generation.participant_snapshot("knowledge", "artifacts")? {
+        None => ArtifactLedger::new(Vec::new()).map_err(knowledge_error),
+        Some(snapshot) => {
+            require_participant_contract(&snapshot, "artifacts")?;
+            ArtifactLedger::from_batches(&read_family_or_empty(&snapshot, || {
+                ArtifactLedger::default().batch().map_err(knowledge_error)
+            })?)
+            .map_err(knowledge_error)
+        }
+    }
+}
+
+pub(crate) fn read_derivation_ledger(
+    generation: &ResolvedProjectGeneration,
+) -> Result<ArtifactDerivationLedger, GfError> {
+    generation.require_capability("knowledge", 1)?;
+    match generation.participant_snapshot("knowledge", "artifact_derivations")? {
+        None => ArtifactDerivationLedger::new(Vec::new()).map_err(knowledge_error),
+        Some(snapshot) => {
+            require_participant_contract(&snapshot, "artifact_derivations")?;
+            ArtifactDerivationLedger::from_batches(&read_family_or_empty(&snapshot, || {
+                ArtifactDerivationLedger::default()
+                    .batch()
+                    .map_err(knowledge_error)
+            })?)
+            .map_err(knowledge_error)
         }
     }
 }
@@ -423,6 +488,93 @@ pub(super) fn confidence_publication_participants(
     Ok(participants)
 }
 
+pub(crate) fn source_artifact_publication_participants(
+    parent: &ResolvedProjectGeneration,
+    sources: &SourceLedger,
+    artifacts: &ArtifactLedger,
+    derivations: &ArtifactDerivationLedger,
+    provenance: &ProvenanceLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let mut participants = parent
+        .participant_snapshots()?
+        .into_iter()
+        .filter(|snapshot| {
+            !(snapshot.capability_id == "knowledge"
+                && matches!(
+                    snapshot.record_family_id.as_str(),
+                    "sources"
+                        | "artifacts"
+                        | "artifact_derivations"
+                        | "artifact_preference_events"
+                        | "retention_dependencies"
+                )
+                || snapshot.capability_id == "provenance"
+                    && matches!(snapshot.record_family_id.as_str(), "events" | "lineage"))
+        })
+        .map(snapshot_to_participant)
+        .collect::<Result<Vec<_>, _>>()?;
+    participants.extend(encode_source_ledger(sources)?);
+    participants.extend(encode_artifact_ledger(artifacts)?);
+    participants.extend(encode_derivation_ledger(derivations)?);
+    participants.extend(crate::provenance::encode_ledger(provenance)?);
+    participants.sort_by(|left, right| {
+        (&left.capability_id, &left.record_family_id)
+            .cmp(&(&right.capability_id, &right.record_family_id))
+    });
+    Ok(participants)
+}
+
+pub(crate) fn merged_source_provenance(
+    parent: &ResolvedProjectGeneration,
+    source_uuid: Uuid,
+    event: &ProvenanceEvent,
+) -> Result<ProvenanceLedger, GfError> {
+    let existing = crate::provenance::read_ledger(parent)?;
+    let lineage = vec![
+        LineageRecord::new(
+            event.provenance_uuid,
+            source_uuid,
+            SubjectKind::Source,
+            LineageRole::Output,
+            0,
+        )
+        .map_err(provenance_error)?,
+    ];
+    existing
+        .merge(&ProvenanceLedger::new(vec![event.clone()], lineage).map_err(provenance_error)?)
+        .map_err(provenance_error)
+}
+
+pub(crate) fn merged_artifact_provenance(
+    parent: &ResolvedProjectGeneration,
+    source_uuid: Uuid,
+    artifact_uuid: Uuid,
+    event: &ProvenanceEvent,
+) -> Result<ProvenanceLedger, GfError> {
+    let existing = crate::provenance::read_ledger(parent)?;
+    let lineage = vec![
+        LineageRecord::new(
+            event.provenance_uuid,
+            source_uuid,
+            SubjectKind::Source,
+            LineageRole::Input,
+            0,
+        )
+        .map_err(provenance_error)?,
+        LineageRecord::new(
+            event.provenance_uuid,
+            artifact_uuid,
+            SubjectKind::Artifact,
+            LineageRole::Output,
+            0,
+        )
+        .map_err(provenance_error)?,
+    ];
+    existing
+        .merge(&ProvenanceLedger::new(vec![event.clone()], lineage).map_err(provenance_error)?)
+        .map_err(provenance_error)
+}
+
 pub(super) fn evidence_publication_participants(
     parent: &ResolvedProjectGeneration,
     knowledge: &EvidenceLedger,
@@ -658,6 +810,76 @@ pub(crate) fn encode_status_ledger(
     )?])
 }
 
+pub(crate) fn encode_source_ledger(
+    ledger: &SourceLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let registry = schema_registry();
+    let sources = registry
+        .iter()
+        .find(|entry| entry.record_family == "sources")
+        .expect("source registry");
+    Ok(vec![participant(
+        sources,
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
+
+pub(crate) fn encode_artifact_ledger(
+    ledger: &ArtifactLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let registry = schema_registry();
+    let artifacts = registry
+        .iter()
+        .find(|entry| entry.record_family == "artifacts")
+        .expect("artifact registry");
+    Ok(vec![participant(
+        artifacts,
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
+
+pub(crate) fn encode_derivation_ledger(
+    ledger: &ArtifactDerivationLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let registry = schema_registry();
+    let derivations = registry
+        .iter()
+        .find(|entry| entry.record_family == "artifact_derivations")
+        .expect("artifact derivation registry");
+    Ok(vec![participant(
+        derivations,
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
+
+pub(crate) fn encode_preference_ledger(
+    ledger: &ArtifactPreferenceLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let registry = schema_registry();
+    let preferences = registry
+        .iter()
+        .find(|entry| entry.record_family == "artifact_preference_events")
+        .expect("artifact preference registry");
+    Ok(vec![participant(
+        preferences,
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
+
+pub(crate) fn encode_retention_ledger(
+    ledger: &RetentionDependencyLedger,
+) -> Result<Vec<ProjectParticipant>, GfError> {
+    let registry = schema_registry();
+    let retention = registry
+        .iter()
+        .find(|entry| entry.record_family == "retention_dependencies")
+        .expect("retention dependency registry");
+    Ok(vec![participant(
+        retention,
+        &ledger.batch().map_err(knowledge_error)?,
+    )?])
+}
+
 pub(crate) fn encode_supersession_ledger(
     ledger: &AssertionSupersessionLedger,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
@@ -789,6 +1011,17 @@ fn read_confidence_or_empty(
         } else {
             ledger.input_batch().map_err(knowledge_error)?
         }])
+    } else {
+        read_parquet(&snapshot.bytes)
+    }
+}
+
+fn read_family_or_empty(
+    snapshot: &graphforge_storage::ProjectParticipantSnapshot,
+    empty: impl FnOnce() -> Result<RecordBatch, GfError>,
+) -> Result<Vec<RecordBatch>, GfError> {
+    if snapshot.row_count == 0 {
+        Ok(vec![empty()?])
     } else {
         read_parquet(&snapshot.bytes)
     }

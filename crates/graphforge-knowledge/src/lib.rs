@@ -9,8 +9,8 @@ mod algorithm_run;
 mod artifact;
 mod artifact_preference;
 mod belief_projection;
-mod derivation;
 mod confidence;
+mod derivation;
 mod hypothesis;
 mod reasoning;
 mod retention_dependency;
@@ -33,9 +33,9 @@ pub use artifact_preference::{
     ArtifactPreferenceLedger, MAX_ARTIFACT_PREFERENCE_REASON_BYTES,
 };
 pub use derivation::{
-    ARTIFACT_DERIVATION_CONTRACT_VERSION, ARTIFACT_DERIVATION_SCHEMA,
-    DERIVATION_ROLE_REGISTRY_VERSION, DERIVATION_SUBJECT_KIND_REGISTRY_VERSION,
-    ArtifactDerivation, ArtifactDerivationLedger, DerivationRole, DerivationSubjectKind,
+    ARTIFACT_DERIVATION_CONTRACT_VERSION, ARTIFACT_DERIVATION_SCHEMA, ArtifactDerivation,
+    ArtifactDerivationLedger, DERIVATION_ROLE_REGISTRY_VERSION,
+    DERIVATION_SUBJECT_KIND_REGISTRY_VERSION, DerivationRole, DerivationSubjectKind,
 };
 pub use hypothesis::{
     HYPOTHESIS_GROUP_CONTRACT_VERSION, HYPOTHESIS_GROUP_SCHEMA, HYPOTHESIS_KEY_POLICY_VERSION,
@@ -52,9 +52,8 @@ pub use reasoning::{
 };
 pub use retention_dependency::{
     RETENTION_DEPENDENCY_CLASS_REGISTRY_VERSION, RETENTION_DEPENDENCY_CONTRACT_VERSION,
-    RETENTION_DEPENDENCY_SCHEMA, RETENTION_REQUIRED_KIND_REGISTRY_VERSION,
-    RetentionDependency, RetentionDependencyClass, RetentionDependencyLedger,
-    RetentionRequiredKind,
+    RETENTION_DEPENDENCY_SCHEMA, RETENTION_REQUIRED_KIND_REGISTRY_VERSION, RetentionDependency,
+    RetentionDependencyClass, RetentionDependencyLedger, RetentionRequiredKind,
 };
 pub use source::{
     MAX_SOURCE_IDENTITY_URI_BYTES, MAX_SOURCE_LABEL_BYTES, SOURCE_CONTRACT_VERSION,

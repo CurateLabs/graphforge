@@ -129,6 +129,20 @@ pub(crate) use graph_object_store::{
     graph_object_publication_is_live, read_graph_object_by_digest, verify_graph_object,
 };
 
+/// Install immutable bytes into the project content-addressed store.
+pub fn install_project_object_bytes(
+    root: &std::path::Path,
+    bytes: &[u8],
+) -> Result<([u8; 32], u64), GfError> {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes).into();
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| GfError::Validation("artifact bytes exceed u64".into()))?;
+    graph_object_store::install_graph_object_bytes(root, bytes)?;
+    Ok((digest, length))
+}
+
 pub mod semantic_bindings;
 pub use semantic_bindings::{
     GRAPH_SEMANTIC_BINDINGS_FAMILY, GRAPH_SEMANTIC_BINDINGS_VERSION, LegacyRouteMigration,

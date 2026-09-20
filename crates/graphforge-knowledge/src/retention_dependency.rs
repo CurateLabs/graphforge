@@ -208,7 +208,11 @@ impl RetentionDependencyLedger {
     pub fn from_batches(batches: &[RecordBatch]) -> Result<Self, KnowledgeError> {
         let mut dependencies = Vec::new();
         for batch in batches {
-            require_schema(batch, &RETENTION_DEPENDENCY_SCHEMA, "retention_dependencies.schema")?;
+            require_schema(
+                batch,
+                &RETENTION_DEPENDENCY_SCHEMA,
+                "retention_dependencies.schema",
+            )?;
             let ids = fixed_column(batch, "dependency_uuid")?;
             let scopes = fixed_column(batch, "scope_uuid")?;
             let required = fixed_column(batch, "required_uuid")?;
@@ -222,12 +226,16 @@ impl RetentionDependencyLedger {
                     dependency_uuid: uuid_at(ids, row, "dependency_uuid")?,
                     scope_uuid: uuid_at(scopes, row, "scope_uuid")?,
                     required_uuid: uuid_at(required, row, "required_uuid")?,
-                    required_kind: RetentionRequiredKind::parse(
-                        required_text(kinds, row, "required_kind")?,
-                    )?,
-                    dependency_class: RetentionDependencyClass::parse(
-                        required_text(classes, row, "dependency_class")?,
-                    )?,
+                    required_kind: RetentionRequiredKind::parse(required_text(
+                        kinds,
+                        row,
+                        "required_kind",
+                    )?)?,
+                    dependency_class: RetentionDependencyClass::parse(required_text(
+                        classes,
+                        row,
+                        "dependency_class",
+                    )?)?,
                     provenance_uuid: uuid_at(provenance, row, "provenance_uuid")?,
                     recorded_at_micros: required_i64(recorded, row, "recorded_at")?,
                     contract_version: required_u32(versions, row, "contract_version")?,
@@ -248,7 +256,10 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
         schema_fingerprint: *RETENTION_DEPENDENCY_SCHEMA_FINGERPRINT,
         enum_registry_versions: &[
             ("required_kind", RETENTION_REQUIRED_KIND_REGISTRY_VERSION),
-            ("dependency_class", RETENTION_DEPENDENCY_CLASS_REGISTRY_VERSION),
+            (
+                "dependency_class",
+                RETENTION_DEPENDENCY_CLASS_REGISTRY_VERSION,
+            ),
         ],
         sort_key: &["recorded_at", "dependency_uuid"],
         diff_identity_fields: &["dependency_uuid"],
@@ -352,8 +363,7 @@ mod tests {
         )
         .unwrap();
         let ledger = RetentionDependencyLedger::new(vec![local, outside]).unwrap();
-        let reopened =
-            RetentionDependencyLedger::from_batches(&[ledger.batch().unwrap()]).unwrap();
+        let reopened = RetentionDependencyLedger::from_batches(&[ledger.batch().unwrap()]).unwrap();
         assert_eq!(reopened, ledger);
     }
 
@@ -372,7 +382,10 @@ mod tests {
             RetentionDependencyClass::OutsideReference,
             RetentionDependencyClass::ComparisonBaseline,
         ] {
-            assert_eq!(RetentionDependencyClass::parse(class.as_str()).unwrap(), class);
+            assert_eq!(
+                RetentionDependencyClass::parse(class.as_str()).unwrap(),
+                class
+            );
         }
         assert!(RetentionRequiredKind::parse("node").is_err());
         assert!(RetentionDependencyClass::parse("genealogy").is_err());

@@ -323,12 +323,8 @@ mod tests {
         )
         .unwrap();
         let ledger = ArtifactPreferenceLedger::new(vec![first, second]).unwrap();
-        let reopened =
-            ArtifactPreferenceLedger::from_batches(&[ledger.batch().unwrap()]).unwrap();
+        let reopened = ArtifactPreferenceLedger::from_batches(&[ledger.batch().unwrap()]).unwrap();
         assert_eq!(reopened, ledger);
-        assert_eq!(
-            ledger.current_preferred_artifact(uuid7(2)),
-            Some(uuid7(6))
-        );
+        assert_eq!(ledger.current_preferred_artifact(uuid7(2)), Some(uuid7(6)));
     }
 }

@@ -2,6 +2,7 @@
 
 mod assertions;
 mod ledger;
+mod source_artifact;
 mod supporting;
 use ledger::assertion_evidence_publication_participants;
 use ledger::assertion_publication_participants;
@@ -37,6 +38,11 @@ pub(crate) use ledger::snapshot_to_participant;
 use ledger::status_publication_participants;
 use ledger::supersession_publication_participants;
 pub(crate) use ledger::with_next_token;
+pub(crate) use ledger::{read_artifact_ledger, read_derivation_ledger, read_source_ledger};
+pub use source_artifact::{
+    ArtifactPayloadRequest, DerivationInput, ListArtifactsRequest, ListSourcesRequest,
+    RegisterArtifactRequest, RegisterSourceRequest,
+};
 
 use std::collections::HashSet;
 use std::fs;
@@ -379,7 +385,7 @@ pub(crate) fn lock_graph_visibility(
     graph.graph_visibility.lock()
 }
 
-fn match_requested_node_uuids(
+pub(crate) fn match_requested_node_uuids(
     graph: &GraphForge,
     pending: &mut HashSet<Uuid>,
 ) -> Result<(), GfError> {
@@ -391,7 +397,7 @@ fn match_requested_node_uuids(
     match_requested_uuids(batches, "node_uuid", pending)
 }
 
-fn match_requested_edge_uuids(
+pub(crate) fn match_requested_edge_uuids(
     graph: &GraphForge,
     pending: &mut HashSet<Uuid>,
 ) -> Result<(), GfError> {
