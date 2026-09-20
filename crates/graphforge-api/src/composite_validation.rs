@@ -49,6 +49,10 @@ pub struct CompositeValidationSnapshot {
     pub algorithm_runs: BTreeSet<Uuid>,
     /// Existing belief-projection attachment identities.
     pub belief_projection_attachments: BTreeSet<Uuid>,
+    /// Existing research Source identities.
+    pub sources: BTreeSet<Uuid>,
+    /// Existing research Artifact identities.
+    pub artifacts: BTreeSet<Uuid>,
 }
 
 impl CompositeValidationSnapshot {
@@ -59,7 +63,7 @@ impl CompositeValidationSnapshot {
             &self.assertions, &self.confidence, &self.evidence, &self.reasoning,
             &self.status_events, &self.supersessions, &self.hypothesis_groups,
             &self.membership_events, &self.selection_events, &self.validity_events, &self.algorithm_runs,
-            &self.belief_projection_attachments,
+            &self.belief_projection_attachments, &self.sources, &self.artifacts,
         ]
         .iter()
         .any(|identities| identities.contains(&uuid))
@@ -265,6 +269,8 @@ impl CompositeTransactionRequest {
                 SubjectKind::BeliefProjectionAttachment => snapshot
                     .belief_projection_attachments
                     .contains(&row.subject_uuid),
+                SubjectKind::Source => snapshot.sources.contains(&row.subject_uuid),
+                SubjectKind::Artifact => snapshot.artifacts.contains(&row.subject_uuid),
             };
             require(subject_exists, "composite lineage subject is missing")?;
         }
@@ -784,6 +790,7 @@ mod tests {
         occupied_in!(status_events); occupied_in!(supersessions); occupied_in!(hypothesis_groups);
         occupied_in!(membership_events); occupied_in!(selection_events); occupied_in!(validity_events);
         occupied_in!(algorithm_runs); occupied_in!(belief_projection_attachments);
+        occupied_in!(sources); occupied_in!(artifacts);
         for snapshot in snapshots {
             assert_conflict(
                 request(vec![node(identity, "Person")]).validate_ontology_and_identities(&snapshot),
@@ -833,16 +840,19 @@ mod tests {
         let provenance = uuid7(241); let assertion = uuid7(242); let evidence = uuid7(243);
         let confidence = uuid7(244); let input_confidence = uuid7(245); let reasoning = uuid7(246);
         let edge = uuid7(247); let algorithm = uuid7(248); let projection = uuid7(249);
+        let source = uuid7(250); let artifact = uuid7(251);
         let mut snapshot = CompositeValidationSnapshot::default();
         snapshot.provenance.insert(provenance); snapshot.assertions.insert(assertion);
         snapshot.evidence.insert(evidence); snapshot.confidence.extend([confidence, input_confidence]);
         snapshot.reasoning.insert(reasoning); snapshot.edges.insert(edge);
         snapshot.algorithm_runs.insert(algorithm); snapshot.belief_projection_attachments.insert(projection);
+        snapshot.sources.insert(source); snapshot.artifacts.insert(artifact);
         let cases = [
             (SubjectKind::Node, uuid7(230)), (SubjectKind::Edge, edge),
             (SubjectKind::Assertion, assertion), (SubjectKind::EvidenceLink, evidence),
             (SubjectKind::ConfidenceAssessment, confidence), (SubjectKind::AlgorithmRun, algorithm),
             (SubjectKind::BeliefProjectionAttachment, projection),
+            (SubjectKind::Source, source), (SubjectKind::Artifact, artifact),
         ];
         for (kind, subject_uuid) in cases {
             let mut subject = reference_request();
@@ -867,7 +877,7 @@ mod tests {
     #[rustfmt::skip]
     fn every_owned_reference_rejects_a_wrong_identity_family() {
         let wrong = uuid7(240);
-        for case in 0..19 {
+        for case in 0..21 {
             let mut subject = reference_request();
             let mut snapshot = CompositeValidationSnapshot::default();
             snapshot.status_events.insert(wrong);
@@ -880,29 +890,31 @@ mod tests {
                 5 => { subject.knowledge.lineage[0].subject_kind = SubjectKind::ConfidenceAssessment; subject.knowledge.lineage[0].subject_uuid = wrong; "composite lineage subject is missing" }
                 6 => { subject.knowledge.lineage[0].subject_kind = SubjectKind::AlgorithmRun; subject.knowledge.lineage[0].subject_uuid = wrong; "composite lineage subject is missing" }
                 7 => { subject.knowledge.lineage[0].subject_kind = SubjectKind::BeliefProjectionAttachment; subject.knowledge.lineage[0].subject_uuid = wrong; "composite lineage subject is missing" }
-                8 => { subject.knowledge.assertions[0].provenance_uuid = wrong; "composite assertion provenance is missing" }
-                9 => {
+                8 => { subject.knowledge.lineage[0].subject_kind = SubjectKind::Source; subject.knowledge.lineage[0].subject_uuid = wrong; "composite lineage subject is missing" }
+                9 => { subject.knowledge.lineage[0].subject_kind = SubjectKind::Artifact; subject.knowledge.lineage[0].subject_uuid = wrong; "composite lineage subject is missing" }
+                10 => { subject.knowledge.assertions[0].provenance_uuid = wrong; "composite assertion provenance is missing" }
+                11 => {
                     let row = &subject.knowledge.assertion_graph_refs[0];
                     subject.knowledge.assertion_graph_refs.push(graphforge_knowledge::AssertionGraphRef::new(
                         wrong, row.graph_uuid, row.graph_kind, row.role, 0).unwrap());
                     "composite graph reference assertion is missing"
                 }
-                10 => { subject.knowledge.confidence_assessments[0].assertion_uuid = wrong; "composite confidence assertion is missing" }
-                11 => { subject.knowledge.confidence_assessments[0].provenance_uuid = wrong; "composite confidence provenance is missing" }
-                12 => { subject.knowledge.confidence_inputs[0].confidence_uuid = wrong; "composite confidence owner is missing" }
-                13 => { subject.knowledge.confidence_inputs[0].input_confidence_uuid = wrong; "composite confidence input is missing" }
-                14 => { subject.knowledge.evidence[0].assertion_uuid = wrong; "composite evidence assertion is missing" }
-                15 => { subject.knowledge.evidence[0].provenance_uuid = wrong; "composite evidence provenance is missing" }
-                16 => {
+                12 => { subject.knowledge.confidence_assessments[0].assertion_uuid = wrong; "composite confidence assertion is missing" }
+                13 => { subject.knowledge.confidence_assessments[0].provenance_uuid = wrong; "composite confidence provenance is missing" }
+                14 => { subject.knowledge.confidence_inputs[0].confidence_uuid = wrong; "composite confidence owner is missing" }
+                15 => { subject.knowledge.confidence_inputs[0].input_confidence_uuid = wrong; "composite confidence input is missing" }
+                16 => { subject.knowledge.evidence[0].assertion_uuid = wrong; "composite evidence assertion is missing" }
+                17 => { subject.knowledge.evidence[0].provenance_uuid = wrong; "composite evidence provenance is missing" }
+                18 => {
                     subject.knowledge.reasoning[0].assertion_uuid = wrong;
                     subject.knowledge.reasoning[0].supersedes_reasoning_uuid = None;
                     "composite reasoning assertion is missing"
                 }
-                17 => { subject.knowledge.reasoning[0].supersedes_reasoning_uuid = Some(wrong); "composite prior reasoning is missing" }
-                18 => { subject.knowledge.reasoning[0].provenance_uuid = wrong; "composite reasoning provenance is missing" }
+                19 => { subject.knowledge.reasoning[0].supersedes_reasoning_uuid = Some(wrong); "composite prior reasoning is missing" }
+                20 => { subject.knowledge.reasoning[0].provenance_uuid = wrong; "composite reasoning provenance is missing" }
                 _ => unreachable!(),
             };
-            if case <= 7 {
+            if case <= 9 {
                 let row = &subject.knowledge.lineage[0];
                 subject.knowledge.lineage[0] = graphforge_provenance::LineageRecord::new(
                     row.provenance_uuid, row.subject_uuid, row.subject_kind, row.role, row.ordinal,

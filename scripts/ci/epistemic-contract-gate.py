@@ -20,7 +20,7 @@ EPISTEMIC_INVENTORY = ROOT / "docs/reference/epistemic-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
 KNOWLEDGE_BASELINE_SHA = "abbab2bc3ab1ee49c09b6fee0e5bb1a5b07e3eb7"
 KNOWLEDGE_BASELINE_INVENTORY_SHA256 = (
-    "ed79c657b0f324b0850c8d0b7b001930343c38f36e6076b0a98dac13bc23f978"
+    "d1d0f4140cc56134c69d51fc7cc1ee76c6372054590ee2392474a1c24981833a"
 )
 REQUIRED_CASES = {
     "knowledge-frozen-baseline",

@@ -7,10 +7,13 @@
 
 mod algorithm_run;
 mod artifact;
+mod artifact_preference;
 mod belief_projection;
+mod derivation;
 mod confidence;
 mod hypothesis;
 mod reasoning;
+mod retention_dependency;
 mod source;
 mod status;
 mod supersession;
@@ -25,6 +28,15 @@ pub use artifact::{
     Artifact, ArtifactAvailability, ArtifactKind, ArtifactLedger, ArtifactPayloadKind,
     MAX_ARTIFACT_EXTERNAL_URI_BYTES, MAX_ARTIFACT_MEDIA_TYPE_BYTES,
 };
+pub use artifact_preference::{
+    ARTIFACT_PREFERENCE_CONTRACT_VERSION, ARTIFACT_PREFERENCE_SCHEMA, ArtifactPreferenceEvent,
+    ArtifactPreferenceLedger, MAX_ARTIFACT_PREFERENCE_REASON_BYTES,
+};
+pub use derivation::{
+    ARTIFACT_DERIVATION_CONTRACT_VERSION, ARTIFACT_DERIVATION_SCHEMA,
+    DERIVATION_ROLE_REGISTRY_VERSION, DERIVATION_SUBJECT_KIND_REGISTRY_VERSION,
+    ArtifactDerivation, ArtifactDerivationLedger, DerivationRole, DerivationSubjectKind,
+};
 pub use hypothesis::{
     HYPOTHESIS_GROUP_CONTRACT_VERSION, HYPOTHESIS_GROUP_SCHEMA, HYPOTHESIS_KEY_POLICY_VERSION,
     HYPOTHESIS_MEMBERSHIP_CONTRACT_VERSION, HYPOTHESIS_MEMBERSHIP_SCHEMA,
@@ -37,6 +49,12 @@ pub use reasoning::{
     REASONING_CONTENT_FORMAT_REGISTRY_VERSION, REASONING_CONTRACT_VERSION,
     REASONING_KIND_REGISTRY_VERSION, REASONING_SCHEMA, ReasoningContentFormat, ReasoningKind,
     ReasoningLedger, ReasoningRecord,
+};
+pub use retention_dependency::{
+    RETENTION_DEPENDENCY_CLASS_REGISTRY_VERSION, RETENTION_DEPENDENCY_CONTRACT_VERSION,
+    RETENTION_DEPENDENCY_SCHEMA, RETENTION_REQUIRED_KIND_REGISTRY_VERSION,
+    RetentionDependency, RetentionDependencyClass, RetentionDependencyLedger,
+    RetentionRequiredKind,
 };
 pub use source::{
     MAX_SOURCE_IDENTITY_URI_BYTES, MAX_SOURCE_LABEL_BYTES, SOURCE_CONTRACT_VERSION,
@@ -894,6 +912,9 @@ pub fn schema_registry() -> Vec<SchemaRegistryEntry> {
     entries.push(belief_projection::schema_registry_entry());
     entries.push(source::schema_registry_entry());
     entries.push(artifact::schema_registry_entry());
+    entries.push(derivation::schema_registry_entry());
+    entries.push(artifact_preference::schema_registry_entry());
+    entries.push(retention_dependency::schema_registry_entry());
     entries
 }
 
@@ -1458,6 +1479,18 @@ fn fixed_32_at(
         .value(row)
         .try_into()
         .expect("validated fixed-size binary width"))
+}
+
+fn optional_fixed_16(
+    array: &FixedSizeBinaryArray,
+    row: usize,
+    field: &'static str,
+) -> Result<Option<Uuid>, KnowledgeError> {
+    if array.is_null(row) {
+        Ok(None)
+    } else {
+        uuid_at(array, row, field).map(Some)
+    }
 }
 
 fn optional_fixed_32(

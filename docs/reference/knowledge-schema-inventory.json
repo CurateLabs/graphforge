@@ -280,6 +280,156 @@
       "capability_id": "knowledge",
       "capability_version": 1,
       "enum_registry_versions": {
+        "derivation_role": 1,
+        "input_kind": 1,
+        "output_kind": 1
+      },
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "derivation_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "output_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "output_kind",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "input_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "input_kind",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "derivation_role",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "ordinal",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/schema",
+      "implementation_issue": 1349,
+      "max_rows": 1000000,
+      "owner": "graphforge-knowledge",
+      "record_family": "artifact_derivations",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "6b8840179ca3c7f2932c72a2f128b6150d6a78c021e3d697a511ce67129f4832",
+      "schema_metadata": {},
+      "sort_key": [
+        "recorded_at",
+        "derivation_uuid"
+      ]
+    },
+    {
+      "capability_id": "knowledge",
+      "capability_version": 1,
+      "enum_registry_versions": {},
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "preference_event_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "source_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "artifact_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "prior_artifact_uuid",
+          "nullable": true
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "reason",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/schema",
+      "implementation_issue": 1349,
+      "max_rows": 1000000,
+      "owner": "graphforge-knowledge",
+      "record_family": "artifact_preference_events",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "8cb1bddeffab705de1c25e24cbba9de1b619d3a9b4b15816d8704bada14bee71",
+      "schema_metadata": {},
+      "sort_key": [
+        "recorded_at",
+        "preference_event_uuid"
+      ]
+    },
+    {
+      "capability_id": "knowledge",
+      "capability_version": 1,
+      "enum_registry_versions": {
         "artifact_kind": 1,
         "availability": 1,
         "payload_kind": 1
@@ -692,6 +842,76 @@
       "capability_id": "knowledge",
       "capability_version": 1,
       "enum_registry_versions": {
+        "dependency_class": 1,
+        "required_kind": 1
+      },
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "dependency_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "scope_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "required_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "required_kind",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "dependency_class",
+          "nullable": false
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/schema",
+      "implementation_issue": 1349,
+      "max_rows": 1000000,
+      "owner": "graphforge-knowledge",
+      "record_family": "retention_dependencies",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "dbf8b0f97a198fb12107560e91509b61984c071168df37e22ee983a620fbb44a",
+      "schema_metadata": {},
+      "sort_key": [
+        "recorded_at",
+        "dependency_uuid"
+      ]
+    },
+    {
+      "capability_id": "knowledge",
+      "capability_version": 1,
+      "enum_registry_versions": {
         "source_kind": 1
       },
       "fields": [
@@ -755,7 +975,7 @@
       "capability_id": "provenance",
       "capability_version": 1,
       "enum_registry_versions": {
-        "event_kind": 5
+        "event_kind": 6
       },
       "fields": [
         {
@@ -813,7 +1033,7 @@
       "capability_version": 1,
       "enum_registry_versions": {
         "role": 1,
-        "subject_kind": 1
+        "subject_kind": 2
       },
       "fields": [
         {
