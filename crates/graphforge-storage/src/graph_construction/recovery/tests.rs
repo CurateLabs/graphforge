@@ -5,6 +5,34 @@ use super::*;
 use tempfile::TempDir;
 
 #[test]
+fn completed_shape_from_another_session_clock_is_refused() {
+    let root = TempDir::new().unwrap();
+    let mut session = open(&root, 14_160);
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+    assert_eq!(
+        shape.runtime_catalog_now_micros,
+        session.checkpoint.session_now_micros
+    );
+    recover_shape_intent(&session.root, &mut session.checkpoint).unwrap();
+
+    // Isolate the clock binding: all other checkpoint, manifest, receipt and
+    // payload authorities remain valid. Removing only the recovery comparison
+    // must make this refusal assertion fail, not another authentication check.
+    session.checkpoint.session_now_micros += 1;
+    let error = recover_shape_intent(&session.root, &mut session.checkpoint)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("complete shape manifest inventory is incomplete"),
+        "{error}"
+    );
+}
+
+#[test]
 fn shaped_writer_capability_resume_adopts_only_the_exact_receipt() {
     let temporary = TempDir::new().unwrap();
     let root = StableDirectory::open(temporary.path()).unwrap();

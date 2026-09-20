@@ -572,7 +572,10 @@ pub struct ConstructionShape {
     pub edge_rows: Vec<String>,
     /// Edge-UUID regrouped `(edge, role, node_surrogate)` endpoint run.
     pub edge_endpoints: Option<String>,
-    /// Timestamp that the publisher must use for every RuntimeCatalog observation.
+    /// Recorded session clock retained as a checkpoint/recovery binding.
+    /// Also used by encoded topology metadata; catalog observations instead use
+    /// the parent catalog's latest observation, or epoch for an empty parent.
+    /// The historical field name is retained for durable manifest compatibility.
     pub runtime_catalog_now_micros: i64,
     /// Authority digest of the exact normalized row artifacts that feed the catalog.
     pub runtime_catalog_inputs_sha256: String,
