@@ -438,8 +438,9 @@ fn million_chunk_shaping_retains_name_state_bounded_by_the_partition_count() {
     let slots = u64::from(budgets.partition_count) * families;
     // Name state is a function of the recorded partition count and the family
     // set, never of the staged chunk count.
-    assert_eq!(slots, 1_280, "retained slots: {slots}");
-    assert!(slots < budgets.max_chunks / 100, "retained slots: {slots}");
+    assert_eq!(slots, 20_480, "retained slots: {slots}");
+    // Even at the maximum cut, name slots stay independent of chunk count.
+    assert!(slots < budgets.max_chunks / 40, "retained slots: {slots}");
     assert_eq!(budgets.max_schema_groups, 256);
     assert_eq!(
         budgets.partition_count,
@@ -1321,5 +1322,68 @@ fn seal_batches_report_one_directory_barrier_per_seal_not_per_spill() {
         checkpoint.evidence.merge_directory_fsync_operations - before,
         1,
         "one directory barrier per seal batch"
+    );
+}
+
+#[test]
+fn legacy_default_partition_budget_resumes_without_rewriting_authority() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(0x1439);
+    let legacy = GraphConstructionBudgets {
+        partition_count: 256,
+        ..Default::default()
+    };
+    let session = GraphConstructionSession::open(root.path(), operation, 0, legacy).unwrap();
+    let before = serde_json::to_value(&session.checkpoint.budgets).unwrap();
+    drop(session);
+    let resumed = GraphConstructionSession::open(
+        root.path(),
+        operation,
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    assert_eq!(resumed.checkpoint.budgets, legacy);
+    assert_eq!(
+        serde_json::to_value(&resumed.checkpoint.budgets).unwrap(),
+        before
+    );
+    drop(resumed);
+    let changed = GraphConstructionBudgets {
+        max_partition_bytes: 1024,
+        ..Default::default()
+    };
+    assert!(GraphConstructionSession::open(root.path(), operation, 0, changed).is_err());
+}
+
+#[test]
+fn recorded_partition_refusal_survives_reopen_with_no_completed_shape() {
+    let root = TempDir::new().unwrap();
+    let operation = Uuid::from_u128(0x143b);
+    let budgets = GraphConstructionBudgets {
+        max_partition_bytes: 1,
+        ..Default::default()
+    };
+    let mut session = GraphConstructionSession::open(root.path(), operation, 0, budgets).unwrap();
+    session
+        .append(ConstructionChunkKind::Node, "node", &node_batch(1, 1))
+        .unwrap();
+    session.seal().unwrap();
+    let error = session
+        .shape_canonical_with_cancellation(|| false)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("exceeds recorded budget"),
+        "{error}"
+    );
+    drop(session);
+    let mut resumed = GraphConstructionSession::open(root.path(), operation, 0, budgets).unwrap();
+    assert!(resumed.checkpoint.shape_authority_sha256.is_none());
+    let error = resumed
+        .shape_canonical_with_cancellation(|| false)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("exceeds recorded budget"),
+        "{error}"
     );
 }
