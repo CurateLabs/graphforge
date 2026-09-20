@@ -78,7 +78,7 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_iowait_ns",
     "thread_unknown_ns",
 ];
-const REGIONS: [&str; 21] = [
+const REGIONS: [&str; 30] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -100,6 +100,15 @@ const REGIONS: [&str; 21] = [
     "artifact_authentication",
     "inventory_authentication",
     "inventory_payload_authentication",
+    "prepare_encoding",
+    "publication_authentication",
+    "cas_install",
+    "publication_intent",
+    "generation_commit",
+    "publication_receipt",
+    "hydration",
+    "read_authority",
+    "adjacency_encoding",
 ];
 
 pub(crate) fn valid_snapshot(value: &Value) -> bool {

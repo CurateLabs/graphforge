@@ -334,6 +334,8 @@ impl GraphConstructionSession {
                 return Ok(published);
             }
         }
+        let authentication =
+            crate::concurrency_attribution::RegionScope::named("publication_authentication");
         let expected_inventory = self
             .checkpoint
             .encoding_inventory_sha256
@@ -481,6 +483,8 @@ impl GraphConstructionSession {
             .publication_application_read_operations
             .checked_add(ordinal_io.read_calls)
             .ok_or_else(|| storage("ordinal publication read calls overflow"))?;
+        drop(authentication);
+        let cas_install = crate::concurrency_attribution::RegionScope::named("cas_install");
         let (graph_root, cas_evidence) = {
             let artifact = encoding
                 .artifacts
@@ -575,11 +579,16 @@ impl GraphConstructionSession {
             }
         }
 
+        drop(cas_install);
         // CAS installation is private and unreachable until the publication
         // intent and generation are committed. Authenticate all source bytes
         // first so corruption leaves the session sealed and retryable.
+        let intent = crate::concurrency_attribution::RegionScope::named("publication_intent");
         self.begin_publication(target_generation_uuid, transaction_uuid)?;
+        drop(intent);
 
+        let generation_commit =
+            crate::concurrency_attribution::RegionScope::named("generation_commit");
         let graph_participant = crate::graph_files::graph_files_root_participant(&graph_root)?;
         let capabilities = parent
             .capabilities()
@@ -635,13 +644,16 @@ impl GraphConstructionSession {
                     .publish_with_graph_objects_cancellable(&lease, &mut cancelled)?,
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             };
+        drop(generation_commit);
         construction_failpoint("publication.after_current_before_receipt");
+        let receipt = crate::concurrency_attribution::RegionScope::named("publication_receipt");
         self.finish_publication_cancellable(
             target_generation_uuid,
             &hex(&publication.generation_manifest_sha256),
             // CURRENT already committed; finish recording its durable receipt.
             &mut || false,
         )?;
+        drop(receipt);
         Ok(publication)
     }
 
