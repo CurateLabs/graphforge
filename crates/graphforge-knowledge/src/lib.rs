@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod algorithm_run;
+mod artifact;
 mod belief_projection;
 mod confidence;
 mod hypothesis;
@@ -18,6 +19,12 @@ mod valid_time;
 pub use algorithm_run::{AlgorithmRun, AlgorithmRunEvent, AlgorithmRunLedger, AlgorithmRunState};
 pub use confidence::{ConfidenceAssessment, ConfidenceInput, ConfidenceLedger, ConfidencePolicy};
 
+pub use artifact::{
+    ARTIFACT_AVAILABILITY_REGISTRY_VERSION, ARTIFACT_CONTRACT_VERSION,
+    ARTIFACT_KIND_REGISTRY_VERSION, ARTIFACT_PAYLOAD_KIND_REGISTRY_VERSION, ARTIFACT_SCHEMA,
+    Artifact, ArtifactAvailability, ArtifactKind, ArtifactLedger, ArtifactPayloadKind,
+    MAX_ARTIFACT_EXTERNAL_URI_BYTES, MAX_ARTIFACT_MEDIA_TYPE_BYTES,
+};
 pub use hypothesis::{
     HYPOTHESIS_GROUP_CONTRACT_VERSION, HYPOTHESIS_GROUP_SCHEMA, HYPOTHESIS_KEY_POLICY_VERSION,
     HYPOTHESIS_MEMBERSHIP_CONTRACT_VERSION, HYPOTHESIS_MEMBERSHIP_SCHEMA,
@@ -886,6 +893,7 @@ pub fn schema_registry() -> Vec<SchemaRegistryEntry> {
     entries.push(valid_time::schema_registry_entry());
     entries.push(belief_projection::schema_registry_entry());
     entries.push(source::schema_registry_entry());
+    entries.push(artifact::schema_registry_entry());
     entries
 }
 
