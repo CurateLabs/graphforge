@@ -67,6 +67,28 @@ because separate proc samples can differ by a tick. Within a command,
 remain the five disjoint construction-call observations; their boundaries are
 narrower than command scopes.
 
+`commit/publish` is decomposed into sequential children so publication can be
+budgeted inside complete ingest (#1481): `prepare_encoding` (reopening the
+encoded inventory and reclaiming superseded payloads), `publication_authentication`
+(inventory control, parent generation, manifest, retained-artifact and route
+authority checks), `cas_install` (appending authenticated graph objects to the
+content-addressed store), `publication_intent` (the durable intent record),
+`generation_commit` (staging the generation and committing `CURRENT`),
+`publication_receipt` (authenticating the published target and recording the
+receipt), `hydration` (materializing the published workspace) and
+`read_authority` (runtime catalog, property inventory, ordinal handle and
+adjacency provider). The residual of `commit/publish` is the visibility swap
+plus uninstrumented time between those children. Boundaries to keep in mind
+when reading the numbers: `cas_install` opens before the route-table authority
+read (a few kilobytes) that the append needs, so that read counts as install;
+`hydration` opens before the published generation is resolved, so the manifest
+resolution counts as hydration; an idempotent replay of an already-published
+session skips publication and reports only `hydration` and `read_authority`. Adjacency CSR encoding runs
+inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
+publish; reconcile publication against that region rather than assuming CSR
+cost lands in `commit`. Measured attribution on the integrated tree is recorded in
+[`evidence/publication-attribution-1481.md`](evidence/publication-attribution-1481.md).
+
 Registration reports successfully owned bytes (Arrow registration reports rows),
 append reports accepted rows, and successful new shaping/encoding reports the
 completed graph's node/edge counts. Reused artifacts do not claim new useful work.

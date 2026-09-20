@@ -5,6 +5,7 @@ mod codec_tests;
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::uuid::Uuid;
+use graphforge_storage::concurrency_attribution::RegionScope;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -303,7 +304,9 @@ impl GraphConstructionSession<'_> {
             }
             replay
         } else {
+            let prepare = RegionScope::named("prepare_encoding");
             let encoding = self.prepare_encoding(cancellation)?;
+            drop(prepare);
             if let Some(token) = cancellation {
                 token.checkpoint()?;
             }
@@ -317,6 +320,7 @@ impl GraphConstructionSession<'_> {
 
         let refresh = (|| {
             refresh_boundary(RefreshBoundary::BeforeHydrate)?;
+            let hydration = RegionScope::named("hydration");
             let root = self.graph.resolved_generation.container_root();
             let resolved = graphforge_storage::resolve_project_generation(root)?;
             if resolved.generation_uuid() != published.generation_uuid {
@@ -327,11 +331,14 @@ impl GraphConstructionSession<'_> {
             let (prepared_dir, prepared_guard, hydration_evidence) =
                 super::hydrate_graph_workspace(&resolved, false)?;
             self.inner.record_hydration_evidence(&hydration_evidence)?;
+            drop(hydration);
             refresh_boundary(RefreshBoundary::AfterHydrate)?;
+            let read_authority = RegionScope::named("read_authority");
             let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
             let prepared = self
                 .graph
                 .prepare_generation_read_authority(&resolved, &prepared_dir)?;
+            drop(read_authority);
             refresh_boundary(RefreshBoundary::BeforeInstall)?;
             Ok((
                 resolved,
