@@ -33,6 +33,7 @@ REQUIRED_CASES = {
     "search-find-knowledge-states",
     "descriptor-direct-arrow-equivalence",
     "canonical-arrow-fingerprint",
+    "source-artifact-lifecycle",
     "cross-binding-contract",
 }
 FORBIDDEN_EXECUTION_WORDS = {"skip", "ignored", "ignore", "quarantine", "manual"}
