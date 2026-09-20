@@ -70,6 +70,7 @@ use catalog::{
     load_parent_runtime_catalog_from_compact,
 };
 mod partition_load;
+mod partition_memory;
 mod partition_records;
 pub(crate) mod partition_shaping;
 mod supersession;
@@ -473,12 +474,26 @@ pub struct GraphConstructionBudgets {
     pub max_catalog_decoded_bytes: usize,
     /// Maximum UTF-8 identifier bytes retained by the complete runtime catalog.
     pub max_catalog_identifier_bytes: usize,
-    /// Range partitions shaping cuts the identity key space into.
+    /// Maximum range partitions shaping cuts the identity key space into.
     ///
     /// This is a recorded format parameter, never derived from the machine. It
     /// must not be tied to `available_parallelism()` or to a thread count: the
     /// same logical input has to stage identically on hosts of different sizes.
     pub partition_count: u32,
+    /// Desired identities per sampled range; a planning target, not a byte bound.
+    #[serde(
+        default = "partition::default_target_records",
+        skip_serializing_if = "partition::is_default_target_records"
+    )]
+    pub target_partition_records: u64,
+    /// Maximum accounted materialization bytes per partition load. Fixed-family
+    /// workers admit at most two loads; Arrow rows are loaded serially. This is
+    /// separate from staging windows, writer buffers and whole-process memory.
+    #[serde(
+        default = "partition::default_materialization_bytes",
+        skip_serializing_if = "partition::is_default_materialization_bytes"
+    )]
+    pub max_partition_bytes: u64,
 }
 
 impl Default for GraphConstructionBudgets {
@@ -495,6 +510,8 @@ impl Default for GraphConstructionBudgets {
             max_catalog_decoded_bytes: 256 << 20,
             max_catalog_identifier_bytes: 64 << 20,
             partition_count: partition::DEFAULT_PARTITION_COUNT,
+            target_partition_records: partition::default_target_records(),
+            max_partition_bytes: partition::default_materialization_bytes(),
         }
     }
 }
@@ -511,6 +528,8 @@ impl GraphConstructionBudgets {
             || self.max_catalog_entries == 0
             || self.max_catalog_decoded_bytes == 0
             || self.max_catalog_identifier_bytes == 0
+            || self.target_partition_records == 0
+            || self.max_partition_bytes == 0
             || self.partition_count == 0
             || self.partition_count > partition::MAX_PARTITION_COUNT
         {
@@ -1287,6 +1306,22 @@ impl GraphConstructionSession {
             Ok(mut file) => Some(decode_bounded::<Checkpoint>(&mut file)?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(storage(error)),
+        };
+        // The former public default recorded a 256-partition maximum. Opening
+        // that exact legacy default with today's default retains its authority;
+        // explicit non-default changes still fail validate_checkpoint below.
+        let legacy_defaults = GraphConstructionBudgets {
+            partition_count: 256,
+            ..GraphConstructionBudgets::default()
+        };
+        let budgets = if budgets == GraphConstructionBudgets::default()
+            && recovered_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.budgets == legacy_defaults)
+        {
+            legacy_defaults
+        } else {
+            budgets
         };
         if let Some(checkpoint) = recovered_checkpoint.as_mut()
             && (DetailCodec::from_version(checkpoint.format_version).is_err()

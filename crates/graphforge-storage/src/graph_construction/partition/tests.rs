@@ -236,3 +236,65 @@ fn every_partition_is_reachable_for_a_well_sampled_ingest() {
         balance.rows()
     );
 }
+
+#[test]
+fn adaptive_cut_grows_from_recorded_data_and_stops_at_recorded_ceiling() {
+    for (records, expected) in [
+        (0, 1),
+        (32, 2),
+        (1 << 20, 256),
+        (1 << 23, 512),
+        (1 << 24, 1024),
+        (1 << 26, 4096),
+        (1 << 30, 4096),
+    ] {
+        let sampler =
+            IdentitySampler::with_target(4096, records, default_target_records()).unwrap();
+        assert_eq!(sampler.cut(), expected);
+        assert_eq!(
+            sampler.positions().collect::<Vec<_>>(),
+            IdentitySampler::with_target(4096, records, default_target_records())
+                .unwrap()
+                .positions()
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        IdentitySampler::with_target(64, 1 << 30, 16).unwrap().cut(),
+        64
+    );
+    assert!(IdentitySampler::with_target(4096, 100, 0).is_err());
+}
+
+#[test]
+fn materialization_budget_refuses_overflow_and_one_byte_over_limit() {
+    assert_eq!(admit_materialization(Some(1024), 1024).unwrap(), 1024);
+    assert!(admit_materialization(Some(1025), 1024).is_err());
+    assert!(admit_materialization(None, u64::MAX).is_err());
+}
+
+#[test]
+fn legacy_budget_serialization_is_unchanged_and_new_limits_round_trip() {
+    let legacy = super::super::GraphConstructionBudgets {
+        partition_count: 256,
+        ..Default::default()
+    };
+    let encoded = serde_json::to_value(legacy).unwrap();
+    assert!(encoded.get("max_partition_bytes").is_none());
+    assert!(encoded.get("target_partition_records").is_none());
+    assert_eq!(
+        serde_json::from_value::<super::super::GraphConstructionBudgets>(encoded).unwrap(),
+        legacy
+    );
+    let custom = super::super::GraphConstructionBudgets {
+        max_partition_bytes: 12345,
+        target_partition_records: 123,
+        ..legacy
+    };
+    let encoded = serde_json::to_value(custom).unwrap();
+    assert_eq!(encoded["max_partition_bytes"], 12345);
+    assert_eq!(
+        serde_json::from_value::<super::super::GraphConstructionBudgets>(encoded).unwrap(),
+        custom
+    );
+}

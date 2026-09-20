@@ -140,7 +140,11 @@ impl GraphConstructionSession {
         // empirically measured RSS-vs-buffer-overhead minimum into the
         // buffer-dominated side of that curve. Reverted: the cut is sized
         // from the sample domain here, same as the joint plan.
-        let mut sampler = IdentitySampler::new(partition_count, total)?;
+        let mut sampler = IdentitySampler::with_target(
+            partition_count,
+            total,
+            self.checkpoint.budgets.target_partition_records,
+        )?;
         let positions = sampler.positions().collect::<Vec<_>>();
         let mut cursor = 0_usize;
         for position in positions {
@@ -266,28 +270,32 @@ impl GraphConstructionSession {
             partitions,
             None,
             true,
-        )?;
+        )?
+        .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes);
         let mut node_details = FixedRangePartitioner::<NODE_DETAIL_WIDTH>::new(
             &self.root,
             PartitionFamily::NodeDetails,
             node_partitions,
             Some(detail_codec),
             false,
-        )?;
+        )?
+        .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes);
         let mut edge_details = FixedRangePartitioner::<EDGE_DETAIL_WIDTH>::new(
             &self.root,
             PartitionFamily::EdgeDetails,
             partitions,
             Some(detail_codec),
             false,
-        )?;
+        )?
+        .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes);
         let mut endpoints = FixedRangePartitioner::<ENDPOINT_WIDTH>::new(
             &self.root,
             PartitionFamily::Endpoints,
             node_partitions,
             None,
             false,
-        )?;
+        )?
+        .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes);
         let mut row_groups: BTreeMap<(u8, String), RowRangePartitioner> = BTreeMap::new();
         // #1455. A kind whose every staged chunk carries the bare canonical
         // schema has no property columns, so its shaped rows would hold
@@ -392,7 +400,8 @@ impl GraphConstructionSession {
                             &self.root,
                             &format!("{kind}-{}", receipt.schema_sha256),
                             row_plan.partitions(),
-                        )?,
+                        )?
+                        .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes),
                     );
                 }
                 row_groups
@@ -547,6 +556,7 @@ impl GraphConstructionSession {
             endpoints.as_deref(),
             self.base_snapshot.as_mut(),
             self.checkpoint.budgets.max_batch_rows,
+            self.checkpoint.budgets.max_partition_bytes,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -1603,6 +1613,7 @@ pub(super) fn resolve_endpoint_surrogates(
     endpoints_name: Option<&str>,
     mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
+    max_partition_bytes: u64,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<Option<String>, GfError> {
@@ -1620,7 +1631,8 @@ pub(super) fn resolve_endpoint_surrogates(
         plan.partitions(),
         None,
         false,
-    )?;
+    )?
+    .with_materialization_limit(max_partition_bytes);
     loop {
         let mut endpoint_window = Vec::with_capacity(window_rows);
         for _ in 0..window_rows {
