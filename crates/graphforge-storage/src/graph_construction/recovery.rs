@@ -794,7 +794,6 @@ pub(super) struct ReadWork {
     pub(super) cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
 }
 
-#[allow(clippy::too_many_lines)] // One authentication pass validates format, digest, and cache cleanup together.
 pub(super) fn authenticate_artifact(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
@@ -813,7 +812,7 @@ pub(super) fn authenticate_row_spill(
     receipt: &ArtifactReceipt,
 ) -> Result<ReadWork, GfError> {
     if !receipt.name.starts_with("part-rows-")
-        || !receipt.name.ends_with(".arrow")
+        || std::path::Path::new(&receipt.name).extension() != Some(OsStr::new("arrow"))
         || receipt.name.contains('/')
         || receipt.name.contains('\\')
         || !is_canonical_sha256(&receipt.sha256)
@@ -823,6 +822,7 @@ pub(super) fn authenticate_row_spill(
     authenticate_artifact_contents(root, receipt, DetailCodec::Compact)
 }
 
+#[allow(clippy::too_many_lines)] // One authentication pass validates format, digest, and cache cleanup together.
 fn authenticate_artifact_contents(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,

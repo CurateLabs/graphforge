@@ -48,12 +48,20 @@ pub(crate) const MAX_PARTITION_COUNT: u32 = 4_096;
 pub(super) const fn default_target_records() -> u64 {
     16_384
 }
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
 pub(super) fn is_default_target_records(value: &u64) -> bool {
     *value == default_target_records()
 }
 pub(super) const fn default_materialization_bytes() -> u64 {
     256 << 20
 }
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
 pub(super) fn is_default_materialization_bytes(value: &u64) -> bool {
     *value == default_materialization_bytes()
 }

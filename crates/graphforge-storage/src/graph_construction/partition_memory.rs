@@ -36,7 +36,7 @@ fn array_reservation(data: &ArrayData, floor: u64) -> Result<(u64, u64), GfError
         mul(n, width as u64)?
     } else {
         match data.data_type() {
-            DataType::Null => 0,
+            DataType::Null | DataType::Struct(_) => 0,
             DataType::Boolean => add(n, 7)? / 8,
             DataType::FixedSizeBinary(width) => mul(n, u64::try_from(*width).map_err(storage)?)?,
             DataType::Utf8 | DataType::Binary | DataType::LargeUtf8 | DataType::LargeBinary => {
@@ -57,7 +57,6 @@ fn array_reservation(data: &ArrayData, floor: u64) -> Result<(u64, u64), GfError
             }
             DataType::List(_) | DataType::Map(_, _) => mul(add(n, 1)?, 4)?,
             DataType::LargeList(_) => mul(add(n, 1)?, 8)?,
-            DataType::Struct(_) => 0,
             DataType::FixedSizeList(_, width) => {
                 child_floor = mul(n, u64::try_from(*width).map_err(storage)?)?;
                 0
