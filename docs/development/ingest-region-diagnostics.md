@@ -78,7 +78,12 @@ content-addressed store), `publication_intent` (the durable intent record),
 receipt), `hydration` (materializing the published workspace) and
 `read_authority` (runtime catalog, property inventory, ordinal handle and
 adjacency provider). The residual of `commit/publish` is the visibility swap
-plus uninstrumented time between those children. Adjacency CSR encoding runs
+plus uninstrumented time between those children. Boundaries to keep in mind
+when reading the numbers: `cas_install` opens before the route-table authority
+read (a few kilobytes) that the append needs, so that read counts as install;
+`hydration` opens before the published generation is resolved, so the manifest
+resolution counts as hydration; an idempotent replay of an already-published
+session skips publication and reports only `hydration` and `read_authority`. Adjacency CSR encoding runs
 inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
 publish; reconcile publication against that region rather than assuming CSR
 cost lands in `commit`. Measured attribution on the integrated tree is recorded in

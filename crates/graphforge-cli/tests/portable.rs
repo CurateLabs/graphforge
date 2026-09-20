@@ -618,6 +618,7 @@ fn import_operation_timings_survive_separate_cli_processes() {
             session,
         ],
     ));
+    assert_eq!(committed["region_diagnostics"]["complete"], true);
     let publish_regions = &committed["region_diagnostics"]["regions"];
     assert!(publish_regions["import_command/commit/publish"].is_object());
     for child in [
