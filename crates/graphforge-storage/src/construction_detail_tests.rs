@@ -694,7 +694,7 @@ mod compact_details {
             )
             .unwrap();
             partitioner
-                .finish_optional(output, &mut || false, &mut session.checkpoint.evidence)
+                .finish_optional(output, 0, false, &mut || false, &mut session.checkpoint.evidence)
                 .unwrap()
                 .unwrap();
             // A single partition over an already sorted run reproduces the

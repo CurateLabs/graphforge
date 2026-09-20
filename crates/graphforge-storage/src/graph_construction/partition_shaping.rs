@@ -25,14 +25,15 @@ use super::partition_load::{
 use super::partition_records::PartitionRecords;
 use super::{
     ArtifactReceipt, BLOCK_BYTES, CountingChunkReader, GraphConstructionEvidence, HashingWriter,
-    IoCounter, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
+    IoCounter, ReadWork, SealDirectoryBatch, account_cache_release, account_fixed_write_operations,
     account_merge_read_bytes, account_merge_write_bytes, account_sequential_write, artifact_temp,
     cleanup_failed_shape_output, cleanup_shape_publication, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, hex, injected_input_release_failure,
-    open_fixed_reader, persist_shape_receipt, persist_shape_receipt_in_batch, read_run_record,
-    record_shape_artifact_install, reject_cancelled, run_record_bytes, sha256,
-    shape_publication_failure, shape_publication_io_failure, unlink_shape_artifact,
-    unlink_writer_capability, uuid_column, uuid_value,
+    merge_cache_release_evidence, open_fixed_reader, persist_shape_receipt,
+    persist_shape_receipt_in_batch, read_run_record, record_shape_artifact_install,
+    reject_cancelled, run_record_bytes, sha256, shape_publication_failure,
+    shape_publication_io_failure, unlink_shape_artifact, unlink_writer_capability, uuid_column,
+    uuid_value,
 };
 use crate::construction_detail_codec::DetailCodec;
 use crate::construction_directory::ConstructionDirectory as StableDirectory;
@@ -123,41 +124,106 @@ impl PartitionFamily {
     ];
 }
 
-/// Durable name of one fixed-width partition spill.
-pub(super) fn fixed_spill_name(family: PartitionFamily, partition: usize) -> String {
-    format!("part-{}-p{partition:05}.run", family.as_str())
+/// Durable name of one fixed-width partition spill **segment**.
+///
+/// Spills are sealed at group boundaries so the staged input of fully routed
+/// chunks can retire while shaping continues (#1418). The sealing boundary is
+/// part of the name: every segment of one partition is uniquely named, the
+/// boundary ordering is self-describing, and a segment whose boundary is not
+/// covered by a `shape-progress` control is identifiable as unclaimed.
+pub(super) fn fixed_spill_name(family: PartitionFamily, boundary: u64, partition: usize) -> String {
+    format!(
+        "part-{}-g{boundary:020}-p{partition:05}.run",
+        family.as_str()
+    )
 }
 
-/// Durable name of one row partition spill.
-pub(super) fn row_spill_name(namespace: &str, partition: usize) -> String {
-    format!("part-rows-{namespace}-p{partition:05}.arrow")
+/// Durable name of one row partition spill segment.
+pub(super) fn row_spill_name(namespace: &str, boundary: u64, partition: usize) -> String {
+    format!("part-rows-{namespace}-g{boundary:020}-p{partition:05}.arrow")
 }
 
-/// Whether `name` is a per-partition spill in the durable shaping grammar.
-pub(crate) fn is_partition_artifact_name(name: &str) -> bool {
+/// One parsed partition-spill segment name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SegmentName {
+    /// Fixed-width family, or `None` for a row (`part-rows-…`) segment.
+    pub(super) family: Option<PartitionFamily>,
+    /// Row namespace digest; empty for a fixed-width segment.
+    pub(super) namespace: String,
+    /// Sealing boundary recorded in the name.
+    pub(super) boundary: u64,
+    /// Partition index.
+    pub(super) partition: usize,
+}
+
+impl SegmentName {
+    /// The stable partitioner tag this segment belongs to: the fixed family
+    /// name, or `rows:<namespace>` for a row group.
+    pub(super) fn tag(&self) -> String {
+        match &self.family {
+            Some(family) => family.as_str().to_owned(),
+            None => format!("rows:{}", self.namespace),
+        }
+    }
+}
+
+/// Parse one partition-spill segment name, or `None` when the name is not in
+/// the segment grammar.
+pub(super) fn parse_segment_name(name: &str) -> Option<SegmentName> {
+    let is_boundary =
+        |value: &str| value.len() == 20 && value.bytes().all(|byte| byte.is_ascii_digit());
     let is_partition_index =
         |tail: &str| tail.len() == 5 && tail.bytes().all(|byte| byte.is_ascii_digit());
     for family in PartitionFamily::ALL {
-        if let Some(tail) = name
+        let parsed = name
             .strip_prefix("part-")
             .and_then(|body| body.strip_prefix(family.as_str()))
-            .and_then(|body| body.strip_prefix("-p"))
-            .and_then(|body| body.strip_suffix(".run"))
-        {
-            return is_partition_index(tail);
+            .and_then(|body| body.strip_prefix("-g"))
+            .and_then(|body| body.split_once("-p"))
+            .and_then(|(boundary, tail)| {
+                tail.strip_suffix(".run")
+                    .map(|partition| (boundary, partition))
+            });
+        let Some((boundary, partition)) = parsed else {
+            continue;
+        };
+        if !is_boundary(boundary) || !is_partition_index(partition) {
+            return None;
         }
-    }
-    if let Some(body) = name
-        .strip_prefix("part-rows-")
-        .and_then(|body| body.strip_suffix(".arrow"))
-    {
-        return body.split_once("-p").is_some_and(|(namespace, tail)| {
-            namespace.len() == 16
-                && super::is_canonical_lower_hex(namespace, 16)
-                && is_partition_index(tail)
+        return Some(SegmentName {
+            family: Some(family),
+            namespace: String::new(),
+            boundary: boundary.parse().ok()?,
+            partition: partition.parse().ok()?,
         });
     }
-    false
+    let parsed = name
+        .strip_prefix("part-rows-")
+        .and_then(|body| body.strip_suffix(".arrow"))
+        .and_then(|body| body.split_once("-g"))
+        .and_then(|(namespace, tail)| {
+            tail.split_once("-p")
+                .map(|(boundary, partition)| (namespace, boundary, partition))
+        })?;
+    if parsed.0.len() != 16
+        || !super::is_canonical_lower_hex(parsed.0, 16)
+        || !is_boundary(parsed.1)
+        || !is_partition_index(parsed.2)
+    {
+        return None;
+    }
+    Some(SegmentName {
+        family: None,
+        namespace: parsed.0.to_owned(),
+        boundary: parsed.1.parse().ok()?,
+        partition: parsed.2.parse().ok()?,
+    })
+}
+
+/// Whether `name` is a per-partition spill segment in the durable shaping
+/// grammar.
+pub(crate) fn is_partition_artifact_name(name: &str) -> bool {
+    parse_segment_name(name).is_some()
 }
 
 /// The sort key column of a normalized construction row batch.
@@ -169,9 +235,16 @@ fn key_column(batch: &RecordBatch) -> Result<&arrow::array::FixedSizeBinaryArray
     uuid_column(batch, schema.field(0).name())
 }
 
+/// Boundary placeholder a spill's **temporary** is created under.
+///
+/// The sealing boundary does not exist yet when a spill starts writing, but
+/// the temporary's target must be a canonical artifact name so crash cleanup
+/// recognises it. Boundary zero is never a real boundary (real controls start
+/// at one), so an installed name can never collide with a temporary target.
+const UNSEALED_BOUNDARY: u64 = 0;
+
 /// One open, unsealed partition spill.
 struct SpillWriter {
-    name: String,
     temporary: std::ffi::OsString,
     identity: FileIdentity,
     writer: BufWriter<HashingWriter>,
@@ -187,6 +260,7 @@ impl SpillWriter {
     /// have no callers left after that change and are not reintroduced here.
     fn seal(
         mut self,
+        name: &str,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
@@ -201,7 +275,7 @@ impl SpillWriter {
         account_cache_release(cache_release, evidence)?;
         account_sequential_write(self.writer.get_ref().bytes, evidence)?;
         let receipt = ArtifactReceipt {
-            name: self.name.clone(),
+            name: name.to_owned(),
             bytes: self.writer.get_ref().bytes,
             allocated_bytes: graphforge_filesystem::file_space_usage(
                 self.writer.get_ref().inner.file(),
@@ -218,12 +292,8 @@ impl SpillWriter {
                 .ok_or_else(|| super::storage("artifact synchronization count overflows"))?,
         };
         drop(self.writer);
-        root.install_child(
-            self.temporary.as_os_str(),
-            self.identity,
-            OsStr::new(&self.name),
-        )
-        .map_err(super::storage)?;
+        root.install_child(self.temporary.as_os_str(), self.identity, OsStr::new(&name))
+            .map_err(super::storage)?;
         // The artifact's name becomes durable with the batch (#1452); the
         // per-spill directory sync it replaces is what serialized every
         // family and partition on one inode.
@@ -260,7 +330,6 @@ impl SpillWriter {
 /// as long as the bound bypasses the buffer. This is the batching the 64 KiB
 /// block used to provide, at a fraction of its residency.
 struct FixedSpillWriter {
-    name: String,
     temporary: std::ffi::OsString,
     identity: FileIdentity,
     writer: HashingWriter,
@@ -271,10 +340,12 @@ struct FixedSpillWriter {
 impl FixedSpillWriter {
     fn create(
         root: &StableDirectory,
-        name: String,
+        family: PartitionFamily,
+        partition: usize,
         window: std::num::NonZeroU64,
         bound: usize,
     ) -> Result<Self, GfError> {
+        let name = fixed_spill_name(family, UNSEALED_BOUNDARY, partition);
         let temporary = artifact_temp(&name);
         let file = root
             .create_replaceable_child_file(temporary.as_os_str())
@@ -282,7 +353,6 @@ impl FixedSpillWriter {
         let identity = file_identity(&file).map_err(super::storage)?;
         let writer = HashingWriter::with_cache_window(file, window)?;
         Ok(Self {
-            name,
             temporary,
             identity,
             writer,
@@ -332,6 +402,7 @@ impl FixedSpillWriter {
 
     fn seal(
         mut self,
+        name: &str,
         root: &StableDirectory,
         evidence: &mut GraphConstructionEvidence,
         batch: &mut SealDirectoryBatch,
@@ -346,7 +417,7 @@ impl FixedSpillWriter {
         account_cache_release(cache_release, evidence)?;
         account_sequential_write(self.writer.bytes, evidence)?;
         let receipt = ArtifactReceipt {
-            name: self.name.clone(),
+            name: name.to_owned(),
             bytes: self.writer.bytes,
             allocated_bytes: graphforge_filesystem::file_space_usage(self.writer.inner.file())
                 .map_err(super::storage)?
@@ -361,12 +432,8 @@ impl FixedSpillWriter {
                 .ok_or_else(|| super::storage("artifact synchronization count overflows"))?,
         };
         drop(self.writer);
-        root.install_child(
-            self.temporary.as_os_str(),
-            self.identity,
-            OsStr::new(&self.name),
-        )
-        .map_err(super::storage)?;
+        root.install_child(self.temporary.as_os_str(), self.identity, OsStr::new(&name))
+            .map_err(super::storage)?;
         // The artifact's name becomes durable with the batch (#1452); the
         // per-spill directory sync it replaces is what serialized every
         // family and partition on one inode.
@@ -383,8 +450,14 @@ impl FixedSpillWriter {
     }
 }
 
-/// Routes fixed-width records into per-partition spills, then emits one sorted
-/// artifact by sorting each partition and concatenating them in index order.
+/// Routes fixed-width records into per-partition spill segments, then emits
+/// one sorted artifact by sorting each partition and concatenating them in
+/// index order.
+///
+/// Each partition holds one segment set, appended per sealing boundary
+/// (#1418): the staged input of fully routed chunks retires at the boundary,
+/// so a resumed shape rebuilds the partitioner from the surviving sealed
+/// segments instead of re-reading retired inputs.
 pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     root: &'a StableDirectory,
     family: PartitionFamily,
@@ -392,7 +465,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     reject_duplicates: bool,
     window: std::num::NonZeroU64,
     spills: Vec<Option<FixedSpillWriter>>,
-    sealed: Vec<Option<ArtifactReceipt>>,
+    sealed: Vec<Vec<ArtifactReceipt>>,
     balance: PartitionBalance,
     records: u64,
     /// Concurrent partition loads while finishing; see
@@ -431,7 +504,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             reject_duplicates,
             window,
             spills: (0..partitions).map(|_| None).collect(),
-            sealed: (0..partitions).map(|_| None).collect(),
+            sealed: (0..partitions).map(|_| Vec::new()).collect(),
             balance: PartitionBalance::new(partitions),
             records: 0,
             load_workers: PARTITION_LOAD_WORKERS,
@@ -497,7 +570,8 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         if slot.is_none() {
             *slot = Some(FixedSpillWriter::create(
                 self.root,
-                fixed_spill_name(self.family, partition),
+                self.family,
+                partition,
                 self.window,
                 self.family.spill_buffer_bytes(),
             )?);
@@ -520,36 +594,100 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         &self.balance
     }
 
-    /// Flush, fsync and install every open spill.
+    /// How many partition spills are currently open and unsealed.
+    pub(super) fn open_spill_count(&self) -> usize {
+        self.spills.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Adopt the sealed segments and cumulative routing balance restored from
+    /// an interrupted shape (#1418).
+    ///
+    /// `segments` holds one slot per partition (shorter is allowed when later
+    /// partitions never received records); `balance_rows` must cover every
+    /// partition and is the exact cumulative routing count restored from the
+    /// progress chain.
+    pub(super) fn restore(
+        &mut self,
+        segments: &[Vec<ArtifactReceipt>],
+        balance_rows: &[u64],
+    ) -> Result<(), GfError> {
+        if segments.len() > self.sealed.len() || balance_rows.len() != self.sealed.len() {
+            return Err(super::storage(
+                "restored partition inventory differs from the plan",
+            ));
+        }
+        for (slot, segments) in self.sealed.iter_mut().zip(segments) {
+            slot.extend(segments.iter().cloned());
+        }
+        let mut total = 0_u64;
+        for (partition, rows) in balance_rows.iter().enumerate() {
+            self.balance.record_many(partition, *rows)?;
+            total = total
+                .checked_add(*rows)
+                .ok_or_else(|| super::storage("partition record count overflows"))?;
+        }
+        self.records = total;
+        Ok(())
+    }
+
+    /// Seal every open spill into this boundary's segment set, sharing one
+    /// directory-durability batch across every partitioner of the group
+    /// (#1418, #1452).
+    pub(super) fn seal_at_boundary(
+        &mut self,
+        boundary: u64,
+        evidence: &mut GraphConstructionEvidence,
+        batch: &mut SealDirectoryBatch,
+    ) -> Result<(), GfError> {
+        for partition in 0..self.spills.len() {
+            if let Some(spill) = self.spills[partition].take() {
+                let name = fixed_spill_name(self.family, boundary, partition);
+                let receipt = spill.seal(&name, self.root, evidence, batch)?;
+                self.sealed[partition].push(receipt);
+            }
+        }
+        Ok(())
+    }
+
+    /// Seal every open spill with a private durability batch.
     ///
     /// The spills seal into one directory-durability batch (#1452): every
     /// artifact and receipt rename lands in the partition directory during
     /// the loop, and one flush at the end makes the whole batch durable
     /// together. A crash before the flush is the incomplete-shape state the
     /// recovery contract already cleans and re-runs.
-    pub(super) fn seal(&mut self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
+    pub(super) fn seal(
+        &mut self,
+        boundary: u64,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
         let mut batch = SealDirectoryBatch::new(self.root);
-        for partition in 0..self.spills.len() {
-            if let Some(spill) = self.spills[partition].take() {
-                self.sealed[partition] = Some(spill.seal(self.root, evidence, &mut batch)?);
-            }
-        }
+        self.seal_at_boundary(boundary, evidence, &mut batch)?;
         construction_failpoint("shape.partition_spill.before_flush");
         batch.flush(evidence)
     }
 
     /// Sort each partition and concatenate them into one globally ordered run.
     ///
+    /// `boundary` names the final segment set when open spills remain (a
+    /// shape whose routing ended without crossing a sealing boundary).
+    ///
     /// Returns `None` when no record was routed.
+    ///
+    /// Sealed segments are **not** unlinked here: they remain until
+    /// supersession retires them, so a crash after one family finished can
+    /// still resume from its segments (#1418).
     #[allow(clippy::too_many_lines)] // One publication lifecycle; the cleanup arms are the invariant.
     pub(super) fn finish_optional(
         mut self,
         output: &str,
+        boundary: u64,
+        retain_segments: bool,
         cancelled: &mut impl FnMut() -> bool,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<Option<String>, GfError> {
         let root = self.root;
-        self.seal(evidence)?;
+        self.seal(boundary, evidence)?;
         if self.records == 0 {
             return Ok(None);
         }
@@ -558,7 +696,7 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
         #[cfg(any(test, feature = "test-support"))]
         let diagnostic = super::diagnostics::Group::start(evidence);
         #[cfg(any(test, feature = "test-support"))]
-        let partitions = self.sealed.iter().filter(|slot| slot.is_some()).count();
+        let partitions = self.sealed.iter().filter(|slot| !slot.is_empty()).count();
         let temporary = artifact_temp(output);
         let mut publication = root
             .create_unpublished_replaceable_child(temporary.as_os_str())
@@ -609,26 +747,27 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             // Every sealed partition, in canonical index order. Workers load
             // and sort them on their own; this thread consumes them in this
             // order, so the output is the same for any worker count.
-            let jobs = self
-                .sealed
-                .iter()
-                .enumerate()
-                .filter_map(|(partition, slot)| {
-                    slot.as_ref().map(|receipt| {
-                        (
-                            partition,
-                            receipt.name.clone(),
-                            self.balance.rows().get(partition).copied(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut jobs = Vec::new();
+            for (partition, segments) in self.sealed.iter().enumerate() {
+                if segments.is_empty() {
+                    continue;
+                }
+                let names = segments
+                    .iter()
+                    .map(|receipt| receipt.name.clone())
+                    .collect::<Vec<_>>();
+                jobs.push((
+                    partition,
+                    names,
+                    self.balance.rows().get(partition).copied(),
+                ));
+            }
             let codec = self.codec;
             let load = |job: usize, stop: &AtomicBool| {
-                let (_, name, expected) = &jobs[job];
+                let (_, names, expected) = &jobs[job];
                 load_fixed_partition::<N>(
                     root,
-                    name,
+                    names,
                     *expected,
                     codec,
                     self.max_partition_bytes,
@@ -817,16 +956,23 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             diagnostic.finish(self.family.as_str(), 1, partitions, evidence, true);
         }
         construction_failpoint("shape.partition_output.after_install");
-        for partition in 0..self.sealed.len() {
-            if let Some(receipt) = self.sealed[partition].take() {
-                unlink_shape_artifact(root, &receipt.name, evidence)?;
+        // When no staged input was retired behind a progress boundary, the
+        // segments have no resume role and are freed here, exactly as the
+        // per-family finish always did (#1418). Otherwise supersession owns
+        // their retirement, so an interrupted finish can still resume.
+        if !retain_segments {
+            for partition in 0..self.sealed.len() {
+                for receipt in self.sealed[partition].drain(..) {
+                    unlink_shape_artifact(root, &receipt.name, evidence)?;
+                }
             }
         }
         Ok(Some(output.to_owned()))
     }
 }
 
-/// Read one fixed-width partition spill into memory and sort it, on a worker.
+/// Read one fixed-width partition's sealed segments into memory and sort them,
+/// on a worker.
 ///
 /// This is the materialization the design's rule R4 requires: the sorted
 /// partition exists in full before any of it is written, so row-group and
@@ -836,18 +982,31 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
 /// comes back as [`PartitionLoadCounters`] for the coordinator to merge, in
 /// partition order, once it consumes the result.
 ///
-/// Pre-size from the routing row count and spill length. Details retain only
-/// compact wire bytes and one offset per record; other families keep their
-/// fixed-width arrays. Sorting does not change either wire representation.
+/// Pre-size from the routing row count and the combined segment length.
+/// Details retain only compact wire bytes and one offset per record; other
+/// families keep their fixed-width arrays. Sorting does not change either wire
+/// representation. Segments are read in boundary order, which is routing
+/// order; the sort below is the only order authority.
 fn load_fixed_partition<const N: usize>(
     root: &StableDirectory,
-    name: &str,
+    names: &[String],
     expected_records: Option<u64>,
     codec: Option<DetailCodec>,
     max_partition_bytes: u64,
     stop: &AtomicBool,
 ) -> Result<(PartitionRecords<N>, PartitionLoadCounters), GfError> {
-    let (mut reader, counter, spill_bytes) = open_fixed_reader(root, name)?;
+    if names.is_empty() {
+        return Err(super::storage("partition has no sealed segments"));
+    }
+    let mut spill_bytes = 0_u64;
+    for name in names {
+        let file = root
+            .open_child_file(OsStr::new(name))
+            .map_err(super::storage)?;
+        spill_bytes = spill_bytes
+            .checked_add(file.metadata().map_err(super::storage)?.len())
+            .ok_or_else(|| super::storage("partition spill byte count overflows"))?;
+    }
     let mut counters = PartitionLoadCounters {
         spill_bytes,
         ..PartitionLoadCounters::default()
@@ -874,23 +1033,50 @@ fn load_fixed_partition<const N: usize>(
         super::partition::admit_materialization(retained, max_partition_bytes)?;
         let mut records = PartitionRecords::new(codec, Some(count), spill_bytes)?;
         let mut admitted_wire_bytes = 0_u64;
-        while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
-            if records.len() as u64 >= count {
-                return Err(super::storage("partition exceeds admitted record count"));
-            }
-            let wire_bytes = if codec.is_some() {
-                N - 255 + usize::from(record[N - 256])
-            } else {
-                N
-            };
-            admitted_wire_bytes = admitted_wire_bytes
-                .checked_add(wire_bytes as u64)
-                .ok_or_else(|| super::storage("partition wire byte count overflows"))?;
-            if admitted_wire_bytes > spill_bytes {
-                return Err(super::storage("partition exceeds admitted wire bytes"));
-            }
-            records.push(record);
-            abandon_if_stopped(records.len(), stop)?;
+        for name in names {
+            let (mut reader, counter, _segment_bytes) = open_fixed_reader(root, name)?;
+            let segment_loaded = (|| -> Result<(), GfError> {
+                while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
+                    if records.len() as u64 >= count {
+                        return Err(super::storage("partition exceeds admitted record count"));
+                    }
+                    let wire_bytes = if codec.is_some() {
+                        N - 255 + usize::from(record[N - 256])
+                    } else {
+                        N
+                    };
+                    admitted_wire_bytes = admitted_wire_bytes
+                        .checked_add(wire_bytes as u64)
+                        .ok_or_else(|| super::storage("partition wire byte count overflows"))?;
+                    if admitted_wire_bytes > spill_bytes {
+                        return Err(super::storage("partition exceeds admitted wire bytes"));
+                    }
+                    records.push(record);
+                    abandon_if_stopped(records.len(), stop)?;
+                }
+                Ok(())
+            })();
+            let released = reader
+                .get_mut()
+                .inner
+                .finish()
+                .map_err(super::storage)
+                .and_then(|evidence_release| {
+                    super::merge_cache_release_evidence(
+                        &mut counters.cache_release,
+                        evidence_release,
+                    )
+                });
+            combine_cache_cleanup(segment_loaded, released, "partition spill")?;
+            let (segment_read_bytes, segment_read_operations) = counter.values();
+            counters.read_bytes = counters
+                .read_bytes
+                .checked_add(segment_read_bytes)
+                .ok_or_else(|| super::storage("partition read byte count overflows"))?;
+            counters.read_operations = counters
+                .read_operations
+                .checked_add(segment_read_operations)
+                .ok_or_else(|| super::storage("partition read operation count overflows"))?;
         }
         if expected_records.is_some_and(|expected| records.len() as u64 != expected) {
             return Err(super::storage(
@@ -899,14 +1085,7 @@ fn load_fixed_partition<const N: usize>(
         }
         Ok(records)
     })();
-    let released = reader
-        .get_mut()
-        .inner
-        .finish()
-        .map_err(super::storage)
-        .map(|released| counters.cache_release = released);
-    let mut records = combine_cache_cleanup(loaded, released, "partition spill")?;
-    (counters.read_bytes, counters.read_operations) = counter.values();
+    let mut records = combine_cache_cleanup(loaded, Ok(()), "partition spill")?;
     counters.records = records.len() as u64;
     // The sort key is the whole record, whose leading 16 bytes are the
     // UUID. Records are globally unique on that prefix, so this is a total
@@ -918,8 +1097,8 @@ fn load_fixed_partition<const N: usize>(
     Ok((records, counters))
 }
 
-/// Routes normalized Arrow rows into per-partition spills, then emits one
-/// sorted Parquet artifact with pinned writer properties.
+/// Routes normalized Arrow rows into per-partition spill segments, then emits
+/// one sorted Parquet artifact with pinned writer properties.
 pub(super) struct RowRangePartitioner<'a> {
     root: &'a StableDirectory,
     #[cfg(any(test, feature = "test-support"))]
@@ -928,7 +1107,7 @@ pub(super) struct RowRangePartitioner<'a> {
     schema: Option<SchemaRef>,
     window: std::num::NonZeroU64,
     spills: Vec<Option<RowSpill>>,
-    sealed: Vec<Option<ArtifactReceipt>>,
+    sealed: Vec<Vec<ArtifactReceipt>>,
     balance: PartitionBalance,
     rows: u64,
     reservations: Vec<super::partition_memory::RowReservation>,
@@ -937,7 +1116,6 @@ pub(super) struct RowRangePartitioner<'a> {
 
 struct RowSpill {
     writer: arrow::ipc::writer::StreamWriter<BufWriter<HashingWriter>>,
-    name: String,
     temporary: std::ffi::OsString,
     identity: FileIdentity,
 }
@@ -948,12 +1126,10 @@ impl Drop for RowRangePartitioner<'_> {
             if let Some(spill) = slot.take() {
                 let RowSpill {
                     writer,
-                    name,
                     temporary,
                     identity,
                 } = spill;
                 drop(writer);
-                let _ = name;
                 let _ = self
                     .root
                     .unlink_child_if_identity(temporary.as_os_str(), identity);
@@ -982,7 +1158,7 @@ impl<'a> RowRangePartitioner<'a> {
             schema: None,
             window,
             spills: (0..partitions).map(|_| None).collect(),
-            sealed: (0..partitions).map(|_| None).collect(),
+            sealed: (0..partitions).map(|_| Vec::new()).collect(),
             balance: PartitionBalance::new(partitions),
             rows: 0,
             reservations: vec![super::partition_memory::RowReservation::default(); partitions],
@@ -1092,7 +1268,7 @@ impl<'a> RowRangePartitioner<'a> {
             .get_mut(partition)
             .ok_or_else(|| super::storage("routed row partition is out of range"))?;
         if slot.is_none() {
-            let name = row_spill_name(&self.namespace, partition);
+            let name = row_spill_name(&self.namespace, UNSEALED_BOUNDARY, partition);
             let temporary = artifact_temp(&name);
             let file = self
                 .root
@@ -1104,7 +1280,6 @@ impl<'a> RowRangePartitioner<'a> {
             *slot = Some(RowSpill {
                 writer: arrow::ipc::writer::StreamWriter::try_new(buffered, schema)
                     .map_err(super::storage)?,
-                name,
                 temporary,
                 identity,
             });
@@ -1127,42 +1302,104 @@ impl<'a> RowRangePartitioner<'a> {
         Ok(())
     }
 
-    /// Seal every open row spill.
-    ///
-    /// Same batched durability as the fixed-width seal: the whole group of
-    /// row spills shares one directory flush (#1452).
-    fn seal(&mut self, evidence: &mut GraphConstructionEvidence) -> Result<(), GfError> {
-        let mut batch = SealDirectoryBatch::new(self.root);
+    /// How many row spills are currently open and unsealed.
+    pub(super) fn open_spill_count(&self) -> usize {
+        self.spills.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Measured per-partition row counts.
+    pub(super) fn balance(&self) -> &PartitionBalance {
+        &self.balance
+    }
+
+    /// Adopt the sealed segments and cumulative routing balance restored from
+    /// an interrupted shape (#1418). See [`FixedRangePartitioner::restore`].
+    pub(super) fn restore(
+        &mut self,
+        segments: &[Vec<ArtifactReceipt>],
+        balance_rows: &[u64],
+    ) -> Result<(), GfError> {
+        if segments.len() > self.sealed.len() || balance_rows.len() != self.sealed.len() {
+            return Err(super::storage(
+                "restored row partition inventory differs from the plan",
+            ));
+        }
+        for (slot, segments) in self.sealed.iter_mut().zip(segments) {
+            slot.extend(segments.iter().cloned());
+        }
+        let mut total = 0_u64;
+        for (partition, rows) in balance_rows.iter().enumerate() {
+            self.balance.record_many(partition, *rows)?;
+            total = total
+                .checked_add(*rows)
+                .ok_or_else(|| super::storage("row partition count overflows"))?;
+        }
+        self.rows = total;
+        Ok(())
+    }
+
+    /// Install the Arrow IPC schema carried by restored row segments, for a
+    /// resumed partitioner whose remaining routing may push no rows.
+    pub(super) fn restore_schema(&mut self, schema: SchemaRef) {
+        self.schema.get_or_insert(schema);
+    }
+
+    /// Seal every open row spill into this boundary's segment set, sharing one
+    /// directory-durability batch (#1418, #1452).
+    pub(super) fn seal_at_boundary(
+        &mut self,
+        boundary: u64,
+        evidence: &mut GraphConstructionEvidence,
+        batch: &mut SealDirectoryBatch,
+    ) -> Result<(), GfError> {
         for partition in 0..self.spills.len() {
             let Some(spill) = self.spills[partition].take() else {
                 continue;
             };
             let RowSpill {
                 writer,
-                name,
                 temporary,
                 identity,
             } = spill;
             let buffered = writer.into_inner().map_err(super::storage)?;
-            self.sealed[partition] = Some(
-                SpillWriter {
-                    name,
-                    temporary,
-                    identity,
-                    writer: buffered,
-                }
-                .seal(self.root, evidence, &mut batch)?,
-            );
+            let name = row_spill_name(&self.namespace, boundary, partition);
+            let receipt = SpillWriter {
+                temporary,
+                identity,
+                writer: buffered,
+            }
+            .seal(&name, self.root, evidence, batch)?;
+            self.sealed[partition].push(receipt);
         }
+        Ok(())
+    }
+
+    /// Seal every open row spill.
+    ///
+    /// Same batched durability as the fixed-width seal: the whole group of
+    /// row spills shares one directory flush (#1452).
+    fn seal(
+        &mut self,
+        boundary: u64,
+        evidence: &mut GraphConstructionEvidence,
+    ) -> Result<(), GfError> {
+        let mut batch = SealDirectoryBatch::new(self.root);
+        self.seal_at_boundary(boundary, evidence, &mut batch)?;
         construction_failpoint("shape.partition_spill.before_flush");
         batch.flush(evidence)
     }
 
     /// Sort each partition and write one globally ordered Parquet artifact.
+    ///
+    /// `boundary` names the final segment set when open spills remain (#1418).
+    /// Sealed segments are **not** unlinked here: they remain until
+    /// supersession retires them (#1418).
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One publication lifecycle.
     pub(super) fn finish(
         mut self,
         output: &str,
+        boundary: u64,
+        retain_segments: bool,
         output_rows: usize,
         output_bytes: usize,
         cancelled: &mut impl FnMut() -> bool,
@@ -1172,13 +1409,13 @@ impl<'a> RowRangePartitioner<'a> {
             return Err(super::storage("invalid row partition group"));
         }
         let root = self.root;
-        self.seal(evidence)?;
+        self.seal(boundary, evidence)?;
         #[cfg(any(test, feature = "test-support"))]
         super::diagnostics::inputs(&self.diagnostic_family, self.rows);
         #[cfg(any(test, feature = "test-support"))]
         let diagnostic = super::diagnostics::Group::start(evidence);
         #[cfg(any(test, feature = "test-support"))]
-        let partitions = self.sealed.iter().filter(|slot| slot.is_some()).count();
+        let partitions = self.sealed.iter().filter(|slot| !slot.is_empty()).count();
         let schema = self
             .schema
             .clone()
@@ -1204,14 +1441,15 @@ impl<'a> RowRangePartitioner<'a> {
         let written = (|| -> Result<u64, GfError> {
             let mut written = 0_u64;
             for partition in 0..self.sealed.len() {
-                let Some(name) = self.sealed[partition]
-                    .as_ref()
-                    .map(|receipt| receipt.name.clone())
-                else {
+                if self.sealed[partition].is_empty() {
                     continue;
-                };
+                }
                 reject_cancelled(cancelled)?;
-                let sorted = self.load_partition(partition, &name, &schema, evidence)?;
+                let names = self.sealed[partition]
+                    .iter()
+                    .map(|receipt| receipt.name.clone())
+                    .collect::<Vec<_>>();
+                let sorted = self.load_partition(partition, &names, &schema, evidence)?;
                 let uuids = key_column(&sorted)?;
                 for row in 0..sorted.num_rows() {
                     let uuid = uuid_value(uuids, row)?;
@@ -1303,40 +1541,68 @@ impl<'a> RowRangePartitioner<'a> {
             .partition_outputs
             .checked_add(1)
             .ok_or_else(|| super::storage("partition output count overflows"))?;
-        for partition in 0..self.sealed.len() {
-            if let Some(receipt) = self.sealed[partition].take() {
-                unlink_shape_artifact(root, &receipt.name, evidence)?;
-            }
-        }
         #[cfg(any(test, feature = "test-support"))]
         if let Some(diagnostic) = diagnostic {
             diagnostic.finish(&self.diagnostic_family, 1, partitions, evidence, true);
         }
+        if !retain_segments {
+            for partition in 0..self.sealed.len() {
+                for receipt in self.sealed[partition].drain(..) {
+                    unlink_shape_artifact(root, &receipt.name, evidence)?;
+                }
+            }
+        }
         Ok(output.to_owned())
     }
 
-    /// Read one row partition spill into memory and sort it by UUID.
+    /// Read one row partition's sealed segments into memory and sort them by
+    /// UUID.
+    ///
+    /// Segments are read in boundary order and concatenated before the sort,
+    /// so a partition routed across several sealing boundaries loads exactly
+    /// as one spill would (#1418).
+    #[allow(clippy::too_many_lines)] // One authenticated multi-segment load; bounds before decode is the invariant.
     fn load_partition(
         &self,
         partition: usize,
-        name: &str,
+        names: &[String],
         schema: &SchemaRef,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<RecordBatch, GfError> {
-        let receipt = self
-            .sealed
-            .get(partition)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| super::storage("row partition receipt is absent"))?;
-        if receipt.name != name {
-            return Err(super::storage(
-                "row partition name differs from its receipt",
-            ));
+        if names.is_empty() {
+            return Err(super::storage("row partition has no sealed segments"));
         }
-        self.reservations[partition].admit(receipt.bytes, self.max_partition_bytes)?;
+        let mut segment_bytes = 0_u64;
+        let mut receipts = Vec::with_capacity(names.len());
+        for name in names {
+            let receipt = self
+                .sealed
+                .get(partition)
+                .and_then(|segments| segments.iter().find(|receipt| &receipt.name == name))
+                .ok_or_else(|| super::storage("row partition receipt is absent"))?;
+            segment_bytes = segment_bytes
+                .checked_add(receipt.bytes)
+                .ok_or_else(|| super::storage("row partition byte count overflows"))?;
+            receipts.push(receipt.clone());
+        }
+        self.reservations[partition].admit(segment_bytes, self.max_partition_bytes)?;
         // Authenticate with bounded buffers BEFORE Arrow reads bodyLength and
         // allocates an IPC body. Post-decode checks cannot protect that step.
-        let (file, work) = super::recovery::authenticate_row_spill(self.root, receipt)?;
+        let mut authenticated = Vec::with_capacity(receipts.len());
+        let mut work = ReadWork::default();
+        for receipt in &receipts {
+            let (file, segment_work) = super::recovery::authenticate_row_spill(self.root, receipt)?;
+            work.bytes = work
+                .bytes
+                .checked_add(segment_work.bytes)
+                .ok_or_else(|| super::storage("partition read bytes overflow"))?;
+            work.operations = work
+                .operations
+                .checked_add(segment_work.operations)
+                .ok_or_else(|| super::storage("partition read operations overflow"))?;
+            merge_cache_release_evidence(&mut work.cache_release, segment_work.cache_release)?;
+            authenticated.push(file);
+        }
         account_cache_release(work.cache_release, evidence)?;
         evidence.merge_read_bytes = evidence
             .merge_read_bytes
@@ -1348,27 +1614,34 @@ impl<'a> RowRangePartitioner<'a> {
             .ok_or_else(|| super::storage("partition read operations overflow"))?;
 
         let counter = IoCounter::default();
-        let reader = super::CountingRead {
-            inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
-                file,
-                self.window,
-                graphforge_filesystem::FileCacheReleaseTracker::default(),
-            )
-            .map_err(super::storage)?,
-            counter: counter.clone(),
-        };
-        let mut reader = std::io::BufReader::with_capacity(BLOCK_BYTES, reader);
+        let mut readers = Vec::with_capacity(authenticated.len());
+        for file in authenticated {
+            readers.push(std::io::BufReader::with_capacity(
+                BLOCK_BYTES,
+                super::CountingRead {
+                    inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
+                        file,
+                        self.window,
+                        graphforge_filesystem::FileCacheReleaseTracker::default(),
+                    )
+                    .map_err(super::storage)?,
+                    counter: counter.clone(),
+                },
+            ));
+        }
         let loaded = (|| -> Result<RecordBatch, GfError> {
-            let stream = arrow::ipc::reader::StreamReader::try_new(&mut reader, None)
-                .map_err(super::storage)?;
             let mut batches = Vec::new();
             let mut decoded = super::partition_memory::RowReservation::default();
-            for batch in stream {
-                let batch = batch.map_err(super::storage)?;
-                decoded = decoded.with_batch(&batch)?;
-                decoded.admit(receipt.bytes, self.max_partition_bytes)?;
-                batches.push(batch);
+            for reader in &mut readers {
+                let stream = arrow::ipc::reader::StreamReader::try_new(reader, None)
+                    .map_err(super::storage)?;
+                for batch in stream {
+                    let batch = batch.map_err(super::storage)?;
+                    decoded = decoded.with_batch(&batch)?;
+                    batches.push(batch);
+                }
             }
+            decoded.admit(segment_bytes, self.max_partition_bytes)?;
             let combined = concat_batches(schema, &batches).map_err(super::storage)?;
             drop(batches);
             let uuids = key_column(&combined)?;
@@ -1383,11 +1656,22 @@ impl<'a> RowRangePartitioner<'a> {
             order.sort_unstable_by_key(|index| keys[*index as usize]);
             take_record_batch(&combined, &UInt32Array::from(order)).map_err(super::storage)
         })();
-        let released = reader.get_mut().inner.finish().map_err(super::storage);
-        let released = match released {
-            Ok(evidence_release) => account_cache_release(evidence_release, evidence),
-            Err(error) => Err(error),
-        };
+        let mut pending_releases: Vec<graphforge_filesystem::FileCacheReleaseEvidence> =
+            Vec::with_capacity(readers.len());
+        let mut release_error = Ok(());
+        for reader in readers.iter_mut().rev() {
+            match reader.get_mut().inner.finish().map_err(super::storage) {
+                Ok(evidence_release) => pending_releases.push(evidence_release),
+                Err(error) => release_error = Err(error),
+            }
+        }
+        let released = release_error.and_then(|()| {
+            let mut merged = graphforge_filesystem::FileCacheReleaseEvidence::default();
+            for evidence_release in pending_releases {
+                merge_cache_release_evidence(&mut merged, evidence_release)?;
+            }
+            account_cache_release(merged, evidence)
+        });
         let sorted = combine_cache_cleanup(loaded, released, "row partition spill")?;
         counter.add_to(evidence)?;
         evidence.peak_partition_records = evidence

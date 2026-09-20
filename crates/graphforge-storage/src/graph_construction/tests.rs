@@ -1207,8 +1207,14 @@ fn route_endpoint_fixture(
             partitioner.route(plan, &key, &record, evidence)?;
         }
     }
-    partitioner.seal(evidence)?;
-    partitioner.finish_optional("shaped-fixture-endpoints.run", &mut || false, evidence)
+    partitioner.seal(1, evidence)?;
+    partitioner.finish_optional(
+        "shaped-fixture-endpoints.run",
+        0,
+        false,
+        &mut || false,
+        evidence,
+    )
 }
 
 /// Splitters at every 32nd node key: the plan the fixture's keys are laid out

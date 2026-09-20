@@ -1,9 +1,15 @@
 //! Shape for graph construction.
 
+use super::partition::PartitionBalance;
 use super::partition::{IdentitySampler, PartitionPlan};
 use super::partition_shaping::{
     FixedRangePartitioner, PartitionFamily, RowRangePartitioner, is_partition_artifact_name,
 };
+use super::progress::{
+    LoadedShapeProgress, ShapeProgressPartition, authenticate_shape_segments,
+    install_shape_progress,
+};
+use super::recovery::is_shape_scoped_name;
 use super::{
     ArtifactReceipt, AuthenticatedShapeSource, AuthenticatedUuidIndexSnapshot, BASE_IDENTITY_WIDTH,
     BLOCK_BYTES, BTreeMap, BufReader, BufWriter, CatalogSource, Checkpoint, ConstructionChunkKind,
@@ -19,12 +25,13 @@ use super::{
     canonical_artifact_target, checked_evidence_sum, combine_cache_cleanup,
     compact_parent_surrogate_tails, construction_failpoint, decode_bounded, decode_shape_intent,
     file_identity, file_link_count, hex, install_control, install_control_batched,
-    is_canonical_lower_hex, is_canonical_sha256, merge_cache_release_evidence,
-    open_counted_fixed_reader, property_free_schema_sha256, read_run_record, receipt_for_existing,
-    receipt_for_existing_with_work, record_shape_artifact_install, reject_cancelled,
-    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
-    replace_control, sha256, shape_authority_sha256, shape_publication_failure, storage,
-    unlink_shape_artifact, validate_parquet_metadata,
+    is_canonical_lower_hex, is_canonical_sha256, load_shape_progress_chain,
+    merge_cache_release_evidence, open_counted_fixed_reader, property_free_schema_sha256,
+    read_run_record, receipt_for_existing, receipt_for_existing_with_work,
+    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
+    release_counted_reader_cache, replace_checkpoint_control, replace_control,
+    retire_staged_payload, scan_shape_segments, sha256, shape_authority_sha256,
+    shape_publication_failure, storage, unlink_shape_artifact, validate_parquet_metadata,
 };
 use std::io::Seek;
 
@@ -206,45 +213,85 @@ impl GraphConstructionSession {
         }
         reject_cancelled(&mut cancelled)?;
         let authenticate_outputs = !self.has_encoding_successor() && !self.shape_outputs_verified;
-        if let Some((shape, work)) =
-            read_completed_shape(&self.root, &self.checkpoint, authenticate_outputs)?
+        let installed_intent = read_installed_shape_intent(&self.root, &self.checkpoint)?;
+        if installed_intent
+            .as_ref()
+            .is_some_and(|intent| intent.complete)
         {
-            self.shape_outputs_verified |= authenticate_outputs;
-            // The completed-shape replay boundary re-verifies the retained
-            // payloads (#1392). Charge that read where every other replay and
-            // recovery authentication is charged; `shaped_output_authentication_bytes`
-            // is bound to the shape-phase sum and is not a replay counter.
-            self.checkpoint.evidence.recovery_application_read_bytes = self
-                .checkpoint
-                .evidence
-                .recovery_application_read_bytes
-                .checked_add(work.bytes)
-                .ok_or_else(|| storage("shape replay authentication bytes overflow"))?;
-            self.checkpoint
-                .evidence
-                .recovery_application_read_operations = self
-                .checkpoint
-                .evidence
-                .recovery_application_read_operations
-                .checked_add(work.operations)
-                .ok_or_else(|| storage("shape replay authentication operations overflow"))?;
-            account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
-            self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
-            return Ok(shape);
+            if let Some((shape, work)) =
+                read_completed_shape(&self.root, &self.checkpoint, authenticate_outputs)?
+            {
+                self.shape_outputs_verified |= authenticate_outputs;
+                // The completed-shape replay boundary re-verifies the retained
+                // payloads (#1392). Charge that read where every other replay and
+                // recovery authentication is charged; `shaped_output_authentication_bytes`
+                // is bound to the shape-phase sum and is not a replay counter.
+                self.checkpoint.evidence.recovery_application_read_bytes = self
+                    .checkpoint
+                    .evidence
+                    .recovery_application_read_bytes
+                    .checked_add(work.bytes)
+                    .ok_or_else(|| storage("shape replay authentication bytes overflow"))?;
+                self.checkpoint
+                    .evidence
+                    .recovery_application_read_operations = self
+                    .checkpoint
+                    .evidence
+                    .recovery_application_read_operations
+                    .checked_add(work.operations)
+                    .ok_or_else(|| storage("shape replay authentication operations overflow"))?;
+                account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
+                self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
+                return Ok(shape);
+            }
+            return Err(storage("incomplete construction shape was not recovered"));
         }
-        reject_existing_merge_artifacts(&self.root)?;
+        // An incomplete shape resumes: sealed segment groups survive behind the
+        // progress chain, and the staged inputs behind those boundaries are
+        // already retired (#1418).
+        let resume = match self.shape_resume.take() {
+            Some(resume) => Some(resume),
+            None => self.begin_shape_resume(installed_intent, &mut cancelled)?,
+        };
+        let start_sequence = resume.as_ref().map_or(0, |state| state.retired_through);
+        if resume.is_none() {
+            reject_existing_merge_artifacts(&self.root)?;
+        }
 
         // Snapshot the committed evidence before any shaping work, including the
         // splitter sampling pass: the shape intent's baseline must match what a
-        // reopen reads back from the checkpoint on disk.
-        let baseline_evidence = self.checkpoint.evidence.clone();
+        // reopen reads back from the checkpoint on disk. A resumed shape keeps
+        // the baseline its installed intent recorded.
+        let baseline_evidence = resume.as_ref().map_or_else(
+            || self.checkpoint.evidence.clone(),
+            |state| state.baseline_evidence.clone(),
+        );
         let detail_codec =
             DetailCodec::from_version(self.checkpoint.format_version).map_err(storage)?;
         // Barrier A0. Choose the range-partition splitters from a deterministic
         // sample of the staged identity domain, and record them before any
         // partition writes a byte. `super::partition` records why a formula
         // over the key's high bits is not an option for UUIDv7 identities.
-        let plan = self.choose_partition_plan(&mut cancelled)?;
+        // A resumed shape replays the recorded splitters instead: the chunks
+        // behind the resumed boundary are retired, so their sampling domain is
+        // gone, and the recorded intent is the authority anyway.
+        let (plan, node_plan) = if let Some(state) = &resume {
+            (
+                PartitionPlan::from_recorded(
+                    self.checkpoint.budgets.partition_count,
+                    state.splitters.clone(),
+                )?,
+                PartitionPlan::from_recorded(
+                    self.checkpoint.budgets.partition_count,
+                    state.node_splitters.clone(),
+                )?,
+            )
+        } else {
+            (
+                self.choose_partition_plan(&mut cancelled)?,
+                self.choose_node_partition_plan(&mut cancelled)?,
+            )
+        };
         let partitions = plan.partitions();
         self.checkpoint.evidence.shape_partitions = u64::try_from(partitions).map_err(storage)?;
         self.checkpoint.evidence.shape_partition_count = u64::from(plan.partition_count());
@@ -260,7 +307,6 @@ impl GraphConstructionSession {
         // plan's (larger) partition count would silently dilute its mean
         // with slots that routing through `node_plan` can never reach,
         // making a perfectly balanced node-keyed family look skewed.
-        let node_plan = self.choose_node_partition_plan(&mut cancelled)?;
         let node_partitions = node_plan.partitions();
         self.checkpoint.evidence.shape_node_partitions =
             u64::try_from(node_partitions).map_err(storage)?;
@@ -317,6 +363,67 @@ impl GraphConstructionSession {
             &self.checkpoint.edge_schema_sha256,
             ConstructionChunkKind::Edge,
         );
+        if let Some(state) = &resume {
+            // Rebuild every family from its claimed sealed segments before the
+            // loop resumes. Row groups for schemas whose chunks all retired
+            // behind the boundary would otherwise never be constructed, and
+            // their segments would be orphaned at finish.
+            identities.restore(
+                state.segments_for("identities"),
+                &state.rows_for("identities", partitions),
+            )?;
+            node_details.restore(
+                state.segments_for("node-details"),
+                &state.rows_for("node-details", node_partitions),
+            )?;
+            edge_details.restore(
+                state.segments_for("edge-details"),
+                &state.rows_for("edge-details", partitions),
+            )?;
+            endpoints.restore(
+                state.segments_for("endpoints"),
+                &state.rows_for("endpoints", node_partitions),
+            )?;
+            for (kind, schemas, from_details, routing_plan, routing_partitions) in [
+                (
+                    0_u8,
+                    &self.checkpoint.node_schema_sha256,
+                    node_catalog_from_details,
+                    &node_plan,
+                    node_partitions,
+                ),
+                (
+                    1_u8,
+                    &self.checkpoint.edge_schema_sha256,
+                    edge_catalog_from_details,
+                    &plan,
+                    partitions,
+                ),
+            ] {
+                if from_details {
+                    continue;
+                }
+                for digest in schemas {
+                    let authority = format!("{kind}-{digest}");
+                    let tag = format!("rows:{}", &sha256(authority.as_bytes())[..16].to_owned());
+                    let claimed = state.segments_for(&tag);
+                    if claimed.is_empty() {
+                        continue;
+                    }
+                    let mut partitioner = RowRangePartitioner::new(
+                        &self.root,
+                        &authority,
+                        routing_plan.partitions(),
+                    )?
+                    .with_materialization_limit(self.checkpoint.budgets.max_partition_bytes);
+                    partitioner.restore(claimed, &state.rows_for(&tag, routing_partitions))?;
+                    if let Some(schema) = state.row_schemas.get(&tag) {
+                        partitioner.restore_schema(schema.clone());
+                    }
+                    row_groups.insert((kind, digest.clone()), partitioner);
+                }
+            }
+        }
         let mut catalog_authority = Sha256::new();
         let shape_intent = ShapeIntent {
             format_version: self.checkpoint.format_version,
@@ -338,8 +445,24 @@ impl GraphConstructionSession {
             node_splitters: encode_splitters(&node_plan),
             partition_identity_rows: Vec::new(),
         };
-        install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
-        for sequence in 0..self.checkpoint.next_sequence {
+        if resume.is_none() {
+            install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
+        }
+        // Sealing cadence (#1418): retired staged input is the point of the
+        // boundary machinery, but every boundary also costs one fsync per
+        // open spill. Space boundaries so each spill is fsynced once per
+        // 255 KiB of newly routed input, the same bytes-per-fsync budget the
+        // write path established in #1442.
+        let mut routed_since_boundary = 0_u64;
+        let mut sealed_through = start_sequence;
+        let mut last_progress_sha256 = resume
+            .as_ref()
+            .and_then(|state| state.last_progress_sha256.clone());
+        let mut previous_rows: BTreeMap<String, Vec<u64>> = resume
+            .as_ref()
+            .map(|state| state.segment_rows.clone())
+            .unwrap_or_default();
+        for sequence in start_sequence..self.checkpoint.next_sequence {
             reject_cancelled(&mut cancelled)?;
             let receipt = self.read_receipt(sequence)?;
             // Fixed-width inputs authenticate their exact inode, length and
@@ -464,6 +587,107 @@ impl GraphConstructionSession {
                     )?;
                 }
             }
+            routed_since_boundary = routed_since_boundary
+                .checked_add(staged_input_bytes(&receipt))
+                .ok_or_else(|| storage("routed input byte count overflows"))?;
+            let open_spills = identities.open_spill_count()
+                + node_details.open_spill_count()
+                + edge_details.open_spill_count()
+                + endpoints.open_spill_count()
+                + row_groups
+                    .values()
+                    .map(RowRangePartitioner::open_spill_count)
+                    .sum::<usize>();
+            if routed_since_boundary < boundary_threshold(open_spills) {
+                continue;
+            }
+            let boundary = sequence
+                .checked_add(1)
+                .ok_or_else(|| storage("shape boundary overflows"))?;
+            let mut partition_rows = Vec::new();
+            capture_balance_delta(
+                super::progress::IDENTITY_TAG,
+                identities.balance(),
+                &mut previous_rows,
+                &mut partition_rows,
+            );
+            capture_balance_delta(
+                "node-details",
+                node_details.balance(),
+                &mut previous_rows,
+                &mut partition_rows,
+            );
+            capture_balance_delta(
+                "edge-details",
+                edge_details.balance(),
+                &mut previous_rows,
+                &mut partition_rows,
+            );
+            capture_balance_delta(
+                "endpoints",
+                endpoints.balance(),
+                &mut previous_rows,
+                &mut partition_rows,
+            );
+            for ((kind, digest), partitioner) in &row_groups {
+                let authority = format!("{kind}-{digest}");
+                let tag = format!("rows:{}", &sha256(authority.as_bytes())[..16].to_owned());
+                capture_balance_delta(
+                    &tag,
+                    partitioner.balance(),
+                    &mut previous_rows,
+                    &mut partition_rows,
+                );
+            }
+            // One directory-durability batch covers the whole group's seal
+            // (#1452); every spill payload fsynced before its name landed in
+            // the batch, so the flush is what makes the boundary's segments
+            // durable together.
+            let mut batch = SealDirectoryBatch::new(&self.root);
+            identities.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
+            node_details.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
+            edge_details.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
+            endpoints.seal_at_boundary(boundary, &mut self.checkpoint.evidence, &mut batch)?;
+            for partitioner in row_groups.values_mut() {
+                partitioner.seal_at_boundary(
+                    boundary,
+                    &mut self.checkpoint.evidence,
+                    &mut batch,
+                )?;
+            }
+            construction_failpoint("shape.partition_spill.before_flush");
+            batch.flush(&mut self.checkpoint.evidence)?;
+            // The boundary control lands before any unlink: from here on the
+            // group's inputs have durable sealed successors, so an interrupted
+            // retirement never strands routed data behind missing inputs.
+            let progress = super::progress::ShapeProgress::new(
+                &self.checkpoint,
+                boundary,
+                last_progress_sha256.clone(),
+                partition_rows,
+            );
+            last_progress_sha256 = Some(install_shape_progress(&self.root, &progress)?);
+            construction_failpoint("shape.after_group_seal");
+            for retire_sequence in sealed_through..boundary {
+                let receipt = self.read_receipt(retire_sequence)?;
+                for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
+                    .into_iter()
+                    .chain(receipt.endpoints.iter())
+                {
+                    retire_staged_payload(
+                        &self.root,
+                        &mut self.checkpoint.evidence,
+                        artifact,
+                        false,
+                        false,
+                        &mut cancelled,
+                    )?;
+                }
+            }
+            sealed_through = boundary;
+            routed_since_boundary = 0;
+            self.shape_boundary_retired_through = boundary;
+            construction_failpoint("shape.after_group_retire");
         }
         // Load-bearing, not a nicety: a collapsed one-partition run is
         // perfectly deterministic and passes every byte-equality test, so this
@@ -473,25 +697,38 @@ impl GraphConstructionSession {
         let partition_identity_rows = identities.balance().rows().to_vec();
         self.checkpoint.evidence.max_partition_identity_rows = identities.balance().max_rows();
         self.checkpoint.evidence.partitioned_identity_rows = identities.balance().total();
+        let final_boundary = self.checkpoint.next_sequence;
+        // Segments are the resume state only while staged inputs have been
+        // retired behind a progress boundary; a boundary-less shape frees
+        // them at finish exactly as the per-family finish always did (#1418).
+        let retain_segments = sealed_through > 0;
         let staged_identities = identities
             .finish_optional(
                 STAGED_IDENTITIES,
+                final_boundary,
+                retain_segments,
                 &mut cancelled,
                 &mut self.checkpoint.evidence,
             )?
             .ok_or_else(|| storage("construction contains no identities"))?;
         let node_details = node_details.finish_optional(
             SHAPED_NODE_DETAILS,
+            final_boundary,
+            retain_segments,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
         let edge_details = edge_details.finish_optional(
             SHAPED_EDGE_DETAILS,
+            final_boundary,
+            retain_segments,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
         let endpoints = endpoints.finish_optional(
             STAGED_ENDPOINTS,
+            final_boundary,
+            retain_segments,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -557,6 +794,8 @@ impl GraphConstructionSession {
             self.base_snapshot.as_mut(),
             self.checkpoint.budgets.max_batch_rows,
             self.checkpoint.budgets.max_partition_bytes,
+            final_boundary,
+            retain_segments,
             &mut cancelled,
             &mut self.checkpoint.evidence,
         )?;
@@ -585,6 +824,8 @@ impl GraphConstructionSession {
             let output = format!("shaped-rows-{kind}-{schema_digest}.parquet");
             let output = rows.finish(
                 &output,
+                final_boundary,
+                retain_segments,
                 self.checkpoint.budgets.max_batch_rows,
                 self.checkpoint.budgets.max_batch_bytes,
                 &mut cancelled,
@@ -718,6 +959,170 @@ impl GraphConstructionSession {
         crate::concurrency_attribution::RegionScope::record_work("nodes", shape.node_count);
         crate::concurrency_attribution::RegionScope::record_work("edges", shape.edge_count);
         Ok(shape)
+    }
+
+    /// Build the resume state for an interrupted shape, or `None` when no
+    /// progress chain exists.
+    ///
+    /// The boundary chain must already be the recovery-cleaned state: sealed
+    /// segments at or below the head boundary are claimed and authenticated
+    /// here once per process, everything else was removed, and the installed
+    /// incomplete intent supplies the recorded splitters the resumed routing
+    /// replays.
+    fn begin_shape_resume(
+        &mut self,
+        installed_intent: Option<ShapeIntent>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<super::progress::ShapeResume>, GfError> {
+        let chain = load_shape_progress_chain(&self.root, &self.checkpoint)?;
+        let Some(head) = chain.last() else {
+            if installed_intent.is_some() {
+                // Recovery removes an incomplete intent that carries no
+                // progress; finding one here means durable state this session
+                // cannot reason about.
+                return Err(storage("incomplete construction shape was not recovered"));
+            }
+            return Ok(None);
+        };
+        let Some(intent) = installed_intent else {
+            return Err(storage(
+                "construction shape progress exists without shape intent",
+            ));
+        };
+        let retired_through = head.retired_through();
+        self.shape_boundary_retired_through = retired_through;
+        let mut segments = scan_shape_segments(
+            &self.root,
+            retired_through,
+            &mut self.checkpoint.evidence,
+            cancelled,
+        )?;
+        // Reconcile the allocation ledger for everything the boundary chain
+        // retired. The durable checkpoint predates those removals (they were
+        // in-flight when the process died), and leaving their inode entries
+        // in the active map would let a reused inode clobber a stale entry
+        // and read as corruption at supersession. This is the same
+        // accounting `retire_payload` performs; the files are already gone
+        // except for a marker-to-unlink crash window, where it unlinks them.
+        for reconcile_sequence in 0..retired_through {
+            let receipt = self.read_receipt(reconcile_sequence)?;
+            for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
+                .into_iter()
+                .chain(receipt.endpoints.iter())
+            {
+                retire_staged_payload(
+                    &self.root,
+                    &mut self.checkpoint.evidence,
+                    artifact,
+                    false,
+                    false,
+                    cancelled,
+                )?;
+            }
+        }
+        let claimed_names: std::collections::BTreeSet<String> = segments
+            .values()
+            .flatten()
+            .flat_map(|partition| partition.iter().map(|receipt| receipt.name.clone()))
+            .collect();
+        // A resumed shape tolerates exactly its claimed segments. Any other
+        // shape-scoped artifact — a derived domain from an interrupted finish,
+        // an unexpected spill — has no producer on the resumed path and would
+        // collide with the re-run's deterministic output.
+        for child in self.root.child_names().map_err(storage)? {
+            let Some(name) = child.to_str() else { continue };
+            if !is_shape_scoped_name(name) || claimed_names.contains(name) {
+                continue;
+            }
+            return Err(storage("unowned construction shaping artifact exists"));
+        }
+        let segment_rows = LoadedShapeProgress::cumulative_rows(&chain)?;
+        let row_schemas = authenticate_shape_segments(
+            &self.root,
+            &segments,
+            &mut self.checkpoint.evidence,
+            cancelled,
+        )?;
+        // Once authenticated and ledger-installed, the claimed receipts are
+        // the restored state; drop the empties so restore sees only families
+        // with real segments.
+        segments.retain(|_, partitions| partitions.iter().any(|partition| !partition.is_empty()));
+        Ok(Some(super::progress::ShapeResume {
+            retired_through,
+            baseline_evidence: intent.baseline_evidence,
+            splitters: decode_splitters(&intent.splitters)?,
+            node_splitters: decode_splitters(&intent.node_splitters)?,
+            segments,
+            segment_rows,
+            row_schemas,
+            last_progress_sha256: Some(head.body_sha256.clone()),
+        }))
+    }
+}
+
+/// Read the installed shape intent, whatever its completion state.
+fn read_installed_shape_intent(
+    root: &StableDirectory,
+    checkpoint: &Checkpoint,
+) -> Result<Option<ShapeIntent>, GfError> {
+    let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
+    let intent = decode_shape_intent(&mut file)?;
+    validate_shape_binding(&intent, checkpoint)?;
+    Ok(Some(intent))
+}
+
+/// Staged input bytes one chunk's routing consumes, the cadence counter's
+/// unit.
+fn staged_input_bytes(receipt: &ConstructionChunkReceipt) -> u64 {
+    let mut total = receipt
+        .parquet
+        .bytes
+        .saturating_add(receipt.identities.bytes)
+        .saturating_add(receipt.details.bytes);
+    if let Some(artifact) = &receipt.endpoints {
+        total = total.saturating_add(artifact.bytes);
+    }
+    total
+}
+
+/// The routed-input byte count that justifies one sealing boundary at
+/// `open_spills` open spills.
+fn boundary_threshold(open_spills: usize) -> u64 {
+    const SEAL_SPACING_BYTES: u64 = 255 * 1024;
+    (open_spills as u64)
+        .saturating_mul(SEAL_SPACING_BYTES)
+        .max(1)
+}
+
+/// Record one partitioner's routing delta since the previous boundary.
+fn capture_balance_delta(
+    tag: &str,
+    balance: &PartitionBalance,
+    previous: &mut BTreeMap<String, Vec<u64>>,
+    out: &mut Vec<ShapeProgressPartition>,
+) {
+    let current = balance.rows();
+    let prior = previous
+        .entry(tag.to_owned())
+        .or_insert_with(|| vec![0; current.len()]);
+    if prior.len() != current.len() {
+        prior.resize(current.len(), 0);
+    }
+    let delta: Vec<u64> = current
+        .iter()
+        .zip(prior.iter())
+        .map(|(count, prior)| count - prior)
+        .collect();
+    *prior = current.to_vec();
+    if delta.iter().any(|rows| *rows != 0) {
+        out.push(ShapeProgressPartition {
+            tag: tag.to_owned(),
+            rows: delta,
+        });
     }
 }
 
@@ -1614,6 +2019,8 @@ pub(super) fn resolve_endpoint_surrogates(
     mut base: Option<&mut AuthenticatedUuidIndexSnapshot>,
     window_rows: usize,
     max_partition_bytes: u64,
+    boundary: u64,
+    retain_segments: bool,
     cancelled: &mut impl FnMut() -> bool,
     evidence: &mut GraphConstructionEvidence,
 ) -> Result<Option<String>, GfError> {
@@ -1702,13 +2109,19 @@ pub(super) fn resolve_endpoint_surrogates(
     drop(identities);
     drop(endpoints);
     // Every routed record is durable before the endpoint domain is retired.
-    resolved.seal(evidence)?;
+    resolved.seal(boundary, evidence)?;
     shape_publication_failure("shape.before_endpoint_retirement")?;
     unlink_shape_artifact(root, endpoints_name, evidence)?;
     construction_failpoint("shape.after_endpoint_retirement");
     shape_publication_failure("shape.after_endpoint_retirement")?;
     reject_cancelled(cancelled)?;
-    resolved.finish_optional(SHAPED_EDGE_ENDPOINTS, cancelled, evidence)
+    resolved.finish_optional(
+        SHAPED_EDGE_ENDPOINTS,
+        boundary,
+        retain_segments,
+        cancelled,
+        evidence,
+    )
 }
 
 pub(super) fn validate_sorted_run(
