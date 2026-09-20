@@ -5,8 +5,9 @@ from __future__ import annotations
 import tempfile
 import uuid
 
-import graphforge
 import pyarrow as pa
+
+import graphforge
 from graphforge.exceptions import StorageError
 
 
