@@ -565,6 +565,17 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         vec![true]
     }
 
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        // The merge exists to replay child partitions in canonical fragment
+        // order. The default `true` let `EnforceDistribution` insert a
+        // round-robin exchange between this node and the scan whenever the
+        // session had more target partitions than fragments (#1466 derives
+        // them from the machine), which interleaves fragments and hides the
+        // scan from the complete-frontier detection the certification fast
+        // paths gate on (#1513).
+        vec![false]
+    }
+
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
@@ -650,6 +661,28 @@ mod tests {
             ArrowWriter::try_new(file, schema, Some(WriterProperties::builder().build())).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    /// #1513: a multi-fragment scan must stay directly beneath its ordered
+    /// merge however many target partitions the session asks for.
+    #[test]
+    fn ordered_partition_stream_declines_input_repartitioning() {
+        let dir = TempDir::new().unwrap();
+        let fragments = (0..3)
+            .map(|index| {
+                let path = dir.path().join(format!("edges-{index}.parquet"));
+                write_edges(&path, 4);
+                ParquetFragment::for_path(path, false)
+            })
+            .collect();
+        let plan = scan_fragments(edge_schema(), fragments, None, None, 8192).unwrap();
+        assert_eq!(plan.name(), "OrderedPartitionStreamExec");
+        assert_eq!(plan.output_partitioning().partition_count(), 1);
+        assert_eq!(plan.benefits_from_input_partitioning(), vec![false]);
+        assert_eq!(
+            plan.children()[0].output_partitioning().partition_count(),
+            3
+        );
     }
 
     #[tokio::test]
