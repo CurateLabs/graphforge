@@ -911,6 +911,9 @@ fn load_fixed_partition<const N: usize>(
     // The sort key is the whole record, whose leading 16 bytes are the
     // UUID. Records are globally unique on that prefix, so this is a total
     // order and no stability assumption is needed.
+    #[cfg(any(test, feature = "test-support"))]
+    records.sort_selected()?;
+    #[cfg(not(any(test, feature = "test-support")))]
     records.sort();
     Ok((records, counters))
 }
