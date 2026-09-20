@@ -1,5 +1,12 @@
 # Encode Arrow/DataFusion seam (#1465)
 
+Broader construction reuse evaluation (sorting, partitioning, spill, scheduling)
+is tracked by [#1504](https://github.com/CurateLabs/graphforge/issues/1504); the
+pre-spike inventory and comparison protocol are in
+[`construction-reuse-inventory-protocol-1505.md`](../construction-reuse-inventory-protocol-1505.md).
+This encode-only seam evidence remains valid within its stated limits and does
+not settle those broader mechanisms.
+
 ## Scope and decision criteria
 
 This experiment keeps GraphForge's authenticated descriptors, recorded UUID
