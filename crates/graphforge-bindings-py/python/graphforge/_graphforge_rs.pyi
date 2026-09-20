@@ -453,6 +453,21 @@ class GraphForge:
         after: str | None = None,
         cancellation: CancellationToken | None = None,
     ) -> pyarrow.Table: ...
+    def list_artifacts(
+        self,
+        *,
+        source_uuid: str | None = None,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
+    def list_sources(
+        self,
+        *,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
     def assertion_graph_refs(
         self,
         assertion_uuid: str,
@@ -506,6 +521,7 @@ class GraphForge:
         weight: float | None = None,
         actor_uuid: str | None = None,
     ) -> pyarrow.Table: ...
+    def artifact(self, artifact_uuid: str) -> pyarrow.Table: ...
     def evidence_link(
         self,
         evidence_uuid: str,
@@ -720,6 +736,60 @@ class GraphForge:
     def workspace_ontology(self) -> dict[str, Any]: ...
     def research_project_metadata(self) -> dict[str, Any]: ...
     def research_project_summary(self) -> dict[str, Any]: ...
+    def register_source(
+        self,
+        *,
+        operation_uuid: str,
+        source_uuid: str,
+        label: str,
+        source_kind: str,
+        identity_uri: str | None = None,
+        actor_uuid: str | None = None,
+    ) -> pyarrow.Table: ...
+    def register_artifact(
+        self,
+        *,
+        operation_uuid: str,
+        artifact_uuid: str,
+        source_uuid: str,
+        artifact_kind: str,
+        media_type: str,
+        payload: dict[str, Any],
+        derivation_inputs: list[dict[str, str]] | None = None,
+        run_uuid: str | None = None,
+        actor_uuid: str | None = None,
+    ) -> pyarrow.Table: ...
+    def replacement_impact(self, source_uuid: str, artifact_uuid: str) -> pyarrow.Table: ...
+    def research_lineage(
+        self,
+        subject_uuid: str,
+        *,
+        subject_kind: str,
+        direction: str,
+        max_depth: int,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
+    def retention_dependency_closure(
+        self,
+        scope_uuid: str,
+        *,
+        limit: int = 100,
+        after: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> pyarrow.Table: ...
+    def set_preferred_artifact(
+        self,
+        *,
+        operation_uuid: str,
+        preference_event_uuid: str,
+        source_uuid: str,
+        artifact_uuid: str,
+        reason: str,
+        actor_uuid: str | None = None,
+    ) -> pyarrow.Table: ...
+    def source(self, source_uuid: str) -> pyarrow.Table: ...
     def update_research_metadata(
         self,
         metadata: dict[str, Any],

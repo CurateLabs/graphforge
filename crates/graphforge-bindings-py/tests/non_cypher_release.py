@@ -91,8 +91,7 @@ EVIDENCE = {
     },
     "source-artifact-lifecycle": {
         "source_artifact_lifecycle.py": [
-            "check_rust_authoritative_surface",
-            "check_lifecycle_surface_not_exposed",
+            "check_source_artifact_lifecycle_survives_reopen",
         ],
     },
     "gsi-profiler": {
