@@ -3,8 +3,9 @@
 use arrow::array::{FixedSizeBinaryArray, StringArray};
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    ArtifactKind, ArtifactPayloadRequest, GraphForge, ListArtifactsRequest, ListSourcesRequest,
-    OperationId, RegisterArtifactRequest, RegisterSourceRequest, SourceKind, WriteContext,
+    ArtifactKind, ArtifactPayloadRequest, CapabilityId, EnableCapabilityRequest, GraphForge,
+    ListArtifactsRequest, ListSourcesRequest, OperationId, RegisterArtifactRequest,
+    RegisterSourceRequest, SourceKind, WriteContext,
 };
 use graphforge_core::{GfError, ProjectErrorCode};
 use tempfile::TempDir;
@@ -25,6 +26,21 @@ fn write_context(seed: u128) -> WriteContext {
     WriteContext {
         operation_uuid: OperationId(Uuid::from_u128(seed)),
         actor_uuid: None,
+    }
+}
+
+fn enable_knowledge_capabilities(graph: &GraphForge) {
+    for (seed, capability_id) in [
+        (100_u128, CapabilityId::Provenance),
+        (101_u128, CapabilityId::Knowledge),
+    ] {
+        graph
+            .enable_capability(EnableCapabilityRequest {
+                context: write_context(seed),
+                capability_id,
+                capability_version: 1,
+            })
+            .unwrap();
     }
 }
 
@@ -72,6 +88,7 @@ fn source_and_artifact_survive_reopen_and_list() {
     let payload = b"manuscript page 1".to_vec();
 
     let graph = GraphForge::new(Some(path)).unwrap();
+    enable_knowledge_capabilities(&graph);
     graph
         .register_source(RegisterSourceRequest {
             context: write_context(1),
@@ -140,14 +157,4 @@ fn source_and_artifact_survive_reopen_and_list() {
         uuid_column(&listed_artifacts, "artifact_uuid"),
         vec![artifact_uuid]
     );
-
-    graph
-        .register_source(RegisterSourceRequest {
-            context: write_context(3),
-            source_uuid,
-            label: "Codex A".into(),
-            source_kind: SourceKind::Manuscript,
-            identity_uri: Some("https://example.org/codex-a".into()),
-        })
-        .unwrap();
 }
