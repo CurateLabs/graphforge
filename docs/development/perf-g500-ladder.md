@@ -82,6 +82,7 @@ hard-code rungs elsewhere.
 | Policy | undirected, drop self-loops, drop duplicates, canonical `(lo,hi)` |
 | Host capacity | **128 GiB** peak RSS, **1 TiB** local NVMe (declared **Linux cloud** SKU) |
 | Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end on that SKU — provisional #745 budget, not a laptop or “overnight is fine” product claim |
+| Per-rung stop | host ladder: last accepted wall for the scale × (1 + `WALL_MARGIN`, default 0.10), capped at 4 h, when `REFERENCE_EVIDENCE_DIR` names a prior evidence dir; BenchExec reports the rung as `rung_wall_exceeded` |
 
 Before any provisioned rung, complete the read-only/no-spend checks from the
 [certification runbook](g500-certification.md): subscription and role, provider

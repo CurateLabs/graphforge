@@ -63,9 +63,19 @@
       "additionalProperties": false,
       "required": ["wall_seconds", "memory_bytes", "cores"],
       "properties": {
-        "wall_seconds": {"const": 14400},
+        "wall_seconds": {"type": "integer", "minimum": 1, "maximum": 14400},
         "memory_bytes": {"const": 4294967296},
         "cores": {"const": 16}
+      }
+    },
+    "wall_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum_wall_seconds", "reference_wall_seconds", "margin"],
+      "properties": {
+        "maximum_wall_seconds": {"const": 14400},
+        "reference_wall_seconds": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]},
+        "margin": {"type": "number", "minimum": 0}
       }
     },
     "outputs": {

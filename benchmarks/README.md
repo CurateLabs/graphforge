@@ -394,6 +394,21 @@ make -C benchmarks progressive-host-ladder-run \
   RESERVED_HEADROOM_BYTES=80530636800
 ```
 
+The 4 h BenchExec envelope is the certification ceiling, not a stop condition.
+Pass `REFERENCE_EVIDENCE_DIR` (a prior ladder's evidence directory) to stage
+each rung with that rung's accepted `s<scale>-rung.json` wall plus
+`WALL_MARGIN` (default `0.10`), capped at the envelope. A rung that regresses
+from minutes to hours then stops as `rung_wall_exceeded` within the margin
+instead of holding the host for four hours; rungs without a reference keep the
+envelope. The staged wall and its reference are recorded in the rung plan's
+`limits.wall_seconds` and `wall_policy`.
+
+```bash
+make -C benchmarks progressive-host-ladder-run \
+  MAXIMUM_SCALE=22 OUTPUT_DIR="$OUTPUT_DIR" WORK_ROOT="$WORK_ROOT" \
+  REFERENCE_EVIDENCE_DIR=/path/to/last-clean-ladder-evidence WALL_MARGIN=0.10
+```
+
 The reserve is 75 GiB by default. Before each launch, admission measures free
 space available to the current user on the actual work-root filesystem.
 S20+ projects storage and work from the declared adjacent completed rungs;

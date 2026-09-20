@@ -116,12 +116,19 @@ BENCHEXEC_PYTHON ?= /usr/bin/python3
 HOST_TARGET_DIR ?= $(CURDIR)/../target-host-ladder
 MAXIMUM_SCALE ?= 26
 RESERVED_HEADROOM_BYTES ?= 80530636800
+# Per-rung stop: with REFERENCE_EVIDENCE_DIR set to a prior ladder's evidence,
+# each rung is staged with that rung's accepted wall plus WALL_MARGIN (capped
+# at the 4 h envelope), so a regressed rung stops in minutes, not hours.
+REFERENCE_EVIDENCE_DIR ?=
+WALL_MARGIN ?= 0.10
 HOST_LADDER_ARGS = --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)" \
 	--gf "$(HOST_TARGET_DIR)/release/gf" \
 	--certify "$(HOST_TARGET_DIR)/release/graphforge-benchmark-certify" \
 	--generator "$(HOST_TARGET_DIR)/release/graphforge-benchmark-graph500-generator" \
 	--benchexec-python "$(BENCHEXEC_PYTHON)" \
-	--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)"
+	--reserved-headroom-bytes "$(RESERVED_HEADROOM_BYTES)" \
+	--wall-margin "$(WALL_MARGIN)" \
+	$(if $(REFERENCE_EVIDENCE_DIR),--reference-evidence-dir "$(REFERENCE_EVIDENCE_DIR)",)
 
 progressive-host-ladder-binaries:
 	CARGO_TARGET_DIR="$(HOST_TARGET_DIR)" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
