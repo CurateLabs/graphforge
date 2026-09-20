@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "f07050c29e4fe957fd056a9408b1fa7fb91b11630899aa37ac8165c23a94aa21",
+  "public_method_digest": "273f55b050c54731ce38464040547d79bc632d6b08dbebb067e27f734c9a4aff",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -266,6 +266,22 @@
         {
           "path": "crates/graphforge-api/tests/research_project.rs",
           "symbol": "metadata_survives_reopen_and_discovery_filters_without_graph_open"
+        }
+      ]
+    },
+    "source-artifact-lifecycle": {
+      "ids": [
+        "GraphForge.artifact",
+        "GraphForge.list_artifacts",
+        "GraphForge.list_sources",
+        "GraphForge.register_artifact",
+        "GraphForge.register_source",
+        "GraphForge.source"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/source_artifact_write.rs",
+          "symbol": "source_and_artifact_survive_reopen_and_list"
         }
       ]
     },
