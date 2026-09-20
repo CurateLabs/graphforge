@@ -335,6 +335,8 @@ fn evidence_input(value: EvidenceInputJs) -> Result<graphforge_api::EvidenceInpu
         "observation" => graphforge_api::EvidenceSourceKind::Observation,
         "graph_node" => graphforge_api::EvidenceSourceKind::GraphNode,
         "graph_edge" => graphforge_api::EvidenceSourceKind::GraphEdge,
+        "source" => graphforge_api::EvidenceSourceKind::Source,
+        "artifact" => graphforge_api::EvidenceSourceKind::Artifact,
         _ => return Err(napi_validation("unknown evidence source kind")),
     };
     let role = match value.role.as_str() {
@@ -1278,6 +1280,8 @@ impl GraphForge {
             "observation" => graphforge_api::EvidenceSourceKind::Observation,
             "graph_node" => graphforge_api::EvidenceSourceKind::GraphNode,
             "graph_edge" => graphforge_api::EvidenceSourceKind::GraphEdge,
+            "source" => graphforge_api::EvidenceSourceKind::Source,
+            "artifact" => graphforge_api::EvidenceSourceKind::Artifact,
             _ => return Err(napi_validation("unknown evidence source kind")),
         };
         let role = match request.role.as_str() {

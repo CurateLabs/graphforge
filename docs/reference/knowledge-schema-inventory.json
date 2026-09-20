@@ -510,7 +510,7 @@
       "capability_version": 1,
       "enum_registry_versions": {
         "evidence_role": 1,
-        "evidence_source_kind": 1
+        "evidence_source_kind": 2
       },
       "fields": [
         {
@@ -579,6 +579,69 @@
       "sort_key": [
         "recorded_at",
         "evidence_uuid"
+      ]
+    },
+    {
+      "capability_id": "knowledge",
+      "capability_version": 1,
+      "enum_registry_versions": {
+        "source_kind": 1
+      },
+      "fields": [
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "source_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "label",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "source_kind",
+          "nullable": false
+        },
+        {
+          "data_type": "Utf8",
+          "metadata": {},
+          "name": "identity_uri",
+          "nullable": true
+        },
+        {
+          "data_type": "FixedSizeBinary(16)",
+          "metadata": {},
+          "name": "provenance_uuid",
+          "nullable": false
+        },
+        {
+          "data_type": "Timestamp(Microsecond,UTC)",
+          "metadata": {},
+          "name": "recorded_at",
+          "nullable": false
+        },
+        {
+          "data_type": "UInt32",
+          "metadata": {},
+          "name": "contract_version",
+          "nullable": false
+        }
+      ],
+      "fingerprint_domain": "graphforge/research-source",
+      "implementation_issue": 1349,
+      "max_rows": 1000000,
+      "owner": "graphforge-knowledge",
+      "record_family": "sources",
+      "record_version": 1,
+      "schema_fingerprint_sha256": "ee4598240a27d7f6e96d7417c2a5d70ab61c7b4376e53ff2115fde78fab670c8",
+      "schema_metadata": {},
+      "sort_key": [
+        "recorded_at",
+        "source_uuid"
       ]
     },
     {

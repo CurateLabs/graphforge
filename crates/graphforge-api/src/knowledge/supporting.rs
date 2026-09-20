@@ -282,7 +282,10 @@ fn validate_evidence_source(
 ) -> Result<(), GfError> {
     let mut pending = HashSet::from([source_uuid]);
     match source_kind {
-        EvidenceSourceKind::Document | EvidenceSourceKind::Observation => return Ok(()),
+        EvidenceSourceKind::Document
+        | EvidenceSourceKind::Observation
+        | EvidenceSourceKind::Source
+        | EvidenceSourceKind::Artifact => return Ok(()),
         EvidenceSourceKind::GraphNode => match_requested_node_uuids(graph, &mut pending)?,
         EvidenceSourceKind::GraphEdge => match_requested_edge_uuids(graph, &mut pending)?,
     }

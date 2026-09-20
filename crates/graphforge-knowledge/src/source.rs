@@ -55,14 +55,23 @@ static SOURCE_SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
+    /// Handwritten or typed manuscript.
     Manuscript,
+    /// Published edition identity.
     Edition,
+    /// Portable document representation.
     Pdf,
+    /// Electronic publication package.
     Epub,
+    /// Web resource or canonical URL identity.
     Web,
+    /// Photograph or still image capture.
     Photograph,
+    /// Audio or audiovisual recording.
     Recording,
+    /// Structured database export snapshot.
     DatabaseExport,
+    /// Other closed kind not listed above.
     Other,
 }
 

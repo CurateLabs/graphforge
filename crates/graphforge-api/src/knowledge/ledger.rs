@@ -258,7 +258,10 @@ pub(super) fn merged_evidence_provenance(
     let source_kind = match request.source_kind {
         EvidenceSourceKind::GraphNode => SubjectKind::Node,
         EvidenceSourceKind::GraphEdge => SubjectKind::Edge,
-        EvidenceSourceKind::Document | EvidenceSourceKind::Observation => SubjectKind::EvidenceLink,
+        EvidenceSourceKind::Document
+        | EvidenceSourceKind::Observation
+        | EvidenceSourceKind::Source
+        | EvidenceSourceKind::Artifact => SubjectKind::EvidenceLink,
     };
     let lineage = vec![
         LineageRecord::new(
@@ -324,9 +327,10 @@ pub(super) fn merged_assertion_evidence_provenance(
                 match input.source_kind {
                     EvidenceSourceKind::GraphNode => SubjectKind::Node,
                     EvidenceSourceKind::GraphEdge => SubjectKind::Edge,
-                    EvidenceSourceKind::Document | EvidenceSourceKind::Observation => {
-                        SubjectKind::EvidenceLink
-                    }
+                    EvidenceSourceKind::Document
+                    | EvidenceSourceKind::Observation
+                    | EvidenceSourceKind::Source
+                    | EvidenceSourceKind::Artifact => SubjectKind::EvidenceLink,
                 },
                 LineageRole::Input,
                 u32::try_from(evidence_offset + ordinal)
