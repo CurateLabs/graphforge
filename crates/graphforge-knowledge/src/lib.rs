@@ -10,6 +10,7 @@ mod belief_projection;
 mod confidence;
 mod hypothesis;
 mod reasoning;
+mod source;
 mod status;
 mod supersession;
 mod valid_time;
@@ -29,6 +30,10 @@ pub use reasoning::{
     REASONING_CONTENT_FORMAT_REGISTRY_VERSION, REASONING_CONTRACT_VERSION,
     REASONING_KIND_REGISTRY_VERSION, REASONING_SCHEMA, ReasoningContentFormat, ReasoningKind,
     ReasoningLedger, ReasoningRecord,
+};
+pub use source::{
+    MAX_SOURCE_IDENTITY_URI_BYTES, MAX_SOURCE_LABEL_BYTES, SOURCE_CONTRACT_VERSION,
+    SOURCE_KIND_REGISTRY_VERSION, SOURCE_SCHEMA, Source, SourceKind, SourceLedger,
 };
 pub use status::{
     ASSERTION_STATUS_CONTRACT_VERSION, ASSERTION_STATUS_REGISTRY_VERSION, ASSERTION_STATUS_SCHEMA,
@@ -81,7 +86,7 @@ pub const GRAPH_OBJECT_KIND_REGISTRY_VERSION: u32 = 1;
 /// Closed assertion-role registry version.
 pub const ASSERTION_GRAPH_ROLE_REGISTRY_VERSION: u32 = 1;
 /// Closed evidence source-kind registry version.
-pub const EVIDENCE_SOURCE_KIND_REGISTRY_VERSION: u32 = 1;
+pub const EVIDENCE_SOURCE_KIND_REGISTRY_VERSION: u32 = 2;
 /// Closed evidence role registry version.
 pub const EVIDENCE_ROLE_REGISTRY_VERSION: u32 = 1;
 /// Closed algorithm-run lifecycle registry version.
@@ -582,6 +587,10 @@ pub enum EvidenceSourceKind {
     GraphNode,
     /// Existing graph edge identity.
     GraphEdge,
+    /// Registered research Source identity.
+    Source,
+    /// Registered research Artifact identity.
+    Artifact,
 }
 
 impl EvidenceSourceKind {
@@ -593,6 +602,8 @@ impl EvidenceSourceKind {
             Self::Observation => "observation",
             Self::GraphNode => "graph_node",
             Self::GraphEdge => "graph_edge",
+            Self::Source => "source",
+            Self::Artifact => "artifact",
         }
     }
 
@@ -602,6 +613,8 @@ impl EvidenceSourceKind {
             "observation" => Ok(Self::Observation),
             "graph_node" => Ok(Self::GraphNode),
             "graph_edge" => Ok(Self::GraphEdge),
+            "source" => Ok(Self::Source),
+            "artifact" => Ok(Self::Artifact),
             _ => Err(invalid("source_kind", "unknown closed value")),
         }
     }
@@ -872,6 +885,7 @@ pub fn schema_registry() -> Vec<SchemaRegistryEntry> {
     entries.extend(hypothesis::schema_registry_entries());
     entries.push(valid_time::schema_registry_entry());
     entries.push(belief_projection::schema_registry_entry());
+    entries.push(source::schema_registry_entry());
     entries
 }
 
@@ -1850,6 +1864,8 @@ mod tests {
             EvidenceSourceKind::Observation,
             EvidenceSourceKind::GraphNode,
             EvidenceSourceKind::GraphEdge,
+            EvidenceSourceKind::Source,
+            EvidenceSourceKind::Artifact,
         ] {
             assert_eq!(EvidenceSourceKind::parse(value.as_str()).unwrap(), value);
         }

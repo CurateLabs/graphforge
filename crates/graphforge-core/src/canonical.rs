@@ -64,6 +64,10 @@ pub enum CanonicalDomain {
     BeliefProjectionAttachment,
     /// Public Arrow result table.
     ArrowResult,
+    /// Immutable research Source identity.
+    ResearchSource,
+    /// Immutable research Artifact identity.
+    ResearchArtifact,
 }
 
 impl CanonicalDomain {
@@ -91,6 +95,8 @@ impl CanonicalDomain {
             Self::BeliefProjectionPolicy => "graphforge/belief-projection-policy",
             Self::BeliefProjectionAttachment => "graphforge/belief-projection-attachment",
             Self::ArrowResult => "graphforge/arrow-result",
+            Self::ResearchSource => "graphforge/research-source",
+            Self::ResearchArtifact => "graphforge/research-artifact",
         }
     }
 }
@@ -549,6 +555,14 @@ mod tests {
                 "graphforge/belief-projection-attachment",
             ),
             (CanonicalDomain::ArrowResult, "graphforge/arrow-result"),
+            (
+                CanonicalDomain::ResearchSource,
+                "graphforge/research-source",
+            ),
+            (
+                CanonicalDomain::ResearchArtifact,
+                "graphforge/research-artifact",
+            ),
         ];
         for (domain, spelling) in domains {
             assert_eq!(domain.as_str(), spelling);
