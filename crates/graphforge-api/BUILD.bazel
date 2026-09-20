@@ -461,6 +461,13 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "research_project",
+    srcs = ["tests/research_project.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "strict_runtime_properties",
     srcs = ["tests/strict_runtime_properties.rs"],
     crate = ":graphforge_api",
@@ -591,6 +598,7 @@ test_suite(
         ":ingestion_attribution",
         ":lifecycle_io_attribution",
         ":release_load_construction",
+        ":research_project",
         ":resumable_construction_surface",
         ":ontology_adoption_retry",
         ":permanent_storage_budgets",

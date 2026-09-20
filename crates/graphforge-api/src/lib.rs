@@ -148,6 +148,7 @@ pub use discovery_portable_v2::{
     DiscoveredPortableV2, DiscoveryPortableV2Error, DiscoveryPortableV2Mismatch,
     DiscoveryPortableV2Request, verify_discovered_portable_v2,
 };
+pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
 mod portable;
 mod provenance;
 mod provider_embedding;
@@ -158,6 +159,7 @@ mod provider_session;
 mod query_evidence;
 mod query_execution;
 mod repository;
+mod research_project;
 mod resource_policy;
 mod runtime_ownership;
 pub use runtime_ownership::RuntimeGuard;
@@ -273,8 +275,11 @@ pub use generation_diff::{
 pub use graphforge_exec::validate_embedding_options;
 pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
 pub use graphforge_storage::{
-    GraphDirectedness, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat,
+    GraphDirectedness, ResearchAccessPolicyMetadata, ResearchCorpusSize, ResearchDiscoveryFacets,
+    ResearchGeographicCoverage, ResearchProjectDiscoveryLimits, ResearchProjectDiscoveryQuery,
+    ResearchProjectIdentity, ResearchProjectSummary, ResearchTemporalCoverage,
+    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
+    WorkspaceOntologySourceFormat, WorkspaceResearchMetadata,
 };
 /// Per-phase application I/O attribution for the whole project lifecycle.
 ///

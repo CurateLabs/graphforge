@@ -718,6 +718,28 @@ class GraphForge:
         document: dict[str, Any] | None = None,
     ) -> None: ...
     def workspace_ontology(self) -> dict[str, Any]: ...
+    def research_project_metadata(self) -> dict[str, Any]: ...
+    def research_project_summary(self) -> dict[str, Any]: ...
+    def update_research_metadata(
+        self,
+        metadata: dict[str, Any],
+        *,
+        operation_uuid: str,
+        actor_uuid: str | None = None,
+    ) -> None: ...
+    @staticmethod
+    def discover_research_projects(
+        project_roots: list[str],
+        *,
+        free_text: str | None = None,
+        languages: list[str] | None = None,
+        subjects: list[str] | None = None,
+        ontologies: list[str] | None = None,
+        source_types: list[str] | None = None,
+        temporal_label: str | None = None,
+        max_projects: int = 1024,
+        max_candidates: int = 1024,
+    ) -> pyarrow.Table: ...
     def adopt_ontology(
         self,
         path: str,
