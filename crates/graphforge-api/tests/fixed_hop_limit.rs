@@ -449,7 +449,8 @@ fn encoded_node_files(dir: &Path) -> usize {
 #[test]
 fn regression1513_fast_paths_survive_multi_file_node_tables() {
     let _guard = io_guard();
-    const NODES: usize = 70_000;
+    // Two 32 Ki-row publication windows: the fixture spans two node files.
+    const NODES: usize = 40_000;
     const MULTI_FILE_FAN_OUT: usize = 4;
     let dir = TempDir::new().unwrap();
     let fixture = generate_bulk_graph(dir.path(), NODES, MULTI_FILE_FAN_OUT);
@@ -458,15 +459,22 @@ fn regression1513_fast_paths_survive_multi_file_node_tables() {
         node_files > 1,
         "fixture must span several node files, found {node_files}"
     );
+    // The explicit policy must fit the instance budget on any CI host:
+    // one Tokio worker plus the partitions must stay within twice the observed
+    // cores (floor four), so the widest partitioning is derived from the host
+    // while still exceeding the file count.
+    let observed = std::thread::available_parallelism().map_or(1, usize::from);
+    let budget = observed.saturating_mul(2).max(4);
+    let widest = (budget - 1).max(node_files + 1);
     let recount = "MATCH ()-[r]->() RETURN count(r) AS n";
-    for partitions in [1_usize, node_files, 8] {
+    for partitions in [1_usize, node_files, widest] {
         let options = GraphForgeOptions {
             resource: ExecutionResourcePolicy {
                 mode: ResourcePolicyMode::Explicit,
-                tokio_worker_threads: Some(2),
+                tokio_worker_threads: Some(1),
                 target_partitions: Some(partitions),
-                io_concurrency: Some(2),
-                compute_threads: Some(2),
+                io_concurrency: Some(1),
+                compute_threads: Some(1),
                 ..ExecutionResourcePolicy::default()
             },
             ..GraphForgeOptions::default()
@@ -475,7 +483,7 @@ fn regression1513_fast_paths_survive_multi_file_node_tables() {
             Some(dir.path().to_str().expect("temp path is UTF-8")),
             options,
         )
-        .unwrap();
+        .unwrap_or_else(|error| panic!("target_partitions={partitions}: {error:?}"));
         for (query, exec, operator) in [
             (recount, "EdgeCountExec", "edge_count"),
             (ORDERED_ONE_HOP, "OrderedOneHopExec", "ordered_one_hop"),
