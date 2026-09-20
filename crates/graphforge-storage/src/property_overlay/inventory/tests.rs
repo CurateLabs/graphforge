@@ -472,3 +472,86 @@ fn only_flat_property_inventory_entries_receive_legacy_validation() {
         );
     }
 }
+
+#[test]
+fn property_authentication_reaches_the_lifecycle_counters() {
+    let dir = TempDir::new().unwrap();
+    let mut table = crate::route_component::RouteTable::default();
+    let selected = table.insert("CON", 64 * 1024 * 1024, 100_000).unwrap();
+    let relative = format!("properties/{selected}.parquet");
+    fs::create_dir_all(dir.path().join("properties")).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "node_uuid",
+        DataType::FixedSizeBinary(16),
+        false,
+    )]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![Arc::new(
+            FixedSizeBinaryArray::try_from_iter(vec![vec![7; 16]].into_iter()).unwrap(),
+        )],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(
+        File::create(dir.path().join(&relative)).unwrap(),
+        schema,
+        None,
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let payload = fs::read(dir.path().join(&relative)).unwrap();
+    let table_bytes = table.encode(64 * 1024 * 1024).unwrap();
+    fs::write(
+        dir.path().join(crate::route_component::TABLE_FILE),
+        &table_bytes,
+    )
+    .unwrap();
+    let entry = |relative_path: String, bytes: &[u8], role| crate::GraphFileEntry {
+        relative_path,
+        byte_length: bytes.len() as u64,
+        content_sha256: digest_hex(&Sha256::digest(bytes)),
+        role,
+    };
+    let inventory = crate::graph_files::inventory_from_entries_with_version(
+        vec![
+            entry(relative.clone(), &payload, crate::GraphFileRole::Properties),
+            entry(
+                crate::route_component::TABLE_FILE.into(),
+                &table_bytes,
+                crate::GraphFileRole::Other,
+            ),
+        ],
+        crate::graph_files::GRAPH_FILES_MAPPED_RECORD_VERSION,
+    )
+    .unwrap();
+
+    // #1449: the streamed SHA-256 over the property payload was counted into
+    // the inventory's own metrics but never into the lifecycle phase rows, so
+    // a property-bearing open under-reported its verification work.
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let before = crate::lifecycle_io::snapshot();
+    let admitted = AuthenticatedPropertyInventory::from_inventory_at_root(
+        dir.path(),
+        inventory,
+        Some((PropertyRouteKind::Node, "CON")),
+    )
+    .unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    region.validate_for_qualification().unwrap();
+
+    let hydration = &region.phases[&crate::StorageIoPhase::HydrationVerification];
+    assert_eq!(
+        hydration.read_bytes,
+        payload.len() as u64,
+        "authentication bytes unattributed: {region:#?}"
+    );
+    assert!(
+        hydration.block_count >= 1,
+        "authentication blocks unattributed: {region:#?}"
+    );
+    assert_eq!(
+        admitted.open_metrics().property_authentication_bytes,
+        payload.len() as u64
+    );
+}

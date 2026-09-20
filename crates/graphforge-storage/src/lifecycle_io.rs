@@ -320,7 +320,10 @@ pub fn reset() {
 ///
 /// Serializes to the same `{phases, totals}` document
 /// [`ConstructionPhaseAttribution`](crate::ConstructionPhaseAttribution) emits,
-/// with one extra row: `read_path_scan`, which construction never performs.
+/// with one extra row: `read_path_scan`. Construction never records into that
+/// row — the publish-side and import-side adjacency builds are scoped to the
+/// encoding row (#1449) — so a nonzero `read_path_scan` always means committed
+/// read-path work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecyclePhaseAttribution {
     /// Every lifecycle phase exactly once, including zero observations.
