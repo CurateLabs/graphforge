@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 273,
-  "releaseSurfaceDigest": "952c9836b52b3c452073b3c9473778f36b225860f8e7ec666a5eb24943d89e18",
+  "releaseSurfaceCount": 279,
+  "releaseSurfaceDigest": "6001cb16902d3454aca7ea48995b006665dade4dcbd1f4df5f6616550d83c60e",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -20,6 +20,7 @@
     "composition-lifecycle": "lifecycleConstruction",
     "lifecycle-construction": "lifecycleConstruction",
     "research-project": "researchProject",
+    "source-artifact-lifecycle": "sourceArtifactLifecycle",
     "gsi-profiler": "gsiProfiler",
     "checkpoint-view": "checkpointView",
     "algorithm": "algorithm",
@@ -357,6 +358,11 @@
     "researchProject": {
       "research-project.test.mjs": [
         "research metadata and discovery stay metadata-only across reopen"
+      ]
+    },
+    "sourceArtifactLifecycle": {
+      "source-artifact-lifecycle.test.mjs": [
+        "source and artifact lifecycle remains Rust-authoritative until binding parity"
       ]
     },
     "gsiProfiler": {
