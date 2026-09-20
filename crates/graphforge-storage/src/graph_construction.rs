@@ -73,7 +73,13 @@ mod partition_load;
 mod partition_memory;
 mod partition_records;
 pub(crate) mod partition_shaping;
+mod progress;
 mod supersession;
+use progress::{
+    LoadedShapeProgress, ShapeResume, load_shape_progress_chain, scan_shape_segments,
+    unlink_shape_progress,
+};
+use supersession::retire_staged_payload;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -935,6 +941,17 @@ pub struct GraphConstructionSession {
     /// bytes, and the threat model excludes an active same-identity adversary
     /// racing it (ADR 0013, recorded in `crate::corruption_checksum`).
     shape_outputs_verified: bool,
+    /// Sealed-segment state restored from an interrupted shape (#1418),
+    /// authenticated once per process and reused across same-facade retries.
+    /// `Some` only while the shape is incomplete behind a progress chain.
+    shape_resume: Option<ShapeResume>,
+    /// The highest sealing boundary whose staged inputs this process has
+    /// retired (#1418): those receipts were reconciled out of the allocation
+    /// ledger at the boundary, so supersession must not consult them again —
+    /// their inode keys may already belong to newer files. Zero until a
+    /// boundary retires; never durable, because the shape-end checkpoint
+    /// captures the reconciled ledger itself.
+    shape_boundary_retired_through: u64,
     session_lock: File,
     _reservation: ProcessReservation,
 }
@@ -1576,6 +1593,8 @@ impl GraphConstructionSession {
             compact_parent,
             semantic_authority,
             shape_outputs_verified: false,
+            shape_resume: None,
+            shape_boundary_retired_through: 0,
             session_lock,
             _reservation: reservation,
         };

@@ -7,18 +7,20 @@ use super::{
     ConstructionPublicationReceipt, CountingChunkReader, DetailCodec, DetailValidator, Digest,
     EDGE_DETAIL_WIDTH, ENDPOINT_WIDTH, FileIdentity, GfError, GraphConstructionEvidence,
     GraphConstructionSession, HashingWriter, IDENTITY_SURROGATE_OFFSET, IDENTITY_WIDTH, INTENT,
-    IoCounter, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH, OsStr, ParquetRecordBatchReaderBuilder,
-    Read, ReceiptPointer, SHAPE_INTENT, Sha256, ShapeIntent, StableDirectory, Uuid, Write,
-    account_cache_release, artifact_stem, authenticate_shaped_output,
+    IoCounter, LoadedShapeProgress, MAX_SHAPE_CONTROL_BYTES, NODE_DETAIL_WIDTH, OsStr,
+    ParquetRecordBatchReaderBuilder, Read, ReceiptPointer, SHAPE_INTENT, Sha256, ShapeIntent,
+    StableDirectory, Uuid, Write, account_cache_release, artifact_stem, authenticate_shaped_output,
     authenticate_shaped_output_identity, checked_category_remove, combine_cache_cleanup,
     combine_secondary_cleanup, construction_failpoint, copy_post_shape_io, decode_bounded,
     decode_shape_intent, file_identity, file_link_count, hex, install_control, is_canonical_sha256,
-    is_shape_artifact_name, merge_cache_release_evidence, read_bounded_limit, receipt_from_intent,
-    receipt_name, record_active_identity_remove, replace_checkpoint_control, sha256,
-    shape_authority_sha256, shape_receipt_name, storage, supersession, validate_artifact_name,
-    validate_intent, validate_receipt_artifacts, validate_receipt_semantics,
-    validate_shape_binding, validate_sorted_run,
+    is_shape_artifact_name, load_shape_progress_chain, merge_cache_release_evidence,
+    read_bounded_limit, receipt_from_intent, receipt_name, record_active_identity_remove,
+    replace_checkpoint_control, scan_shape_segments, sha256, shape_authority_sha256,
+    shape_receipt_name, storage, supersession, validate_artifact_name, validate_intent,
+    validate_receipt_artifacts, validate_receipt_semantics, validate_shape_binding,
+    validate_sorted_run,
 };
+use std::collections::BTreeSet;
 
 impl GraphConstructionSession {
     #[allow(clippy::too_many_lines)]
@@ -263,6 +265,7 @@ pub(super) fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<
 /// Returns the authentication work performed and whether the retained shape
 /// output payloads were verified, so the session does not repeat that pass at
 /// its next trust boundary (#1392).
+#[allow(clippy::too_many_lines)] // One recovery decision tree; the refusal arms are the invariant.
 pub(super) fn recover_shape_intent(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
@@ -348,10 +351,28 @@ pub(super) fn recover_shape_intent(
     {
         return Err(storage("incomplete shape changed committed evidence"));
     }
-    let work = cleanup_incomplete_shape_capabilities(root)?;
+    // Sealed segment groups behind a progress boundary are the resume state
+    // (#1418): the scan keeps claimed segments (and removes unclaimed ones —
+    // a crash between a group's seal and its control install, whose chunks
+    // are still on disk and re-route deterministically), so only the
+    // boundaryless state below is a full discard-and-replay.
+    let chain = load_shape_progress_chain(root, checkpoint)?;
+    let head_boundary = chain.last().map(LoadedShapeProgress::retired_through);
+    let claimed = scan_shape_segments(
+        root,
+        head_boundary.unwrap_or(0),
+        &mut checkpoint.evidence,
+        &mut || false,
+    )?;
+    let claimed_names: BTreeSet<String> = claimed
+        .values()
+        .flatten()
+        .flat_map(|partition| partition.iter().map(|receipt| receipt.name.clone()))
+        .collect();
+    let work = cleanup_incomplete_shape_capabilities(root, &claimed_names)?;
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
-        if !is_shape_scoped_name(name) {
+        if !is_shape_scoped_name(name) || claimed_names.contains(name) {
             continue;
         }
         match root.open_child_file(OsStr::new(name)) {
@@ -366,7 +387,11 @@ pub(super) fn recover_shape_intent(
             Err(error) => return Err(storage(error)),
         }
     }
-    unlink_named(root, SHAPE_INTENT)?;
+    // A resumed shape keeps its installed intent: it carries the recorded
+    // splitters and baseline the resumed routing replays (#1418).
+    if head_boundary.is_none() {
+        unlink_named(root, SHAPE_INTENT)?;
+    }
     Ok((work, false))
 }
 
@@ -428,10 +453,15 @@ fn persisted_evidence_equivalent(
     left == right
 }
 
-fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<ReadWork, GfError> {
+fn cleanup_incomplete_shape_capabilities(
+    root: &StableDirectory,
+    keep: &BTreeSet<String>,
+) -> Result<ReadWork, GfError> {
     let mut work = ReadWork::default();
     // Authenticate every surviving derived payload before removing any recovery
     // authority. A writer receipt alone cannot detect in-place byte corruption.
+    // Claimed resume segments are kept, not removed, and are authenticated at
+    // the resume boundary instead (#1418).
     for child in root.child_names().map_err(storage)? {
         let Some(name) = child.to_str() else { continue };
         if !name.starts_with("shape-receipt-") {
@@ -454,6 +484,9 @@ fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<ReadW
             return Err(storage("shaped writer capability name changed"));
         }
         if !is_shape_artifact_name(&receipt.name) {
+            continue;
+        }
+        if is_canonical_sha256(&receipt.sha256) && keep.contains(&receipt.name) {
             continue;
         }
         if !is_canonical_sha256(&receipt.sha256) {
@@ -500,6 +533,9 @@ fn cleanup_incomplete_shape_capabilities(root: &StableDirectory) -> Result<ReadW
             return Err(storage("shaped writer capability name changed"));
         }
         if !is_shape_artifact_name(&receipt.name) {
+            continue;
+        }
+        if keep.contains(&receipt.name) {
             continue;
         }
         drop(file);

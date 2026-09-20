@@ -121,6 +121,8 @@ fn partition_output_failures_finalize_release_and_remove_unpublished_outputs() {
     let error = partitioner
         .finish_optional(
             "staged-identities.run",
+            0,
+            false,
             &mut || true,
             &mut checkpoint.evidence,
         )
@@ -153,6 +155,8 @@ fn partition_output_failures_finalize_release_and_remove_unpublished_outputs() {
     let error = partitioner
         .finish_optional(
             "staged-identities.run",
+            0,
+            false,
             &mut || false,
             &mut checkpoint.evidence,
         )
@@ -214,7 +218,7 @@ fn partition_publication_guard_covers_setup_and_post_rename_failures() {
         }
         inject_shape_publication_failure(point);
         let error = partitioner
-            .finish_optional(output, &mut || false, &mut checkpoint.evidence)
+            .finish_optional(output, 0, false, &mut || false, &mut checkpoint.evidence)
             .unwrap_err()
             .to_string();
         assert!(

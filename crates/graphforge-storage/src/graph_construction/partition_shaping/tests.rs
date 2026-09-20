@@ -29,12 +29,14 @@ fn detail_partition_load<const N: usize>(family: PartitionFamily) {
             block_records = 0;
         }
     }
-    partitioner.seal(&mut session.checkpoint.evidence).unwrap();
+    partitioner
+        .seal(1, &mut session.checkpoint.evidence)
+        .unwrap();
     drop(block);
     drop(partitioner);
     let (records, counters) = load_fixed_partition::<N>(
         &session.root,
-        &fixed_spill_name(family, 0),
+        &[fixed_spill_name(family, 1, 0)],
         Some(count),
         Some(codec),
         super::super::partition::default_materialization_bytes(),
@@ -99,11 +101,13 @@ fn concentrated_fixed_partition_is_refused_before_record_allocation() {
     partitioner
         .route_slice(0, &wire, 1024, &mut session.checkpoint.evidence)
         .unwrap();
-    partitioner.seal(&mut session.checkpoint.evidence).unwrap();
-    let name = fixed_spill_name(PartitionFamily::Endpoints, 0);
+    partitioner
+        .seal(1, &mut session.checkpoint.evidence)
+        .unwrap();
+    let name = fixed_spill_name(PartitionFamily::Endpoints, 1, 0);
     let error = load_fixed_partition::<33>(
         &session.root,
-        &name,
+        &[name.clone()],
         Some(1024),
         None,
         1024 * 33 - 1,
@@ -114,7 +118,7 @@ fn concentrated_fixed_partition_is_refused_before_record_allocation() {
     assert!(error.to_string().contains("exceeds recorded budget"));
     let (rows, _) = load_fixed_partition::<33>(
         &session.root,
-        &name,
+        &[name.clone()],
         Some(1024),
         None,
         1024 * 33,
@@ -126,7 +130,7 @@ fn concentrated_fixed_partition_is_refused_before_record_allocation() {
     assert!(
         load_fixed_partition::<33>(
             &session.root,
-            &name,
+            &[name.clone()],
             Some(1),
             None,
             33,
@@ -168,15 +172,27 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
     partitioner
         .route_slice(&schema, &batch, 0, 2, 0, &mut session.checkpoint.evidence)
         .unwrap();
-    partitioner.seal(&mut session.checkpoint.evidence).unwrap();
-    let name = partitioner.sealed[0].as_ref().unwrap().name.clone();
+    partitioner
+        .seal(1, &mut session.checkpoint.evidence)
+        .unwrap();
+    let name = partitioner.sealed[0].last().unwrap().name.clone();
     let sorted = partitioner
-        .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
+        .load_partition(
+            0,
+            &[name.clone()],
+            &schema,
+            &mut session.checkpoint.evidence,
+        )
         .unwrap();
     assert_eq!(uuid_value(key_column(&sorted).unwrap(), 0).unwrap(), ids[1]);
     partitioner.max_partition_bytes = 1;
     let error = partitioner
-        .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
+        .load_partition(
+            0,
+            &[name.clone()],
+            &schema,
+            &mut session.checkpoint.evidence,
+        )
         .unwrap_err();
     assert!(error.to_string().contains("exceeds recorded budget"));
     partitioner.max_partition_bytes = super::super::partition::default_materialization_bytes();
@@ -191,7 +207,12 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
     bytes[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
     let error = partitioner
-        .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
+        .load_partition(
+            0,
+            &[name.clone()],
+            &schema,
+            &mut session.checkpoint.evidence,
+        )
         .unwrap_err();
     assert!(error.to_string().contains("digest"), "{error}");
 
@@ -199,7 +220,7 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
     std::fs::write(&path, original).unwrap();
     let (file, _) = super::super::recovery::authenticate_row_spill(
         &session.root,
-        partitioner.sealed[0].as_ref().unwrap(),
+        partitioner.sealed[0].last().unwrap(),
     )
     .unwrap();
     let renamed = std::fs::rename(&path, path.with_extension("saved"));
@@ -219,7 +240,12 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
     #[cfg(not(windows))]
     {
         let error = partitioner
-            .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
+            .load_partition(
+                0,
+                &[name.clone()],
+                &schema,
+                &mut session.checkpoint.evidence,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("identity"), "{error}");
     }

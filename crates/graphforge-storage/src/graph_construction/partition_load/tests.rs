@@ -374,6 +374,8 @@ fn fixed_partition_finish_is_schedule_independent_across_worker_counts() {
         let output = partitioner
             .finish_optional(
                 "staged-identities.run",
+                0,
+                false,
                 &mut || false,
                 &mut checkpoint.evidence,
             )
