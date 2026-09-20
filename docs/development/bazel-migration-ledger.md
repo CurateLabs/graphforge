@@ -110,6 +110,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `release_load_construction` | `integration-test` | `crates/graphforge-api/tests/release_load_construction.rs` | `//crates/graphforge-api:release_load_construction` | `mapped` | #8 |
 | `graphforge-api` | `research_project` | `integration-test` | `crates/graphforge-api/tests/research_project.rs` | `//crates/graphforge-api:research_project` | `mapped` | #1348 research Project metadata and discovery |
 | `graphforge-api` | `source_artifact_write` | `integration-test` | `crates/graphforge-api/tests/source_artifact_write.rs` | `//crates/graphforge-api:source_artifact_write` | `mapped` | #1349 durable Source and Artifact registration |
+| `graphforge-api` | `source_artifact_lifecycle` | `integration-test` | `crates/graphforge-api/tests/source_artifact_lifecycle.rs` | `//crates/graphforge-api:source_artifact_lifecycle` | `mapped` | #1349 Source and Artifact lifecycle integration |
 | `graphforge-api` | `strict_runtime_properties` | `integration-test` | `crates/graphforge-api/tests/strict_runtime_properties.rs` | `//crates/graphforge-api:strict_runtime_properties` | `mapped` | #8 |
 | `graphforge-api` | `varlen_empty_seed` | `integration-test` | `crates/graphforge-api/tests/varlen_empty_seed.rs` | `//crates/graphforge-api:varlen_empty_seed` | `mapped` | #8 |
 | `graphforge-api` | `value_access_semantics` | `integration-test` | `crates/graphforge-api/tests/value_access_semantics.rs` | `//crates/graphforge-api:value_access_semantics` | `mapped` | #8 |

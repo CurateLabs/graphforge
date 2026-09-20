@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "273f55b050c54731ce38464040547d79bc632d6b08dbebb067e27f734c9a4aff",
+  "public_method_digest": "6999993bece2dc7895fa25af4a0c66850171091712dfce15540ff115de955e0e",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -276,12 +276,20 @@
         "GraphForge.list_sources",
         "GraphForge.register_artifact",
         "GraphForge.register_source",
+        "GraphForge.replacement_impact",
+        "GraphForge.research_lineage",
+        "GraphForge.retention_dependency_closure",
+        "GraphForge.set_preferred_artifact",
         "GraphForge.source"
       ],
       "test_refs": [
         {
           "path": "crates/graphforge-api/tests/source_artifact_write.rs",
           "symbol": "source_and_artifact_survive_reopen_and_list"
+        },
+        {
+          "path": "crates/graphforge-api/tests/source_artifact_lifecycle.rs",
+          "symbol": "scan_to_ocr_lineage_preference_and_impact_survive_reopen"
         }
       ]
     },

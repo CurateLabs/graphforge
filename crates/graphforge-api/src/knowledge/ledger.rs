@@ -12,8 +12,8 @@ use super::{
     schema_registry,
 };
 use graphforge_knowledge::{
-    ArtifactDerivationLedger, ArtifactLedger, ArtifactPreferenceLedger, RetentionDependencyLedger,
-    SourceLedger,
+    ArtifactDerivationLedger, ArtifactLedger, ArtifactPreferenceLedger, DerivationSubjectKind,
+    RetentionDependencyLedger, SourceLedger,
 };
 
 pub(crate) fn empty_participants() -> Result<Vec<ProjectParticipant>, GfError> {
@@ -153,6 +153,54 @@ pub(crate) fn read_derivation_ledger(
             })?)
             .map_err(knowledge_error)
         }
+    }
+}
+
+pub(crate) fn read_preference_ledger(
+    generation: &ResolvedProjectGeneration,
+) -> Result<ArtifactPreferenceLedger, GfError> {
+    generation.require_capability("knowledge", 1)?;
+    match generation.participant_snapshot("knowledge", "artifact_preference_events")? {
+        None => ArtifactPreferenceLedger::new(Vec::new()).map_err(knowledge_error),
+        Some(snapshot) => {
+            require_participant_contract(&snapshot, "artifact_preference_events")?;
+            ArtifactPreferenceLedger::from_batches(&read_family_or_empty(&snapshot, || {
+                ArtifactPreferenceLedger::default()
+                    .batch()
+                    .map_err(knowledge_error)
+            })?)
+            .map_err(knowledge_error)
+        }
+    }
+}
+
+pub(crate) fn read_retention_ledger(
+    generation: &ResolvedProjectGeneration,
+) -> Result<RetentionDependencyLedger, GfError> {
+    generation.require_capability("knowledge", 1)?;
+    match generation.participant_snapshot("knowledge", "retention_dependencies")? {
+        None => RetentionDependencyLedger::new(Vec::new()).map_err(knowledge_error),
+        Some(snapshot) => {
+            require_participant_contract(&snapshot, "retention_dependencies")?;
+            RetentionDependencyLedger::from_batches(&read_family_or_empty(&snapshot, || {
+                RetentionDependencyLedger::default()
+                    .batch()
+                    .map_err(knowledge_error)
+            })?)
+            .map_err(knowledge_error)
+        }
+    }
+}
+
+pub(crate) fn derivation_subject_kind(kind: DerivationSubjectKind) -> SubjectKind {
+    match kind {
+        DerivationSubjectKind::Source => SubjectKind::Source,
+        DerivationSubjectKind::Artifact => SubjectKind::Artifact,
+        DerivationSubjectKind::Node => SubjectKind::Node,
+        DerivationSubjectKind::Edge => SubjectKind::Edge,
+        DerivationSubjectKind::Assertion => SubjectKind::Assertion,
+        DerivationSubjectKind::EvidenceLink => SubjectKind::EvidenceLink,
+        DerivationSubjectKind::AlgorithmRun => SubjectKind::AlgorithmRun,
     }
 }
 
@@ -493,6 +541,8 @@ pub(crate) fn source_artifact_publication_participants(
     sources: &SourceLedger,
     artifacts: &ArtifactLedger,
     derivations: &ArtifactDerivationLedger,
+    preferences: &ArtifactPreferenceLedger,
+    retention: &RetentionDependencyLedger,
     provenance: &ProvenanceLedger,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
     let mut participants = parent
@@ -516,6 +566,8 @@ pub(crate) fn source_artifact_publication_participants(
     participants.extend(encode_source_ledger(sources)?);
     participants.extend(encode_artifact_ledger(artifacts)?);
     participants.extend(encode_derivation_ledger(derivations)?);
+    participants.extend(encode_preference_ledger(preferences)?);
+    participants.extend(encode_retention_ledger(retention)?);
     participants.extend(crate::provenance::encode_ledger(provenance)?);
     participants.sort_by(|left, right| {
         (&left.capability_id, &left.record_family_id)
@@ -546,6 +598,53 @@ pub(crate) fn merged_source_provenance(
 }
 
 pub(crate) fn merged_artifact_provenance(
+    parent: &ResolvedProjectGeneration,
+    source_uuid: Uuid,
+    artifact_uuid: Uuid,
+    derivation_inputs: &[(Uuid, DerivationSubjectKind)],
+    event: &ProvenanceEvent,
+) -> Result<ProvenanceLedger, GfError> {
+    let existing = crate::provenance::read_ledger(parent)?;
+    let mut lineage = Vec::with_capacity(derivation_inputs.len() + 2);
+    lineage.push(
+        LineageRecord::new(
+            event.provenance_uuid,
+            source_uuid,
+            SubjectKind::Source,
+            LineageRole::Input,
+            0,
+        )
+        .map_err(provenance_error)?,
+    );
+    for (ordinal, (input_uuid, input_kind)) in derivation_inputs.iter().enumerate() {
+        lineage.push(
+            LineageRecord::new(
+                event.provenance_uuid,
+                *input_uuid,
+                derivation_subject_kind(*input_kind),
+                LineageRole::Input,
+                u32::try_from(ordinal + 1)
+                    .map_err(|_| GfError::Execution("lineage ordinal exceeds u32".into()))?,
+            )
+            .map_err(provenance_error)?,
+        );
+    }
+    lineage.push(
+        LineageRecord::new(
+            event.provenance_uuid,
+            artifact_uuid,
+            SubjectKind::Artifact,
+            LineageRole::Output,
+            0,
+        )
+        .map_err(provenance_error)?,
+    );
+    existing
+        .merge(&ProvenanceLedger::new(vec![event.clone()], lineage).map_err(provenance_error)?)
+        .map_err(provenance_error)
+}
+
+pub(crate) fn merged_preference_provenance(
     parent: &ResolvedProjectGeneration,
     source_uuid: Uuid,
     artifact_uuid: Uuid,

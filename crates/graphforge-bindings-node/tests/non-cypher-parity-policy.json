@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 279,
-  "releaseSurfaceDigest": "6001cb16902d3454aca7ea48995b006665dade4dcbd1f4df5f6616550d83c60e",
+  "releaseSurfaceCount": 283,
+  "releaseSurfaceDigest": "b40eaf0f6dead9d403fdf54b2f54c57dfbfb4f5133480e3ce91135ca14f262b4",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -362,7 +362,8 @@
     },
     "sourceArtifactLifecycle": {
       "source-artifact-lifecycle.test.mjs": [
-        "source and artifact lifecycle remains Rust-authoritative until binding parity"
+        "source and artifact lifecycle remains Rust-authoritative until binding parity",
+        "lifecycle query and preference APIs remain Rust-authoritative until binding parity"
       ]
     },
     "gsiProfiler": {

@@ -2,6 +2,7 @@
 
 mod assertions;
 mod ledger;
+mod lineage;
 mod source_artifact;
 mod supporting;
 use ledger::assertion_evidence_publication_participants;
@@ -39,9 +40,11 @@ use ledger::status_publication_participants;
 use ledger::supersession_publication_participants;
 pub(crate) use ledger::with_next_token;
 pub(crate) use ledger::{read_artifact_ledger, read_derivation_ledger, read_source_ledger};
+pub use lineage::{LineageDirection, ResearchLineageRequest};
 pub use source_artifact::{
     ArtifactPayloadRequest, DerivationInput, ListArtifactsRequest, ListSourcesRequest,
-    RegisterArtifactRequest, RegisterSourceRequest,
+    RegisterArtifactRequest, RegisterSourceRequest, ReplacementImpactRequest,
+    RetentionDependencyClosureRequest, SetPreferredArtifactRequest,
 };
 
 use std::collections::HashSet;

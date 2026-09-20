@@ -340,10 +340,10 @@ pub use graphforge_ir::{IrLiteral, ProcedureDefinition, ProcedureField};
 pub use graphforge_knowledge::{
     ArtifactKind, Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus,
     AssertionStatusEvent, AssertionSupersession, AssertionValidityEvent, ConfidenceAssessment,
-    ConfidenceInput, ConfidencePolicy, EvidenceLink, EvidenceRole, EvidenceSourceKind,
-    GraphObjectKind, HypothesisGroup, HypothesisMembershipAction, HypothesisMembershipEvent,
-    HypothesisSelectionEvent, KnowledgeError, ReasoningContentFormat, ReasoningKind,
-    ReasoningRecord, SourceKind,
+    ConfidenceInput, ConfidencePolicy, DerivationSubjectKind, EvidenceLink, EvidenceRole,
+    EvidenceSourceKind, GraphObjectKind, HypothesisGroup, HypothesisMembershipAction,
+    HypothesisMembershipEvent, HypothesisSelectionEvent, KnowledgeError, ReasoningContentFormat,
+    ReasoningKind, ReasoningRecord, SourceKind,
 };
 pub use graphforge_ontology::OntologyDoc;
 pub use graphforge_provenance::{
@@ -388,10 +388,12 @@ pub use knowledge::{
     ArtifactPayloadRequest, AssertionGraphRefInput, AssessConfidenceRequest, AttachEvidenceRequest,
     ConfidencePolicyRequest, CreateAssertionRequest, CreateAssertionWithEvidenceRequest,
     CreateAssertionWithStatusRequest, DerivationInput, EvidenceInput, FirstAssertionStatusInput,
-    ListArtifactsRequest, ListAssertionStatusRequest, ListAssertionSupersessionsRequest,
-    ListAssertionsRequest, ListConfidenceAssessmentsRequest, ListEvidenceLinksRequest,
-    ListReasoningRequest, ListSourcesRequest, RecordAssertionStatusRequest, RecordReasoningRequest,
-    RegisterArtifactRequest, RegisterSourceRequest, SupersedeAssertionRequest,
+    LineageDirection, ListArtifactsRequest, ListAssertionStatusRequest,
+    ListAssertionSupersessionsRequest, ListAssertionsRequest, ListConfidenceAssessmentsRequest,
+    ListEvidenceLinksRequest, ListReasoningRequest, ListSourcesRequest,
+    RecordAssertionStatusRequest, RecordReasoningRequest, RegisterArtifactRequest,
+    RegisterSourceRequest, ReplacementImpactRequest, ResearchLineageRequest,
+    RetentionDependencyClosureRequest, SetPreferredArtifactRequest, SupersedeAssertionRequest,
 };
 pub use ontology_lifecycle::{
     CatalogEntryKind, OntologyExportFormat, OntologyExportSource, OntologySuggestion,

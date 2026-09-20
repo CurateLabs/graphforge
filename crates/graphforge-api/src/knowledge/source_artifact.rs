@@ -4,13 +4,15 @@ use std::collections::HashSet;
 
 use graphforge_knowledge::{
     ARTIFACT_SCHEMA, Artifact, ArtifactAvailability, ArtifactDerivation, ArtifactDerivationLedger,
-    ArtifactKind, ArtifactLedger, ArtifactPayloadKind, DerivationRole, DerivationSubjectKind,
+    ArtifactKind, ArtifactLedger, ArtifactPayloadKind, ArtifactPreferenceEvent,
+    ArtifactPreferenceLedger, DerivationRole, DerivationSubjectKind, RETENTION_DEPENDENCY_SCHEMA,
     SOURCE_SCHEMA, Source, SourceKind, SourceLedger,
 };
 use sha2::{Digest, Sha256};
 
 use super::ledger::{
-    merged_artifact_provenance, merged_source_provenance, source_artifact_publication_participants,
+    merged_artifact_provenance, merged_preference_provenance, merged_source_provenance,
+    read_preference_ledger, read_retention_ledger, source_artifact_publication_participants,
 };
 use super::{
     ApiErrorCode, EventKind, GfError, GraphForge, PageRequest, ProjectCapability,
@@ -101,6 +103,39 @@ pub struct ListArtifactsRequest {
     pub page: PageRequest,
 }
 
+/// Frozen request to set the preferred Artifact for one Source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetPreferredArtifactRequest {
+    /// Idempotency identity and optional actor.
+    pub context: WriteContext,
+    /// Caller-supplied UUIDv7 preference-event identity.
+    pub preference_event_uuid: Uuid,
+    /// Parent Source identity.
+    pub source_uuid: Uuid,
+    /// Newly preferred Artifact identity.
+    pub artifact_uuid: Uuid,
+    /// Bounded human-readable reason.
+    pub reason: String,
+}
+
+/// Frozen read-only replacement-impact request for one Source preference change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReplacementImpactRequest {
+    /// Parent Source identity.
+    pub source_uuid: Uuid,
+    /// Proposed preferred Artifact identity.
+    pub artifact_uuid: Uuid,
+}
+
+/// Frozen read-only retention-closure request for one scope.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RetentionDependencyClosureRequest {
+    /// Selection or retention root UUID.
+    pub scope_uuid: Uuid,
+    /// Generation-pinned bounded page.
+    pub page: PageRequest,
+}
+
 impl GraphForge {
     /// Atomically register one immutable research Source and its provenance.
     #[allow(
@@ -166,6 +201,8 @@ impl GraphForge {
         let sources = existing.merge(&staged).map_err(knowledge_error)?;
         let artifacts = read_artifact_ledger(&parent)?;
         let derivations = read_derivation_ledger(&parent)?;
+        let preferences = read_preference_ledger(&parent)?;
+        let retention = read_retention_ledger(&parent)?;
         let provenance = merged_source_provenance(&parent, request.source_uuid, &event)?;
         publish_source_artifact(
             self,
@@ -175,6 +212,8 @@ impl GraphForge {
             &sources,
             &artifacts,
             &derivations,
+            &preferences,
+            &retention,
             &provenance,
             request.source_uuid,
             None,
@@ -300,10 +339,18 @@ impl GraphForge {
             .merge(&staged_derivations)
             .map_err(knowledge_error)?;
         let sources = read_source_ledger(&parent)?;
+        let preferences = read_preference_ledger(&parent)?;
+        let retention = read_retention_ledger(&parent)?;
+        let derivation_lineage = request
+            .derivation_inputs
+            .iter()
+            .map(|input| (input.input_uuid, input.input_kind))
+            .collect::<Vec<_>>();
         let provenance = merged_artifact_provenance(
             &parent,
             request.source_uuid,
             request.artifact_uuid,
+            &derivation_lineage,
             &event,
         )?;
         publish_source_artifact(
@@ -314,6 +361,8 @@ impl GraphForge {
             &sources,
             &artifacts,
             &derivations,
+            &preferences,
+            &retention,
             &provenance,
             request.artifact_uuid,
             local_bytes.as_deref(),
@@ -402,6 +451,202 @@ impl GraphForge {
             &request.page,
         )
     }
+
+    /// Atomically record one preferred-representation change for a Source.
+    #[allow(
+        clippy::needless_pass_by_value,
+        clippy::too_many_lines,
+        reason = "graphforge-knowledge-api/1 freezes owned request structs; preference publication validates every participant"
+    )]
+    pub fn set_preferred_artifact(
+        &self,
+        request: SetPreferredArtifactRequest,
+    ) -> Result<graphforge_exec::ExecutionResult, GfError> {
+        validate_write_context(&request.context)?;
+        require_uuid(request.preference_event_uuid, "preference_event_uuid")?;
+        require_uuid(request.source_uuid, "source_uuid")?;
+        require_uuid(request.artifact_uuid, "artifact_uuid")?;
+        let _graph_visibility = lock_graph_visibility(self)?;
+        let root = self.resolved_generation.container_root();
+        let parent = graphforge_storage::resolve_project_generation(root)?;
+        parent.validate_complete_participant_inventory()?;
+        parent.require_capability("knowledge", 1)?;
+        parent.require_capability("provenance", 1)?;
+        let expected_parent = *self
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+        if parent.generation_uuid() != expected_parent {
+            return Err(transaction_conflict(
+                "project generation changed before preference publication",
+            ));
+        }
+        let sources = read_source_ledger(&parent)?;
+        if !sources
+            .sources
+            .iter()
+            .any(|row| row.source_uuid == request.source_uuid)
+        {
+            return Err(not_found_kind("source"));
+        }
+        let artifacts = read_artifact_ledger(&parent)?;
+        if !artifacts.artifacts.iter().any(|row| {
+            row.artifact_uuid == request.artifact_uuid && row.source_uuid == request.source_uuid
+        }) {
+            return Err(not_found_kind("artifact"));
+        }
+        let existing_preferences = read_preference_ledger(&parent)?;
+        let prior_artifact_uuid =
+            existing_preferences.current_preferred_artifact(request.source_uuid);
+        let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
+        let event = ProvenanceEvent::new(
+            request.context.operation_uuid.0,
+            EventKind::SetArtifactPreference,
+            request.context.actor_uuid,
+            recorded_at_micros,
+        )
+        .map_err(provenance_error)?;
+        let preference_row = ArtifactPreferenceEvent::new(
+            request.preference_event_uuid,
+            request.source_uuid,
+            request.artifact_uuid,
+            prior_artifact_uuid,
+            request.reason,
+            event.provenance_uuid,
+            recorded_at_micros,
+        )
+        .map_err(knowledge_error)?;
+        let staged_preferences =
+            ArtifactPreferenceLedger::new(vec![preference_row.clone()]).map_err(knowledge_error)?;
+        if let Some(index) = existing_preferences
+            .events
+            .iter()
+            .position(|row| row.preference_event_uuid == request.preference_event_uuid)
+        {
+            if existing_preferences.events[index] == preference_row {
+                return Ok(assertion_result(
+                    existing_preferences
+                        .batch()
+                        .map_err(knowledge_error)?
+                        .slice(index, 1),
+                ));
+            }
+            return Err(transaction_conflict(
+                "preference event UUID was reused for different canonical content",
+            ));
+        }
+        let preferences = existing_preferences
+            .merge(&staged_preferences)
+            .map_err(knowledge_error)?;
+        let derivations = read_derivation_ledger(&parent)?;
+        let retention = read_retention_ledger(&parent)?;
+        let provenance = merged_preference_provenance(
+            &parent,
+            request.source_uuid,
+            request.artifact_uuid,
+            &event,
+        )?;
+        publish_source_artifact(
+            self,
+            &request.context,
+            &parent,
+            expected_parent,
+            &sources,
+            &artifacts,
+            &derivations,
+            &preferences,
+            &retention,
+            &provenance,
+            request.artifact_uuid,
+            None,
+        )?;
+        let generation = graphforge_storage::resolve_project_generation(
+            self.resolved_generation.container_root(),
+        )?;
+        let committed = read_preference_ledger(&generation)?;
+        let index = committed
+            .events
+            .iter()
+            .position(|row| row.preference_event_uuid == request.preference_event_uuid)
+            .ok_or_else(|| GfError::Validation("committed preference event is absent".into()))?;
+        Ok(assertion_result(
+            committed.batch().map_err(knowledge_error)?.slice(index, 1),
+        ))
+    }
+
+    /// Report Artifacts directly or transitively affected by a preference replacement.
+    pub fn replacement_impact(
+        &self,
+        request: ReplacementImpactRequest,
+    ) -> Result<graphforge_exec::ExecutionResult, GfError> {
+        require_uuid(request.source_uuid, "source_uuid")?;
+        require_uuid(request.artifact_uuid, "artifact_uuid")?;
+        let generation = self.generation_for_read()?;
+        let artifacts = read_artifact_ledger(&generation)?;
+        let preferences = read_preference_ledger(&generation)?;
+        let derivations = read_derivation_ledger(&generation)?;
+        if !artifacts.artifacts.iter().any(|row| {
+            row.artifact_uuid == request.artifact_uuid && row.source_uuid == request.source_uuid
+        }) {
+            return Err(not_found_kind("artifact"));
+        }
+        let prior = preferences.current_preferred_artifact(request.source_uuid);
+        let mut affected = HashSet::new();
+        if let Some(prior_uuid) = prior
+            && prior_uuid != request.artifact_uuid
+        {
+            affected.insert(prior_uuid);
+            for index in super::lineage::collect_derivation_indices_internal(
+                &derivations,
+                prior_uuid,
+                DerivationSubjectKind::Artifact,
+                super::lineage::LineageDirection::Forward,
+                32,
+            ) {
+                let row = &derivations.derivations[index];
+                if row.output_kind == DerivationSubjectKind::Artifact {
+                    affected.insert(row.output_uuid);
+                }
+            }
+        }
+        let batch = artifacts.batch().map_err(knowledge_error)?;
+        let rows = artifacts
+            .artifacts
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| affected.contains(&row.artifact_uuid))
+            .map(|(index, _)| batch.slice(index, 1))
+            .collect::<Vec<_>>();
+        Ok(assertion_result(concat_or_empty(&rows, &ARTIFACT_SCHEMA)?))
+    }
+
+    /// Return explicit retention dependencies pinned to one scope.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
+    )]
+    pub fn retention_dependency_closure(
+        &self,
+        request: RetentionDependencyClosureRequest,
+    ) -> Result<graphforge_exec::ExecutionResult, GfError> {
+        require_uuid(request.scope_uuid, "scope_uuid")?;
+        let generation = self.generation_for_read()?;
+        let ledger = read_retention_ledger(&generation)?;
+        let batch = ledger.batch().map_err(knowledge_error)?;
+        let rows = ledger
+            .dependencies
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.scope_uuid == request.scope_uuid)
+            .map(|(index, _)| batch.slice(index, 1))
+            .collect::<Vec<_>>();
+        page_record_batches(
+            &rows,
+            &RETENTION_DEPENDENCY_SCHEMA,
+            generation.generation_uuid(),
+            &request.page,
+        )
+    }
 }
 
 type ResolvedArtifactPayload = (
@@ -460,6 +705,8 @@ fn publish_source_artifact(
     sources: &SourceLedger,
     artifacts: &ArtifactLedger,
     derivations: &ArtifactDerivationLedger,
+    preferences: &graphforge_knowledge::ArtifactPreferenceLedger,
+    retention: &graphforge_knowledge::RetentionDependencyLedger,
     provenance: &graphforge_provenance::ProvenanceLedger,
     result_uuid: Uuid,
     local_bytes: Option<&[u8]>,
@@ -470,6 +717,8 @@ fn publish_source_artifact(
         sources,
         artifacts,
         derivations,
+        preferences,
+        retention,
         provenance,
     )?;
     let capabilities = parent

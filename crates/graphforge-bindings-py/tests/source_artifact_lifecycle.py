@@ -18,8 +18,20 @@ def check_rust_authoritative_surface() -> None:
         assert not hasattr(graph, name), f"unexpected Python binding for {name}"
 
 
+def check_lifecycle_surface_not_exposed() -> None:
+    graph = graphforge.GraphForge()
+    for name in (
+        "research_lineage",
+        "set_preferred_artifact",
+        "replacement_impact",
+        "retention_dependency_closure",
+    ):
+        assert not hasattr(graph, name), f"unexpected Python binding for {name}"
+
+
 def main() -> None:
     check_rust_authoritative_surface()
+    check_lifecycle_surface_not_exposed()
 
 
 if __name__ == "__main__":

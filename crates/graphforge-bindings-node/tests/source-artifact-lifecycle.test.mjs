@@ -19,9 +19,27 @@ const RUST_ONLY_METHODS = [
   "listArtifacts",
 ];
 
+const RUST_ONLY_LIFECYCLE_METHODS = [
+  "researchLineage",
+  "setPreferredArtifact",
+  "replacementImpact",
+  "retentionDependencyClosure",
+];
+
 test("source and artifact lifecycle remains Rust-authoritative until binding parity", () => {
   const graph = new GraphForge();
   for (const method of RUST_ONLY_METHODS) {
+    assert.equal(
+      typeof graph[method],
+      "undefined",
+      `unexpected Node binding for ${method}`,
+    );
+  }
+});
+
+test("lifecycle query and preference APIs remain Rust-authoritative until binding parity", () => {
+  const graph = new GraphForge();
+  for (const method of RUST_ONLY_LIFECYCLE_METHODS) {
     assert.equal(
       typeof graph[method],
       "undefined",
