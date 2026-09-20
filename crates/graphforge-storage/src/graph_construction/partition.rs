@@ -33,15 +33,49 @@
 use super::storage;
 use graphforge_core::GfError;
 
-/// Number of range partitions requested by a construction session.
+/// Maximum range partitions requested by a construction session.
 ///
 /// This is a recorded format parameter, never derived from the machine: it must
 /// not depend on `available_parallelism()` or on thread count, or the same
 /// logical input would stage differently on differently-sized hosts.
-pub(crate) const DEFAULT_PARTITION_COUNT: u32 = 256;
+pub(crate) const DEFAULT_PARTITION_COUNT: u32 = 4_096;
 
 /// Upper bound on the recorded partition count.
 pub(crate) const MAX_PARTITION_COUNT: u32 = 4_096;
+
+/// Deterministic planning target; not a byte bound or an optimality claim.
+/// Admission checks actual bytes independently; skew can exceed this target.
+pub(super) const fn default_target_records() -> u64 {
+    16_384
+}
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
+pub(super) fn is_default_target_records(value: &u64) -> bool {
+    *value == default_target_records()
+}
+pub(super) const fn default_materialization_bytes() -> u64 {
+    256 << 20
+}
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip_serializing_if requires a reference"
+)]
+pub(super) fn is_default_materialization_bytes(value: &u64) -> bool {
+    *value == default_materialization_bytes()
+}
+
+/// Fail before allocating the retained partition or its sort/reorder buffers.
+pub(super) fn admit_materialization(bytes: Option<u64>, limit: u64) -> Result<u64, GfError> {
+    let bytes = bytes.ok_or_else(|| storage("partition materialization byte count overflows"))?;
+    if bytes > limit {
+        return Err(storage(format!(
+            "partition materialization requires {bytes} bytes, exceeds recorded budget {limit}"
+        )));
+    }
+    Ok(bytes)
+}
 
 /// Sample points drawn per requested partition. Oversampling the quantile
 /// estimate is what keeps the partitions close to balanced; 64 points per
@@ -62,12 +96,9 @@ const BALANCE_MIN_MEAN_ROWS: u64 = 16;
 
 /// Never cut more partitions than the balance check can meaningfully assert on.
 ///
-/// Each partition costs a durable spill artifact, with its own barrier and
-/// writer receipt, in every family. Cutting the full recorded count regardless
-/// of input size makes that cost a constant: a two-thousand-row graph would pay
-/// the same durability price as a sixty-seven-million-row one, and shaping's
-/// barrier count would stop tracking the work it protects. Bounding the cut by
-/// the recorded record count keeps the cost proportional.
+/// Each partition retains spill names and writer state in every family.
+/// Bounding the cut by the recorded record count avoids charging tiny inputs
+/// for the maximum cut. Directory synchronization is batched across spills.
 ///
 /// This does not make the partition count machine-dependent, which is the thing
 /// R1 forbids. The bound is a pure function of the staged record count recorded
@@ -216,6 +247,23 @@ pub(crate) struct IdentitySampler {
 }
 
 impl IdentitySampler {
+    /// Adapt within the recorded maximum, retaining the small-input balance floor.
+    pub(crate) fn with_target(
+        partition_count: u32,
+        total_records: u64,
+        target: u64,
+    ) -> Result<Self, GfError> {
+        validate_partition_count(partition_count)?;
+        if target == 0 {
+            return Err(storage("partition target must be positive"));
+        }
+        let desired = total_records
+            .div_ceil(target)
+            .max(256)
+            .min(u64::from(partition_count));
+        Self::new(u32::try_from(desired).map_err(storage)?, total_records)
+    }
+
     /// Build a sampler for `total_records` staged identities.
     ///
     /// # Errors

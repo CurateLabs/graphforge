@@ -794,7 +794,6 @@ pub(super) struct ReadWork {
     pub(super) cache_release: graphforge_filesystem::FileCacheReleaseEvidence,
 }
 
-#[allow(clippy::too_many_lines)] // One authentication pass validates format, digest, and cache cleanup together.
 pub(super) fn authenticate_artifact(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
@@ -806,6 +805,43 @@ pub(super) fn authenticate_artifact(
     let file = root
         .open_child_file(OsStr::new(&receipt.name))
         .map_err(storage)?;
+    authenticate_artifact_contents(file, receipt, codec)
+}
+
+/// Authenticate an internally generated, sealed row spill before IPC decoding.
+/// These temporary spills are not published construction artifacts.
+pub(super) fn authenticate_row_spill(
+    root: &StableDirectory,
+    receipt: &ArtifactReceipt,
+) -> Result<(std::fs::File, ReadWork), GfError> {
+    if !receipt.name.starts_with("part-rows-")
+        || std::path::Path::new(&receipt.name).extension() != Some(OsStr::new("arrow"))
+        || receipt.name.contains('/')
+        || receipt.name.contains('\\')
+        || !is_canonical_sha256(&receipt.sha256)
+    {
+        return Err(storage("invalid row partition spill receipt"));
+    }
+    let mut file = root
+        .open_child_file(OsStr::new(&receipt.name))
+        .map_err(storage)?;
+    // Cloning retains this exact file identity rather than reopening its name.
+    // The duplicate shares its cursor, so rewind after the authentication pass.
+    let work = authenticate_artifact_contents(
+        file.try_clone().map_err(storage)?,
+        receipt,
+        DetailCodec::Compact,
+    )?;
+    std::io::Seek::rewind(&mut file).map_err(storage)?;
+    Ok((file, work))
+}
+
+#[allow(clippy::too_many_lines)] // One authentication pass validates format, digest, and cache cleanup together.
+fn authenticate_artifact_contents(
+    file: std::fs::File,
+    receipt: &ArtifactReceipt,
+    codec: DetailCodec,
+) -> Result<ReadWork, GfError> {
     if !receipt
         .identity
         .matches(file_identity(&file).map_err(storage)?)

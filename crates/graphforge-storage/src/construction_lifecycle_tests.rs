@@ -1552,6 +1552,7 @@ mod lifecycle_budget {
                 Some("endpoints.run"),
                 None,
                 window_rows,
+                partition::default_materialization_bytes(),
                 &mut || false,
                 &mut evidence,
             )

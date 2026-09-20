@@ -23,6 +23,38 @@ change establishes cross-process determinism for shaped payloads, not all encode
 metadata. Existing completed shapes remain authenticated and resumable with their
 recorded payloads; they are not rewritten to change historical catalog times.
 
+Construction shaping also has recorded partition limits. New sessions allow up
+to 4,096 ranges, with a target of 16,384 sampled identities per range. The cut
+retains a 256-range floor where the input has enough identities for meaningful
+balance checks, and never exceeds the recorded maximum or one range per 16
+identities. This is a deterministic planning policy, not a guarantee that skewed
+or variable-width records fit. Recorded splitters remain the recovery authority;
+worker count and host memory do not select the layout.
+
+`GraphConstructionBudgets::max_partition_bytes` defaults to 256 MiB of accounted
+materialization per load. Fixed-width families admit the routed record count
+and wire representation before reserving storage; compact details include their
+sorting offsets. The production worker window holds at most two such loads.
+Arrow property-row partitions load serially and charge decoded buffers,
+concatenation/reordering capacity, nested child capacity, UUID keys and indexes.
+Their conservative accounting can refuse a partition even when a less
+conservative representation might fit. Unsupported Arrow representations are
+refused rather than assigned an unproven estimate. Sealed IPC spills are
+authenticated with bounded reads before Arrow can allocate from their metadata.
+
+A partition exceeding its recorded budget is refused before its retained load
+is allocated. Increasing the cut cannot split one node's hub group; a large hub
+can therefore be refused even at 4,096 ranges. The failed private shape remains
+unpublished and reopening retains the same limits. The materialization budget
+is separate from source decoding, routing/writer buffers, allocator metadata,
+page cache and the process memory limit; it is not a whole-process RSS promise.
+
+The new budget fields have stable defaults for historical checkpoints and omit
+default values when serialized. Opening a checkpoint with the exact former
+256-partition default through today's default retains its recorded budgets;
+other explicit budget mismatches remain errors. Completed shapes and their
+recorded authority are not rewritten.
+
 The resource envelope is explicit in `ImportSessionLimits`. Decoding is capped
 by `batch_rows`, source bytes and files have hard limits, and source readers are
 bounded by `io_concurrency`. Status reports accepted and rejected rows, bytes,

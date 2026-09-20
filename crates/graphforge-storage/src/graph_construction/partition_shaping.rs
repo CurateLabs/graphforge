@@ -398,6 +398,7 @@ pub(super) struct FixedRangePartitioner<'a, const N: usize> {
     /// Concurrent partition loads while finishing; see
     /// [`super::partition_load::consume_in_partition_order`] for the bound.
     load_workers: NonZeroUsize,
+    max_partition_bytes: u64,
 }
 
 impl<const N: usize> Drop for FixedRangePartitioner<'_, N> {
@@ -434,7 +435,13 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             balance: PartitionBalance::new(partitions),
             records: 0,
             load_workers: PARTITION_LOAD_WORKERS,
+            max_partition_bytes: super::partition::default_materialization_bytes(),
         })
+    }
+
+    pub(super) fn with_materialization_limit(mut self, bytes: u64) -> Self {
+        self.max_partition_bytes = bytes;
+        self
     }
 
     /// Force the finish-time worker count. Scheduling only: the tests hold the
@@ -619,7 +626,14 @@ impl<'a, const N: usize> FixedRangePartitioner<'a, N> {
             let codec = self.codec;
             let load = |job: usize, stop: &AtomicBool| {
                 let (_, name, expected) = &jobs[job];
-                load_fixed_partition::<N>(root, name, *expected, codec, stop)
+                load_fixed_partition::<N>(
+                    root,
+                    name,
+                    *expected,
+                    codec,
+                    self.max_partition_bytes,
+                    stop,
+                )
             };
             let consume =
                 |job: usize, (records, counters): (PartitionRecords<N>, PartitionLoadCounters)| {
@@ -830,6 +844,7 @@ fn load_fixed_partition<const N: usize>(
     name: &str,
     expected_records: Option<u64>,
     codec: Option<DetailCodec>,
+    max_partition_bytes: u64,
     stop: &AtomicBool,
 ) -> Result<(PartitionRecords<N>, PartitionLoadCounters), GfError> {
     let (mut reader, counter, spill_bytes) = open_fixed_reader(root, name)?;
@@ -838,10 +853,49 @@ fn load_fixed_partition<const N: usize>(
         ..PartitionLoadCounters::default()
     };
     let loaded = (|| -> Result<PartitionRecords<N>, GfError> {
-        let mut records = PartitionRecords::new(codec, expected_records, spill_bytes)?;
+        if let Some(codec) = codec {
+            codec.validate_size(N, 0, 0).map_err(super::storage)?;
+        }
+        let count = expected_records.unwrap_or(
+            spill_bytes
+                / if codec.is_some() {
+                    (N - 255) as u64
+                } else {
+                    N as u64
+                },
+        );
+        let retained = if codec.is_some() {
+            count
+                .checked_mul(std::mem::size_of::<usize>() as u64)
+                .and_then(|offsets| spill_bytes.checked_add(offsets))
+        } else {
+            count.checked_mul(N as u64)
+        };
+        super::partition::admit_materialization(retained, max_partition_bytes)?;
+        let mut records = PartitionRecords::new(codec, Some(count), spill_bytes)?;
+        let mut admitted_wire_bytes = 0_u64;
         while let Some(record) = read_run_record::<N>(&mut reader, codec)? {
+            if records.len() as u64 >= count {
+                return Err(super::storage("partition exceeds admitted record count"));
+            }
+            let wire_bytes = if codec.is_some() {
+                N - 255 + usize::from(record[N - 256])
+            } else {
+                N
+            };
+            admitted_wire_bytes = admitted_wire_bytes
+                .checked_add(wire_bytes as u64)
+                .ok_or_else(|| super::storage("partition wire byte count overflows"))?;
+            if admitted_wire_bytes > spill_bytes {
+                return Err(super::storage("partition exceeds admitted wire bytes"));
+            }
             records.push(record);
             abandon_if_stopped(records.len(), stop)?;
+        }
+        if expected_records.is_some_and(|expected| records.len() as u64 != expected) {
+            return Err(super::storage(
+                "partition differs from admitted record count",
+            ));
         }
         Ok(records)
     })();
@@ -874,6 +928,8 @@ pub(super) struct RowRangePartitioner<'a> {
     sealed: Vec<Option<ArtifactReceipt>>,
     balance: PartitionBalance,
     rows: u64,
+    reservations: Vec<super::partition_memory::RowReservation>,
+    max_partition_bytes: u64,
 }
 
 struct RowSpill {
@@ -926,7 +982,14 @@ impl<'a> RowRangePartitioner<'a> {
             sealed: (0..partitions).map(|_| None).collect(),
             balance: PartitionBalance::new(partitions),
             rows: 0,
+            reservations: vec![super::partition_memory::RowReservation::default(); partitions],
+            max_partition_bytes: super::partition::default_materialization_bytes(),
         })
+    }
+
+    pub(super) fn with_materialization_limit(mut self, bytes: u64) -> Self {
+        self.max_partition_bytes = bytes;
+        self
     }
 
     /// Route every row of one staged chunk Parquet into its partition.
@@ -1013,6 +1076,14 @@ impl<'a> RowRangePartitioner<'a> {
         partition: usize,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<(), GfError> {
+        let slice = batch.slice(offset, length);
+        let reservation = self
+            .reservations
+            .get_mut(partition)
+            .ok_or_else(|| super::storage("row reservation partition is out of range"))?;
+        let next = reservation.with_batch(&slice)?;
+        next.admit(0, self.max_partition_bytes)?;
+        *reservation = next;
         let slot = self
             .spills
             .get_mut(partition)
@@ -1038,10 +1109,7 @@ impl<'a> RowRangePartitioner<'a> {
         let spill = slot
             .as_mut()
             .ok_or_else(|| super::storage("row partition spill is absent"))?;
-        spill
-            .writer
-            .write(&batch.slice(offset, length))
-            .map_err(super::storage)?;
+        spill.writer.write(&slice).map_err(super::storage)?;
         for _ in 0..length {
             self.balance.record(partition)?;
         }
@@ -1140,7 +1208,7 @@ impl<'a> RowRangePartitioner<'a> {
                     continue;
                 };
                 reject_cancelled(cancelled)?;
-                let sorted = self.load_partition(&name, &schema, evidence)?;
+                let sorted = self.load_partition(partition, &name, &schema, evidence)?;
                 let uuids = key_column(&sorted)?;
                 for row in 0..sorted.num_rows() {
                     let uuid = uuid_value(uuids, row)?;
@@ -1247,14 +1315,35 @@ impl<'a> RowRangePartitioner<'a> {
     /// Read one row partition spill into memory and sort it by UUID.
     fn load_partition(
         &self,
+        partition: usize,
         name: &str,
         schema: &SchemaRef,
         evidence: &mut GraphConstructionEvidence,
     ) -> Result<RecordBatch, GfError> {
-        let file = self
-            .root
-            .open_child_file(OsStr::new(name))
-            .map_err(super::storage)?;
+        let receipt = self
+            .sealed
+            .get(partition)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| super::storage("row partition receipt is absent"))?;
+        if receipt.name != name {
+            return Err(super::storage(
+                "row partition name differs from its receipt",
+            ));
+        }
+        self.reservations[partition].admit(receipt.bytes, self.max_partition_bytes)?;
+        // Authenticate with bounded buffers BEFORE Arrow reads bodyLength and
+        // allocates an IPC body. Post-decode checks cannot protect that step.
+        let (file, work) = super::recovery::authenticate_row_spill(self.root, receipt)?;
+        account_cache_release(work.cache_release, evidence)?;
+        evidence.merge_read_bytes = evidence
+            .merge_read_bytes
+            .checked_add(work.bytes)
+            .ok_or_else(|| super::storage("partition read bytes overflow"))?;
+        evidence.merge_read_operations = evidence
+            .merge_read_operations
+            .checked_add(work.operations)
+            .ok_or_else(|| super::storage("partition read operations overflow"))?;
+
         let counter = IoCounter::default();
         let reader = super::CountingRead {
             inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(
@@ -1270,8 +1359,12 @@ impl<'a> RowRangePartitioner<'a> {
             let stream = arrow::ipc::reader::StreamReader::try_new(&mut reader, None)
                 .map_err(super::storage)?;
             let mut batches = Vec::new();
+            let mut decoded = super::partition_memory::RowReservation::default();
             for batch in stream {
-                batches.push(batch.map_err(super::storage)?);
+                let batch = batch.map_err(super::storage)?;
+                decoded = decoded.with_batch(&batch)?;
+                decoded.admit(receipt.bytes, self.max_partition_bytes)?;
+                batches.push(batch);
             }
             let combined = concat_batches(schema, &batches).map_err(super::storage)?;
             drop(batches);

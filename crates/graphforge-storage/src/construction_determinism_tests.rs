@@ -508,6 +508,7 @@ mod determinism {
                 max_batch_rows: 8_192,
                 max_run_records: 262_144,
                 partition_count,
+                target_partition_records: 16,
                 ..GraphConstructionBudgets::default()
             };
             let (fingerprint, layout) =
