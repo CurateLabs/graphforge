@@ -81,7 +81,8 @@ adjacency provider). The residual of `commit/publish` is the visibility swap
 plus uninstrumented time between those children. Adjacency CSR encoding runs
 inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
 publish; reconcile publication against that region rather than assuming CSR
-cost lands in `commit`.
+cost lands in `commit`. Measured attribution on the integrated tree is recorded in
+[`evidence/publication-attribution-1481.md`](evidence/publication-attribution-1481.md).
 
 Registration reports successfully owned bytes (Arrow registration reports rows),
 append reports accepted rows, and successful new shaping/encoding reports the
