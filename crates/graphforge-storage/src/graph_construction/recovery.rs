@@ -802,7 +802,10 @@ pub(super) fn authenticate_artifact(
     let _diagnostic_scope =
         crate::graph_construction::diagnostics::Scope::start("artifact_authentication");
     validate_artifact_name(receipt)?;
-    authenticate_artifact_contents(root, receipt, codec)
+    let file = root
+        .open_child_file(OsStr::new(&receipt.name))
+        .map_err(storage)?;
+    authenticate_artifact_contents(file, receipt, codec)
 }
 
 /// Authenticate an internally generated, sealed row spill before IPC decoding.
@@ -810,7 +813,7 @@ pub(super) fn authenticate_artifact(
 pub(super) fn authenticate_row_spill(
     root: &StableDirectory,
     receipt: &ArtifactReceipt,
-) -> Result<ReadWork, GfError> {
+) -> Result<(std::fs::File, ReadWork), GfError> {
     if !receipt.name.starts_with("part-rows-")
         || std::path::Path::new(&receipt.name).extension() != Some(OsStr::new("arrow"))
         || receipt.name.contains('/')
@@ -819,18 +822,26 @@ pub(super) fn authenticate_row_spill(
     {
         return Err(storage("invalid row partition spill receipt"));
     }
-    authenticate_artifact_contents(root, receipt, DetailCodec::Compact)
+    let mut file = root
+        .open_child_file(OsStr::new(&receipt.name))
+        .map_err(storage)?;
+    // Cloning retains this exact file identity rather than reopening its name.
+    // The duplicate shares its cursor, so rewind after the authentication pass.
+    let work = authenticate_artifact_contents(
+        file.try_clone().map_err(storage)?,
+        receipt,
+        DetailCodec::Compact,
+    )?;
+    std::io::Seek::rewind(&mut file).map_err(storage)?;
+    Ok((file, work))
 }
 
 #[allow(clippy::too_many_lines)] // One authentication pass validates format, digest, and cache cleanup together.
 fn authenticate_artifact_contents(
-    root: &StableDirectory,
+    file: std::fs::File,
     receipt: &ArtifactReceipt,
     codec: DetailCodec,
 ) -> Result<ReadWork, GfError> {
-    let file = root
-        .open_child_file(OsStr::new(&receipt.name))
-        .map_err(storage)?;
     if !receipt
         .identity
         .matches(file_identity(&file).map_err(storage)?)

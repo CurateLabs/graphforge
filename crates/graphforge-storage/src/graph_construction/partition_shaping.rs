@@ -1325,10 +1325,15 @@ impl<'a> RowRangePartitioner<'a> {
             .get(partition)
             .and_then(Option::as_ref)
             .ok_or_else(|| super::storage("row partition receipt is absent"))?;
+        if receipt.name != name {
+            return Err(super::storage(
+                "row partition name differs from its receipt",
+            ));
+        }
         self.reservations[partition].admit(receipt.bytes, self.max_partition_bytes)?;
         // Authenticate with bounded buffers BEFORE Arrow reads bodyLength and
         // allocates an IPC body. Post-decode checks cannot protect that step.
-        let work = super::recovery::authenticate_row_spill(self.root, receipt)?;
+        let (file, work) = super::recovery::authenticate_row_spill(self.root, receipt)?;
         account_cache_release(work.cache_release, evidence)?;
         evidence.merge_read_bytes = evidence
             .merge_read_bytes
@@ -1338,10 +1343,7 @@ impl<'a> RowRangePartitioner<'a> {
             .merge_read_operations
             .checked_add(work.operations)
             .ok_or_else(|| super::storage("partition read operations overflow"))?;
-        let file = self
-            .root
-            .open_child_file(OsStr::new(name))
-            .map_err(super::storage)?;
+
         let counter = IoCounter::default();
         let reader = super::CountingRead {
             inner: graphforge_filesystem::FileCacheReleasingReader::with_window_bytes(

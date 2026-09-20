@@ -186,11 +186,41 @@ fn row_partition_admits_before_decode_and_authenticates_before_ipc_allocation() 
         .join(format!("{:032x}", 0x143a))
         .join(&name);
     // Corrupt the IPC metadata length. Arrow must never get to allocate it.
-    let mut bytes = std::fs::read(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut bytes = original.clone();
     bytes[4..8].copy_from_slice(&i32::MAX.to_le_bytes());
-    std::fs::write(&path, bytes).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
     let error = partitioner
         .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
         .unwrap_err();
     assert!(error.to_string().contains("digest"), "{error}");
+
+    // Substituting the pathname after authentication cannot redirect decoding.
+    std::fs::write(&path, original).unwrap();
+    let (file, _) = super::super::recovery::authenticate_row_spill(
+        &session.root,
+        partitioner.sealed[0].as_ref().unwrap(),
+    )
+    .unwrap();
+    let renamed = std::fs::rename(&path, path.with_extension("saved"));
+    #[cfg(windows)]
+    assert!(
+        renamed.is_err(),
+        "the retained handle denies delete sharing"
+    );
+    #[cfg(not(windows))]
+    {
+        renamed.unwrap();
+        std::fs::write(&path, bytes).unwrap();
+    }
+    let mut reader = arrow::ipc::reader::StreamReader::try_new(file, None).unwrap();
+    assert_eq!(reader.next().unwrap().unwrap().num_rows(), 2);
+    assert!(reader.next().is_none());
+    #[cfg(not(windows))]
+    {
+        let error = partitioner
+            .load_partition(0, &name, &schema, &mut session.checkpoint.evidence)
+            .unwrap_err();
+        assert!(error.to_string().contains("identity"), "{error}");
+    }
 }
