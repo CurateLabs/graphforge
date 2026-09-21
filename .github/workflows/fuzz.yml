@@ -33,7 +33,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Mount fuzz build disk
-        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: ${{ github.repository }}-daily-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1
           path: fuzz/target

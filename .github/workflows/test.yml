@@ -1280,7 +1280,7 @@ jobs:
       # between runs; Bazel's disk cache is content-addressed, so a shared volume
       # is safe and a stale entry is simply never read.
       - name: Mount Bazel disk cache
-        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: ${{ github.repository }}-bazel-disk-cache-v1
           path: .bazel-disk-cache
