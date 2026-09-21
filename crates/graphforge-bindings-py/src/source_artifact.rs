@@ -155,6 +155,7 @@ fn write_context(
 impl GraphForge {
     /// Atomically register one immutable research Source.
     #[pyo3(signature = (*, operation_uuid, source_uuid, label, source_kind, identity_uri=None, actor_uuid=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register_source(
         &self,
         py: Python<'_>,
@@ -187,6 +188,7 @@ impl GraphForge {
 
     /// Atomically register one immutable research Artifact.
     #[pyo3(signature = (*, operation_uuid, artifact_uuid, source_uuid, artifact_kind, media_type, payload, derivation_inputs=None, run_uuid=None, actor_uuid=None))]
+    #[allow(clippy::too_many_arguments)]
     fn register_artifact(
         &self,
         py: Python<'_>,
@@ -335,6 +337,7 @@ impl GraphForge {
 
     /// Set the preferred Artifact for one Source.
     #[pyo3(signature = (*, operation_uuid, preference_event_uuid, source_uuid, artifact_uuid, reason, actor_uuid=None))]
+    #[allow(clippy::too_many_arguments)]
     fn set_preferred_artifact(
         &self,
         py: Python<'_>,
@@ -398,6 +401,7 @@ impl GraphForge {
 
     /// Return one deterministic page of derivation edges for a research subject.
     #[pyo3(signature = (subject_uuid, *, subject_kind, direction, max_depth, limit=100, after=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
     fn research_lineage(
         &self,
         py: Python<'_>,

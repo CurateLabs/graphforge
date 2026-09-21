@@ -30,10 +30,10 @@ def check_source_artifact_lifecycle_survives_reopen() -> None:
         if _open_admitted(root) is None:
             return
 
-        source_uuid = uuid.uuid7()
-        scan_uuid = uuid.uuid7()
-        ocr_uuid = uuid.uuid7()
-        preference_uuid = uuid.uuid7()
+        source_uuid = uuid.UUID("018f0f4e-7b8c-7000-8000-000000001301")
+        scan_uuid = uuid.UUID("018f0f4e-7b8c-7000-8000-000000001302")
+        ocr_uuid = uuid.UUID("018f0f4e-7b8c-7000-8000-000000001303")
+        preference_uuid = uuid.UUID("018f0f4e-7b8c-7000-8000-000000001304")
 
         forge = graphforge.GraphForge(root)
         forge.enable_capability(
@@ -88,7 +88,7 @@ def check_source_artifact_lifecycle_survives_reopen() -> None:
         assert ocr_uuid in impacted
         forge.set_preferred_artifact(
             operation_uuid=str(uuid.UUID(int=5)),
-            preference_event_uuid=str(uuid.uuid7()),
+            preference_event_uuid=str(uuid.UUID("018f0f4e-7b8c-7000-8000-000000001305")),
             source_uuid=str(source_uuid),
             artifact_uuid=str(ocr_uuid),
             reason="better OCR available",

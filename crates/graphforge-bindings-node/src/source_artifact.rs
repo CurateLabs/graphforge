@@ -95,12 +95,14 @@ fn artifact_payload(
 ) -> Result<graphforge_api::ArtifactPayloadRequest> {
     match input.kind.as_str() {
         "local_bytes" => {
-            let bytes = input.bytes.clone().ok_or_else(|| {
+            let bytes = input.bytes.as_ref().ok_or_else(|| {
                 to_napi_err(&GfError::Validation(
                     "local_bytes payload requires bytes".into(),
                 ))
             })?;
-            Ok(graphforge_api::ArtifactPayloadRequest::LocalBytes(bytes))
+            Ok(graphforge_api::ArtifactPayloadRequest::LocalBytes(
+                bytes.to_vec(),
+            ))
         }
         "external_reference" => {
             let uri = input.uri.clone().ok_or_else(|| {
@@ -145,7 +147,7 @@ pub struct ArtifactPayloadInput {
     /// `local_bytes`, `external_reference`, or `absent`.
     pub kind: String,
     /// Local bytes when `kind` is `local_bytes`.
-    pub bytes: Option<Vec<u8>>,
+    pub bytes: Option<Buffer>,
     /// External URI when `kind` is `external_reference`.
     pub uri: Option<String>,
     /// Optional 32-byte fingerprint when `kind` is `external_reference`.
