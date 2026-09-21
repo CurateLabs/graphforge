@@ -120,13 +120,13 @@ jobs:
         with:
           node-version: "20"
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
       # Keep maturin + cargo + napi on one sticky volume so dense L/XL case
       # workspaces are not competing with a second root-disk Cargo tree (#2765).
       - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           # Per-certification workspace; cleanup_load_disk deletes it after load.
           key: ${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3

@@ -55,13 +55,13 @@ jobs:
       # `cargo llvm-cov clean --workspace` drops workspace-member artifacts only,
       # so third-party dependencies stay warm on this volume between runs.
       - name: Mount coverage build disk
-        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: ${{ github.repository }}-coverage-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-target-v1
           path: target
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
           components: llvm-tools-preview
@@ -75,7 +75,7 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
           tool: cargo-llvm-cov@0.9.1
 

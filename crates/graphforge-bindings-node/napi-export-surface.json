@@ -12,7 +12,12 @@
     "struct, and declares as `export type Old = New`.",
     "tests/export-surface.test.mjs fails closed when this drifts from the",
     "exports the napi-built addon actually has; regenerate it from",
-    "`Object.keys(require('./index.js'))` plus the kinds in index.d.ts."
+    "`Object.keys(require('./index.js'))` plus the kinds in index.d.ts.",
+    "`__napiBindingTarget` is not a Rust export: every loader @napi-rs/cli",
+    ">= 3.10 generates exports it to report which binding artifact loaded",
+    "('native' for a .node addon). The assembled loader only ever loads the",
+    "native addon, so it emits the literal 'native' rather than reading the",
+    "name off the addon."
   ],
   "exports": {
     "CheckpointView": "class",
@@ -29,6 +34,7 @@
     "ResolvedBeliefProjectionHandle": "alias",
     "ResolvedBeliefSubjectOutput": "class",
     "TelemetryRuntime": "class",
+    "__napiBindingTarget": "value",
     "runCli": "function",
     "testAcquireWriterHold": "function",
     "testReleaseWriterHold": "function",
