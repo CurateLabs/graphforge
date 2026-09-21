@@ -7,11 +7,13 @@ use graphforge_knowledge::{
 };
 
 use super::{
-    GfError, GraphForge, PageRequest, Uuid, assertion_result, concat_or_empty, knowledge_error,
-    read_artifact_ledger, read_derivation_ledger, read_source_ledger, require_uuid,
-    with_next_token,
+    ApiErrorCode, GfError, GraphForge, PageRequest, ResolvedProjectGeneration, Uuid,
+    assertion_result, concat_or_empty, knowledge_error, match_requested_edge_uuids,
+    match_requested_node_uuids, read_artifact_ledger, read_derivation_ledger, read_evidence_ledger,
+    read_ledger, read_source_ledger, require_uuid, with_next_token,
 };
 use crate::PageToken;
+use crate::algorithm_runs::read_ledger as read_algorithm_run_ledger;
 use crate::paging::validate_page;
 
 /// Traversal direction for research lineage.
@@ -57,6 +59,8 @@ impl GraphForge {
         let artifacts = read_artifact_ledger(&generation)?;
         let sources = read_source_ledger(&generation)?;
         validate_subject_exists(
+            self,
+            &generation,
             request.subject_uuid,
             request.subject_kind,
             &sources,
@@ -79,6 +83,8 @@ impl GraphForge {
 }
 
 fn validate_subject_exists(
+    graph: &GraphForge,
+    generation: &ResolvedProjectGeneration,
     subject_uuid: Uuid,
     subject_kind: DerivationSubjectKind,
     sources: &graphforge_knowledge::SourceLedger,
@@ -93,13 +99,34 @@ fn validate_subject_exists(
             .artifacts
             .iter()
             .any(|row| row.artifact_uuid == subject_uuid),
-        _ => true,
+        DerivationSubjectKind::Node => {
+            let mut pending = HashSet::from([subject_uuid]);
+            match_requested_node_uuids(graph, &mut pending)?;
+            pending.is_empty()
+        }
+        DerivationSubjectKind::Edge => {
+            let mut pending = HashSet::from([subject_uuid]);
+            match_requested_edge_uuids(graph, &mut pending)?;
+            pending.is_empty()
+        }
+        DerivationSubjectKind::Assertion => read_ledger(generation)?
+            .assertions
+            .iter()
+            .any(|row| row.assertion_uuid == subject_uuid),
+        DerivationSubjectKind::EvidenceLink => read_evidence_ledger(generation)?
+            .links
+            .iter()
+            .any(|row| row.evidence_uuid == subject_uuid),
+        DerivationSubjectKind::AlgorithmRun => read_algorithm_run_ledger(generation)?
+            .runs
+            .iter()
+            .any(|row| row.run_uuid == subject_uuid),
     };
     if found {
         Ok(())
     } else {
         Err(GfError::Api {
-            code: super::ApiErrorCode::NotFound,
+            code: ApiErrorCode::NotFound,
             message: "lineage subject was not found".into(),
         })
     }
