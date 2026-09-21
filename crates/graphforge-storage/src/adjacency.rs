@@ -546,6 +546,9 @@ fn write_csr_shard(
         encoded_bytes,
         codec::encoded_limit(shard.node_count(), shard.edge_count())?,
     )?;
+    // The post-write read-back that hashes the shard is real rebuild I/O of
+    // the whole shard; attribute it with the write it verifies (#1449).
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
     codec::preflight(&bytes, shard.node_count(), shard.edge_count())?;
     Ok(CsrShardRecord {
         first_node,
