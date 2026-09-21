@@ -65,6 +65,20 @@ pub enum StorageIoPhase {
     /// It is deliberately excluded from [`StorageIoPhase::ALL`] so the closed
     /// construction inventory, and every artifact derived from it, is
     /// unchanged.
+    ///
+    /// # Scope (#1449)
+    ///
+    /// Besides the ordinary Parquet reads of committed topology and property
+    /// data, this row owns the whole lazy adjacency rebuild a query process
+    /// can perform: the projected edge-table reads, the spill-run and CSR
+    /// shard reads and writes, the shard manifest reads, the serving-time
+    /// shard authentication on first row touch, and the rebuild's manifest
+    /// write. Construction publish and clean import build the same index as
+    /// ordinary construction work and scope themselves to
+    /// [`StorageIoPhase::EncodeWritePostwriteAuthentication`], so this row
+    /// stays zero for them. What this row does not claim: OS page-cache
+    /// effects, and read-ahead or buffering the kernel performs beyond the
+    /// application-requested bytes.
     ReadPathScan,
 }
 

@@ -1098,6 +1098,19 @@ fn authenticate_inventory_file(
     if digest_hex(&digest.finalize()) != entry.content_sha256 {
         return Err(corrupt("property handle digest conflicts with inventory"));
     }
+    // #1449: these reads were computed and counted here but never reached the
+    // lifecycle phase counters, so property-bearing opens under-reported the
+    // verification row. Default to the hydration/verification row; a caller
+    // whose phase differs overrides with a `PhaseScope`.
+    crate::lifecycle_io::record_read(
+        crate::StorageIoPhase::HydrationVerification,
+        bytes,
+        read_calls,
+    );
+    crate::lifecycle_io::record_blocks(
+        crate::StorageIoPhase::HydrationVerification,
+        bytes.div_ceil(64 * 1024),
+    );
     Ok((bytes, bytes.div_ceil(64 * 1024), read_calls))
 }
 

@@ -610,6 +610,7 @@ fn write_keyed_run(
     let header = 8 + 4 + 8;
     let body = entries.len() as u64 * BYTES_PER_KEYED_ENTRY;
     spill.account_write(header + body)?;
+    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, header + body, 1);
     file.write_all(SPILL_RUN_MAGIC).map_err(storage_err)?;
     file.write_all(&SPILL_RUN_VERSION.to_le_bytes())
         .map_err(storage_err)?;
@@ -657,6 +658,7 @@ impl RunCursor {
         }
         let mut count = [0u8; 8];
         file.read_exact(&mut count).map_err(storage_err)?;
+        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 20, 3);
         let mut cursor = Self {
             file,
             remaining: u64::from_le_bytes(count),
@@ -674,6 +676,7 @@ impl RunCursor {
         }
         let mut buf = [0u8; 24];
         self.file.read_exact(&mut buf).map_err(storage_err)?;
+        crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 24, 1);
         let key = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let edge = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let neighbor = u64::from_le_bytes(buf[16..24].try_into().unwrap());
@@ -726,6 +729,7 @@ fn keyed_run_count(path: &Path) -> Result<u64, GfError> {
     let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(storage_err)?);
     let mut header = [0_u8; 20];
     file.read_exact(&mut header).map_err(storage_err)?;
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, 20, 1);
     if &header[..8] != SPILL_RUN_MAGIC
         || u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) != SPILL_RUN_VERSION
     {
@@ -767,7 +771,9 @@ fn merge_keyed_runs_to_run(
             .write_all(&neighbor.to_le_bytes())
             .map_err(storage_err)
     })?;
-    writer.flush().map_err(storage_err)
+    writer.flush().map_err(storage_err)?;
+    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, bytes, 1);
+    Ok(())
 }
 
 fn merge_keyed_runs(

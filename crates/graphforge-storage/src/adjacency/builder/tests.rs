@@ -535,3 +535,89 @@ fn admitted_reserved_relations_build_portable_distinct_indexes() {
         .is_empty()
     );
 }
+
+#[test]
+fn the_lazy_rebuilds_reads_and_writes_reach_the_lifecycle_counters() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path()); // I/O before the capture; only the build is measured.
+
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let before = crate::lifecycle_io::snapshot();
+    build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+    region.validate_for_qualification().unwrap();
+
+    // #1449: the rebuild used to read every edge table and write its spill
+    // runs, CSR shards and manifest with counters blind to all of it.
+    let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
+    assert!(
+        scan.read_bytes > 0,
+        "rebuild reads unattributed: {region:#?}"
+    );
+    assert!(
+        scan.write_bytes > 0,
+        "rebuild writes unattributed: {region:#?}"
+    );
+}
+
+#[test]
+fn spill_runs_are_counted_in_both_directions_of_their_lifetime() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path());
+    let stage = TempDir::new().unwrap();
+
+    let options = AdjacencyBuildOptions {
+        chunk_rows: 2, // force sorted spill runs for the six diamond edges
+        ..AdjacencyBuildOptions::default()
+    };
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let before = crate::lifecycle_io::snapshot();
+    build_adjacency_index_into_with_options(
+        dir.path(),
+        stage.path(),
+        BUILD_TS,
+        &options,
+        || Ok(()),
+    )
+    .unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+
+    let scan = &region.phases[&crate::StorageIoPhase::ReadPathScan];
+    assert!(
+        scan.write_bytes > 0,
+        "spill writes unattributed: {region:#?}"
+    );
+    assert!(
+        scan.read_bytes > 0,
+        "edge tables or merged spill runs unattributed: {region:#?}"
+    );
+}
+
+#[test]
+fn a_publish_style_scope_moves_the_build_out_of_the_read_path_row() {
+    let dir = TempDir::new().unwrap();
+    write_diamond(dir.path());
+
+    let _capture = crate::lifecycle_io::CaptureScope::install();
+    let _scope = crate::lifecycle_io::PhaseScope::enter(
+        crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
+    );
+    let before = crate::lifecycle_io::snapshot();
+    build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+    let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+
+    assert_eq!(
+        region.phases[&crate::StorageIoPhase::ReadPathScan],
+        crate::PhaseIoTotals::default(),
+        "scoped build leaked into read_path_scan: {region:#?}"
+    );
+    let encode = &region.phases[&crate::StorageIoPhase::EncodeWritePostwriteAuthentication];
+    assert!(
+        encode.read_bytes > 0,
+        "encode reads unattributed: {region:#?}"
+    );
+    assert!(
+        encode.write_bytes > 0,
+        "encode writes unattributed: {region:#?}"
+    );
+}

@@ -46,7 +46,6 @@ pub use builder::{
     build_adjacency_index_with_checkpoint,
 };
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,6 +119,11 @@ impl ShardedCsrIndex {
     pub fn open(path: &Path) -> Result<Self, GfError> {
         let manifest_path = path.with_extension("csr.json");
         let bytes = std::fs::read(&manifest_path).map_err(storage_err)?;
+        crate::lifecycle_io::record_read(
+            crate::StorageIoPhase::ReadPathScan,
+            bytes.len() as u64,
+            1,
+        );
         let manifest: CsrShardManifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
         if manifest.format != "graphforge.csr-shards" || manifest.version != SHARDED_CSR_VERSION {
             return Err(GfError::Storage(format!(
@@ -536,11 +540,15 @@ fn write_csr_shard(
     let path = root.join(&file);
     write_csr_shard_file(&path, shard)?;
     let encoded_bytes = std::fs::metadata(&path).map_err(storage_err)?.len();
+    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, encoded_bytes, 1);
     let bytes = codec::read(
         &path,
         encoded_bytes,
         codec::encoded_limit(shard.node_count(), shard.edge_count())?,
     )?;
+    // The post-write read-back that hashes the shard is real rebuild I/O of
+    // the whole shard; attribute it with the write it verifies (#1449).
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
     codec::preflight(&bytes, shard.node_count(), shard.edge_count())?;
     Ok(CsrShardRecord {
         first_node,
@@ -952,6 +960,7 @@ fn read_authenticated_shard(path: &Path, record: &CsrShardRecord) -> Result<CsrI
         record.encoded_bytes,
         codec::encoded_limit(record.node_count, record.edge_count)?,
     )?;
+    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, record.encoded_bytes, 1);
     if sha256_hex(&bytes) != record.sha256 {
         return Err(GfError::Storage(format!(
             "CSR shard checksum mismatch: {}",
@@ -1090,7 +1099,15 @@ pub fn write_manifest(project_dir: &Path, rows: &[AdjacencyManifestRow]) -> Resu
         Arc::clone(&ADJACENCY_MANIFEST_SCHEMA),
         &batch,
     )?;
-    staged.commit_at(project_dir)
+    staged.commit_at(project_dir)?;
+    crate::lifecycle_io::record_write(
+        crate::StorageIoPhase::ReadPathScan,
+        std::fs::metadata(manifest_path(project_dir))
+            .map_err(storage_err)?
+            .len(),
+        1,
+    );
+    Ok(())
 }
 
 /// Read `index_manifest.parquet`. An absent manifest (or absent
@@ -1106,11 +1123,13 @@ pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, Gf
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let file = File::open(&path).map_err(storage_err)?;
-    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(storage_err)?
-        .build()
-        .map_err(storage_err)?;
+    let file = std::fs::File::open(&path).map_err(storage_err)?;
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+        crate::lifecycle_io::ReadPathFile::new(file),
+    )
+    .map_err(storage_err)?
+    .build()
+    .map_err(storage_err)?;
 
     let mut rows = Vec::new();
     for batch in reader {
@@ -1242,8 +1261,10 @@ pub(crate) fn stream_projected_parquet_batches(
     if !path.exists() {
         return Ok(0);
     }
-    let file = File::open(path).map_err(storage_err)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage_err)?;
+    let file = std::fs::File::open(path).map_err(storage_err)?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(crate::lifecycle_io::ReadPathFile::new(file))
+            .map_err(storage_err)?;
     let mask = ProjectionMask::columns(builder.parquet_schema(), column_names.iter().copied());
     let batch_size = batch_size.max(1);
     let reader = builder
@@ -1913,6 +1934,29 @@ mod tests {
             (expected.node_count(), expected.edge_count())
         );
         assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
+    }
+
+    #[test]
+    fn serving_a_row_attributes_its_shard_payload_read() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        write_sharded_csr(&path, &sample_csr(), 2).unwrap();
+        // Open outside the capture: presence-only, records nothing but the
+        // small manifest read, and proves payload bytes stay untouched until
+        // a row asks for them.
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+
+        let _capture = crate::lifecycle_io::CaptureScope::install();
+        let before = crate::lifecycle_io::snapshot();
+        assert!(!reader.row(0).unwrap().is_empty());
+        let region = crate::lifecycle_io::snapshot().since(&before).unwrap();
+        region.validate_for_qualification().unwrap();
+        // #1449: first-row-touch authentication is real read-path work and
+        // used to be invisible to the counters.
+        assert!(
+            region.phases[&crate::StorageIoPhase::ReadPathScan].read_bytes > 0,
+            "serving read unattributed: {region:#?}"
+        );
     }
 
     #[test]
