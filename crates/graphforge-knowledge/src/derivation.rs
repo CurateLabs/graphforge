@@ -294,7 +294,7 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
         sort_key: &["recorded_at", "derivation_uuid"],
         diff_identity_fields: &["derivation_uuid"],
         diff_record_uuid_field: Some("derivation_uuid"),
-        fingerprint_domain: CanonicalDomain::Schema,
+        fingerprint_domain: CanonicalDomain::ArtifactDerivation,
         owner: "graphforge-knowledge",
         implementation_issue: 1349,
         max_rows: MAX_KNOWLEDGE_ROWS,
@@ -317,7 +317,7 @@ fn derivation_identity_uuid(
     writer.text(derivation_role.as_str())?;
     writer.u32(ordinal)?;
     let digest = fingerprint(
-        CanonicalDomain::Schema,
+        CanonicalDomain::ArtifactDerivation,
         ARTIFACT_DERIVATION_CONTRACT_VERSION,
         &writer.finish(),
     )?;

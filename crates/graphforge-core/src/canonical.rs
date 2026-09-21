@@ -68,6 +68,12 @@ pub enum CanonicalDomain {
     ResearchSource,
     /// Immutable research Artifact identity.
     ResearchArtifact,
+    /// Immutable artifact-derivation edge record/table.
+    ArtifactDerivation,
+    /// Append-only artifact-preference event record/table.
+    ArtifactPreference,
+    /// Retention-dependency record/table.
+    RetentionDependency,
 }
 
 impl CanonicalDomain {
@@ -97,6 +103,9 @@ impl CanonicalDomain {
             Self::ArrowResult => "graphforge/arrow-result",
             Self::ResearchSource => "graphforge/research-source",
             Self::ResearchArtifact => "graphforge/research-artifact",
+            Self::ArtifactDerivation => "graphforge/artifact-derivation",
+            Self::ArtifactPreference => "graphforge/artifact-preference",
+            Self::RetentionDependency => "graphforge/retention-dependency",
         }
     }
 }
@@ -562,6 +571,18 @@ mod tests {
             (
                 CanonicalDomain::ResearchArtifact,
                 "graphforge/research-artifact",
+            ),
+            (
+                CanonicalDomain::ArtifactDerivation,
+                "graphforge/artifact-derivation",
+            ),
+            (
+                CanonicalDomain::ArtifactPreference,
+                "graphforge/artifact-preference",
+            ),
+            (
+                CanonicalDomain::RetentionDependency,
+                "graphforge/retention-dependency",
             ),
         ];
         for (domain, spelling) in domains {

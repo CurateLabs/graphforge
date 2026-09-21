@@ -346,7 +346,7 @@
           "nullable": false
         }
       ],
-      "fingerprint_domain": "graphforge/schema",
+      "fingerprint_domain": "graphforge/artifact-derivation",
       "implementation_issue": 1349,
       "max_rows": 1000000,
       "owner": "graphforge-knowledge",
@@ -413,7 +413,7 @@
           "nullable": false
         }
       ],
-      "fingerprint_domain": "graphforge/schema",
+      "fingerprint_domain": "graphforge/artifact-preference",
       "implementation_issue": 1349,
       "max_rows": 1000000,
       "owner": "graphforge-knowledge",
@@ -895,7 +895,7 @@
           "nullable": false
         }
       ],
-      "fingerprint_domain": "graphforge/schema",
+      "fingerprint_domain": "graphforge/retention-dependency",
       "implementation_issue": 1349,
       "max_rows": 1000000,
       "owner": "graphforge-knowledge",

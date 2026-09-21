@@ -264,7 +264,7 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
         sort_key: &["recorded_at", "dependency_uuid"],
         diff_identity_fields: &["dependency_uuid"],
         diff_record_uuid_field: Some("dependency_uuid"),
-        fingerprint_domain: CanonicalDomain::Schema,
+        fingerprint_domain: CanonicalDomain::RetentionDependency,
         owner: "graphforge-knowledge",
         implementation_issue: 1349,
         max_rows: MAX_KNOWLEDGE_ROWS,

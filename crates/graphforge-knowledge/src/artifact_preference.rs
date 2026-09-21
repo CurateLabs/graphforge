@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use arrow::array::{FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+use graphforge_core::canonical::{
+    CANONICAL_CONTRACT_VERSION, CanonicalDomain, CanonicalWriter, fingerprint,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -128,6 +130,61 @@ impl ArtifactPreferenceLedger {
         Self::new(merged)
     }
 
+    /// Canonical semantic fingerprint over caller-supplied preference-event content.
+    ///
+    /// Excludes `prior_artifact_uuid` (ledger-derived), `provenance_uuid`, and
+    /// `recorded_at_micros` (clock-derived) so that a retry with the same caller-provided
+    /// content compares equal to the committed row regardless of when it was retried.
+    pub fn preference_fingerprint(
+        &self,
+        preference_event_uuid: Uuid,
+    ) -> Result<[u8; 32], KnowledgeError> {
+        let row = self
+            .events
+            .iter()
+            .find(|row| row.preference_event_uuid == preference_event_uuid)
+            .ok_or(KnowledgeError::Dangling("preference_event_uuid"))?;
+        let mut writer = CanonicalWriter::new();
+        writer.raw(b"GFPE")?;
+        writer.u32(ARTIFACT_PREFERENCE_CONTRACT_VERSION)?;
+        writer.raw(row.preference_event_uuid.as_bytes())?;
+        writer.raw(row.source_uuid.as_bytes())?;
+        writer.raw(row.artifact_uuid.as_bytes())?;
+        // `prior_artifact_uuid` is ledger-derived, not caller-supplied; omit from fingerprint.
+        writer.text(&row.reason)?;
+        Ok(fingerprint(
+            CanonicalDomain::ArtifactPreference,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )?)
+    }
+
+    /// Canonical semantic fingerprint for caller-supplied preference request fields.
+    ///
+    /// Identical to `preference_fingerprint` but computed from raw caller-provided fields
+    /// rather than requiring a committed ledger row. Used to compare an incoming request
+    /// against the already-committed row before constructing the full staged event.
+    pub fn preference_request_fingerprint(
+        preference_event_uuid: Uuid,
+        source_uuid: Uuid,
+        artifact_uuid: Uuid,
+        reason: &str,
+    ) -> Result<[u8; 32], KnowledgeError> {
+        let mut writer = CanonicalWriter::new();
+        writer.raw(b"GFPE")?;
+        writer.u32(ARTIFACT_PREFERENCE_CONTRACT_VERSION)?;
+        writer.raw(preference_event_uuid.as_bytes())?;
+        writer.raw(source_uuid.as_bytes())?;
+        writer.raw(artifact_uuid.as_bytes())?;
+        // `prior_artifact_uuid` is ledger-derived, not caller-supplied; omit.
+        writer.text(reason)?;
+        Ok(fingerprint(
+            CanonicalDomain::ArtifactPreference,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )?)
+    }
+
     /// Return the current preferred Artifact for one Source, if any.
     #[must_use]
     pub fn current_preferred_artifact(&self, source_uuid: Uuid) -> Option<Uuid> {
@@ -189,7 +246,7 @@ pub(crate) fn schema_registry_entry() -> SchemaRegistryEntry {
         sort_key: &["recorded_at", "preference_event_uuid"],
         diff_identity_fields: &["preference_event_uuid"],
         diff_record_uuid_field: Some("preference_event_uuid"),
-        fingerprint_domain: CanonicalDomain::Schema,
+        fingerprint_domain: CanonicalDomain::ArtifactPreference,
         owner: "graphforge-knowledge",
         implementation_issue: 1349,
         max_rows: MAX_KNOWLEDGE_ROWS,
