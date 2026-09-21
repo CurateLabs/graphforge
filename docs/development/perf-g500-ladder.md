@@ -83,6 +83,7 @@ hard-code rungs elsewhere.
 | Host capacity | **128 GiB** peak RSS, **1 TiB** local NVMe (declared **Linux cloud** SKU) |
 | Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end on that SKU — provisional #745 budget, not a laptop or “overnight is fine” product claim |
 | Per-rung stop | host ladder: last accepted wall for the scale × (1 + `WALL_MARGIN`, default 0.10), capped at 4 h, when `REFERENCE_EVIDENCE_DIR` names a prior evidence dir; BenchExec reports the rung as `rung_wall_exceeded` |
+| Per-rung phase failure | host ladder: a rung whose run executed and died inside a phase stops as `rung_phase_failed`, with the phase in `failed_phase` and the failing child's bounded error text in `error_tail` (also in the retained `s<scale>-failure-raw/` certify stream); `staging_failed` is reserved for failures before the run started |
 
 Before any provisioned rung, complete the read-only/no-spend checks from the
 [certification runbook](g500-certification.md): subscription and role, provider

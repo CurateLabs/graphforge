@@ -1,0 +1,10 @@
+graphforge-benchmark-certify run <redacted-stage>/profile.json <redacted-work-root>/tmp/graphforge-certify-evidence.json
+
+
+--------------------------------------------------------------------------------
+
+
+{"schema":"graphforge-public-certification-phase-event/1","profile_id":"graph500-s22-provider","outcome":{"phase":"admission","status":"passed","duration_ms":10,"peak_rss_bytes":126976,"exit_code":0}}
+{"schema":"graphforge-public-certification-phase-event/1","profile_id":"graph500-s22-provider","outcome":{"phase":"generate","status":"passed","duration_ms":25539,"peak_rss_bytes":74752000,"exit_code":0}}
+{"schema":"graphforge-public-certification-phase-event/1","profile_id":"graph500-s22-provider","outcome":{"phase":"ingest","status":"failed","duration_ms":304005,"peak_rss_bytes":453537792,"exit_code":3,"failure":"command_failed","error_tail":"GF_IO: storage error: graph construction session: control record exceeds bound"}}
+{"schema":"graphforge-public-certification/1","profile_id":"graph500-s22-provider","status":"failed","phases":[{"phase":"admission","status":"passed","duration_ms":10,"peak_rss_bytes":126976,"exit_code":0},{"phase":"generate","status":"passed","duration_ms":25539,"peak_rss_bytes":74752000,"exit_code":0},{"phase":"ingest","status":"failed","duration_ms":304005,"peak_rss_bytes":453537792,"exit_code":3,"failure":"command_failed","error_tail":"GF_IO: storage error: graph construction session: control record exceeds bound"}],"failed_phase":"ingest"}

@@ -16,12 +16,17 @@
         "execution_boundary_failed",
         "benchexec_failed",
         "rung_wall_exceeded",
+        "rung_phase_failed",
         "ordinary_receipt_missing",
         "stored_plan_mismatch",
         "projection_refused",
         "work_root_invalid"
       ]
     },
+    "failed_phase": {
+      "enum": ["admission", "generate", "ingest", "reopen", "recount", "query", "export", "verify", "clean_import", "reopen_proof"]
+    },
+    "error_tail": {"type": "string", "minLength": 1, "maxLength": 1024},
     "identities": {
       "type": "object",
       "additionalProperties": false,
@@ -87,6 +92,11 @@
       "if": {"properties": {"status": {"const": "passed"}}, "required": ["status"]},
       "then": {"properties": {"failure": {"type": "null"}, "artifacts": {"type": "object"}}},
       "else": {"properties": {"failure": {"type": "string"}, "artifacts": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"failure": {"const": "rung_phase_failed"}}, "required": ["failure"]},
+      "then": {"required": ["failed_phase"]},
+      "else": {"not": {"anyOf": [{"required": ["failed_phase"]}, {"required": ["error_tail"]}]}}
     },
     {
       "if": {"properties": {"rung": {"enum": ["S20", "S22", "S24", "S25", "S26"]}}, "required": ["rung"]},

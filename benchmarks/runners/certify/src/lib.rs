@@ -267,6 +267,9 @@ pub struct Execution {
     pub peak_rss_bytes: Option<u64>,
     pub failure: Option<FailureKind>,
     pub cleanup_failure: Option<String>,
+    /// Bounded, sanitized tail of the child's standard error, kept only when
+    /// the phase failed. Carries the child's own error text and nothing else.
+    pub error_tail: Option<String>,
     pub receipts: Vec<serde_json::Value>,
 }
 
@@ -591,6 +594,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                             peak_rss_bytes,
                             failure: Some(FailureKind::CommandUnavailable),
                             cleanup_failure: None,
+                            error_tail: None,
                             receipts,
                         });
                     }
@@ -605,6 +609,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                         peak_rss_bytes,
                         failure: execution.failure,
                         cleanup_failure: execution.cleanup_failure,
+                        error_tail: execution.error_tail,
                         receipts,
                     });
                 }
@@ -616,6 +621,7 @@ impl PhaseExecutor for PublicProcessExecutor {
                 peak_rss_bytes,
                 failure: None,
                 cleanup_failure: None,
+                error_tail: None,
                 receipts,
             };
             if produce_lifecycle_storage {
@@ -693,7 +699,7 @@ fn execute_process_with_allocation(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "public command could not start".to_owned())?;
     let stdout = child
@@ -701,6 +707,13 @@ fn execute_process_with_allocation(
         .take()
         .ok_or_else(|| "public command stdout unavailable".to_owned())?;
     let stdout_reader = thread::spawn(move || read_bounded(stdout, 1_048_576));
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "public command diagnostic stream unavailable".to_owned())?;
+    // A dedicated reader keeps a chatty child from filling the pipe and
+    // blocking on a write the runner would never drain.
+    let stderr_reader = thread::spawn(move || read_tail(stderr, ERROR_TAIL_CAPTURE_BYTES));
     let stdin_writer = if let Some(bytes) = baseline {
         let mut stdin = child
             .stdin
@@ -725,6 +738,10 @@ fn execute_process_with_allocation(
             let stdout = stdout_reader
                 .join()
                 .map_err(|_| "public command stdout reader failed".to_owned())??;
+            let error_tail = stderr_reader
+                .join()
+                .ok()
+                .and_then(|tail| sanitize_error_tail(&tail));
             let input_result = stdin_writer
                 .map(|writer| {
                     writer
@@ -763,6 +780,7 @@ fn execute_process_with_allocation(
                     peak_rss_bytes,
                     failure: Some(FailureKind::CommandFailed),
                     cleanup_failure,
+                    error_tail,
                     receipts: receipts.unwrap_or_default(),
                 });
             }
@@ -773,6 +791,7 @@ fn execute_process_with_allocation(
                     peak_rss_bytes,
                     failure: Some(FailureKind::EvidenceInvalid),
                     cleanup_failure: input_result.err(),
+                    error_tail,
                     receipts: receipts.unwrap_or_default(),
                 });
             }
@@ -786,6 +805,7 @@ fn execute_process_with_allocation(
                         peak_rss_bytes,
                         failure: Some(FailureKind::EvidenceInvalid),
                         cleanup_failure: None,
+                        error_tail,
                         receipts: Vec::new(),
                     });
                 }
@@ -800,6 +820,7 @@ fn execute_process_with_allocation(
                 peak_rss_bytes,
                 failure: None,
                 cleanup_failure: None,
+                error_tail: None,
                 receipts,
             });
         }
@@ -940,6 +961,91 @@ fn release_open_file_cache(
             .ok_or_else(|| "command-owned cache release offset overflow".to_owned())?;
     }
     Ok(())
+}
+
+/// Bytes of child standard error retained for a failed phase.
+pub const ERROR_TAIL_CAPTURE_BYTES: usize = 4_096;
+/// Characters of sanitized error text published in a phase outcome.
+pub const ERROR_TAIL_LIMIT_CHARS: usize = 1_024;
+
+/// Keep the trailing `limit` bytes of a stream, draining the rest.
+///
+/// The tail is where a failing command reports why it failed; retaining the
+/// head would keep progress chatter and drop the error.
+fn read_tail(mut input: impl Read, limit: usize) -> Vec<u8> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut chunk = [0_u8; 8_192];
+    let mut truncated = false;
+    while let Ok(read) = input.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        kept.extend_from_slice(&chunk[..read]);
+        if kept.len() > limit {
+            let excess = kept.len() - limit;
+            kept.drain(..excess);
+            truncated = true;
+        }
+    }
+    if truncated {
+        // The first retained line is cut mid-token; drop it rather than
+        // publishing a fragment.
+        if let Some(position) = kept.iter().position(|byte| *byte == b'\n') {
+            kept.drain(..=position);
+        }
+    }
+    kept
+}
+
+/// Reduce a captured standard-error tail to bounded single-line error text.
+///
+/// A `--json` child reports one JSON error object; that object's code and
+/// message are the whole diagnosis, so prefer it over surrounding chatter.
+fn sanitize_error_tail(tail: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(tail);
+    let structured = text
+        .lines()
+        .rev()
+        .find_map(|line| json_error_text(line.trim()));
+    let message = match structured {
+        Some(message) => message,
+        None => text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" | "),
+    };
+    let cleaned = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(match cleaned.char_indices().nth(ERROR_TAIL_LIMIT_CHARS) {
+        Some((index, _)) => cleaned[..index].to_owned(),
+        None => cleaned.to_owned(),
+    })
+}
+
+fn json_error_text(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let error = value.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    Some(
+        match error.get("code").and_then(serde_json::Value::as_str) {
+            Some(code) => format!("{code}: {message}"),
+            None => message.to_owned(),
+        },
+    )
 }
 
 fn read_bounded(mut input: impl Read, limit: usize) -> Result<Vec<u8>, String> {
@@ -1786,6 +1892,10 @@ pub struct PhaseOutcome {
     pub failure: Option<FailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup_failure: Option<CleanupFailureKind>,
+    /// Bounded tail of the failing child's standard error. Present only on a
+    /// failed phase; carries the child's error text, never its arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_tail: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receipts: Vec<serde_json::Value>,
 }
@@ -1842,6 +1952,7 @@ pub fn certify_with_events(
                         execution.failure.or(Some(FailureKind::CommandFailed))
                     },
                     cleanup_failure: sanitize_cleanup_failure(execution.cleanup_failure.as_deref()),
+                    error_tail: if passed { None } else { execution.error_tail },
                     receipts: execution.receipts,
                 }
             }
@@ -1853,6 +1964,7 @@ pub fn certify_with_events(
                 exit_code: None,
                 failure: Some(FailureKind::CommandUnavailable),
                 cleanup_failure: None,
+                error_tail: None,
                 receipts: Vec::new(),
             },
         };
@@ -1932,6 +2044,7 @@ pub fn normalize_evidence(input: &[u8]) -> Result<Evidence, RunnerError> {
                     exit_code: phase.exit_code,
                     failure: (!phase.ok).then_some(FailureKind::CommandFailed),
                     cleanup_failure: None,
+                    error_tail: None,
                     receipts: Vec::new(),
                 });
                 if !phase.ok {
@@ -1976,8 +2089,12 @@ fn validate_evidence(evidence: Evidence) -> Result<Evidence, RunnerError> {
         .map(|outcome| outcome.phase);
     let statuses_are_consistent = evidence.phases.iter().enumerate().all(|(index, outcome)| {
         let failed = outcome.status == OutcomeStatus::Failed;
+        let error_tail_is_bounded = outcome.error_tail.as_ref().is_none_or(|tail| {
+            failed && !tail.is_empty() && tail.chars().count() <= ERROR_TAIL_LIMIT_CHARS
+        });
         failed == outcome.failure.is_some()
             && (failed || outcome.cleanup_failure.is_none())
+            && error_tail_is_bounded
             && (!failed || index + 1 == evidence.phases.len())
     });
     if observed_failure != evidence.failed_phase
@@ -2802,6 +2919,7 @@ mod tests {
             peak_rss_bytes: Some((index + 1) * 1_024),
             failure: None,
             cleanup_failure: None,
+            error_tail: None,
             receipts: Vec::new(),
         })
     }
@@ -2837,6 +2955,7 @@ mod tests {
             peak_rss_bytes: Some(4_096),
             failure: None,
             cleanup_failure: None,
+            error_tail: None,
             receipts: Vec::new(),
         }));
         executions.extend((4..10).map(passed_execution));
@@ -2869,6 +2988,7 @@ mod tests {
                     "child exit preserved; command-owned cache release also failed: /secret/project"
                         .to_owned(),
                 ),
+                error_tail: None,
                 receipts: Vec::new(),
             })]),
             calls: Vec::new(),
@@ -3226,6 +3346,123 @@ fi
                 "a rejected receipt must prevent all later child commands"
             );
         }
+    }
+
+    #[test]
+    fn error_tail_keeps_the_last_json_error_and_bounds_plain_text() {
+        let structured = b"progress: 40%\n{\"error\":{\"code\":\"GF_IO\",\"message\":\"storage error: control record exceeds bound\"}}\n";
+        assert_eq!(
+            sanitize_error_tail(structured).as_deref(),
+            Some("GF_IO: storage error: control record exceeds bound")
+        );
+        assert_eq!(
+            sanitize_error_tail(b"warning: slow disk\nfatal: out of descriptors\n").as_deref(),
+            Some("warning: slow disk | fatal: out of descriptors")
+        );
+        assert_eq!(sanitize_error_tail(b"   \n\n").as_deref(), None);
+        let long = "x".repeat(ERROR_TAIL_LIMIT_CHARS + 500);
+        assert_eq!(
+            sanitize_error_tail(long.as_bytes())
+                .unwrap()
+                .chars()
+                .count(),
+            ERROR_TAIL_LIMIT_CHARS
+        );
+    }
+
+    #[test]
+    fn read_tail_keeps_the_end_and_drops_the_severed_line() {
+        let chatter = format!("{}\nthe error line\n", "a".repeat(8_000));
+        let tail = read_tail(chatter.as_bytes(), 4_096);
+        assert!(tail.len() <= 4_096);
+        assert_eq!(String::from_utf8(tail).unwrap(), "the error line\n");
+        assert_eq!(
+            String::from_utf8(read_tail(&b"short\n"[..], 4_096)).unwrap(),
+            "short\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_phase_carries_the_bounded_child_error_tail() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("gf");
+        fs::write(
+            &executable,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' 'import progress 3 of 4' >&2\n",
+                "printf '%s\\n' '{\"error\":{\"code\":\"GF_IO\",\"message\":\"storage error: graph construction session: control record exceeds bound\"}}' >&2\n",
+                "exit 3\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut profile = tiny_profile();
+        profile.executable = executable.to_string_lossy().into_owned();
+        let mut executor = PublicProcessExecutor::default();
+        let evidence = certify(&profile, &mut executor).unwrap();
+
+        assert_eq!(evidence.status, OutcomeStatus::Failed);
+        assert_eq!(evidence.failed_phase, Some(Phase::Admission));
+        let outcome = &evidence.phases[0];
+        assert_eq!(outcome.exit_code, Some(3));
+        assert_eq!(outcome.failure, Some(FailureKind::CommandFailed));
+        assert_eq!(
+            outcome.error_tail.as_deref(),
+            Some("GF_IO: storage error: graph construction session: control record exceeds bound"),
+            "the failing child's own error text must survive into the phase outcome"
+        );
+        let encoded = serde_json::to_string(&evidence).unwrap();
+        assert!(encoded.contains(
+            "\"error_tail\":\"GF_IO: storage error: graph construction session: control record exceeds bound\""
+        ));
+        for forbidden in ["args", "stdout", "stderr", "credential", "secret"] {
+            assert!(
+                !encoded.contains(forbidden),
+                "failed evidence must not name {forbidden}"
+            );
+        }
+        assert_eq!(normalize_evidence(encoded.as_bytes()).unwrap(), evidence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passing_phase_publishes_no_error_tail_and_a_chatty_child_cannot_block() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("gf");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ni=0\nwhile [ $i -lt 4000 ]; do printf '%s\\n' \"diagnostic chatter line $i\" >&2; i=$((i + 1)); done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut profile = tiny_profile();
+        profile.executable = executable.to_string_lossy().into_owned();
+        let execution = PublicProcessExecutor::default()
+            .execute(&profile, &profile.phases[0])
+            .unwrap();
+        assert_eq!(execution.exit_code, Some(0));
+        assert_eq!(execution.error_tail, None);
+    }
+
+    #[test]
+    fn evidence_refuses_an_error_tail_on_a_passed_phase() {
+        let mut executor = FakeExecutor {
+            executions: (0..10).map(passed_execution).collect(),
+            calls: Vec::new(),
+        };
+        let mut evidence = certify(&tiny_profile(), &mut executor).unwrap();
+        evidence.phases[0].error_tail = Some("child text".to_owned());
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        assert!(matches!(
+            normalize_evidence(&encoded),
+            Err(RunnerError::Legacy)
+        ));
     }
 
     #[cfg(unix)]
