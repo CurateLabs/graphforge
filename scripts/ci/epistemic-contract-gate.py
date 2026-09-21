@@ -18,9 +18,9 @@ MATRIX_PATH = ROOT / "tests/contracts/epistemic-contract-matrix.json"
 KNOWLEDGE_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
 EPISTEMIC_INVENTORY = ROOT / "docs/reference/epistemic-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
-KNOWLEDGE_BASELINE_SHA = "215e5860048ba0d4a0b7e7430f7f02a65ec132de"
+KNOWLEDGE_BASELINE_SHA = "9ba4a3cd70b117e02c2494b68385a2b2f6308dc8"
 KNOWLEDGE_BASELINE_INVENTORY_SHA256 = (
-    "d1d0f4140cc56134c69d51fc7cc1ee76c6372054590ee2392474a1c24981833a"
+    "49681ad89ba2840211bcb1619c5ff2a0ceb6d4f3c7b4e24d2098dd30f4f8c1d0"
 )
 REQUIRED_CASES = {
     "knowledge-frozen-baseline",
