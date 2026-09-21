@@ -1604,38 +1604,38 @@ mod group_boundary {
     /// property-bearing edge chunks: every chunk crosses a sealing boundary,
     /// and the property-bearing edges exercise the row-partition resume path.
     fn stage_boundary_chunks(session: &mut GraphConstructionSession) {
-        for chunk in 0..2 {
+        stage_boundary_groups(session, 1);
+    }
+
+    /// `groups` repetitions of the ten-chunk fixture above, over disjoint
+    /// identity ranges. Every chunk still crosses a sealing boundary, so the
+    /// boundary count — and with it the sealed-segment count — scales with
+    /// `groups` while the shape's families and outputs do not (#1526).
+    fn stage_boundary_groups(session: &mut GraphConstructionSession, groups: u128) {
+        for index in 0..groups * 2 {
             session
                 .append(
                     ConstructionChunkKind::Node,
-                    &format!("nodes-{chunk}"),
-                    &node_batch(1 + chunk * 8192, 8192),
+                    &format!("nodes-{index}"),
+                    &node_batch(1 + index * 8192, 8192),
                 )
                 .unwrap();
         }
-        for chunk in 0..6 {
+        for index in 0..groups * 6 {
             session
                 .append(
                     ConstructionChunkKind::Edge,
-                    &format!("edges-{chunk}"),
-                    &edge_batch(
-                        1_000_000 + chunk as u128 * 8192,
-                        1 + chunk as u128 * 8192 % 8192,
-                        8192,
-                        8192,
-                    ),
+                    &format!("edges-{index}"),
+                    &edge_batch(1_000_000 + index * 8192, 1, 8192, 8192),
                 )
                 .unwrap();
         }
-        for chunk in 0..2 {
+        for index in 0..groups * 2 {
             session
                 .append(
                     ConstructionChunkKind::Edge,
-                    &format!("weighted-edges-{chunk}"),
-                    &edge_property_batch(
-                        2_000_000 + chunk as u128 * 8192,
-                        8192,
-                    ),
+                    &format!("weighted-edges-{index}"),
+                    &edge_property_batch(2_000_000 + index * 8192, 8192),
                 )
                 .unwrap();
         }
@@ -1767,6 +1767,243 @@ mod group_boundary {
                 clean_current,
                 "{boundary}"
             );
+        }
+    }
+
+    /// Files in the session directory keyed by the allocation-ledger identity
+    /// each one would occupy, so a ledger entry can be named.
+    fn session_identity_names(session_path: &Path) -> BTreeMap<String, String> {
+        let mut names = BTreeMap::new();
+        for entry in std::fs::read_dir(session_path).unwrap() {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_file() {
+                continue;
+            }
+            let file = std::fs::File::open(entry.path()).unwrap();
+            let identity = file_identity(&file).unwrap();
+            names.insert(
+                format!("{:016x}:{}", identity.volume_serial, hex(&identity.file_id)),
+                entry.file_name().to_string_lossy().into_owned(),
+            );
+        }
+        names
+    }
+
+    fn segment_names(session_path: &Path) -> Vec<String> {
+        std::fs::read_dir(session_path)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                crate::graph_construction::partition_shaping::is_partition_artifact_name(&name).then_some(name)
+            })
+            .collect()
+    }
+
+    fn session_directory(root: &Path, operation: u128) -> std::path::PathBuf {
+        root.join(".graphforge-construction")
+            .join(format!("{operation:032x}"))
+    }
+
+    /// Shape `groups` repetitions of the boundary fixture and report the
+    /// shape-end durable state: boundaries sealed, the allocation ledger the
+    /// shape-end checkpoint persisted, and the two control sizes.
+    fn shape_end_state(
+        root: &Path,
+        operation: u128,
+        groups: u128,
+    ) -> (usize, BTreeMap<String, String>, u64, u64) {
+        crate::open_or_initialize_project(root).unwrap();
+        let mut session = boundary_session(root, operation);
+        stage_boundary_groups(&mut session, groups);
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.edge_count, groups as u64 * 8 * 8192);
+        let session_path = session_directory(root, operation);
+        // Sealing happened and retention was in force: every chunk below this
+        // sequence was retired behind a progress boundary, which is exactly
+        // the condition under which segments are retained (#1418). The
+        // progress controls themselves are already unlinked by the shape-end
+        // supersession, so this is the surviving record of the boundaries.
+        let boundaries = session.shape_boundary_retired_through as usize;
+        assert!(boundaries >= 2, "groups={groups} boundaries={boundaries}");
+        // Every segment is gone by the shape end.
+        assert_eq!(
+            segment_names(&session_path),
+            Vec::<String>::new(),
+            "groups={groups}: sealed segment survived the shape end"
+        );
+        let intent: ShapeIntent =
+            serde_json::from_slice(&std::fs::read(session_path.join(SHAPE_INTENT)).unwrap())
+                .unwrap();
+        assert!(intent.complete);
+        let final_evidence = intent.final_evidence.as_ref().unwrap();
+        // Transition history is live operation evidence; a durable control
+        // that serializes it grows with every artifact the shape installed.
+        assert!(
+            final_evidence.storage_allocation_transitions.is_empty(),
+            "groups={groups}"
+        );
+        let checkpoint: Checkpoint =
+            serde_json::from_slice(&std::fs::read(session_path.join(CHECKPOINT)).unwrap()).unwrap();
+        // The shape-end checkpoint is the record under the 1 MiB bound, and it
+        // carries exactly the intent's ledger.
+        assert_eq!(
+            checkpoint.evidence.storage_active_identity_allocated_bytes,
+            final_evidence.storage_active_identity_allocated_bytes,
+            "groups={groups}"
+        );
+        let names = session_identity_names(&session_path);
+        let mut ledger = BTreeMap::new();
+        for key in final_evidence
+            .storage_active_identity_allocated_bytes
+            .keys()
+        {
+            // No entry for a file that is gone, and none for a segment.
+            let name = names
+                .get(key)
+                .unwrap_or_else(|| panic!("groups={groups}: ledger entry {key} names no file"));
+            assert!(
+                !crate::graph_construction::partition_shaping::is_partition_artifact_name(name),
+                "groups={groups}: ledger retained segment {name}"
+            );
+            ledger.insert(key.clone(), name.clone());
+        }
+        let intent_bytes = std::fs::metadata(session_path.join(SHAPE_INTENT))
+            .unwrap()
+            .len();
+        let checkpoint_bytes = std::fs::metadata(session_path.join(CHECKPOINT)).unwrap().len();
+        assert!(checkpoint_bytes < MAX_CONTROL_BYTES, "groups={groups}");
+        assert!(intent_bytes < MAX_SHAPE_CONTROL_BYTES, "groups={groups}");
+        (boundaries, ledger, checkpoint_bytes, intent_bytes)
+    }
+
+    /// #1526. The durable shape-end controls must not grow with the number of
+    /// sealed segments.
+    ///
+    /// This is asserted as a slope rather than a threshold: doubling the
+    /// routed chunks doubles the sealing boundaries, and so the segments each
+    /// boundary seals, while the shape's families and outputs stay fixed. The
+    /// allocation ledger the shape-end checkpoint persists must name exactly
+    /// the same files in both runs. A threshold assertion ("under 1 MiB at
+    /// this size") would pass on a tree that merely still had margin, which
+    /// is how #1519 reached S22 before failing.
+    #[test]
+    fn shape_end_controls_are_independent_of_sealed_segment_count() {
+        let single = TempDir::new().unwrap();
+        let (single_boundaries, single_ledger, ..) =
+            shape_end_state(single.path(), 141_802, 1);
+        let double = TempDir::new().unwrap();
+        let (double_boundaries, double_ledger, ..) =
+            shape_end_state(double.path(), 141_803, 2);
+        assert!(
+            double_boundaries > single_boundaries,
+            "the fixture must scale its boundaries: {single_boundaries} -> {double_boundaries}"
+        );
+        // Same named files, and therefore the same entry count, under twice
+        // the sealed segments. Keys are inode-ordered, so compare the names.
+        let names = |ledger: &BTreeMap<String, String>| {
+            let mut names: Vec<String> = ledger.values().cloned().collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(&single_ledger),
+            names(&double_ledger),
+            "the shape-end ledger grew with the sealed-segment count"
+        );
+        // The shape's own outputs are the whole ledger: nothing the routing
+        // installed per boundary survives into the durable control.
+        assert_eq!(names(&single_ledger).len(), 7);
+    }
+
+    #[test]
+    fn shape_end_segment_discard_crash_child() {
+        let Ok(path) = std::env::var("GF_SUPERSESSION_CRASH_ROOT") else {
+            return;
+        };
+        let mut session = boundary_session(Path::new(&path), 141_804);
+        stage_boundary_groups(&mut session, 1);
+        session.shape_canonical_with_cancellation(|| false).unwrap();
+    }
+
+    /// #1526. The two crash windows the split retirement introduces: after the
+    /// complete inventory is durable but before the segments are unlinked, and
+    /// after they are unlinked but before the shape-end checkpoint. Recovery
+    /// must complete with the same outputs and an exact ledger in both.
+    #[test]
+    fn shape_end_crashes_discard_segments_and_complete() {
+        for (failpoint, segments_survive) in [
+            ("shape.after_complete_inventory", true),
+            ("shape.after_segment_discard", false),
+        ] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "graph_construction::tests::group_boundary::shape_end_segment_discard_crash_child",
+                ])
+                .env("GF_SUPERSESSION_CRASH_ROOT", root.path())
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            let session_path = session_directory(root.path(), 141_804);
+            // The positive control for the window: the complete inventory is
+            // durable, and the segments it excluded from the ledger are still
+            // on disk at the first failpoint and gone at the second.
+            let intent: ShapeIntent =
+                serde_json::from_slice(&std::fs::read(session_path.join(SHAPE_INTENT)).unwrap())
+                    .unwrap();
+            assert!(intent.complete, "{failpoint}");
+            assert_eq!(
+                !segment_names(&session_path).is_empty(),
+                segments_survive,
+                "{failpoint}: segment survival"
+            );
+            assert!(
+                !progress_control_names(&session_path).is_empty(),
+                "{failpoint}"
+            );
+
+            // A clean reference run of the same fixture for ledger equality.
+            let clean_root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(clean_root.path()).unwrap();
+            let mut clean = boundary_session(clean_root.path(), 141_804);
+            complete_boundary(&mut clean);
+            let clean_current = clean.evidence().storage_current.clone();
+            drop(clean);
+
+            let mut recovered = boundary_session(root.path(), 141_804);
+            // Recovery closed the window: nothing is left to collect, and the
+            // restored ledger is the reconciled one.
+            assert_eq!(
+                segment_names(&session_path),
+                Vec::<String>::new(),
+                "{failpoint}: recovery left a segment behind"
+            );
+            complete_boundary(&mut recovered);
+            assert!(recovered.checkpoint.inputs_retired, "{failpoint}");
+            assert!(recovered.checkpoint.shape_retired, "{failpoint}");
+            assert_eq!(
+                recovered.evidence().current_merge_temporary_allocated_bytes,
+                0,
+                "{failpoint}"
+            );
+            assert_eq!(
+                recovered.evidence().storage_current,
+                clean_current,
+                "{failpoint}: recovered run must reconcile every allocation"
+            );
+            assert_eq!(published_edge_count(root.path()), 8 * 8192, "{failpoint}");
         }
     }
 

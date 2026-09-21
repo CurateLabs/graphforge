@@ -25,13 +25,14 @@ use super::{
     canonical_artifact_target, checked_evidence_sum, combine_cache_cleanup,
     compact_parent_surrogate_tails, construction_failpoint, decode_bounded, decode_shape_intent,
     file_identity, file_link_count, hex, install_control, install_control_batched,
-    is_canonical_lower_hex, is_canonical_sha256, load_shape_progress_chain,
+    install_shape_intent, is_canonical_lower_hex, is_canonical_sha256, load_shape_progress_chain,
     merge_cache_release_evidence, open_counted_fixed_reader, property_free_schema_sha256,
     read_run_record, receipt_for_existing, receipt_for_existing_with_work,
-    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
-    release_counted_reader_cache, replace_checkpoint_control, replace_control,
-    retire_staged_payload, scan_shape_segments, sha256, shape_authority_sha256,
-    shape_publication_failure, storage, unlink_shape_artifact, validate_parquet_metadata,
+    reconcile_retained_shape_segments, record_shape_artifact_install, reject_cancelled,
+    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
+    replace_shape_intent, retained_shape_segments, retire_staged_payload, scan_shape_segments,
+    sha256, shape_authority_sha256, shape_publication_failure, storage,
+    unlink_reconciled_shape_segments, unlink_shape_artifact, validate_parquet_metadata,
 };
 use std::io::Seek;
 
@@ -425,7 +426,7 @@ impl GraphConstructionSession {
             }
         }
         let mut catalog_authority = Sha256::new();
-        let shape_intent = ShapeIntent {
+        let mut shape_intent = ShapeIntent {
             format_version: self.checkpoint.format_version,
             operation_uuid: self.checkpoint.operation_uuid,
             project_identity: self.checkpoint.project_identity.clone(),
@@ -446,7 +447,7 @@ impl GraphConstructionSession {
             partition_identity_rows: Vec::new(),
         };
         if resume.is_none() {
-            install_control(&self.root, SHAPE_INTENT, &shape_intent)?;
+            install_shape_intent(&self.root, &mut shape_intent)?;
         }
         // Sealing cadence (#1418): retired staged input is the point of the
         // boundary machinery, but every boundary also costs one fsync per
@@ -928,10 +929,23 @@ impl GraphConstructionSession {
         )?;
         let shape_authority_sha256 = shape_authority_sha256(&shape, &outputs)?;
         self.checkpoint.shape_authority_sha256 = Some(shape_authority_sha256.clone());
-        replace_control(
+        // Boundary-retained segments (#1418) have no consumer left: every
+        // family's output is installed and authenticated above. Charge their
+        // removal here so the complete inventory and the shape-end checkpoint
+        // both record the post-retirement ledger; a durable control whose
+        // allocation map carried one entry per sealed segment grew with routed
+        // input and exceeded its bound (#1526). The payloads follow the
+        // complete inventory, so a crash in between leaves them for recovery
+        // rather than stranding a resumable shape with no segments.
+        let retained_segments = retained_shape_segments(&self.root, &mut cancelled)?;
+        reconcile_retained_shape_segments(
+            &mut self.checkpoint.evidence,
+            &retained_segments,
+            &mut cancelled,
+        )?;
+        replace_shape_intent(
             &self.root,
-            SHAPE_INTENT,
-            &ShapeIntent {
+            &mut ShapeIntent {
                 format_version: self.checkpoint.format_version,
                 operation_uuid: self.checkpoint.operation_uuid,
                 project_identity: self.checkpoint.project_identity.clone(),
@@ -953,6 +967,8 @@ impl GraphConstructionSession {
             },
         )?;
         construction_failpoint("shape.after_complete_inventory");
+        unlink_reconciled_shape_segments(&self.root, &retained_segments, &mut cancelled)?;
+        construction_failpoint("shape.after_segment_discard");
         replace_checkpoint_control(&self.root, &self.checkpoint)?;
         construction_failpoint("shape.after_evidence_checkpoint");
         self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;

@@ -262,18 +262,19 @@ pub(super) fn reject_existing_merge_artifacts(root: &StableDirectory) -> Result<
     Ok(())
 }
 
-/// Returns the authentication work performed and whether the retained shape
+/// Returns the authentication work performed, whether the retained shape
 /// output payloads were verified, so the session does not repeat that pass at
-/// its next trust boundary (#1392).
+/// its next trust boundary (#1392), and the chunk sequence a completed shape
+/// already retired behind a progress boundary.
 #[allow(clippy::too_many_lines)] // One recovery decision tree; the refusal arms are the invariant.
 pub(super) fn recover_shape_intent(
     root: &StableDirectory,
     checkpoint: &mut Checkpoint,
-) -> Result<(ReadWork, bool), GfError> {
+) -> Result<(ReadWork, bool, u64), GfError> {
     let mut file = match root.open_child_file(OsStr::new(SHAPE_INTENT)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((ReadWork::default(), false));
+            return Ok((ReadWork::default(), false, 0));
         }
         Err(error) => return Err(storage(error)),
     };
@@ -325,6 +326,20 @@ pub(super) fn recover_shape_intent(
             final_evidence,
             expected_shape_authority,
         )?;
+        // The restored ledger is the post-retirement one the shape end
+        // recorded before it unlinked its boundary-retained segments (#1526).
+        // Any segment still on disk is a crash inside that window; it is
+        // garbage under the recovered authority, so remove it here rather than
+        // leaving it for the next boundary that happens to scan.
+        discard_completed_shape_segments(root, &checkpoint.evidence)?;
+        // The boundaries a completed shape retired are still the reason its
+        // staged inputs are gone and their ledger entries reconciled (#1418).
+        // Supersession must skip those sequences here for the same reason the
+        // resumed path does: their inode keys may already belong to files this
+        // process installed.
+        let retired_through = load_shape_progress_chain(root, checkpoint)?
+            .last()
+            .map_or(0, LoadedShapeProgress::retired_through);
         // Charged after the completed shape's own evidence is restored, and
         // made durable by the supersession checkpoint the caller writes next,
         // exactly where this read work was charged before it moved to the
@@ -341,7 +356,7 @@ pub(super) fn recover_shape_intent(
             .checked_add(work.operations)
             .ok_or_else(|| storage("shape recovery read operations overflow"))?;
         account_cache_release(work.cache_release, &mut checkpoint.evidence)?;
-        return Ok((ReadWork::default(), verified));
+        return Ok((ReadWork::default(), verified, retired_through));
     }
     if intent.shape.is_some() || !intent.outputs.is_empty() {
         return Err(storage("incomplete shape intent claims completed output"));
@@ -392,7 +407,7 @@ pub(super) fn recover_shape_intent(
     if head_boundary.is_none() {
         unlink_named(root, SHAPE_INTENT)?;
     }
-    Ok((work, false))
+    Ok((work, false, 0))
 }
 
 /// Stream and checksum every retained payload of a completed shape, returning
@@ -681,6 +696,108 @@ pub(super) fn unlink_shape_artifact(
     let receipt = receipt_for_existing(root, name)?;
     unlink_artifact(root, &receipt)?;
     construction_failpoint("shape.after_derived_unlink");
+    reconcile_shape_artifact_removal(evidence, &receipt)
+}
+
+/// Every sealed partition segment still on disk, in name order, with the
+/// receipt authority each one's removal is charged against.
+///
+/// Boundary-retained segments (#1418) are the resume state only while the
+/// shape is incomplete. This is the inventory the shape end reconciles and
+/// removes once the complete inventory is durable; a directory scan is the
+/// authority because the segment set is exactly what the sealing boundaries
+/// left behind, and it is the same set a recovered process observes.
+pub(super) fn retained_shape_segments(
+    root: &StableDirectory,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<ArtifactReceipt>, GfError> {
+    let mut names: Vec<String> = root
+        .child_names()
+        .map_err(storage)?
+        .into_iter()
+        .filter_map(|child| child.into_string().ok())
+        .filter(|name| super::partition_shaping::is_partition_artifact_name(name))
+        .collect();
+    names.sort_unstable();
+    let mut receipts = Vec::with_capacity(names.len());
+    for name in &names {
+        super::reject_cancelled(cancelled)?;
+        receipts.push(receipt_for_existing(root, name)?);
+    }
+    Ok(receipts)
+}
+
+/// Charge the removal of every named segment against the allocation ledgers,
+/// leaving the payloads on disk for [`unlink_reconciled_shape_segments`].
+///
+/// Splitting the accounting from the unlink is what keeps the durable
+/// shape-end controls independent of the sealed-segment count (#1526): the
+/// complete inventory and the checkpoint that follow it both record the
+/// post-retirement ledger, so neither grows with routed input. The window
+/// between the two is closed by recovery, which removes whatever segments a
+/// crash left behind under exactly this already-reconciled ledger.
+pub(super) fn reconcile_retained_shape_segments(
+    evidence: &mut GraphConstructionEvidence,
+    segments: &[ArtifactReceipt],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GfError> {
+    for receipt in segments {
+        super::reject_cancelled(cancelled)?;
+        reconcile_shape_artifact_removal(evidence, receipt)?;
+    }
+    Ok(())
+}
+
+/// Unlink already-reconciled segments. No ledger is touched here: their
+/// allocation was charged by [`reconcile_retained_shape_segments`] before the
+/// complete inventory recorded it.
+pub(super) fn unlink_reconciled_shape_segments(
+    root: &StableDirectory,
+    segments: &[ArtifactReceipt],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GfError> {
+    for receipt in segments {
+        super::reject_cancelled(cancelled)?;
+        unlink_artifact(root, receipt)?;
+    }
+    Ok(())
+}
+
+/// Remove segments a crash left behind between the complete inventory and the
+/// shape-end checkpoint.
+///
+/// The restored ledger already excludes them, so each one is refused if it
+/// still carries an active allocation entry: that would mean the segment was
+/// never reconciled and this is not the window it claims to be.
+pub(super) fn discard_completed_shape_segments(
+    root: &StableDirectory,
+    evidence: &GraphConstructionEvidence,
+) -> Result<(), GfError> {
+    for receipt in retained_shape_segments(root, &mut || false)? {
+        let identity_key = format!(
+            "{:016x}:{}",
+            receipt.identity.volume_serial, receipt.identity.file_id
+        );
+        if evidence
+            .storage_active_identity_allocated_bytes
+            .contains_key(&identity_key)
+        {
+            return Err(storage(
+                "completed shape segment retains an active allocation",
+            ));
+        }
+        unlink_artifact(root, &receipt)?;
+    }
+    Ok(())
+}
+
+/// Charge one removed shape artifact against the identity, category and
+/// merge-temporary ledgers.
+fn reconcile_shape_artifact_removal(
+    evidence: &mut GraphConstructionEvidence,
+    receipt: &ArtifactReceipt,
+) -> Result<(), GfError> {
+    let name = &receipt.name;
     let identity_key = format!(
         "{:016x}:{}",
         receipt.identity.volume_serial, receipt.identity.file_id
