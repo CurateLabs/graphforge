@@ -49,17 +49,19 @@ mod recovery;
 use recovery::{
     ReadWork, authenticate_artifact, canonical_artifact_target,
     cleanup_authenticated_control_temps, cleanup_failed_shape_output, cleanup_owned_artifact_temps,
-    cleanup_shape_publication, is_control_temp, receipt_for_existing,
-    receipt_for_existing_with_work, recover_shape_intent, reject_existing_merge_artifacts,
-    remove_owned_directory_tree, shape_publication_failure, shape_publication_io_failure,
-    unlink_named, unlink_shape_artifact, unlink_writer_capability,
+    cleanup_shape_publication, discard_completed_shape_segments, is_control_temp,
+    receipt_for_existing, receipt_for_existing_with_work, reconcile_retained_shape_segments,
+    recover_shape_intent, reject_existing_merge_artifacts, remove_owned_directory_tree,
+    retained_shape_segments, shape_publication_failure, shape_publication_io_failure, unlink_named,
+    unlink_reconciled_shape_segments, unlink_shape_artifact, unlink_writer_capability,
 };
 mod controls;
 use controls::{
     SealDirectoryBatch, artifact_temp, control_sha256, decode_bounded, decode_shape_intent,
-    initial_checkpoint_format, install_control, install_control_batched, is_canonical_lower_hex,
-    is_canonical_sha256, read_bounded_limit, replace_checkpoint_control, replace_control,
-    validate_checkpoint, validate_parent_phase_bytes, validate_sha256,
+    initial_checkpoint_format, install_control, install_control_batched, install_shape_intent,
+    is_canonical_lower_hex, is_canonical_sha256, read_bounded_limit, replace_checkpoint_control,
+    replace_control, replace_shape_intent, validate_checkpoint, validate_parent_phase_bytes,
+    validate_sha256,
 };
 
 mod catalog;
@@ -1624,9 +1626,10 @@ impl GraphConstructionSession {
                 .entry(category)
                 .or_default();
         }
-        let (shape_recovery_work, shape_outputs_verified) =
+        let (shape_recovery_work, shape_outputs_verified, shape_boundary_retired_through) =
             recover_shape_intent(&session.root, &mut session.checkpoint)?;
         session.shape_outputs_verified = shape_outputs_verified;
+        session.shape_boundary_retired_through = shape_boundary_retired_through;
         session.recover_intent()?;
         if session
             .checkpoint

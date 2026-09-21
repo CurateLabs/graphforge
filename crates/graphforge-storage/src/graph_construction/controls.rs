@@ -381,6 +381,42 @@ pub(super) fn replace_checkpoint_control(
     replace_control(root, CHECKPOINT, &durable)
 }
 
+/// Persist a shape intent without transition history.
+///
+/// The same rule the checkpoint states above: transition history is live
+/// operation evidence, and serializing it makes a fixed-purpose durable
+/// control grow with the number of artifacts the shape installed. Nothing
+/// reads it back as authority — recovery clears both sides before comparing
+/// persisted evidence, adopts the intent's transitions only to reseed a
+/// single-entry union, and `copy_post_shape_io` overwrites them from the
+/// intent it is comparing against (#1526).
+pub(super) fn install_shape_intent(
+    root: &StableDirectory,
+    intent: &mut ShapeIntent,
+) -> Result<(), GfError> {
+    drop_live_evidence(intent);
+    install_control(root, SHAPE_INTENT, intent)
+}
+
+/// Replace a shape intent without transition history; see
+/// [`install_shape_intent`].
+pub(super) fn replace_shape_intent(
+    root: &StableDirectory,
+    intent: &mut ShapeIntent,
+) -> Result<(), GfError> {
+    drop_live_evidence(intent);
+    replace_control(root, SHAPE_INTENT, intent)
+}
+
+/// Drop the transition history from an intent's evidence, in place, so the
+/// record written and the record the writer holds agree.
+fn drop_live_evidence(intent: &mut ShapeIntent) {
+    intent.baseline_evidence.storage_allocation_transitions = Vec::new();
+    if let Some(final_evidence) = intent.final_evidence.as_mut() {
+        final_evidence.storage_allocation_transitions = Vec::new();
+    }
+}
+
 fn control_limit(target: &str) -> u64 {
     if target == SHAPE_INTENT || target.starts_with(super::progress::SHAPE_PROGRESS_PREFIX) {
         MAX_SHAPE_CONTROL_BYTES
