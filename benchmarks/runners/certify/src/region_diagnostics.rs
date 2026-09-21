@@ -78,7 +78,7 @@ const MEASUREMENTS: [&str; 9] = [
     "thread_iowait_ns",
     "thread_unknown_ns",
 ];
-const REGIONS: [&str; 21] = [
+const REGIONS: [&str; 30] = [
     "import_command",
     "begin_import",
     "resume_import",
@@ -100,6 +100,15 @@ const REGIONS: [&str; 21] = [
     "artifact_authentication",
     "inventory_authentication",
     "inventory_payload_authentication",
+    "prepare_encoding",
+    "publication_authentication",
+    "cas_install",
+    "publication_intent",
+    "generation_commit",
+    "publication_receipt",
+    "hydration",
+    "read_authority",
+    "adjacency_encoding",
 ];
 
 pub(crate) fn valid_snapshot(value: &Value) -> bool {
@@ -170,5 +179,38 @@ mod tests {
         assert!(valid_snapshot(&value));
         value["regions"]["private/path"] = value["regions"]["import_command"].clone();
         assert!(!valid_snapshot(&value));
+    }
+
+    #[test]
+    fn snapshot_contract_accepts_every_allowlisted_region_name() {
+        let capture =
+            graphforge_storage::concurrency_attribution::RegionCapture::start("import_command");
+        for name in REGIONS.iter().skip(1) {
+            let _scope = graphforge_storage::concurrency_attribution::RegionScope::named(name);
+        }
+        let value = serde_json::to_value(capture.finish()).unwrap();
+        assert!(valid_snapshot(&value));
+        for name in REGIONS.iter().skip(1) {
+            assert!(
+                value["regions"][format!("import_command/{name}")].is_object(),
+                "{name} missing from the capture"
+            );
+        }
+    }
+
+    #[test]
+    fn region_allowlist_matches_certification_schema_pattern() {
+        let schema = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/certification-evidence.json"
+        ))
+        .unwrap();
+        let start = schema.find("^import_command(/(").unwrap() + "^import_command(/(".len();
+        let end = start + schema[start..].find("))").unwrap();
+        let mut schema_names: Vec<&str> = schema[start..end].split('|').collect();
+        schema_names.sort_unstable();
+        let mut rust_names: Vec<&str> = REGIONS.iter().copied().skip(1).collect();
+        rust_names.sort_unstable();
+        assert_eq!(schema_names, rust_names);
     }
 }

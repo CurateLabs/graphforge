@@ -47,7 +47,7 @@
           "minProperties": 1,
           "maxProperties": 256,
           "propertyNames": {
-            "pattern": "^import_command(/(begin_import|resume_import|register_arrow|register_parquet|checkpoint|validate|commit|open_construction|append|seal|publish|shaping|canonical_encoding|seal_authentication|fsync|normalization|lock_wait|artifact_authentication|inventory_authentication|inventory_payload_authentication)){0,15}$"
+            "pattern": "^import_command(/(begin_import|resume_import|register_arrow|register_parquet|checkpoint|validate|commit|open_construction|append|seal|publish|shaping|canonical_encoding|seal_authentication|fsync|normalization|lock_wait|artifact_authentication|inventory_authentication|inventory_payload_authentication|prepare_encoding|publication_authentication|cas_install|publication_intent|generation_commit|publication_receipt|hydration|read_authority|adjacency_encoding)){0,15}$"
           },
           "additionalProperties": {
             "type": "object",

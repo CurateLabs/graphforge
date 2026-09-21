@@ -1222,7 +1222,13 @@ mod lifecycle_budget {
             let balance: PartitionBalance = partitioner.balance().clone();
             balance.assert_balanced("linear work").unwrap();
             let output = partitioner
-                .finish_optional("staged-identities.run", &mut || false, &mut evidence)
+                .finish_optional(
+            "staged-identities.run",
+            0,
+            false,
+            &mut || false,
+            &mut evidence,
+        )
                 .unwrap()
                 .unwrap();
             let mut file = session.root.open_child_file(OsStr::new(&output)).unwrap();
@@ -1553,6 +1559,8 @@ mod lifecycle_budget {
                 None,
                 window_rows,
                 partition::default_materialization_bytes(),
+                0,
+                false,
                 &mut || false,
                 &mut evidence,
             )
@@ -1564,5 +1572,233 @@ mod lifecycle_budget {
             );
             assert_eq!(std::fs::read(path).unwrap(), malformed);
         }
+    }
+}
+
+mod group_boundary {
+    use super::*;
+
+    /// The staged-input byte count that crosses one sealing boundary in this
+    /// fixture: `partition_count: 1` puts one spill behind each family, so
+    /// the cadence threshold is four spills times 255 KiB, and an 8192-row
+    /// edge chunk stages well above it.
+    fn boundary_budgets() -> GraphConstructionBudgets {
+        GraphConstructionBudgets {
+            partition_count: 1,
+            ..Default::default()
+        }
+    }
+
+    fn boundary_session(path: &Path, operation: u128) -> GraphConstructionSession {
+        GraphConstructionSession::open_with_mode(
+            path,
+            Uuid::from_u128(operation),
+            0,
+            graphforge_core::OntologyMode::Exploratory,
+            boundary_budgets(),
+        )
+        .unwrap()
+    }
+
+    /// Two property-free node chunks, six property-free edge chunks and two
+    /// property-bearing edge chunks: every chunk crosses a sealing boundary,
+    /// and the property-bearing edges exercise the row-partition resume path.
+    fn stage_boundary_chunks(session: &mut GraphConstructionSession) {
+        for chunk in 0..2 {
+            session
+                .append(
+                    ConstructionChunkKind::Node,
+                    &format!("nodes-{chunk}"),
+                    &node_batch(1 + chunk * 8192, 8192),
+                )
+                .unwrap();
+        }
+        for chunk in 0..6 {
+            session
+                .append(
+                    ConstructionChunkKind::Edge,
+                    &format!("edges-{chunk}"),
+                    &edge_batch(
+                        1_000_000 + chunk as u128 * 8192,
+                        1 + chunk as u128 * 8192 % 8192,
+                        8192,
+                        8192,
+                    ),
+                )
+                .unwrap();
+        }
+        for chunk in 0..2 {
+            session
+                .append(
+                    ConstructionChunkKind::Edge,
+                    &format!("weighted-edges-{chunk}"),
+                    &edge_property_batch(
+                        2_000_000 + chunk as u128 * 8192,
+                        8192,
+                    ),
+                )
+                .unwrap();
+        }
+        session.seal().unwrap();
+    }
+
+    fn complete_boundary(session: &mut GraphConstructionSession) {
+        if session.state() == GraphConstructionState::Staging {
+            stage_boundary_chunks(session);
+        }
+        let encoded = session.prepare_canonical_encoding(1).unwrap();
+        session
+            .publish_canonical(&encoded, Uuid::from_u128(2_119_501), Uuid::from_u128(2_119_502))
+            .unwrap();
+    }
+
+    fn published_edge_count(path: &Path) -> usize {
+        let selected = crate::resolve_project_generation(path).unwrap();
+        let inventory =
+            crate::AuthenticatedPropertyInventory::from_resolved_generation(&selected).unwrap();
+        crate::read_edges_from_inventory(
+            &inventory,
+            "*",
+            graphforge_core::OntologyMode::Exploratory,
+        )
+        .unwrap()
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum()
+    }
+
+    fn progress_control_names(session_path: &Path) -> Vec<String> {
+        std::fs::read_dir(session_path)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                name.starts_with("shape-progress-").then_some(name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn group_boundary_crash_child() {
+        let Ok(path) = std::env::var("GF_SUPERSESSION_CRASH_ROOT") else {
+            return;
+        };
+        let mut session = boundary_session(Path::new(&path), 141_800);
+        complete_boundary(&mut session);
+    }
+
+    #[test]
+    fn group_boundary_crashes_resume_with_retired_inputs() {
+        for boundary in ["shape.after_group_seal", "shape.after_group_retire"] {
+            let root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(root.path()).unwrap();
+            let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "graph_construction::tests::group_boundary::group_boundary_crash_child",
+                ])
+                .env("GF_SUPERSESSION_CRASH_ROOT", root.path())
+                .env(
+                    "GF_CONSTRUCTION_FAILPOINT_COOKIE",
+                    "graphforge-construction-test-v1",
+                )
+                .env("GF_CONSTRUCTION_FAILPOINT", boundary)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{boundary}");
+            assert_eq!(
+                std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+                prior
+            );
+            // The crash happened behind at least one durable boundary: the
+            // progress chain exists. after_group_retire additionally proves
+            // the retirement ran: the first chunk's staged input is gone
+            // while the chain still records it as sealed.
+            let session_path = root
+                .path()
+                .join(".graphforge-construction")
+                .join(format!("{:032x}", 141_800));
+            let controls = progress_control_names(&session_path);
+            assert!(!controls.is_empty(), "{boundary}");
+            if boundary == "shape.after_group_retire" {
+                assert!(
+                    !session_path
+                        .join("chunk-00000000000000000000-node.parquet")
+                        .exists(),
+                    "{boundary}: retired staged input survived"
+                );
+            }
+            // A clean reference run of the same fixture for ledger equality.
+            let clean_root = TempDir::new().unwrap();
+            crate::open_or_initialize_project(clean_root.path()).unwrap();
+            let mut clean = boundary_session(clean_root.path(), 141_800);
+            complete_boundary(&mut clean);
+            let clean_current = clean.evidence().storage_current.clone();
+            drop(clean);
+
+            let mut recovered = boundary_session(root.path(), 141_800);
+            complete_boundary(&mut recovered);
+            assert!(recovered.checkpoint.inputs_retired, "{boundary}");
+            assert!(recovered.checkpoint.shape_retired, "{boundary}");
+            assert_eq!(
+                recovered.evidence().current_merge_temporary_allocated_bytes,
+                0,
+                "{boundary}"
+            );
+            assert_eq!(
+                recovered.evidence().storage_current,
+                clean_current,
+                "{boundary}: resumed run must reconcile every allocation"
+            );
+            assert_eq!(
+                published_edge_count(root.path()),
+                8 * 8192,
+                "{boundary}"
+            );
+            drop(recovered);
+            // The boundary controls were dead weight once supersession ran.
+            let reopened = boundary_session(root.path(), 141_800);
+            assert!(
+                progress_control_names(&session_path).is_empty(),
+                "{boundary}: progress controls outlived supersession"
+            );
+            assert_eq!(
+                reopened.evidence().storage_current,
+                clean_current,
+                "{boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_boundary_retirement_returned_errors_retry_on_same_facade() {
+        let root = TempDir::new().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let prior = std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap();
+        let mut session = boundary_session(root.path(), 141_801);
+        stage_boundary_chunks(&mut session);
+        supersession::set_returned_failure(Some("supersession.before_unlink"));
+        let result = session.prepare_canonical_encoding(1);
+        supersession::set_returned_failure(None);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected returned failure")
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(crate::CURRENT_FILE)).unwrap(),
+            prior
+        );
+        // The retry resumes behind the already-installed boundaries instead of
+        // replaying retired inputs, and completes on the same session object.
+        let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+        assert_eq!(shape.edge_count, 8 * 8192);
+        let encoded = session.encode_canonical(&shape, 1).unwrap();
+        session
+            .publish_canonical(&encoded, Uuid::from_u128(2_119_503), Uuid::from_u128(2_119_504))
+            .unwrap();
+        assert_eq!(session.evidence().current_merge_temporary_allocated_bytes, 0);
+        assert_eq!(published_edge_count(root.path()), 8 * 8192);
     }
 }

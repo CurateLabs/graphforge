@@ -382,7 +382,7 @@ pub(super) fn replace_checkpoint_control(
 }
 
 fn control_limit(target: &str) -> u64 {
-    if target == SHAPE_INTENT {
+    if target == SHAPE_INTENT || target.starts_with(super::progress::SHAPE_PROGRESS_PREFIX) {
         MAX_SHAPE_CONTROL_BYTES
     } else {
         MAX_CONTROL_BYTES

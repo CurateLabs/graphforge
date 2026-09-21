@@ -817,6 +817,7 @@ pub(crate) fn encode(
             &mut evidence,
         )?;
     }
+    let adjacency_region = crate::concurrency_attribution::RegionScope::named("adjacency_encoding");
     adjacency::encode_adjacency(
         &output,
         shape,
@@ -826,6 +827,7 @@ pub(crate) fn encode(
         &mut artifacts,
         &mut evidence,
     )?;
+    drop(adjacency_region);
 
     evidence.membership_records = index.input_records;
     evidence.membership_read_bytes = index.read_bytes;

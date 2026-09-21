@@ -9,12 +9,16 @@ from unittest.mock import patch
 
 from graphforge_bench.progressive_host_run import (
     HOST_PROFILE_ID,
+    MAXIMUM_WALL_SECONDS,
     HostRunError,
+    RungWall,
+    _benchexec_hit_wall,
     build_plan,
     completed_prefix,
     inventory_work_root,
     load_host_capacity,
     reclaim_rung_workspace,
+    reference_wall_seconds,
     require_order,
     require_work_root,
     resolve_host_benchexec_python,
@@ -232,3 +236,107 @@ class ProgressiveHostRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RungWallTests(unittest.TestCase):
+    """A rung stops a margin above its last accepted wall, never above 4 h."""
+
+    def test_reference_plus_margin_rounds_up_and_caps_at_envelope(self) -> None:
+        self.assertEqual(RungWall.from_reference(92, 0.10).wall_seconds, 102)
+        self.assertEqual(RungWall.from_reference(1783, 0.10).wall_seconds, 1962)
+        self.assertEqual(RungWall.from_reference(100, 0.0).wall_seconds, 100)
+        self.assertEqual(RungWall.from_reference(14_000, 0.10).wall_seconds, MAXIMUM_WALL_SECONDS)
+        self.assertEqual(RungWall.from_reference(None, 0.10).wall_seconds, MAXIMUM_WALL_SECONDS)
+        self.assertEqual(RungWall.envelope().wall_seconds, MAXIMUM_WALL_SECONDS)
+        self.assertEqual(
+            RungWall.from_reference(92, 0.10).policy(),
+            {"maximum_wall_seconds": 14_400, "reference_wall_seconds": 92, "margin": 0.10},
+        )
+        self.assertEqual(
+            RungWall.envelope().policy(),
+            {"maximum_wall_seconds": 14_400, "reference_wall_seconds": None, "margin": 0.10},
+        )
+
+    def test_refuses_malformed_reference_or_margin(self) -> None:
+        for reference in (0, -5, True, 12.5):
+            with self.assertRaises(HostRunError):
+                RungWall.from_reference(reference, 0.10)  # type: ignore[arg-type]
+        for margin in (-0.1, float("nan"), float("inf"), True, "10%"):
+            with self.assertRaises(HostRunError):
+                RungWall.from_reference(92, margin)  # type: ignore[arg-type]
+
+    def test_reference_wall_seconds_reads_only_passed_rung_evidence(self) -> None:
+        self.assertIsNone(reference_wall_seconds(None, 18))
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            output = Path(temporary) / "evidence"
+            self.assertIsNone(reference_wall_seconds(output, 18))
+            write_host_bundle(output, 18)
+            expected = json.loads((output / "s18-rung.json").read_text())["metrics"]["wall_seconds"]
+            self.assertEqual(reference_wall_seconds(output, 18), expected)
+            self.assertIsNone(reference_wall_seconds(output, 19))
+            rung = json.loads((output / "s18-rung.json").read_text())
+            rung["status"] = "failed"
+            (output / "s18-rung.json").write_text(json.dumps(rung))
+            with self.assertRaisesRegex(HostRunError, "not a passed rung"):
+                reference_wall_seconds(output, 18)
+            rung["status"] = "passed"
+            rung["metrics"]["wall_seconds"] = 0
+            (output / "s18-rung.json").write_text(json.dumps(rung))
+            with self.assertRaisesRegex(HostRunError, "positive integer wall_seconds"):
+                reference_wall_seconds(output, 18)
+
+    def test_build_plan_binds_rung_wall_and_policy(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            output = Path(temporary)
+            python = ROOT / ".venv/bin/python"
+            payload = (ROOT / "runners/graph500-generator/src/main.rs").read_bytes()
+            gf = Path(temporary) / "gf"
+            certify = Path(temporary) / "certify"
+            generator = Path(temporary) / "generator"
+            for path in (gf, certify, generator):
+                path.write_bytes(payload)
+                path.chmod(0o755)
+            executables = Executables(
+                gf=gf, certify=certify, generator=generator, benchexec_python=python
+            )
+            with patch("graphforge_bench.progressive_host_run.version", return_value="3.35"):
+                plan = build_plan(
+                    root=ROOT,
+                    output_dir=output,
+                    scale=18,
+                    commit=COMMIT,
+                    executables=executables,
+                    capacity=None,
+                    wall=RungWall.from_reference(92, 0.10),
+                )
+                envelope = build_plan(
+                    root=ROOT,
+                    output_dir=output,
+                    scale=18,
+                    commit=COMMIT,
+                    executables=executables,
+                    capacity=None,
+                )
+            self.assertEqual(plan["limits"]["wall_seconds"], 102)
+            self.assertEqual(plan["limits"]["memory_bytes"], 4_294_967_296)
+            self.assertEqual(plan["wall_policy"]["reference_wall_seconds"], 92)
+            self.assertEqual(envelope["limits"]["wall_seconds"], MAXIMUM_WALL_SECONDS)
+            self.assertIsNone(envelope["wall_policy"]["reference_wall_seconds"])
+
+    def test_benchexec_hit_wall_reads_the_staged_result(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            stage = Path(temporary)
+            self.assertFalse(_benchexec_hit_wall(stage))
+            raw = stage / "raw"
+            raw.mkdir()
+            document = raw / "results.xml"
+            document.write_text(
+                '<result><run name="profile"><column title="status" value="TIMEOUT"/>'
+                '<column title="walltime" value="102.4s"/></run></result>'
+            )
+            self.assertTrue(_benchexec_hit_wall(stage))
+            document.write_text(
+                '<result><run name="profile"><column title="status" value="DONE"/>'
+                '<column title="walltime" value="91.0s"/></run></result>'
+            )
+            self.assertFalse(_benchexec_hit_wall(stage))

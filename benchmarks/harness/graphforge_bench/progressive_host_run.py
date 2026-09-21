@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
+import math
 from pathlib import Path
 import shutil
 import stat
 import subprocess
 import tempfile
 from typing import Any
+import xml.etree.ElementTree as ET
 
 from jsonschema import Draft202012Validator
 
@@ -305,6 +308,77 @@ def _admit_projection(
     return evidence, hashlib.sha256(encoded).hexdigest()
 
 
+MAXIMUM_WALL_SECONDS = 14_400
+DEFAULT_WALL_MARGIN = 0.10
+
+
+@dataclass(frozen=True)
+class RungWall:
+    """The BenchExec wall limit one rung is staged with.
+
+    The 4 h envelope is the certification ceiling, not a stop condition: a rung
+    that regresses from minutes to hours holds the ladder for the full envelope
+    before BenchExec reports TIMEOUT. When a prior accepted measurement for the
+    same scale is available, the rung is staged with that measurement plus a
+    margin instead, capped at the envelope. Without a reference the envelope
+    applies unchanged.
+    """
+
+    wall_seconds: int
+    reference_wall_seconds: int | None
+    margin: float
+
+    @classmethod
+    def envelope(cls) -> RungWall:
+        return cls(MAXIMUM_WALL_SECONDS, None, DEFAULT_WALL_MARGIN)
+
+    @classmethod
+    def from_reference(cls, reference_wall_seconds: int | None, margin: float) -> RungWall:
+        if isinstance(margin, bool) or not isinstance(margin, (int, float)):
+            raise HostRunError("rung wall margin must be a number")
+        if not math.isfinite(margin) or margin < 0:
+            raise HostRunError("rung wall margin must be a finite non-negative fraction")
+        if reference_wall_seconds is None:
+            return cls(MAXIMUM_WALL_SECONDS, None, float(margin))
+        if (
+            isinstance(reference_wall_seconds, bool)
+            or not isinstance(reference_wall_seconds, int)
+            or reference_wall_seconds <= 0
+        ):
+            raise HostRunError("reference rung wall_seconds must be a positive integer")
+        bounded = math.ceil(reference_wall_seconds * (1 + margin))
+        return cls(min(MAXIMUM_WALL_SECONDS, bounded), reference_wall_seconds, float(margin))
+
+    def policy(self) -> dict[str, Any]:
+        return {
+            "maximum_wall_seconds": MAXIMUM_WALL_SECONDS,
+            "reference_wall_seconds": self.reference_wall_seconds,
+            "margin": self.margin,
+        }
+
+
+def reference_wall_seconds(reference_dir: Path | None, scale: int) -> int | None:
+    """The accepted wall measurement for `scale` in a prior evidence directory.
+
+    Only a passed rung's assembled evidence counts. A directory without that
+    rung yields no reference, so the rung keeps the 4 h envelope; a present but
+    malformed document is refused rather than silently widened.
+    """
+    if reference_dir is None:
+        return None
+    path = reference_dir / f"s{scale}-rung.json"
+    if not path.is_file():
+        return None
+    document = _json(path)
+    if document.get("status") != "passed" or document.get("scale") != scale:
+        raise HostRunError("reference rung evidence is not a passed rung of this scale")
+    metrics = document.get("metrics")
+    value = metrics.get("wall_seconds") if isinstance(metrics, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise HostRunError("reference rung evidence lacks a positive integer wall_seconds")
+    return value
+
+
 def build_plan(
     *,
     root: Path,
@@ -314,8 +388,10 @@ def build_plan(
     executables: Executables,
     capacity: Mapping[str, Any] | None,
     projection: tuple[dict[str, Any], str] | None = None,
+    wall: RungWall | None = None,
 ) -> dict[str, Any]:
     require_order(root, output_dir, scale)
+    wall = wall or RungWall.envelope()
     profile_path = _profile_path(root, scale)
     profile = _json(profile_path)
     _validate(root, "progressive-qualification-profile.json", profile)
@@ -353,7 +429,12 @@ def build_plan(
         "rung": f"S{scale}",
         "execution": "native_linux_benchexec_host",
         "identities": identities,
-        "limits": {"wall_seconds": 14_400, "memory_bytes": 4_294_967_296, "cores": 16},
+        "limits": {
+            "wall_seconds": wall.wall_seconds,
+            "memory_bytes": 4_294_967_296,
+            "cores": 16,
+        },
+        "wall_policy": wall.policy(),
         "outputs": [
             f"s{scale}-plan.json",
             f"s{scale}-benchexec.json",
@@ -396,13 +477,14 @@ def _safe_stage_host(
     *,
     scale: int,
     work_root: Path,
+    wall_seconds: int = MAXIMUM_WALL_SECONDS,
 ) -> Path:
     stage = Path(tempfile.mkdtemp(prefix="gf-host-progressive-", dir=parent))
     profile_text = _rewrite_profile_for_work_root(
         profile_path.read_text(encoding="utf-8"), scale, work_root
     )
     (stage / "profile.json").write_text(profile_text, encoding="utf-8")
-    _stage_benchmark_xml(root, stage)
+    _stage_benchmark_xml(root, stage, wall_seconds=wall_seconds)
     bin_dir = stage / "bin"
     bin_dir.mkdir()
     tmp_dir = work_root / "tmp"
@@ -460,6 +542,31 @@ def inventory_work_root(work_root: Path, output_dir: Path | None = None) -> dict
     return collect_inventory(work_root, output_dir)
 
 
+def _benchexec_hit_wall(stage: Path) -> bool:
+    """Whether the staged BenchExec run ended by its wall limit (status TIMEOUT)."""
+    documents = sorted((stage / "raw").glob("*.xml")) if (stage / "raw").is_dir() else []
+    if len(documents) != 1:
+        return False
+    try:
+        runs = ET.parse(documents[0]).getroot().findall(".//run")
+    except ET.ParseError:
+        return False
+    if len(runs) != 1:
+        return False
+    columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
+    return columns.get("status") == "TIMEOUT" or columns.get("terminationreason") == "walltime"
+
+
+def _plan_wall_seconds(plan: Mapping[str, Any]) -> int:
+    limits = plan.get("limits")
+    value = limits.get("wall_seconds") if isinstance(limits, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HostRunError("run plan wall_seconds is malformed")
+    if value <= 0 or value > MAXIMUM_WALL_SECONDS:
+        raise HostRunError("run plan wall_seconds is outside the 4 h envelope")
+    return value
+
+
 def run(
     *,
     root: Path,
@@ -495,6 +602,7 @@ def run(
                 Path(temporary),
                 scale=scale,
                 work_root=work_root,
+                wall_seconds=_plan_wall_seconds(plan),
             )
             status = _run_benchexec(
                 stage,
@@ -520,6 +628,14 @@ def run(
                 )
             except (ControllerError, OSError, ValueError):
                 _preserve_failure_artifacts(stage, output_dir, scale)
+                if _benchexec_hit_wall(stage):
+                    # BenchExec stopped the rung at the staged wall. The certify
+                    # runner was killed mid-phase, so its evidence is missing by
+                    # construction; report the wall, not a missing receipt.
+                    failed = _result(plan, "failed", "rung_wall_exceeded")
+                    _validate(root, "progressive-host-run-result.json", failed)
+                    publish_json_no_clobber(result_path, failed)
+                    raise HostRunError("rung_wall_exceeded") from None
                 raise
     except HostRunError:
         raise
@@ -559,6 +675,8 @@ def execute_ladder(
     reserved_headroom_bytes: int,
     dry_run: bool = False,
     rung: int | None = None,
+    reference_dir: Path | None = None,
+    wall_margin: float = DEFAULT_WALL_MARGIN,
 ) -> list[dict[str, Any]]:
     """Advance the existing ladder once, stopping before any successor on failure."""
     completed = completed_prefix(root, output_dir)
@@ -629,6 +747,9 @@ def execute_ladder(
                 executables=executables,
                 capacity=capacity,
                 projection=projection,
+                wall=RungWall.from_reference(
+                    reference_wall_seconds(reference_dir, scale), wall_margin
+                ),
             )
             if shared_identity is not None and "producer_sha256" not in shared_identity:
                 plan["identities"].pop("producer_sha256", None)
@@ -685,6 +806,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="legacy input: only reserve is used; space and rates are measured",
     )
+    parser.add_argument(
+        "--reference-evidence-dir",
+        type=Path,
+        help=(
+            "prior ladder evidence directory; each rung with an accepted "
+            "s<scale>-rung.json there is staged with that wall plus --wall-margin, "
+            "capped at the 4 h envelope"
+        ),
+    )
+    parser.add_argument(
+        "--wall-margin",
+        type=float,
+        default=DEFAULT_WALL_MARGIN,
+        help="fraction above the reference wall a rung may take before BenchExec stops it",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -722,6 +858,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit=repository_commit(root),
             reserved_headroom_bytes=reserve,
             dry_run=args.dry_run,
+            reference_dir=args.reference_evidence_dir,
+            wall_margin=args.wall_margin,
         )
         if args.dry_run:
             print(

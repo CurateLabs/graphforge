@@ -7,7 +7,7 @@ use super::{
     compact_parent_inventory, construction_failpoint, control_sha256, decode_bounded,
     file_identity, file_link_count, hex, is_shape_artifact_name, read_completed_shape,
     read_completed_shape_outputs, record_active_identity_remove, replace_checkpoint_control,
-    shape_receipt_name, storage,
+    shape_receipt_name, storage, unlink_shape_progress,
 };
 
 impl GraphConstructionSession {
@@ -110,6 +110,12 @@ impl GraphConstructionSession {
         })?;
         for sequence in 0..self.checkpoint.next_sequence {
             super::reject_cancelled(cancelled)?;
+            // Receipts below this process's resumed boundary were reconciled
+            // out of the allocation ledger when the shape resumed (#1418);
+            // their inode keys may already belong to newer files.
+            if sequence < self.shape_boundary_retired_through {
+                continue;
+            }
             let receipt = self.read_receipt(sequence)?;
             for artifact in [&receipt.parquet, &receipt.identities, &receipt.details]
                 .into_iter()
@@ -128,6 +134,11 @@ impl GraphConstructionSession {
         }
         self.checkpoint_supersession()?;
         supersession_boundary("supersession.after_checkpoint")?;
+        // The boundary controls' whole purpose was the retirement window; with
+        // every payload retired they are dead weight (#1418). They are also
+        // inert: any later open takes the completed-shape path and never reads
+        // them.
+        unlink_shape_progress(&self.root)?;
         Ok(())
     }
 
@@ -299,121 +310,152 @@ impl GraphConstructionSession {
         Ok(())
     }
 
-    fn retire_payload(
+    /// Unlink one consumed payload against its receipt, reconciling the
+    /// allocation ledgers.
+    ///
+    /// Shared by the supersession sweep and the per-boundary staged-input
+    /// retirement (#1418). `completed` marks a payload that a recorded
+    /// retirement already removed: its return is tolerable only as recovery
+    /// garbage, never as authority. `shaped` marks a shaped output whose
+    /// removal is charged against the merge-temporary inventory.
+    pub(super) fn retire_payload(
         &mut self,
         receipt: &ArtifactReceipt,
         shaped: bool,
         completed: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), GfError> {
-        super::reject_cancelled(cancelled)?;
-        let key = format!(
-            "{:016x}:{}",
-            receipt.identity.volume_serial, receipt.identity.file_id
-        );
-        let active = self
-            .checkpoint
-            .evidence
-            .storage_active_identity_allocated_bytes
-            .get(&key)
-            .copied();
-        match self.root.open_child_file(OsStr::new(&receipt.name)) {
-            Ok(file) => {
-                if completed {
-                    return Err(storage("supersession retired predecessor reappeared"));
-                }
-                let identity = file_identity(&file).map_err(storage)?;
-                // Identity, link count and length, and nothing more. The only
-                // failure a full re-hash here uniquely catches is "a payload
-                // was mutated after it was consumed but before it was
-                // deleted", which cannot change any already-produced output
-                // and is invisible to the user. Every payload that is still
-                // *consumed* is authenticated at the boundary that consumes
-                // it: shape outputs by `authenticate_shaped_output` at the
-                // replay/recovery boundary, encoded artifacts by the CAS
-                // install at publication (#1384; the corruption refusals
-                // themselves are #1269 / #1392 and
-                // `install_graph_object_file_with_lease`).
-                if !receipt.identity.matches(identity)
-                    || file_link_count(&file).map_err(storage)? != 1
-                    || file.metadata().map_err(storage)?.len() != receipt.bytes
-                {
-                    return Err(storage("supersession predecessor identity changed"));
-                }
-                if active != Some(receipt.allocated_bytes) {
-                    return Err(storage(
-                        "supersession predecessor allocation authority changed",
-                    ));
-                }
-                drop(file);
-                supersession_boundary("supersession.before_unlink")?;
-                self.root
-                    .unlink_child_if_identity(OsStr::new(&receipt.name), identity)
-                    .map_err(storage)?;
-                supersession_boundary("supersession.after_unlink")?;
-                if shaped {
-                    supersession_boundary("supersession.shape_after_unlink")?;
-                }
+        retire_staged_payload(
+            &self.root,
+            &mut self.checkpoint.evidence,
+            receipt,
+            shaped,
+            completed,
+            cancelled,
+        )
+    }
+}
+
+/// Unlink one consumed payload against its receipt, reconciling the
+/// allocation ledgers. Free form for the shaping boundary loop, which holds
+/// the session root borrowed for the partitioners' lifetimes (#1418).
+pub(super) fn retire_staged_payload(
+    root: &StableDirectory,
+    evidence: &mut GraphConstructionEvidence,
+    receipt: &ArtifactReceipt,
+    shaped: bool,
+    completed: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), GfError> {
+    super::reject_cancelled(cancelled)?;
+    #[cfg(test)]
+    eprintln!(
+        "DEBUG retire pid={} name={} shaped={shaped} completed={completed}",
+        std::process::id(),
+        receipt.name
+    );
+    let key = format!(
+        "{:016x}:{}",
+        receipt.identity.volume_serial, receipt.identity.file_id
+    );
+    let active = evidence
+        .storage_active_identity_allocated_bytes
+        .get(&key)
+        .copied();
+    match root.open_child_file(OsStr::new(&receipt.name)) {
+        Ok(file) => {
+            if completed {
+                return Err(storage("supersession retired predecessor reappeared"));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if completed {
-                    return Ok(());
-                }
+            let identity = file_identity(&file).map_err(storage)?;
+            // Identity, link count and length, and nothing more. The only
+            // failure a full re-hash here uniquely catches is "a payload
+            // was mutated after it was consumed but before it was
+            // deleted", which cannot change any already-produced output
+            // and is invisible to the user. Every payload that is still
+            // *consumed* is authenticated at the boundary that consumes
+            // it: shape outputs by `authenticate_shaped_output` at the
+            // replay/recovery boundary, encoded artifacts by the CAS
+            // install at publication (#1384; the corruption refusals
+            // themselves are #1269 / #1392 and
+            // `install_graph_object_file_with_lease`).
+            if !receipt.identity.matches(identity)
+                || file_link_count(&file).map_err(storage)? != 1
+                || file.metadata().map_err(storage)?.len() != receipt.bytes
+            {
+                return Err(storage("supersession predecessor identity changed"));
             }
-            Err(error) => return Err(storage(error)),
-        }
-        // Even a previously missing name must cross the directory durability
-        // barrier before a retry releases its still-persisted allocation.
-        supersession_boundary("supersession.before_sync")?;
-        self.root.sync().map_err(storage)?;
-        self.checkpoint
-            .evidence
-            .recovery_checkpoint_fsync_operations = self
-            .checkpoint
-            .evidence
-            .recovery_checkpoint_fsync_operations
-            .checked_add(1)
-            .ok_or_else(|| storage("supersession directory synchronization count overflow"))?;
-        supersession_boundary("supersession.after_sync")?;
-        if shaped {
-            supersession_boundary("supersession.shape_after_sync")?;
-        }
-        if let Some(allocated) = active {
-            if allocated != receipt.allocated_bytes {
+            if active != Some(receipt.allocated_bytes) {
                 return Err(storage(
-                    "supersession missing predecessor allocation changed",
+                    "supersession predecessor allocation authority changed",
                 ));
             }
-            let category = crate::ArtifactCategory::ConstructionStaging;
-            let evidence = &self.checkpoint.evidence;
-            let reported = checked_category_remove(
-                &evidence.storage_current[&category],
-                receipt.bytes,
-                allocated,
-            )?;
-            let authority = checked_category_remove(
-                &evidence.storage_receipt_category_authorities[&category],
-                receipt.bytes,
-                allocated,
-            )?;
-            let merge_bytes = if shaped {
-                evidence
-                    .current_merge_temporary_allocated_bytes
-                    .checked_sub(allocated)
-                    .ok_or_else(|| storage("supersession merge allocation underflow"))?
-            } else {
-                evidence.current_merge_temporary_allocated_bytes
-            };
-            let evidence = &mut self.checkpoint.evidence;
-            record_active_identity_remove(evidence, &key)?;
-            evidence.storage_current.insert(category, reported);
-            evidence
-                .storage_receipt_category_authorities
-                .insert(category, authority);
-            evidence.current_merge_temporary_allocated_bytes = merge_bytes;
+            drop(file);
+            supersession_boundary("supersession.before_unlink")?;
+            root.unlink_child_if_identity(OsStr::new(&receipt.name), identity)
+                .map_err(storage)?;
+            supersession_boundary("supersession.after_unlink")?;
+            if shaped {
+                supersession_boundary("supersession.shape_after_unlink")?;
+            }
         }
-        Ok(())
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if completed {
+                return Ok(());
+            }
+        }
+        Err(error) => return Err(storage(error)),
     }
+    // Even a previously missing name must cross the directory durability
+    // barrier before a retry releases its still-persisted allocation.
+    supersession_boundary("supersession.before_sync")?;
+    root.sync().map_err(storage)?;
+    evidence.recovery_checkpoint_fsync_operations = evidence
+        .recovery_checkpoint_fsync_operations
+        .checked_add(1)
+        .ok_or_else(|| storage("supersession directory synchronization count overflow"))?;
+    supersession_boundary("supersession.after_sync")?;
+    if shaped {
+        supersession_boundary("supersession.shape_after_sync")?;
+    }
+    if let Some(allocated) = active {
+        if allocated != receipt.allocated_bytes {
+            #[cfg(test)]
+            eprintln!(
+                "DEBUG mismatch name={} ledger={allocated} receipt={}",
+                receipt.name, receipt.allocated_bytes
+            );
+            return Err(storage(
+                "supersession missing predecessor allocation changed",
+            ));
+        }
+        let category = crate::ArtifactCategory::ConstructionStaging;
+        let reported = checked_category_remove(
+            &evidence.storage_current[&category],
+            receipt.bytes,
+            allocated,
+        )?;
+        let authority = checked_category_remove(
+            &evidence.storage_receipt_category_authorities[&category],
+            receipt.bytes,
+            allocated,
+        )?;
+        let merge_bytes = if shaped {
+            evidence
+                .current_merge_temporary_allocated_bytes
+                .checked_sub(allocated)
+                .ok_or_else(|| storage("supersession merge allocation underflow"))?
+        } else {
+            evidence.current_merge_temporary_allocated_bytes
+        };
+        record_active_identity_remove(evidence, &key)?;
+        evidence.storage_current.insert(category, reported);
+        evidence
+            .storage_receipt_category_authorities
+            .insert(category, authority);
+        evidence.current_merge_temporary_allocated_bytes = merge_bytes;
+    }
+    Ok(())
 }
 
 #[allow(clippy::unnecessary_wraps)] // Test builds inject returned I/O failures at these same boundaries.

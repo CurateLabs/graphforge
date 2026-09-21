@@ -15,9 +15,10 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, GraphConstructionBudgets, GraphForge,
-    OperationId, PortableSelection, PortableV2ExportRequest, PortableV2ImportRequest,
-    PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
+    CONSTRUCTION_EDGE_SCHEMA, CONSTRUCTION_NODE_SCHEMA, ExecutionResourcePolicy,
+    GraphConstructionBudgets, GraphForge, GraphForgeOptions, OperationId, PortableSelection,
+    PortableV2ExportRequest, PortableV2ImportRequest, PortableVerifyRequest, ResourcePolicyMode,
+    ResultSinkFormat, ResultSinkOptions, verify_portable_v2,
 };
 use graphforge_core::OntologyMode;
 use graphforge_core::uuid::{Uuid, new_v7};
@@ -406,6 +407,114 @@ fn generate_semantic_v4_graph_with_nodes(dir: &Path, nodes: Vec<Uuid>) -> Vec<Uu
     build_adjacency_index(workspace.path(), TS).unwrap();
     project_fixture::publish_graph_workspace_v4(dir, workspace.path());
     nodes
+}
+
+/// Encoded node files under `dir` (construction staging included): the
+/// published topology spans one file per 65,536-row window.
+fn encoded_node_files(dir: &Path) -> usize {
+    fn walk(path: &Path, found: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                walk(&child, found);
+            } else if child.extension().is_some_and(|ext| ext == "parquet")
+                && child
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "nodes")
+                && child
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "topology")
+            {
+                *found += 1;
+            }
+        }
+    }
+    let mut found = 0;
+    walk(dir, &mut found);
+    found
+}
+
+/// #1513: the certification fast paths must survive a node table that spans
+/// more than one encoded file when the session plans with more target
+/// partitions than files. The ladder host derives eight target partitions
+/// from the machine (#1466) and S17+ node tables span two or more files; on
+/// that combination the S18 recount fell back to a per-batch edge scan and the
+/// two-hop query ran for hours.
+#[test]
+fn regression1513_fast_paths_survive_multi_file_node_tables() {
+    let _guard = io_guard();
+    // Two 32 Ki-row publication windows: the fixture spans two node files.
+    const NODES: usize = 40_000;
+    const MULTI_FILE_FAN_OUT: usize = 4;
+    let dir = TempDir::new().unwrap();
+    let fixture = generate_bulk_graph(dir.path(), NODES, MULTI_FILE_FAN_OUT);
+    let node_files = encoded_node_files(dir.path());
+    assert!(
+        node_files > 1,
+        "fixture must span several node files, found {node_files}"
+    );
+    // The explicit policy must fit the instance budget on any CI host:
+    // one Tokio worker plus the partitions must stay within twice the observed
+    // cores (floor four), so the widest partitioning is derived from the host
+    // while still exceeding the file count.
+    let observed = std::thread::available_parallelism().map_or(1, usize::from);
+    let budget = observed.saturating_mul(2).max(4);
+    let widest = (budget - 1).max(node_files + 1);
+    let recount = "MATCH ()-[r]->() RETURN count(r) AS n";
+    for partitions in [1_usize, node_files, widest] {
+        let options = GraphForgeOptions {
+            resource: ExecutionResourcePolicy {
+                mode: ResourcePolicyMode::Explicit,
+                tokio_worker_threads: Some(1),
+                target_partitions: Some(partitions),
+                io_concurrency: Some(1),
+                compute_threads: Some(1),
+                ..ExecutionResourcePolicy::default()
+            },
+            ..GraphForgeOptions::default()
+        };
+        let forge = GraphForge::new_with_options(
+            Some(dir.path().to_str().expect("temp path is UTF-8")),
+            options,
+        )
+        .unwrap_or_else(|error| panic!("target_partitions={partitions}: {error:?}"));
+        for (query, exec, operator) in [
+            (recount, "EdgeCountExec", "edge_count"),
+            (ORDERED_ONE_HOP, "OrderedOneHopExec", "ordered_one_hop"),
+            (
+                ORDERED_TWO_HOP,
+                "OrderedTwoHopPathCountExec",
+                "ordered_two_hop",
+            ),
+        ] {
+            let plan = forge.explain(query).unwrap();
+            assert!(
+                plan.contains(exec),
+                "target_partitions={partitions} node_files={node_files} {query}: {plan}"
+            );
+            let (result, evidence) = demand::capture(|| forge.execute(query));
+            let result = result.unwrap();
+            assert!(
+                evidence
+                    .operator_rss
+                    .iter()
+                    .any(|entry| entry.operator == operator),
+                "target_partitions={partitions} {query}: {evidence:#?}"
+            );
+            if query == recount {
+                assert_eq!(int64_values(&result, "n"), vec![fixture.edge_rows as i64]);
+            } else {
+                let rows: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
+                assert_eq!(rows, LIMIT, "target_partitions={partitions} {query}");
+            }
+        }
+    }
 }
 
 #[test]

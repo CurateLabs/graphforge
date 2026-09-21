@@ -776,7 +776,7 @@ fn assert_bounded_partition_run<const N: usize>(
     run.flush(&mut target, evidence).unwrap(); // Empty flush cannot duplicate rows.
     assert_eq!(target.balance().total(), records.len() as u64);
     let output = target
-        .finish_optional("staged-identities.run", &mut || false, evidence)
+        .finish_optional("staged-identities.run", 0, false, &mut || false, evidence)
         .unwrap()
         .unwrap();
     let mut actual = Vec::new();

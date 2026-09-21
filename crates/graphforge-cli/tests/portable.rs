@@ -585,6 +585,9 @@ fn import_operation_timings_survive_separate_cli_processes() {
     let regions = &validated["region_diagnostics"]["regions"];
     assert_eq!(validated["region_diagnostics"]["complete"], true);
     assert!(regions["import_command/validate/seal/shaping"].is_object());
+    assert!(
+        regions["import_command/validate/seal/canonical_encoding/adjacency_encoding"].is_object()
+    );
     let root = regions["import_command"]["inclusive"]["wall_ns"]
         .as_u64()
         .unwrap();
@@ -615,9 +618,36 @@ fn import_operation_timings_survive_separate_cli_processes() {
             session,
         ],
     ));
-    assert!(
-        committed["region_diagnostics"]["regions"]["import_command/commit/publish"].is_object()
-    );
+    assert_eq!(committed["region_diagnostics"]["complete"], true);
+    let publish_regions = &committed["region_diagnostics"]["regions"];
+    assert!(publish_regions["import_command/commit/publish"].is_object());
+    for child in [
+        "prepare_encoding",
+        "publication_authentication",
+        "cas_install",
+        "publication_intent",
+        "generation_commit",
+        "publication_receipt",
+        "hydration",
+        "read_authority",
+    ] {
+        let path = format!("import_command/commit/publish/{child}");
+        assert!(publish_regions[&path].is_object(), "missing {path}");
+        assert_eq!(publish_regions[&path]["calls"], 1, "{path}");
+    }
+    let publish_root = publish_regions["import_command/commit/publish"]["inclusive"]["wall_ns"]
+        .as_u64()
+        .unwrap();
+    let publish_children: u64 = publish_regions
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| {
+            path.starts_with("import_command/commit/publish/") && path.matches('/').count() == 3
+        })
+        .map(|(_, row)| row["inclusive"]["wall_ns"].as_u64().unwrap())
+        .sum();
+    assert!(publish_children <= publish_root);
     let timing = &committed["operation_timings"];
     assert_eq!(timing["begin"]["calls"], 0);
     assert_eq!(timing["resume"]["calls"], 1);
