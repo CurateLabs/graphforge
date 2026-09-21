@@ -29,6 +29,7 @@ mod maintenance_cli;
 mod ontology_cli;
 mod portable_cli;
 mod research_cli;
+mod source_artifact_cli;
 mod storage_attribution_cli;
 mod verify_cli;
 
@@ -311,6 +312,11 @@ enum Command {
     Research {
         #[command(subcommand)]
         command: research_cli::ResearchCommand,
+    },
+    /// Source and Artifact lifecycle: registration, lineage, preference, and impact.
+    SourceArtifact {
+        #[command(subcommand)]
+        command: source_artifact_cli::SourceArtifactCommand,
     },
     /// Explicit multi-mutation transactions (Rust-owned lifecycle).
     Transaction {
@@ -1362,6 +1368,11 @@ fn run_with_allocation(
         }
         Command::Research { command } => {
             return research_cli::run_research(&mut graph, command, cli.json, output)
+                .map(|()| 0)
+                .map_err(Into::into);
+        }
+        Command::SourceArtifact { command } => {
+            return source_artifact_cli::run_source_artifact(&mut graph, command, cli.json, output)
                 .map(|()| 0)
                 .map_err(Into::into);
         }
