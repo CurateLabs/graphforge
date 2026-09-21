@@ -202,6 +202,16 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "source_artifact",
+    srcs = ["tests/source_artifact.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "medium",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_integration_test(
     name = "verify",
     srcs = ["tests/verify.rs"],
     crate = ":graphforge_cli",
@@ -221,6 +231,7 @@ test_suite(
         ":portable",
         ":query_sink",
         ":repository",
+        ":source_artifact",
         ":verify",
     ],
 )

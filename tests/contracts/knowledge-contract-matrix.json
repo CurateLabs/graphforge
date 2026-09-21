@@ -21,6 +21,9 @@
       "pnpm --filter @curatelabs/graphforge exec napi build --platform",
       "pnpm --filter @curatelabs/graphforge test:smoke",
       "pnpm --filter @curatelabs/graphforge test"
+    ],
+    "cli": [
+      "cargo test -p graphforge-cli --test source_artifact --no-fail-fast"
     ]
   },
   "cases": [

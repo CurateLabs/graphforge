@@ -814,6 +814,16 @@
     },
     {
       "package": "graphforge-cli",
+      "target": "source_artifact",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/source_artifact.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:source_artifact",
+      "exception_id": null,
+      "notes": "#1349 Source and Artifact lifecycle CLI integration"
+    },
+    {
+      "package": "graphforge-cli",
       "target": "verify",
       "class": "integration-test",
       "source": "crates/graphforge-cli/tests/verify.rs",
