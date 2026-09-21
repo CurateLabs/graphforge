@@ -516,8 +516,9 @@ def _result(
     status: str,
     failure: str | None,
     artifacts: Mapping[str, str] | None = None,
+    phase_failure: PhaseFailure | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "schema": RESULT_SCHEMA,
         "rung": plan["rung"],
         "status": status,
@@ -526,6 +527,11 @@ def _result(
         "artifacts": artifacts,
         "claim": "engineering_evidence_only",
     }
+    if phase_failure is not None:
+        result["failed_phase"] = phase_failure.phase
+        if phase_failure.error_tail is not None:
+            result["error_tail"] = phase_failure.error_tail
+    return result
 
 
 def reclaim_rung_workspace(work_root: Path, scale: int) -> None:
@@ -555,6 +561,53 @@ def _benchexec_hit_wall(stage: Path) -> bool:
         return False
     columns = {column.attrib.get("title"): column.attrib.get("value") for column in runs[0]}
     return columns.get("status") == "TIMEOUT" or columns.get("terminationreason") == "walltime"
+
+
+@dataclass(frozen=True)
+class PhaseFailure:
+    """The certify phase a rung died in, with the child's own error text."""
+
+    phase: str
+    error_tail: str | None
+
+
+def _certify_phase_failure(stage: Path) -> PhaseFailure | None:
+    """The certify phase that failed inside a run that actually executed.
+
+    The certify runner streams one phase event per phase and closes with its
+    evidence document; a failed phase names itself and carries a bounded tail
+    of the failing child's standard error. Absence of such a record means the
+    run never reached a phase, which is not a phase failure.
+    """
+    raw = stage / "raw"
+    if not raw.is_dir():
+        return None
+    failure: PhaseFailure | None = None
+    for path in sorted(raw.rglob("*.log")):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                document = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(document, Mapping):
+                continue
+            outcomes: Sequence[Any]
+            if document.get("schema") == "graphforge-public-certification-phase-event/1":
+                outcomes = [document.get("outcome")]
+            elif document.get("schema") == "graphforge-public-certification/1":
+                phases = document.get("phases")
+                outcomes = phases if isinstance(phases, Sequence) else []
+            else:
+                continue
+            for outcome in outcomes:
+                if not isinstance(outcome, Mapping) or outcome.get("status") != "failed":
+                    continue
+                phase = outcome.get("phase")
+                if not isinstance(phase, str):
+                    continue
+                tail = outcome.get("error_tail")
+                failure = PhaseFailure(phase, tail if isinstance(tail, str) else None)
+    return failure
 
 
 def _plan_wall_seconds(plan: Mapping[str, Any]) -> int:
@@ -613,10 +666,12 @@ def run(
             )
             if status != 0:
                 _preserve_failure_artifacts(stage, output_dir, scale)
-                failed = _result(plan, "failed", "benchexec_failed")
+                phase_failure = _certify_phase_failure(stage)
+                code = "rung_phase_failed" if phase_failure else "benchexec_failed"
+                failed = _result(plan, "failed", code, phase_failure=phase_failure)
                 _validate(root, "progressive-host-run-result.json", failed)
                 publish_json_no_clobber(result_path, failed)
-                raise HostRunError("benchexec_failed")
+                raise HostRunError(code)
             try:
                 benchexec, graphforge, rung = ingest_benchexec_result(
                     root=root,
@@ -636,6 +691,17 @@ def run(
                     _validate(root, "progressive-host-run-result.json", failed)
                     publish_json_no_clobber(result_path, failed)
                     raise HostRunError("rung_wall_exceeded") from None
+                phase_failure = _certify_phase_failure(stage)
+                if phase_failure is not None:
+                    # The rung ran and died inside a phase. Report the phase and
+                    # the child's error text; staging_failed is for failures
+                    # before the run started.
+                    failed = _result(
+                        plan, "failed", "rung_phase_failed", phase_failure=phase_failure
+                    )
+                    _validate(root, "progressive-host-run-result.json", failed)
+                    publish_json_no_clobber(result_path, failed)
+                    raise HostRunError("rung_phase_failed") from None
                 raise
     except HostRunError:
         raise

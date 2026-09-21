@@ -181,6 +181,9 @@ profile_*
 *.tmp
 *.bak
 *.log
+# Checked-in certify stream fixtures keep the real *.log artifact name the
+# controller globs for (benchmarks/tests/test_progressive_host_run.py).
+!benchmarks/tests/fixtures/**/*.log
 .temp/
 tmp/
 

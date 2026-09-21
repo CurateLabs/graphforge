@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,8 +12,12 @@ from graphforge_bench.progressive_host_run import (
     HOST_PROFILE_ID,
     MAXIMUM_WALL_SECONDS,
     HostRunError,
+    PhaseFailure,
     RungWall,
     _benchexec_hit_wall,
+    _certify_phase_failure,
+    _result,
+    _validate,
     build_plan,
     completed_prefix,
     inventory_work_root,
@@ -23,7 +28,11 @@ from graphforge_bench.progressive_host_run import (
     require_work_root,
     resolve_host_benchexec_python,
 )
+from graphforge_bench.progressive_host_run import (
+    run as host_run,
+)
 from graphforge_bench.progressive_run import Executables
+from tests.host_run_fixture import executables as fixture_executables
 from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung
 
@@ -340,3 +349,128 @@ class RungWallTests(unittest.TestCase):
                 '<column title="walltime" value="91.0s"/></run></result>'
             )
             self.assertFalse(_benchexec_hit_wall(stage))
+
+
+class RungPhaseFailureTests(unittest.TestCase):
+    """A rung that ran and died inside a phase names the phase, not staging."""
+
+    FIXTURE = ROOT / "tests/fixtures/s22-phase-failure-raw"
+    TAIL = "GF_IO: storage error: graph construction session: control record exceeds bound"
+
+    def stage(self, parent: Path) -> Path:
+        stage = parent / "stage"
+        shutil.copytree(self.FIXTURE, stage / "raw")
+        return stage
+
+    def plan(self, scale: int) -> dict:
+        identities = host_result(scale)["identities"]
+        return {
+            "schema": "graphforge-progressive-host-run-plan/1",
+            "rung": f"S{scale}",
+            "execution": "native_linux_benchexec_host",
+            "identities": identities,
+            "limits": {"wall_seconds": 1963, "memory_bytes": 96_000_000_000, "cores": 16},
+            "outputs": [
+                f"s{scale}-{name}.json"
+                for name in ("plan", "benchexec", "graphforge", "rung", "result")
+            ],
+            "claim": "engineering_evidence_only",
+        }
+
+    def test_certify_phase_failure_reads_the_staged_stream(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            self.assertIsNone(_certify_phase_failure(parent / "absent"))
+            stage = self.stage(parent)
+            failure = _certify_phase_failure(stage)
+            self.assertIsNotNone(failure)
+            assert failure is not None
+            self.assertEqual(failure.phase, "ingest")
+            self.assertEqual(failure.error_tail, self.TAIL)
+            documents = [
+                json.loads(line)
+                for log in (stage / "raw").rglob("*.log")
+                for line in log.read_text().splitlines()
+                if line.startswith("{")
+            ]
+            evidence = [
+                document
+                for document in documents
+                if document["schema"] == "graphforge-public-certification/1"
+            ]
+            self.assertEqual(len(evidence), 1)
+            _validate(ROOT, "certification-evidence.json", evidence[0])
+
+    def test_certify_phase_failure_ignores_a_run_that_reached_no_failed_phase(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            raw = Path(temporary) / "raw"
+            raw.mkdir()
+            (raw / "run.log").write_text(
+                json.dumps(
+                    {
+                        "schema": "graphforge-public-certification-phase-event/1",
+                        "profile_id": "graph500-s22-provider",
+                        "outcome": {
+                            "phase": "admission",
+                            "status": "passed",
+                            "duration_ms": 10,
+                            "peak_rss_bytes": 126976,
+                            "exit_code": 0,
+                        },
+                    }
+                )
+                + "\nBenchExec could not start the tool\n"
+            )
+            self.assertIsNone(_certify_phase_failure(Path(temporary)))
+
+    def test_result_carries_the_failed_phase_and_error_text(self) -> None:
+        plan = self.plan(22)
+        failed = _result(
+            plan,
+            "failed",
+            "rung_phase_failed",
+            phase_failure=PhaseFailure("ingest", self.TAIL),
+        )
+        _validate(ROOT, "progressive-host-run-result.json", failed)
+        self.assertEqual(failed["failure"], "rung_phase_failed")
+        self.assertEqual(failed["failed_phase"], "ingest")
+        self.assertEqual(failed["error_tail"], self.TAIL)
+        staging = _result(plan, "failed", "staging_failed")
+        _validate(ROOT, "progressive-host-run-result.json", staging)
+        self.assertNotIn("failed_phase", staging)
+        with self.assertRaises(HostRunError):
+            _validate(
+                ROOT,
+                "progressive-host-run-result.json",
+                {**staging, "failed_phase": "ingest"},
+            )
+
+    def test_run_reports_the_failed_phase_instead_of_staging_failed(self) -> None:
+        plan = self.plan(22)
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            parent = Path(temporary)
+            work_root = parent / "work"
+            work_root.mkdir()
+            output = parent / "evidence"
+            stage = self.stage(parent)
+            with (
+                patch("graphforge_bench.progressive_host_run._native_authority"),
+                patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
+                patch("graphforge_bench.progressive_host_run._run_benchexec", return_value=0),
+                self.assertRaisesRegex(HostRunError, "rung_phase_failed"),
+            ):
+                host_run(
+                    root=ROOT,
+                    output_dir=output,
+                    work_root=work_root,
+                    scale=22,
+                    plan=plan,
+                    executables=fixture_executables(parent),
+                )
+            result = json.loads((output / "s22-result.json").read_text())
+            _validate(ROOT, "progressive-host-run-result.json", result)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure"], "rung_phase_failed")
+            self.assertEqual(result["failed_phase"], "ingest")
+            self.assertEqual(result["error_tail"], self.TAIL)
+            self.assertTrue((output / "s22-failure-raw").is_dir())
