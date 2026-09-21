@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "gate": "epistemic",
-  "knowledge_baseline_sha": "8101c2c52246b903a39ff502dc325915974e4d69",
+  "knowledge_baseline_sha": "9ba4a3cd70b117e02c2494b68385a2b2f6308dc8",
   "command_groups": {
     "rust": [
       "cargo test -p graphforge-knowledge --no-fail-fast",
@@ -24,7 +24,7 @@
   "cases": [
     {
       "id": "knowledge-frozen-baseline",
-      "criterion": "The closed knowledge schema inventory is byte-identical to verified gate SHA 8101c2c and both generated inventories match their checked digests.",
+      "criterion": "The closed knowledge schema inventory is byte-identical to verified gate SHA 9ba4a3c0 and both generated inventories match their checked digests.",
       "command_groups": ["rust"],
       "surfaces": ["rust", "schema"],
       "tests": [

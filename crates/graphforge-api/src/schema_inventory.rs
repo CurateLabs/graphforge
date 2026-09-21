@@ -212,6 +212,7 @@ fn data_type_name(data_type: &DataType) -> String {
         DataType::Utf8 => "Utf8".to_owned(),
         DataType::Binary => "Binary".to_owned(),
         DataType::UInt32 => "UInt32".to_owned(),
+        DataType::UInt64 => "UInt64".to_owned(),
         DataType::Float64 => "Float64".to_owned(),
         DataType::FixedSizeBinary(width) => format!("FixedSizeBinary({width})"),
         DataType::List(item) => format!("List({})", data_type_name(item.data_type())),

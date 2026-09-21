@@ -64,6 +64,16 @@ pub enum CanonicalDomain {
     BeliefProjectionAttachment,
     /// Public Arrow result table.
     ArrowResult,
+    /// Immutable research Source identity.
+    ResearchSource,
+    /// Immutable research Artifact identity.
+    ResearchArtifact,
+    /// Immutable artifact-derivation edge record/table.
+    ArtifactDerivation,
+    /// Append-only artifact-preference event record/table.
+    ArtifactPreference,
+    /// Retention-dependency record/table.
+    RetentionDependency,
 }
 
 impl CanonicalDomain {
@@ -91,6 +101,11 @@ impl CanonicalDomain {
             Self::BeliefProjectionPolicy => "graphforge/belief-projection-policy",
             Self::BeliefProjectionAttachment => "graphforge/belief-projection-attachment",
             Self::ArrowResult => "graphforge/arrow-result",
+            Self::ResearchSource => "graphforge/research-source",
+            Self::ResearchArtifact => "graphforge/research-artifact",
+            Self::ArtifactDerivation => "graphforge/artifact-derivation",
+            Self::ArtifactPreference => "graphforge/artifact-preference",
+            Self::RetentionDependency => "graphforge/retention-dependency",
         }
     }
 }
@@ -549,6 +564,26 @@ mod tests {
                 "graphforge/belief-projection-attachment",
             ),
             (CanonicalDomain::ArrowResult, "graphforge/arrow-result"),
+            (
+                CanonicalDomain::ResearchSource,
+                "graphforge/research-source",
+            ),
+            (
+                CanonicalDomain::ResearchArtifact,
+                "graphforge/research-artifact",
+            ),
+            (
+                CanonicalDomain::ArtifactDerivation,
+                "graphforge/artifact-derivation",
+            ),
+            (
+                CanonicalDomain::ArtifactPreference,
+                "graphforge/artifact-preference",
+            ),
+            (
+                CanonicalDomain::RetentionDependency,
+                "graphforge/retention-dependency",
+            ),
         ];
         for (domain, spelling) in domains {
             assert_eq!(domain.as_str(), spelling);

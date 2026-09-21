@@ -867,6 +867,8 @@ fn evidence_source_kind(value: &str) -> Result<EvidenceSourceKind> {
         "observation" => Ok(EvidenceSourceKind::Observation),
         "graph_node" => Ok(EvidenceSourceKind::GraphNode),
         "graph_edge" => Ok(EvidenceSourceKind::GraphEdge),
+        "source" => Ok(EvidenceSourceKind::Source),
+        "artifact" => Ok(EvidenceSourceKind::Artifact),
         _ => Err(napi_validation("unknown evidence source_kind")),
     }
 }

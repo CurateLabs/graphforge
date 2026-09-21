@@ -28,9 +28,9 @@ pub const PROVENANCE_EVENT_CONTRACT_VERSION: u32 = 1;
 /// Lineage record contract.
 pub const LINEAGE_CONTRACT_VERSION: u32 = 1;
 /// Closed event-kind registry version.
-pub const EVENT_KIND_REGISTRY_VERSION: u32 = 5;
+pub const EVENT_KIND_REGISTRY_VERSION: u32 = 6;
 /// Closed subject-kind registry version.
-pub const SUBJECT_KIND_REGISTRY_VERSION: u32 = 1;
+pub const SUBJECT_KIND_REGISTRY_VERSION: u32 = 2;
 /// Closed lineage-role registry version.
 pub const LINEAGE_ROLE_REGISTRY_VERSION: u32 = 1;
 /// Per-participant row bound used by validation before allocation/persistence.
@@ -123,6 +123,14 @@ pub enum EventKind {
     RecordAlgorithmRun,
     /// An epistemic interpretation attachment was appended to a completed run.
     RecordBeliefProjectionAttachment,
+    /// An immutable research Source was registered.
+    RegisterSource,
+    /// An immutable research Artifact was registered.
+    RegisterArtifact,
+    /// A directed derivation edge was recorded.
+    RecordDerivation,
+    /// A preferred Artifact representation was selected for one Source.
+    SetArtifactPreference,
 }
 
 impl EventKind {
@@ -146,6 +154,10 @@ impl EventKind {
             Self::RecordEvidence => "record_evidence",
             Self::RecordAlgorithmRun => "record_algorithm_run",
             Self::RecordBeliefProjectionAttachment => "record_belief_projection_attachment",
+            Self::RegisterSource => "register_source",
+            Self::RegisterArtifact => "register_artifact",
+            Self::RecordDerivation => "record_derivation",
+            Self::SetArtifactPreference => "set_artifact_preference",
         }
     }
 
@@ -167,6 +179,10 @@ impl EventKind {
             "record_evidence" => Ok(Self::RecordEvidence),
             "record_algorithm_run" => Ok(Self::RecordAlgorithmRun),
             "record_belief_projection_attachment" => Ok(Self::RecordBeliefProjectionAttachment),
+            "register_source" => Ok(Self::RegisterSource),
+            "register_artifact" => Ok(Self::RegisterArtifact),
+            "record_derivation" => Ok(Self::RecordDerivation),
+            "set_artifact_preference" => Ok(Self::SetArtifactPreference),
             _ => Err(invalid("event_kind", "unknown closed value")),
         }
     }
@@ -190,6 +206,10 @@ pub enum SubjectKind {
     AlgorithmRun,
     /// epistemic interpretation attachment UUID.
     BeliefProjectionAttachment,
+    /// Immutable research Source UUID.
+    Source,
+    /// Immutable research Artifact UUID.
+    Artifact,
 }
 
 impl SubjectKind {
@@ -204,6 +224,8 @@ impl SubjectKind {
             Self::ConfidenceAssessment => "confidence_assessment",
             Self::AlgorithmRun => "algorithm_run",
             Self::BeliefProjectionAttachment => "belief_projection_attachment",
+            Self::Source => "source",
+            Self::Artifact => "artifact",
         }
     }
 
@@ -216,6 +238,8 @@ impl SubjectKind {
             "confidence_assessment" => Ok(Self::ConfidenceAssessment),
             "algorithm_run" => Ok(Self::AlgorithmRun),
             "belief_projection_attachment" => Ok(Self::BeliefProjectionAttachment),
+            "source" => Ok(Self::Source),
+            "artifact" => Ok(Self::Artifact),
             _ => Err(invalid("subject_kind", "unknown closed value")),
         }
     }
@@ -1363,6 +1387,10 @@ mod tests {
             EventKind::RecordEvidence,
             EventKind::RecordAlgorithmRun,
             EventKind::RecordBeliefProjectionAttachment,
+            EventKind::RegisterSource,
+            EventKind::RegisterArtifact,
+            EventKind::RecordDerivation,
+            EventKind::SetArtifactPreference,
         ];
         for value in events {
             assert_eq!(EventKind::parse(value.as_str()).unwrap(), value);
@@ -1376,6 +1404,8 @@ mod tests {
             SubjectKind::ConfidenceAssessment,
             SubjectKind::AlgorithmRun,
             SubjectKind::BeliefProjectionAttachment,
+            SubjectKind::Source,
+            SubjectKind::Artifact,
         ];
         for value in subjects {
             assert_eq!(SubjectKind::parse(value.as_str()).unwrap(), value);

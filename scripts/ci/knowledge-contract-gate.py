@@ -16,7 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/knowledge-contract-matrix.json"
 SCHEMA_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
-GROUPS = {"rust", "python", "node"}
+GROUPS = {"rust", "python", "node", "cli"}
 REQUIRED_CASES = {
     "graph-only-no-knowledge",
     "knowledge-enabled-empty",
@@ -33,6 +33,7 @@ REQUIRED_CASES = {
     "search-find-knowledge-states",
     "descriptor-direct-arrow-equivalence",
     "canonical-arrow-fingerprint",
+    "source-artifact-lifecycle",
     "cross-binding-contract",
 }
 FORBIDDEN_EXECUTION_WORDS = {"skip", "ignored", "ignore", "quarantine", "manual"}

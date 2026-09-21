@@ -21,6 +21,9 @@
       "pnpm --filter @curatelabs/graphforge exec napi build --platform",
       "pnpm --filter @curatelabs/graphforge test:smoke",
       "pnpm --filter @curatelabs/graphforge test"
+    ],
+    "cli": [
+      "cargo test -p graphforge-cli --test source_artifact --no-fail-fast"
     ]
   },
   "cases": [
@@ -189,6 +192,19 @@
       "tests": [
         {"kind": "rust", "path": "crates/graphforge-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_ignores_batches_and_dictionary_layout"},
         {"kind": "rust", "path": "crates/graphforge-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_filters_metadata_by_the_closed_registry"}
+      ]
+    },
+    {
+      "id": "source-artifact-lifecycle",
+      "criterion": "Source and Artifact registration, preference, lineage, and replacement impact publish as immutable Arrow tables across Rust, Python, Node, and CLI.",
+      "command_groups": ["rust", "python", "node", "cli"],
+      "surfaces": ["rust", "python", "node", "cli"],
+      "tests": [
+        {"kind": "rust", "path": "crates/graphforge-api/tests/source_artifact_write.rs", "symbol": "source_and_artifact_survive_reopen_and_list"},
+        {"kind": "rust", "path": "crates/graphforge-api/tests/source_artifact_lifecycle.rs", "symbol": "scan_to_ocr_lineage_preference_and_impact_survive_reopen"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/source_artifact_lifecycle.py", "symbol": "check_source_artifact_lifecycle_survives_reopen"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/source-artifact-lifecycle.test.mjs", "symbol": "source and artifact lifecycle survives reopen through the Node surface"},
+        {"kind": "rust", "path": "crates/graphforge-cli/tests/source_artifact.rs", "symbol": "source_artifact_lifecycle_survives_reopen"}
       ]
     },
     {

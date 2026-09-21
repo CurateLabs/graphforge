@@ -166,6 +166,8 @@ fn evidence_source_kind(value: &str) -> Result<EvidenceSourceKind, GfError> {
         "observation" => Ok(EvidenceSourceKind::Observation),
         "graph_node" => Ok(EvidenceSourceKind::GraphNode),
         "graph_edge" => Ok(EvidenceSourceKind::GraphEdge),
+        "source" => Ok(EvidenceSourceKind::Source),
+        "artifact" => Ok(EvidenceSourceKind::Artifact),
         _ => Err(GfError::Validation(format!(
             "unknown composite evidence source_kind {value:?}"
         ))),

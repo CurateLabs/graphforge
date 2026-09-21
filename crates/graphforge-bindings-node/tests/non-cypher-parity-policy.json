@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 273,
-  "releaseSurfaceDigest": "952c9836b52b3c452073b3c9473778f36b225860f8e7ec666a5eb24943d89e18",
+  "releaseSurfaceCount": 283,
+  "releaseSurfaceDigest": "b40eaf0f6dead9d403fdf54b2f54c57dfbfb4f5133480e3ce91135ca14f262b4",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -20,6 +20,7 @@
     "composition-lifecycle": "lifecycleConstruction",
     "lifecycle-construction": "lifecycleConstruction",
     "research-project": "researchProject",
+    "source-artifact-lifecycle": "sourceArtifactLifecycle",
     "gsi-profiler": "gsiProfiler",
     "checkpoint-view": "checkpointView",
     "algorithm": "algorithm",
@@ -86,6 +87,7 @@
       "GraphForge.assess_confidence",
       "GraphForge.attach_evidence",
       "GraphForge.attach_resolved_run",
+      "GraphForge.artifact",
       "GraphForge.begin_import_session",
       "GraphForge.begin_transaction",
       "GraphForge.bind_embedding_space_alias",
@@ -137,6 +139,7 @@
       "GraphForge.invoke_resolved_recorded",
       "GraphForge.labels",
       "GraphForge.list_algorithm_runs",
+      "GraphForge.list_artifacts",
       "GraphForge.list_assertion_status",
       "GraphForge.list_assertion_supersessions",
       "GraphForge.list_assertion_validity",
@@ -149,6 +152,7 @@
       "GraphForge.list_hypothesis_selection",
       "GraphForge.list_provenance_history",
       "GraphForge.list_reasoning",
+      "GraphForge.list_sources",
       "GraphForge.load_ontology",
       "GraphForge.node_count",
       "GraphForge.ontology_mode",
@@ -181,8 +185,13 @@
       "GraphForge.record_hypothesis_membership",
       "GraphForge.record_hypothesis_selection",
       "GraphForge.record_reasoning",
+      "GraphForge.register_artifact",
+      "GraphForge.register_source",
       "GraphForge.research_project_metadata",
       "GraphForge.research_project_summary",
+      "GraphForge.replacement_impact",
+      "GraphForge.research_lineage",
+      "GraphForge.retention_dependency_closure",
       "GraphForge.relationship_types",
       "GraphForge.remove_embedding_space_alias",
       "GraphForge.remove_hypothesis_member",
@@ -191,11 +200,13 @@
       "GraphForge.resume_import_session",
       "GraphForge.revert_to_checkpoint",
       "GraphForge.schema",
+      "GraphForge.set_preferred_artifact",
       "GraphForge.set_default_embedding_space",
       "GraphForge.set_embedding_refresh_project_policy",
       "GraphForge.set_embedding_refresh_space_policy",
       "GraphForge.set_graph_directedness",
       "GraphForge.similar",
+      "GraphForge.source",
       "GraphForge.suggest_ontology",
       "GraphForge.supersede_assertion",
       "GraphForge.validate_ontology",
@@ -357,6 +368,11 @@
     "researchProject": {
       "research-project.test.mjs": [
         "research metadata and discovery stay metadata-only across reopen"
+      ]
+    },
+    "sourceArtifactLifecycle": {
+      "source-artifact-lifecycle.test.mjs": [
+        "source and artifact lifecycle survives reopen through the Node surface"
       ]
     },
     "gsiProfiler": {

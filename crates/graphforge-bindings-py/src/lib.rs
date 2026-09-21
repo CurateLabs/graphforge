@@ -16,6 +16,7 @@ mod providers;
 mod query;
 mod recorded;
 mod research_project;
+mod source_artifact;
 
 pub use analyst::PyGraphScaleIndexProfile;
 pub use analyst::PyInvocationDescriptor;

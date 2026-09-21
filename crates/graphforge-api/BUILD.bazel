@@ -468,6 +468,20 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "source_artifact_write",
+    srcs = ["tests/source_artifact_write.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "source_artifact_lifecycle",
+    srcs = ["tests/source_artifact_lifecycle.rs"],
+    crate = ":graphforge_api",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "strict_runtime_properties",
     srcs = ["tests/strict_runtime_properties.rs"],
     crate = ":graphforge_api",
@@ -604,6 +618,8 @@ test_suite(
         ":permanent_storage_budgets",
         ":scale_g500_ladder",
         ":scale_g500_scale20",
+        ":source_artifact_lifecycle",
+        ":source_artifact_write",
         ":strict_runtime_properties",
         ":value_access_semantics",
         ":value_semantics",

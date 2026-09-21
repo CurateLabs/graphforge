@@ -8,7 +8,7 @@ The knowledge layer deliberately does not place current belief, reasoning, super
 hypotheses, or valid-time interpretation in its rows. The shipped epistemic layer
 implements those concerns as additive records.
 
-## Evidence and research model (M11, Designed)
+## Evidence and research model (M11, Implemented)
 
 The [analyst experience](../../engineering/analyst-ux.md) extends the existing
 ledger into an inspectable evidence/research lifecycle:
@@ -48,8 +48,9 @@ acceptance and later proposals do not flatten competing interpretations or
 apply the same contribution twice.
 
 Current APIs below describe implemented records. First-class Source/Artifact
-lifecycle, contextual canonicality, research lineage, and selective integration
-must be implemented and validated before being described as shipped.
+lifecycle, preference, bounded lineage, and replacement impact are shipped in
+Rust, Python, and Node. Contextual canonicality and selective integration remain
+future work.
 
 ## Ownership and isolation
 

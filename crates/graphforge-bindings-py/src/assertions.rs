@@ -108,6 +108,8 @@ fn py_evidence_input(
         "observation" => graphforge_api::EvidenceSourceKind::Observation,
         "graph_node" => graphforge_api::EvidenceSourceKind::GraphNode,
         "graph_edge" => graphforge_api::EvidenceSourceKind::GraphEdge,
+        "source" => graphforge_api::EvidenceSourceKind::Source,
+        "artifact" => graphforge_api::EvidenceSourceKind::Artifact,
         _ => return Err(PyTypeError::new_err("unknown evidence source kind")),
     };
     let role = match field("role")?.extract::<String>()?.as_str() {
@@ -676,6 +678,8 @@ impl GraphForge {
             "observation" => graphforge_api::EvidenceSourceKind::Observation,
             "graph_node" => graphforge_api::EvidenceSourceKind::GraphNode,
             "graph_edge" => graphforge_api::EvidenceSourceKind::GraphEdge,
+            "source" => graphforge_api::EvidenceSourceKind::Source,
+            "artifact" => graphforge_api::EvidenceSourceKind::Artifact,
             _ => {
                 return Err(to_pyerr(
                     py,

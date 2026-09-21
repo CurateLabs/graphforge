@@ -2,6 +2,8 @@
 
 mod assertions;
 mod ledger;
+mod lineage;
+mod source_artifact;
 mod supporting;
 use ledger::assertion_evidence_publication_participants;
 use ledger::assertion_publication_participants;
@@ -37,6 +39,13 @@ pub(crate) use ledger::snapshot_to_participant;
 use ledger::status_publication_participants;
 use ledger::supersession_publication_participants;
 pub(crate) use ledger::with_next_token;
+pub(crate) use ledger::{read_artifact_ledger, read_derivation_ledger, read_source_ledger};
+pub use lineage::{LineageDirection, ResearchLineageRequest};
+pub use source_artifact::{
+    ArtifactPayloadRequest, DerivationInput, ListArtifactsRequest, ListSourcesRequest,
+    RegisterArtifactRequest, RegisterSourceRequest, ReplacementImpactRequest,
+    RetentionDependencyClosureRequest, SetPreferredArtifactRequest,
+};
 
 use std::collections::HashSet;
 use std::fs;
@@ -379,7 +388,7 @@ pub(crate) fn lock_graph_visibility(
     graph.graph_visibility.lock()
 }
 
-fn match_requested_node_uuids(
+pub(crate) fn match_requested_node_uuids(
     graph: &GraphForge,
     pending: &mut HashSet<Uuid>,
 ) -> Result<(), GfError> {
@@ -391,7 +400,7 @@ fn match_requested_node_uuids(
     match_requested_uuids(batches, "node_uuid", pending)
 }
 
-fn match_requested_edge_uuids(
+pub(crate) fn match_requested_edge_uuids(
     graph: &GraphForge,
     pending: &mut HashSet<Uuid>,
 ) -> Result<(), GfError> {
@@ -540,7 +549,12 @@ pub(crate) fn provenance_error(error: graphforge_provenance::ProvenanceError) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CapabilityId, EnableCapabilityRequest};
+    use crate::{
+        ArtifactKind, ArtifactPayloadRequest, CapabilityId, DerivationInput, DerivationSubjectKind,
+        EnableCapabilityRequest, LineageDirection, ListArtifactsRequest, ListSourcesRequest,
+        RegisterArtifactRequest, RegisterSourceRequest, ResearchLineageRequest,
+        SetPreferredArtifactRequest, SourceKind,
+    };
     use std::collections::HashMap;
 
     pub(super) fn uuid7(seed: u8) -> Uuid {
@@ -1008,5 +1022,502 @@ mod tests {
                 .rows_produced,
             0
         );
+    }
+
+    // ── Finding 1: idempotency tolerates clock advance ──────────────────────
+
+    fn source_fixture_in_memory(graph: &GraphForge, source_uuid: Uuid, op_seed: u8) {
+        enable(graph, CapabilityId::Provenance, op_seed);
+        enable(graph, CapabilityId::Knowledge, op_seed.wrapping_add(1));
+        graph
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(op_seed.wrapping_add(2))),
+                    actor_uuid: None,
+                },
+                source_uuid,
+                label: "Idempotency Manuscript".into(),
+                source_kind: SourceKind::Manuscript,
+                identity_uri: Some("https://example.org/idempotency".into()),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn source_register_idempotency_tolerates_clock_advance() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(1_000));
+        let source_uuid = uuid7(10);
+        source_fixture_in_memory(&graph, source_uuid, 20);
+
+        // Advance the clock and retry the identical request.
+        graph.set_clock_for_test(|| Ok(2_000));
+        let result = graph
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(23)),
+                    actor_uuid: None,
+                },
+                source_uuid,
+                label: "Idempotency Manuscript".into(),
+                source_kind: SourceKind::Manuscript,
+                identity_uri: Some("https://example.org/idempotency".into()),
+            })
+            .unwrap();
+        // Returns the previously committed row, not a new publication.
+        assert_eq!(result.stats.rows_produced, 1);
+
+        // A genuinely different request with the same UUID must conflict.
+        let conflict = graph
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(24)),
+                    actor_uuid: None,
+                },
+                source_uuid,
+                label: "Different Label".into(),
+                source_kind: SourceKind::Pdf,
+                identity_uri: None,
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
+        // Ledger must still contain exactly one source.
+        assert_eq!(
+            graph
+                .list_sources(ListSourcesRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+    }
+
+    #[test]
+    fn artifact_register_idempotency_tolerates_clock_advance() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(1_000));
+        let source_uuid = uuid7(30);
+        let artifact_uuid = uuid7(31);
+        source_fixture_in_memory(&graph, source_uuid, 40);
+        graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(43)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::RawScan,
+                media_type: "image/tiff".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap();
+
+        // Advance the clock and retry.
+        graph.set_clock_for_test(|| Ok(2_000));
+        let result = graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(44)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::RawScan,
+                media_type: "image/tiff".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(result.stats.rows_produced, 1);
+
+        // Different content with the same UUID must conflict.
+        let conflict = graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(45)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::OcrText,
+                media_type: "text/plain".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert_eq!(
+            graph
+                .list_artifacts(ListArtifactsRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+    }
+
+    #[test]
+    fn set_preferred_artifact_idempotency_tolerates_clock_advance() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(1_000));
+        let source_uuid = uuid7(50);
+        let artifact_uuid = uuid7(51);
+        let preference_uuid = uuid7(52);
+        source_fixture_in_memory(&graph, source_uuid, 60);
+        graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(63)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::RawScan,
+                media_type: "image/png".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap();
+        graph
+            .set_preferred_artifact(SetPreferredArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(64)),
+                    actor_uuid: None,
+                },
+                preference_event_uuid: preference_uuid,
+                source_uuid,
+                artifact_uuid,
+                reason: "best available scan".into(),
+            })
+            .unwrap();
+
+        // Advance the clock and retry.
+        graph.set_clock_for_test(|| Ok(2_000));
+        let result = graph
+            .set_preferred_artifact(SetPreferredArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(65)),
+                    actor_uuid: None,
+                },
+                preference_event_uuid: preference_uuid,
+                source_uuid,
+                artifact_uuid,
+                reason: "best available scan".into(),
+            })
+            .unwrap();
+        assert_eq!(result.stats.rows_produced, 1);
+
+        // Different content with the same preference UUID must conflict.
+        let conflict = graph
+            .set_preferred_artifact(SetPreferredArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(66)),
+                    actor_uuid: None,
+                },
+                preference_event_uuid: preference_uuid,
+                source_uuid,
+                artifact_uuid,
+                reason: "different reason".into(),
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
+    }
+
+    // ── Finding 2: no-partial-mutation + invalid input coverage ──────────────
+
+    #[test]
+    fn register_artifact_rejects_missing_source_and_derivation_input() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(1_000));
+        let source_uuid = uuid7(70);
+        let artifact_uuid = uuid7(71);
+        let nonexistent_source = uuid7(72);
+        let nonexistent_derivation = uuid7(73);
+        source_fixture_in_memory(&graph, source_uuid, 80);
+
+        // Nonexistent source UUID → not-found.
+        let err = graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(83)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid: nonexistent_source,
+                artifact_kind: ArtifactKind::RawScan,
+                media_type: "image/tiff".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap_err();
+        assert_eq!(err.code(), "GF_NOT_FOUND");
+        assert_eq!(
+            graph
+                .list_artifacts(ListArtifactsRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            0,
+            "no artifact must have been written after source-not-found"
+        );
+
+        // Nonexistent derivation input → not-found.
+        let err = graph
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(84)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::OcrText,
+                media_type: "text/plain".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: vec![DerivationInput {
+                    input_uuid: nonexistent_derivation,
+                    input_kind: DerivationSubjectKind::Artifact,
+                }],
+                run_uuid: None,
+            })
+            .unwrap_err();
+        assert_eq!(err.code(), "GF_NOT_FOUND");
+        assert_eq!(
+            graph
+                .list_artifacts(ListArtifactsRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            0,
+            "no artifact must have been written after derivation-input-not-found"
+        );
+    }
+
+    #[test]
+    fn stale_facade_rejects_source_artifact_publications_without_partial_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let bootstrap = GraphForge::new(root.path().to_str()).unwrap();
+        bootstrap.set_clock_for_test(|| Ok(100));
+        enable(&bootstrap, CapabilityId::Provenance, 100);
+        enable(&bootstrap, CapabilityId::Knowledge, 101);
+        let source_uuid = uuid7(110);
+        let artifact_uuid = uuid7(111);
+        let preference_uuid = uuid7(112);
+        bootstrap
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(113)),
+                    actor_uuid: None,
+                },
+                source_uuid,
+                label: "Stale Facade Source".into(),
+                source_kind: SourceKind::Manuscript,
+                identity_uri: None,
+            })
+            .unwrap();
+        bootstrap
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(114)),
+                    actor_uuid: None,
+                },
+                artifact_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::RawScan,
+                media_type: "image/tiff".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap();
+        bootstrap
+            .set_preferred_artifact(SetPreferredArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(115)),
+                    actor_uuid: None,
+                },
+                preference_event_uuid: preference_uuid,
+                source_uuid,
+                artifact_uuid,
+                reason: "initial preference".into(),
+            })
+            .unwrap();
+        drop(bootstrap);
+
+        // Stale facade: opened before the concurrent write below.
+        let stale = GraphForge::new(root.path().to_str()).unwrap();
+        stale.set_clock_for_test(|| Ok(200));
+        // Concurrent write advances the generation.
+        let concurrent = GraphForge::new(root.path().to_str()).unwrap();
+        concurrent
+            .add_node("ConcurrentNode", &HashMap::new())
+            .unwrap();
+        let durable_generation = graphforge_storage::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+
+        let source2_uuid = uuid7(116);
+        let stale_source = stale
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(117)),
+                    actor_uuid: None,
+                },
+                source_uuid: source2_uuid,
+                label: "Should Not Register".into(),
+                source_kind: SourceKind::Pdf,
+                identity_uri: None,
+            })
+            .unwrap_err();
+        assert_eq!(stale_source.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let artifact2_uuid = uuid7(118);
+        let stale_artifact = stale
+            .register_artifact(RegisterArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(119)),
+                    actor_uuid: None,
+                },
+                artifact_uuid: artifact2_uuid,
+                source_uuid,
+                artifact_kind: ArtifactKind::OcrText,
+                media_type: "text/plain".into(),
+                payload: ArtifactPayloadRequest::Absent,
+                derivation_inputs: Vec::new(),
+                run_uuid: None,
+            })
+            .unwrap_err();
+        assert_eq!(stale_artifact.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let preference2_uuid = uuid7(120);
+        let stale_preference = stale
+            .set_preferred_artifact(SetPreferredArtifactRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(121)),
+                    actor_uuid: None,
+                },
+                preference_event_uuid: preference2_uuid,
+                source_uuid,
+                artifact_uuid,
+                reason: "should not be set".into(),
+            })
+            .unwrap_err();
+        assert_eq!(stale_preference.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        // Generation must not have advanced past the concurrent write.
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            durable_generation
+        );
+
+        // Reopen and verify ledgers are unchanged.
+        let reopened = GraphForge::new(root.path().to_str()).unwrap();
+        // Only one source (the bootstrap source), not the stale-attempted second.
+        assert_eq!(
+            reopened
+                .list_sources(ListSourcesRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        // Only one artifact, not the stale-attempted second.
+        assert_eq!(
+            reopened
+                .list_artifacts(ListArtifactsRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+    }
+
+    // ── Finding 4: lineage subject validation for every kind ─────────────────
+
+    fn lineage_not_found(
+        graph: &GraphForge,
+        subject_uuid: Uuid,
+        subject_kind: DerivationSubjectKind,
+    ) {
+        let err = graph
+            .research_lineage(ResearchLineageRequest {
+                subject_uuid,
+                subject_kind,
+                direction: LineageDirection::Backward,
+                max_depth: 1,
+                page: Default::default(),
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.code(),
+            "GF_NOT_FOUND",
+            "expected not-found for {:?}",
+            subject_kind
+        );
+    }
+
+    #[test]
+    fn lineage_validates_all_subject_kinds_and_returns_not_found() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(1_000));
+        enable(&graph, CapabilityId::Provenance, 130);
+        enable(&graph, CapabilityId::Knowledge, 131);
+        enable(&graph, CapabilityId::Epistemic, 132);
+
+        let nonexistent = uuid7(140);
+
+        // Source: no sources registered yet.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::Source);
+
+        // Artifact: no artifacts registered.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::Artifact);
+
+        // Node: uuid7(140) does not exist in the graph.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::Node);
+
+        // Edge: uuid7(140) is not an edge UUID.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::Edge);
+
+        // Assertion: no assertions registered.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::Assertion);
+
+        // EvidenceLink: no evidence registered.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::EvidenceLink);
+
+        // AlgorithmRun: no runs registered.
+        lineage_not_found(&graph, nonexistent, DerivationSubjectKind::AlgorithmRun);
+
+        // Verify that a legitimate Source does NOT return not-found.
+        let source_uuid = uuid7(141);
+        graph
+            .register_source(RegisterSourceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(142)),
+                    actor_uuid: None,
+                },
+                source_uuid,
+                label: "Lineage Validation Source".into(),
+                source_kind: SourceKind::Manuscript,
+                identity_uri: None,
+            })
+            .unwrap();
+        let ok = graph
+            .research_lineage(ResearchLineageRequest {
+                subject_uuid: source_uuid,
+                subject_kind: DerivationSubjectKind::Source,
+                direction: LineageDirection::Backward,
+                max_depth: 1,
+                page: Default::default(),
+            })
+            .unwrap();
+        assert_eq!(ok.stats.rows_produced, 0); // no derivations yet, but not an error
     }
 }
