@@ -159,6 +159,7 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
             {"exports": {}},
             {"exports": {"not an identifier": "class"}},
             {"exports": {"GraphForge": "widget"}},
+            {"exports": {"GraphForge": "class", "__napiBindingTarget": "function"}},
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -246,6 +247,43 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(completed.stdout, "0.0.0-test")
+
+    def test_synthesized_loader_reports_the_native_binding_target(self) -> None:
+        # @napi-rs/cli >= 3.10 exports `__napiBindingTarget` from every loader it
+        # generates, so tests/export-surface.test.mjs requires the manifest to
+        # declare it. The assembled loader defines the value itself: the addon
+        # has no such export, and the assembled lane only ever loads native.
+        surface = {"GraphForge": "class", "__napiBindingTarget": "value"}
+        body = synthesize_node_index_js(
+            "native-stub.js",
+            surface,
+            package_name="@curatelabs/graphforge",
+            binary_name="graphforge",
+        )
+        self.assertIn("module.exports.__napiBindingTarget = 'native';", body)
+        self.assertNotIn("nativeBinding.__napiBindingTarget", body)
+        declarations = synthesize_node_index_dts(surface)
+        self.assertIn("export declare const __napiBindingTarget: 'native';", declarations)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp)
+            (pkg / "native-stub.js").write_text(
+                "module.exports = { GraphForge: class GraphForge {} };\n",
+                encoding="utf-8",
+            )
+            (pkg / "index.js").write_text(body, encoding="utf-8")
+            esm = pkg / "target.mjs"
+            esm.write_text(
+                "import binding, { __napiBindingTarget, GraphForge } from './index.js';\n"
+                "if (typeof GraphForge !== 'function') process.exit(2);\n"
+                "if (binding.__napiBindingTarget !== __napiBindingTarget) process.exit(3);\n"
+                "process.stdout.write(__napiBindingTarget);\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                ["node", str(esm)], check=True, capture_output=True, text=True
+            )
+            self.assertEqual(completed.stdout, "native")
 
     def test_synthesized_loader_resolves_the_optional_platform_package(self) -> None:
         # #1369 — the published main package ships no addon: `files` excludes

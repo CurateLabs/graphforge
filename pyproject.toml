@@ -48,7 +48,7 @@ dev = [
     "pytest-mock>=3.0",
     "pytest-bdd>=7.0",
     "hypothesis>=6.0",
-    "ruff==0.16.7",
+    "ruff==0.16.8",
     "pyarrow>=15.0",
 ]
 
@@ -292,7 +292,7 @@ dev = [
     "pre-commit>=3.6.0",
     "types-defusedxml>=0.7.0.20250822",
     "interrogate>=1.7.0",
-    "ruff==0.16.7",
+    "ruff==0.16.8",
     "networkx>=3.4.2",
     "pandas>=2.3.3",
     "python-igraph>=1.0.0",

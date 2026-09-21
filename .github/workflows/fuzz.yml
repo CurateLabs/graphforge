@@ -25,7 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly as of 2026-08-05
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # nightly as of 2026-08-05
         with:
           components: clippy, rustfmt
           # Pin glibc: the prebuilt cargo-fuzz binary is musl-static, whose libc
@@ -33,7 +33,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Mount fuzz build disk
-        uses: useblacksmith/stickydisk@74f3f01ab1392726dd6ee06904f0452b0ec1e151 # v1.6.0
+        uses: useblacksmith/stickydisk@94697d49e77d0dd78b77deb85ad3de63a28b4b8a # v1.7.1
         with:
           key: ${{ github.repository }}-daily-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1
           path: fuzz/target
@@ -49,7 +49,7 @@ jobs:
             ${{ runner.os }}-fuzz-
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2.87.11
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
           tool: cargo-fuzz
 

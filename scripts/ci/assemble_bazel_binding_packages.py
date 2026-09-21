@@ -156,6 +156,13 @@ EXPORT_SURFACE_FILENAME = "napi-export-surface.json"
 
 _IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*\Z")
 _EXPORT_KINDS = ("alias", "class", "function", "value")
+# Named export every loader @napi-rs/cli >= 3.10 generates carries to report
+# which binding artifact actually loaded: 'native' for a .node addon, otherwise
+# the platformArchABI of a WASI flavour. It is loader metadata, not a Rust
+# export, so the assembled loader emits the literal instead of reading it off
+# the addon; the assembled lane only ever loads the native addon.
+NAPI_BINDING_TARGET_EXPORT = "__napiBindingTarget"
+NAPI_BINDING_TARGET_NATIVE = "native"
 
 
 def read_node_export_surface(package_root: Path) -> dict[str, str]:
@@ -183,6 +190,8 @@ def read_node_export_surface(package_root: Path) -> dict[str, str]:
             _die(f"{manifest_path} export name is not a JS identifier: {name!r}")
         if kind not in _EXPORT_KINDS:
             _die(f"{manifest_path} export {name} has unsupported kind: {kind!r}")
+        if name == NAPI_BINDING_TARGET_EXPORT and kind != "value":
+            _die(f"{manifest_path} export {name} is loader metadata; declare it as 'value'")
         surface[name] = kind
     return dict(sorted(surface.items()))
 
@@ -318,7 +327,14 @@ def synthesize_node_index_js(
             "module.exports = nativeBinding;",
         ]
     )
-    lines.extend(f"module.exports.{name} = nativeBinding.{name};" for name in surface)
+    for name in surface:
+        if name == NAPI_BINDING_TARGET_EXPORT:
+            # Loader metadata, not an addon export: napi's own loader defines
+            # it and stamps it onto the binding; assigning through
+            # `module.exports` (which is `nativeBinding`) does both here.
+            lines.append(f"module.exports.{name} = '{NAPI_BINDING_TARGET_NATIVE}';")
+        else:
+            lines.append(f"module.exports.{name} = nativeBinding.{name};")
     lines.append("")
     return "\n".join(lines)
 
@@ -345,6 +361,8 @@ def synthesize_node_index_dts(surface: dict[str, str]) -> str:
             )
         elif kind == "function":
             lines.append(f"export declare function {name}(...args: any[]): any;")
+        elif name == NAPI_BINDING_TARGET_EXPORT:
+            lines.append(f"export declare const {name}: '{NAPI_BINDING_TARGET_NATIVE}';")
         else:
             lines.append(f"export declare const {name}: any;")
     lines.append("")
