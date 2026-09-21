@@ -1,5 +1,5 @@
 {
-  "checksum": "d2015f65cded0384a0bca5a039355f4975114228f999cfcb520548db595ee7e5",
+  "checksum": "8905a2046e7dc333083148f5fc8f81d4721394f55372a14dbe0b8a9d1d11648b",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -4027,14 +4027,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "clap 4.6.6": {
+    "clap 4.6.7": {
       "name": "clap",
-      "version": "4.6.6",
+      "version": "4.6.7",
       "package_url": "https://github.com/clap-rs/clap",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/clap/4.6.6/download",
-          "sha256": "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
+          "url": "https://static.crates.io/crates/clap/4.6.7/download",
+          "sha256": "aa8876b300ab35ba921adea3dfd70157a46249b33f95c9084ae5709785478946"
         }
       },
       "targets": [
@@ -4074,7 +4074,7 @@
         "deps": {
           "common": [
             {
-              "id": "clap_builder 4.6.6",
+              "id": "clap_builder 4.6.7",
               "target": "clap_builder"
             }
           ],
@@ -4084,13 +4084,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "clap_derive 4.6.4",
+              "id": "clap_derive 4.6.7",
               "target": "clap_derive"
             }
           ],
           "selects": {}
         },
-        "version": "4.6.6"
+        "version": "4.6.7"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -4099,14 +4099,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "clap_builder 4.6.6": {
+    "clap_builder 4.6.7": {
       "name": "clap_builder",
-      "version": "4.6.6",
+      "version": "4.6.7",
       "package_url": "https://github.com/clap-rs/clap",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/clap_builder/4.6.6/download",
-          "sha256": "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
+          "url": "https://static.crates.io/crates/clap_builder/4.6.7/download",
+          "sha256": "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
         }
       },
       "targets": [
@@ -4167,7 +4167,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "4.6.6"
+        "version": "4.6.7"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -4176,14 +4176,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "clap_derive 4.6.4": {
+    "clap_derive 4.6.7": {
       "name": "clap_derive",
-      "version": "4.6.4",
+      "version": "4.6.7",
       "package_url": "https://github.com/clap-rs/clap",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/clap_derive/4.6.4/download",
-          "sha256": "d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061"
+          "url": "https://static.crates.io/crates/clap_derive/4.6.7/download",
+          "sha256": "f9c751b79415d4e559e3d1fcf128e09e720eb673a06d26cf6f392d37d75b66e0"
         }
       },
       "targets": [
@@ -4233,7 +4233,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "4.6.4"
+        "version": "4.6.7"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -4443,7 +4443,7 @@
         "deps": {
           "common": [
             {
-              "id": "clap 4.6.6",
+              "id": "clap 4.6.7",
               "target": "clap"
             },
             {
@@ -4615,7 +4615,7 @@
               "target": "cfg_if"
             },
             {
-              "id": "clap 4.6.6",
+              "id": "clap 4.6.7",
               "target": "clap"
             },
             {
@@ -4733,7 +4733,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -6157,7 +6157,7 @@
               "target": "anyhow"
             },
             {
-              "id": "clap 4.6.6",
+              "id": "clap 4.6.7",
               "target": "clap"
             },
             {
@@ -10631,7 +10631,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -11188,7 +11188,7 @@
           "selects": {
             "cfg(not(windows))": [
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
@@ -11251,7 +11251,7 @@
           "selects": {
             "cfg(not(windows))": [
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
@@ -12744,7 +12744,7 @@
               "target": "arrow"
             },
             {
-              "id": "napi 3.12.4",
+              "id": "napi 3.12.5",
               "target": "napi"
             },
             {
@@ -12772,7 +12772,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "napi-derive 3.6.6",
+              "id": "napi-derive 3.6.8",
               "target": "napi_derive"
             }
           ],
@@ -12793,7 +12793,7 @@
         "deps": {
           "common": [
             {
-              "id": "napi-build 2.4.2",
+              "id": "napi-build 2.4.4",
               "target": "napi_build"
             }
           ],
@@ -12898,7 +12898,7 @@
               "target": "arrow"
             },
             {
-              "id": "clap 4.6.6",
+              "id": "clap 4.6.7",
               "target": "clap"
             },
             {
@@ -12931,7 +12931,7 @@
               "target": "tempfile"
             },
             {
-              "id": "ureq 3.4.1",
+              "id": "ureq 3.4.2",
               "target": "ureq"
             },
             {
@@ -13222,6 +13222,11 @@
         "deps_dev": {
           "common": [
             {
+              "id": "codspeed-divan-compat 5.0.1",
+              "target": "codspeed_divan_compat",
+              "alias": "divan"
+            },
+            {
               "id": "insta 1.48.0",
               "target": "insta"
             },
@@ -13288,7 +13293,7 @@
           "selects": {
             "cfg(unix)": [
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
@@ -13540,7 +13545,7 @@
               "target": "thiserror"
             },
             {
-              "id": "ureq 3.4.1",
+              "id": "ureq 3.4.2",
               "target": "ureq"
             },
             {
@@ -13724,7 +13729,7 @@
               "target": "sha2"
             },
             {
-              "id": "ureq 3.4.1",
+              "id": "ureq 3.4.2",
               "target": "ureq"
             },
             {
@@ -13919,7 +13924,7 @@
               "target": "tantivy"
             },
             {
-              "id": "ureq 3.4.1",
+              "id": "ureq 3.4.2",
               "target": "ureq"
             },
             {
@@ -14069,7 +14074,7 @@
                 "target": "libc"
               },
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
@@ -18296,14 +18301,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "napi 3.12.4": {
+    "napi 3.12.5": {
       "name": "napi",
-      "version": "3.12.4",
+      "version": "3.12.5",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi/3.12.4/download",
-          "sha256": "3d2c1d080c842ec1347ebf3cfb9347c15f8c2262f143cc30eea41ddf1c7da720"
+          "url": "https://static.crates.io/crates/napi/3.12.5/download",
+          "sha256": "f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e"
         }
       },
       "targets": [
@@ -18414,7 +18419,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.12.4"
+        "version": "3.12.5"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -18429,7 +18434,7 @@
         "deps": {
           "common": [
             {
-              "id": "napi-build 2.4.2",
+              "id": "napi-build 2.4.4",
               "target": "napi_build"
             }
           ],
@@ -18442,14 +18447,14 @@
       ],
       "license_file": null
     },
-    "napi-build 2.4.2": {
+    "napi-build 2.4.4": {
       "name": "napi-build",
-      "version": "2.4.2",
+      "version": "2.4.4",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-build/2.4.2/download",
-          "sha256": "860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7"
+          "url": "https://static.crates.io/crates/napi-build/2.4.4/download",
+          "sha256": "9befcb51d87271051c0c11aaf625d09340266b7f1ac3fef5975e62274dc2813f"
         }
       },
       "targets": [
@@ -18472,7 +18477,7 @@
           "**"
         ],
         "edition": "2021",
-        "version": "2.4.2"
+        "version": "2.4.4"
       },
       "license": "MIT",
       "license_ids": [
@@ -18480,14 +18485,14 @@
       ],
       "license_file": null
     },
-    "napi-derive 3.6.6": {
+    "napi-derive 3.6.8": {
       "name": "napi-derive",
-      "version": "3.6.6",
+      "version": "3.6.8",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-derive/3.6.6/download",
-          "sha256": "e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb"
+          "url": "https://static.crates.io/crates/napi-derive/3.6.8/download",
+          "sha256": "7e332e701386d8101b093203e296059ad8aeef58ddd4c75594f3c84ce637405e"
         }
       },
       "targets": [
@@ -18529,7 +18534,7 @@
               "target": "ctor"
             },
             {
-              "id": "napi-derive-backend 6.1.3",
+              "id": "napi-derive-backend 6.1.4",
               "target": "napi_derive_backend"
             },
             {
@@ -18548,7 +18553,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.6.6"
+        "version": "3.6.8"
       },
       "license": "MIT",
       "license_ids": [
@@ -18556,14 +18561,14 @@
       ],
       "license_file": null
     },
-    "napi-derive-backend 6.1.3": {
+    "napi-derive-backend 6.1.4": {
       "name": "napi-derive-backend",
-      "version": "6.1.3",
+      "version": "6.1.4",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-derive-backend/6.1.3/download",
-          "sha256": "4c1c87a71568f3fe5c736b10878ff55064b250bb4ea4b48c8055713e07b9e463"
+          "url": "https://static.crates.io/crates/napi-derive-backend/6.1.4/download",
+          "sha256": "fd6856fe1686867da90ed0dc292d7c0c87a695eb7c578b913360f33619ee01e3"
         }
       },
       "targets": [
@@ -18619,7 +18624,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "6.1.3"
+        "version": "6.1.4"
       },
       "license": "MIT",
       "license_ids": [
@@ -23259,14 +23264,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "rustix 1.1.4": {
+    "rustix 1.1.5": {
       "name": "rustix",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "package_url": "https://github.com/bytecodealliance/rustix",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/rustix/1.1.4/download",
-          "sha256": "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+          "url": "https://static.crates.io/crates/rustix/1.1.5/download",
+          "sha256": "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
         }
       },
       "targets": [
@@ -23371,7 +23376,7 @@
                 "alias": "libc_errno"
               },
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
@@ -23406,7 +23411,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.1.4"
+        "version": "1.1.5"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -26919,13 +26924,13 @@
             ],
             "cfg(any(unix, target_os = \"wasi\"))": [
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ],
@@ -26999,13 +27004,13 @@
           "selects": {
             "cfg(unix)": [
               {
-                "id": "rustix 1.1.4",
+                "id": "rustix 1.1.5",
                 "target": "rustix"
               }
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -29352,14 +29357,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "ureq 3.4.1": {
+    "ureq 3.4.2": {
       "name": "ureq",
-      "version": "3.4.1",
+      "version": "3.4.2",
       "package_url": "https://github.com/algesten/ureq",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/ureq/3.4.1/download",
-          "sha256": "af5546be8f5378d5414f83733f5c9a2526f4645829edbc1c41790aeef1b38e8b"
+          "url": "https://static.crates.io/crates/ureq/3.4.2/download",
+          "sha256": "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
         }
       },
       "targets": [
@@ -29430,7 +29435,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "3.4.1"
+        "version": "3.4.2"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -31047,7 +31052,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.59.0",
+                "id": "windows-sys 0.61.2",
                 "target": "windows_sys"
               }
             ]
@@ -31988,7 +31993,6 @@
             "Win32_System",
             "Win32_System_Console",
             "Win32_System_IO",
-            "Win32_System_SystemInformation",
             "Win32_UI",
             "Win32_UI_Input",
             "Win32_UI_Input_KeyboardAndMouse",
@@ -32066,6 +32070,7 @@
             "Win32_System_Ioctl",
             "Win32_System_Memory",
             "Win32_System_Pipes",
+            "Win32_System_SystemInformation",
             "Win32_System_SystemServices",
             "Win32_System_Threading",
             "Win32_System_WindowsProgramming",
@@ -34793,7 +34798,7 @@
     "bytes 1.12.1",
     "chrono 0.4.45",
     "chrono-tz 0.10.4",
-    "clap 4.6.6",
+    "clap 4.6.7",
     "datafusion 54.1.0",
     "datafusion-catalog 54.1.0",
     "datafusion-datasource 54.1.0",
@@ -34802,13 +34807,13 @@
     "futures 0.3.34",
     "libc 0.2.189",
     "named-lock 0.4.1",
-    "napi 3.12.4",
-    "napi-build 2.4.2",
-    "napi-derive 3.6.6",
+    "napi 3.12.5",
+    "napi-build 2.4.4",
+    "napi-derive 3.6.8",
     "parquet 58.4.0",
     "pyo3 0.28.3",
     "rayon 1.12.0",
-    "rustix 1.1.4",
+    "rustix 1.1.5",
     "serde 1.0.229",
     "serde_json 1.0.151",
     "serde_yaml_ng 0.9.36",
@@ -34820,7 +34825,7 @@
     "thrift 0.17.0",
     "tokio 1.53.1",
     "unicode-normalization 0.1.25",
-    "ureq 3.4.1",
+    "ureq 3.4.2",
     "url 2.5.8",
     "uuid 1.26.1",
     "windows-sys 0.61.2",

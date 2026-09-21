@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "c115978db91209335e4a26a58f03706dd3fdd09958a325a4f2fc9214f64ca173",
+  "sha256": "582bf4132835c94c0b5dfc1e581096727bed9cdd360b678065564b9c0de6dca3",
   "entries": [
     {
       "name": "graphforge-api",
@@ -710,7 +710,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.1",
+          "req": "=3.4.2",
           "features": [
             "rustls"
           ],
@@ -1474,7 +1474,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.1",
+          "req": "=3.4.2",
           "features": [
             "rustls"
           ],
@@ -1703,7 +1703,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.1",
+          "req": "=3.4.2",
           "features": [
             "rustls"
           ],
@@ -2042,7 +2042,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.4.1",
+          "req": "=3.4.2",
           "features": [
             "rustls"
           ],
