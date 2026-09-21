@@ -8,7 +8,9 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+use graphforge_core::canonical::{
+    CANONICAL_CONTRACT_VERSION, CanonicalDomain, CanonicalWriter, fingerprint,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -282,6 +284,67 @@ impl ArtifactLedger {
             merged.push(row.clone());
         }
         Self::new(merged)
+    }
+
+    /// Canonical semantic fingerprint over immutable Artifact content, excluding clock fields.
+    ///
+    /// Excludes `provenance_uuid` and `recorded_at_micros` so that a retry with the same
+    /// semantic content but a different clock value compares equal to the committed row.
+    pub fn artifact_fingerprint(&self, artifact_uuid: Uuid) -> Result<[u8; 32], KnowledgeError> {
+        let row = self
+            .artifacts
+            .iter()
+            .find(|row| row.artifact_uuid == artifact_uuid)
+            .ok_or(KnowledgeError::Dangling("artifact_uuid"))?;
+        let mut writer = CanonicalWriter::new();
+        writer.raw(b"GFAR")?;
+        writer.u32(ARTIFACT_CONTRACT_VERSION)?;
+        writer.raw(row.artifact_uuid.as_bytes())?;
+        writer.raw(row.source_uuid.as_bytes())?;
+        writer.text(row.artifact_kind.as_str())?;
+        writer.text(&row.media_type)?;
+        writer.text(row.payload_kind.as_str())?;
+        match row.content_sha256 {
+            None => writer.u8(0)?,
+            Some(hash) => {
+                writer.u8(1)?;
+                writer.raw(&hash)?;
+            }
+        }
+        match row.content_length {
+            None => writer.u8(0)?,
+            Some(len) => {
+                writer.u8(1)?;
+                writer.u64(len)?;
+            }
+        }
+        match &row.external_uri {
+            None => writer.u8(0)?,
+            Some(uri) => {
+                writer.u8(1)?;
+                writer.text(uri)?;
+            }
+        }
+        match row.external_fingerprint {
+            None => writer.u8(0)?,
+            Some(fp) => {
+                writer.u8(1)?;
+                writer.raw(&fp)?;
+            }
+        }
+        writer.text(row.availability.as_str())?;
+        match row.run_uuid {
+            None => writer.u8(0)?,
+            Some(uuid) => {
+                writer.u8(1)?;
+                writer.raw(uuid.as_bytes())?;
+            }
+        }
+        Ok(fingerprint(
+            CanonicalDomain::ResearchArtifact,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )?)
     }
 
     /// Encode the authoritative Arrow batch.

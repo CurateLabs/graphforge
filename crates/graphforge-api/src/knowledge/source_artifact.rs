@@ -189,7 +189,13 @@ impl GraphForge {
             .iter()
             .position(|row| row.source_uuid == request.source_uuid)
         {
-            if existing.sources[index] == staged.sources[0] {
+            if existing
+                .source_fingerprint(request.source_uuid)
+                .map_err(knowledge_error)?
+                == staged
+                    .source_fingerprint(request.source_uuid)
+                    .map_err(knowledge_error)?
+            {
                 return Ok(assertion_result(
                     existing.batch().map_err(knowledge_error)?.slice(index, 1),
                 ));
@@ -300,7 +306,13 @@ impl GraphForge {
             .iter()
             .position(|row| row.artifact_uuid == request.artifact_uuid)
         {
-            if existing_artifacts.artifacts[index] == artifact_row {
+            if existing_artifacts
+                .artifact_fingerprint(request.artifact_uuid)
+                .map_err(knowledge_error)?
+                == staged_artifacts
+                    .artifact_fingerprint(request.artifact_uuid)
+                    .map_err(knowledge_error)?
+            {
                 return Ok(assertion_result(
                     existing_artifacts
                         .batch()
@@ -496,6 +508,37 @@ impl GraphForge {
             return Err(not_found_kind("artifact"));
         }
         let existing_preferences = read_preference_ledger(&parent)?;
+        // Check for an already-committed row BEFORE constructing the staged row:
+        // prior_artifact_uuid is ledger-derived and may equal artifact_uuid on retry (the
+        // committed first preference becomes the current preferred), causing construction to
+        // fail validation. Compare against the request's caller-supplied fields instead.
+        if let Some(index) = existing_preferences
+            .events
+            .iter()
+            .position(|row| row.preference_event_uuid == request.preference_event_uuid)
+        {
+            let existing_fp = existing_preferences
+                .preference_fingerprint(request.preference_event_uuid)
+                .map_err(knowledge_error)?;
+            let request_fp = ArtifactPreferenceLedger::preference_request_fingerprint(
+                request.preference_event_uuid,
+                request.source_uuid,
+                request.artifact_uuid,
+                &request.reason,
+            )
+            .map_err(knowledge_error)?;
+            if existing_fp == request_fp {
+                return Ok(assertion_result(
+                    existing_preferences
+                        .batch()
+                        .map_err(knowledge_error)?
+                        .slice(index, 1),
+                ));
+            }
+            return Err(transaction_conflict(
+                "preference event UUID was reused for different canonical content",
+            ));
+        }
         let prior_artifact_uuid =
             existing_preferences.current_preferred_artifact(request.source_uuid);
         let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
@@ -518,23 +561,6 @@ impl GraphForge {
         .map_err(knowledge_error)?;
         let staged_preferences =
             ArtifactPreferenceLedger::new(vec![preference_row.clone()]).map_err(knowledge_error)?;
-        if let Some(index) = existing_preferences
-            .events
-            .iter()
-            .position(|row| row.preference_event_uuid == request.preference_event_uuid)
-        {
-            if existing_preferences.events[index] == preference_row {
-                return Ok(assertion_result(
-                    existing_preferences
-                        .batch()
-                        .map_err(knowledge_error)?
-                        .slice(index, 1),
-                ));
-            }
-            return Err(transaction_conflict(
-                "preference event UUID was reused for different canonical content",
-            ));
-        }
         let preferences = existing_preferences
             .merge(&staged_preferences)
             .map_err(knowledge_error)?;

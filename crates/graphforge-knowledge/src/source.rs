@@ -6,7 +6,9 @@ use std::sync::{Arc, LazyLock};
 use arrow::array::{FixedSizeBinaryBuilder, StringArray, TimestampMicrosecondArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
+use graphforge_core::canonical::{
+    CANONICAL_CONTRACT_VERSION, CanonicalDomain, CanonicalWriter, fingerprint,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -182,6 +184,36 @@ impl SourceLedger {
             merged.push(row.clone());
         }
         Self::new(merged)
+    }
+
+    /// Canonical semantic fingerprint over immutable Source content, excluding clock fields.
+    ///
+    /// Excludes `provenance_uuid` and `recorded_at_micros` so that a retry with the same
+    /// semantic content but a different clock value compares equal to the committed row.
+    pub fn source_fingerprint(&self, source_uuid: Uuid) -> Result<[u8; 32], KnowledgeError> {
+        let row = self
+            .sources
+            .iter()
+            .find(|row| row.source_uuid == source_uuid)
+            .ok_or(KnowledgeError::Dangling("source_uuid"))?;
+        let mut writer = CanonicalWriter::new();
+        writer.raw(b"GFSO")?;
+        writer.u32(SOURCE_CONTRACT_VERSION)?;
+        writer.raw(row.source_uuid.as_bytes())?;
+        writer.text(&row.label)?;
+        writer.text(row.source_kind.as_str())?;
+        match &row.identity_uri {
+            None => writer.u8(0)?,
+            Some(uri) => {
+                writer.u8(1)?;
+                writer.text(uri)?;
+            }
+        }
+        Ok(fingerprint(
+            CanonicalDomain::ResearchSource,
+            CANONICAL_CONTRACT_VERSION,
+            &writer.finish(),
+        )?)
     }
 
     /// Encode the authoritative Arrow batch.
