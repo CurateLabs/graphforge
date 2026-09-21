@@ -65,6 +65,12 @@ pub(super) fn persist_import_adjacency(
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
         });
+    // Lifecycle attribution (#1449): the import-side build is construction
+    // work, so scope it to the encoding row and keep `read_path_scan` for
+    // committed read-path work only.
+    let phase_scope = crate::lifecycle_io::PhaseScope::enter(
+        crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
+    );
     let outcome = crate::adjacency::build_adjacency_index_for_edge_files(
         graph_tree,
         &edge_files,
@@ -79,6 +85,7 @@ pub(super) fn persist_import_adjacency(
             }
         },
     );
+    drop(phase_scope);
     let _ = fs::remove_dir_all(&spill_root);
     outcome.map_err(|error| storage_or_cancel(&error, cancelled))?;
     let mut added = 0_usize;

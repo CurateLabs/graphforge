@@ -17,8 +17,10 @@ use crate::graph_construction::ConstructionShape;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdjacencyEncodingEvidence {
     /// Exact bytes of the published CSR artifacts. Also counted in the
-    /// encoding's `output_write_bytes`; the bounded builder's individual write
-    /// and fsync calls are not attributed.
+    /// encoding's `output_write_bytes`. The bounded builder's individual write
+    /// and fsync calls are not attributed to this evidence (the artifacts are
+    /// accounted at file granularity here), but they do reach the lifecycle
+    /// ledger, scoped to the encoding row (#1449).
     #[serde(default)]
     pub write_bytes: u64,
     /// Projected edge rows streamed from the encoded edge tables.
@@ -98,6 +100,13 @@ pub(super) fn encode_adjacency(
         spill_dir: Some(spill_root.clone()),
         ..crate::adjacency::AdjacencyBuildOptions::default()
     };
+    // The builder's own I/O is recorded in the lifecycle ledger (#1449), whose
+    // `read_path_scan` row is reserved for committed read-path work. Scope the
+    // publish-side build to the encoding row so construction never reports a
+    // read-path scan; the evidence contract above is untouched.
+    let phase_scope = crate::lifecycle_io::PhaseScope::enter(
+        crate::StorageIoPhase::EncodeWritePostwriteAuthentication,
+    );
     let (rows, metrics) = crate::adjacency::build_adjacency_index_for_edge_files(
         &graph_root,
         &edge_files,
@@ -106,6 +115,7 @@ pub(super) fn encode_adjacency(
         &options,
         || crate::graph_construction::reject_cancelled(cancelled),
     )?;
+    drop(phase_scope);
     let _ = std::fs::remove_dir_all(&spill_root);
     if rows.is_empty() {
         return Err(storage("adjacency build published no manifest rows"));

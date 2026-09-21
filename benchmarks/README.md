@@ -409,6 +409,17 @@ make -C benchmarks progressive-host-ladder-run \
   REFERENCE_EVIDENCE_DIR=/path/to/last-clean-ladder-evidence WALL_MARGIN=0.10
 ```
 
+A rung that ran and died inside a certification phase stops as
+`rung_phase_failed`. Its `s<scale>-result.json` names the phase in
+`failed_phase` and carries the failing child's own bounded error text in
+`error_tail` (the last JSON error object when the command ran with `--json`,
+otherwise the last 4 KiB of its standard error, reduced to at most 1024
+characters). The same text appears in the retained certify stream under
+`s<scale>-failure-raw/` — in the failed phase event and in the closing
+`graphforge-public-certification/1` document, as the phase outcome's
+`error_tail`. `staging_failed` now means only that the rung never started;
+`benchexec_failed` means BenchExec itself failed before any phase reported.
+
 The reserve is 75 GiB by default. Before each launch, admission measures free
 space available to the current user on the actual work-root filesystem.
 S20+ projects storage and work from the declared adjacent completed rungs;

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE result
+  PUBLIC '+//IDN sosy-lab.org//DTD BenchExec result 3.12//EN'
+  'https://www.sosy-lab.org/benchexec/result-3.12.dtd'>
+<result benchmarkname="benchmark" date="2026-09-21 17:32:36 UTC" starttime="2026-09-21T17:32:37.013637+00:00" tool="GraphForge public certification" version="" toolmodule="graphforge_bench.tools.graphforge_certify" generator="BenchExec 3.35" memlimit="96000000000B" timelimit="1963s" cpuCores="16" options="" block="profile" name="graphforge-progressive-qualification-v1.profile" endtime="2026-09-21T17:38:06.693741+00:00">
+  <columns>
+    <column title="status"/>
+    <column title="cputime"/>
+    <column title="walltime"/>
+  </columns>
+  <run name="../profile.json" files="[../profile.json]">
+    <column title="cputime" value="344.742056s"/>
+    <column title="memory" value="3142377472B"/>
+    <column title="status" value="ERROR (1)"/>
+    <column title="walltime" value="329.55912703089416s"/>
+    <column title="blkio-read" value="103240351744B" hidden="true"/>
+    <column title="blkio-write" value="145118572544B" hidden="true"/>
+    <column title="category" value="error" hidden="true"/>
+    <column title="cpuCores" value="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15" hidden="true"/>
+    <column title="memoryNodes" value="0" hidden="true"/>
+    <column title="pressure-cpu-some" value="0.594199" hidden="true"/>
+    <column title="pressure-io-some" value="13.265322" hidden="true"/>
+    <column title="pressure-memory-some" value="0" hidden="true"/>
+    <column title="returnvalue" value="1" hidden="true"/>
+    <column title="starttime" value="2026-09-21T17:32:37.028326+00:00" hidden="true"/>
+  </run>
+  <column title="cputime" value="344.75280300000003s"/>
+  <column title="walltime" value="329.68016112502664s"/>
+</result>

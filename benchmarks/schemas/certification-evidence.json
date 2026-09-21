@@ -351,6 +351,7 @@
         "cleanup_failure": {
           "enum": ["receipt_cleanup_failed", "command_owned_cache_release_failed", "multiple_cleanup_failures", "cleanup_failed"]
         },
+        "error_tail": { "type": "string", "minLength": 1, "maxLength": 1024 },
         "receipts": {
           "type": "array",
           "maxItems": 8,
@@ -623,6 +624,14 @@
         {
           "if": {
             "required": ["cleanup_failure"]
+          },
+          "then": {
+            "properties": { "status": { "const": "failed" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["error_tail"]
           },
           "then": {
             "properties": { "status": { "const": "failed" } }
