@@ -24,15 +24,16 @@ use super::{
     account_sequential_write, artifact_temp, authenticate_artifact, build_runtime_catalog,
     canonical_artifact_target, checked_evidence_sum, combine_cache_cleanup,
     compact_parent_surrogate_tails, construction_failpoint, decode_bounded, decode_shape_intent,
-    file_identity, file_link_count, hex, install_control, install_control_batched,
-    install_shape_intent, is_canonical_lower_hex, is_canonical_sha256, load_shape_progress_chain,
-    merge_cache_release_evidence, open_counted_fixed_reader, property_free_schema_sha256,
-    read_run_record, receipt_for_existing, receipt_for_existing_with_work,
-    reconcile_retained_shape_segments, record_shape_artifact_install, reject_cancelled,
-    reject_existing_merge_artifacts, release_counted_reader_cache, replace_checkpoint_control,
-    replace_shape_intent, retained_shape_segments, retire_staged_payload, scan_shape_segments,
-    sha256, shape_authority_sha256, shape_publication_failure, storage,
-    unlink_reconciled_shape_segments, unlink_shape_artifact, validate_parquet_metadata,
+    discard_completed_shape_segments, file_identity, file_link_count, hex, install_control,
+    install_control_batched, install_shape_intent, is_canonical_lower_hex, is_canonical_sha256,
+    load_shape_progress_chain, merge_cache_release_evidence, open_counted_fixed_reader,
+    property_free_schema_sha256, read_run_record, receipt_for_existing,
+    receipt_for_existing_with_work, reconcile_retained_shape_segments,
+    record_shape_artifact_install, reject_cancelled, reject_existing_merge_artifacts,
+    release_counted_reader_cache, replace_checkpoint_control, replace_shape_intent,
+    retained_shape_segments, retire_staged_payload, scan_shape_segments, sha256,
+    shape_authority_sha256, shape_publication_failure, storage, unlink_reconciled_shape_segments,
+    unlink_shape_artifact, validate_parquet_metadata,
 };
 use std::io::Seek;
 
@@ -242,6 +243,10 @@ impl GraphConstructionSession {
                     .checked_add(work.operations)
                     .ok_or_else(|| storage("shape replay authentication operations overflow"))?;
                 account_cache_release(work.cache_release, &mut self.checkpoint.evidence)?;
+                // A replay on the same session object converges exactly as a
+                // reopen does: collect any segment the shape-end retirement
+                // window left behind before supersession inspects it (#1526).
+                discard_completed_shape_segments(&self.root, &self.checkpoint.evidence)?;
                 self.reclaim_superseded_payloads_cancellable(&mut cancelled)?;
                 return Ok(shape);
             }
@@ -938,11 +943,7 @@ impl GraphConstructionSession {
         // complete inventory, so a crash in between leaves them for recovery
         // rather than stranding a resumable shape with no segments.
         let retained_segments = retained_shape_segments(&self.root, &mut cancelled)?;
-        reconcile_retained_shape_segments(
-            &mut self.checkpoint.evidence,
-            &retained_segments,
-            &mut cancelled,
-        )?;
+        reconcile_retained_shape_segments(&mut self.checkpoint.evidence, &retained_segments)?;
         replace_shape_intent(
             &self.root,
             &mut ShapeIntent {

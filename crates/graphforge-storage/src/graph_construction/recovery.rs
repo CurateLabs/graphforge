@@ -736,13 +736,15 @@ pub(super) fn retained_shape_segments(
 /// post-retirement ledger, so neither grows with routed input. The window
 /// between the two is closed by recovery, which removes whatever segments a
 /// crash left behind under exactly this already-reconciled ledger.
+///
+/// Deliberately not cancellable: this is in-memory arithmetic over an
+/// inventory already read, and a half-reconciled ledger on a session object a
+/// caller then retries would reinstall the entries it still holds.
 pub(super) fn reconcile_retained_shape_segments(
     evidence: &mut GraphConstructionEvidence,
     segments: &[ArtifactReceipt],
-    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), GfError> {
     for receipt in segments {
-        super::reject_cancelled(cancelled)?;
         reconcile_shape_artifact_removal(evidence, receipt)?;
     }
     Ok(())

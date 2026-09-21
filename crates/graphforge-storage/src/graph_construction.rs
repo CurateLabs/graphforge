@@ -49,10 +49,10 @@ mod recovery;
 use recovery::{
     ReadWork, authenticate_artifact, canonical_artifact_target,
     cleanup_authenticated_control_temps, cleanup_failed_shape_output, cleanup_owned_artifact_temps,
-    cleanup_shape_publication, is_control_temp, receipt_for_existing,
-    receipt_for_existing_with_work, reconcile_retained_shape_segments, recover_shape_intent,
-    reject_existing_merge_artifacts, remove_owned_directory_tree, retained_shape_segments,
-    shape_publication_failure, shape_publication_io_failure, unlink_named,
+    cleanup_shape_publication, discard_completed_shape_segments, is_control_temp,
+    receipt_for_existing, receipt_for_existing_with_work, reconcile_retained_shape_segments,
+    recover_shape_intent, reject_existing_merge_artifacts, remove_owned_directory_tree,
+    retained_shape_segments, shape_publication_failure, shape_publication_io_failure, unlink_named,
     unlink_reconciled_shape_segments, unlink_shape_artifact, unlink_writer_capability,
 };
 mod controls;
