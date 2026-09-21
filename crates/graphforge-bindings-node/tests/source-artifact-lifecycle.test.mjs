@@ -19,10 +19,15 @@ function openAdmitted(path) {
   }
 }
 
+function uuidFromBytes(value) {
+  const hex = Buffer.from(value).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function uuidColumn(table, name) {
   const column = table.getChild(name);
   return Array.from({ length: table.numRows }, (_, index) =>
-    column.get(index),
+    uuidFromBytes(column.get(index)),
   );
 }
 
