@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod project_restore;
+pub use project_restore::materialize_research_project;
 mod projection;
 mod retained_content;
 pub use projection::{ResearchGraphProjection, ResearchGraphSelection};
@@ -255,6 +257,17 @@ pub enum ResearchMutation {
         /// Fresh immutable identity for the restored current state.
         version_uuid: Uuid,
         /// New Version's UTC creation time in microseconds.
+        created_at: i64,
+    },
+    /// Replace complete Project research, preserving current history and other heads.
+    RestoreProject {
+        /// Owning context of the complete source Version.
+        context_uuid: Uuid,
+        /// Retained complete Version; projections are rejected.
+        source_version: Uuid,
+        /// Fresh immutable Version identity.
+        version_uuid: Uuid,
+        /// New Version creation time in UTC microseconds.
         created_at: i64,
     },
     /// Register an explicit immutable dependency root.
@@ -680,6 +693,12 @@ fn apply_mutation(
             source_version,
             version_uuid,
             created_at,
+        }
+        | ResearchMutation::RestoreProject {
+            context_uuid,
+            source_version,
+            version_uuid,
+            created_at,
         } => {
             let mut version = registry
                 .versions
@@ -690,6 +709,13 @@ fn apply_mutation(
             {
                 return Err(invalid(
                     "restore requires its owning context and a new Version identity",
+                ));
+            }
+            if matches!(mutation, ResearchMutation::RestoreProject { .. })
+                && version.content.source_version.is_some()
+            {
+                return Err(invalid(
+                    "Project restore requires a complete Version, not a projection",
                 ));
             }
             inspect_research_version(root, &version)?;
@@ -810,13 +836,29 @@ pub fn publish_research_operation(
     request: &ResearchOperation,
     cancellation: &AtomicBool,
 ) -> Result<ResearchOperationReceipt, GfError> {
+    publish_research_operation_with_mode(
+        root,
+        request,
+        cancellation,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Publish using the owning facade's admitted lifecycle mode.
+/// Ephemeral mode is only for process-owned temporary Projects.
+pub fn publish_research_operation_with_mode(
+    root: &Path,
+    request: &ResearchOperation,
+    cancellation: &AtomicBool,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ResearchOperationReceipt, GfError> {
     cancelled(cancellation)?;
     if request.operation_uuid.is_nil() {
         return Err(invalid("research operation identity is nil"));
     }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     let parent = crate::resolve_project_generation(root)?;
@@ -869,14 +911,22 @@ pub fn publish_research_operation(
             Ok(source)
         })
         .collect::<Result<Vec<_>, GfError>>()?;
-    let publication = publication_request(&parent, request, generation_uuid, research)?;
+    let mut publication = publication_request(&parent, request, generation_uuid, research)?;
+    let restored_graph = project_restore::prepare(root, request, &registry, &mut publication)?;
     cancelled(cancellation)?;
-    let graph_tree = parent.graph_tree_root();
+    let graph_tree = if let Some(directory) = &restored_graph {
+        Some(directory.path().to_path_buf())
+    } else if matches!(request.mutation, ResearchMutation::RestoreProject { .. }) {
+        None
+    } else {
+        let tree = parent.graph_tree_root();
+        tree.is_dir().then_some(tree)
+    };
     let staged = crate::project_publication::stage_project_generation_from_admitted_parent(
         admission,
         parent,
         &publication,
-        graph_tree.is_dir().then_some(graph_tree.as_path()),
+        graph_tree.as_deref(),
         None,
     )?;
     if let ProjectStageOutcome::Staged(staged) = staged {

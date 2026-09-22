@@ -292,3 +292,85 @@ limits); explicit graph selectors allow at most one million identities.
 Cleanup authenticates all retained CAS content before removing generations. A
 busy CAS lifecycle guard returns `GF_WRITER_BUSY` for research cleanup without
 mutation. Revision-1 readers refuse revision 2; there is no migration command.
+
+### Native public Version lifecycle
+
+The Rust facade exposes `prepare_research_version`,
+`commit_research_version_operation`, `research_version`,
+`list_research_versions`, `research_version_retention` and
+`open_research_version`. Preparation freezes the exact source generation and
+obtains the complete Artifact closure from the Source/Artifact owner. Keep the
+returned operation unchanged: commit validates it, exact retries return its
+permanent receipt, and changed content under its operation UUID returns
+`GF_IDEMPOTENCY_CONFLICT`. A retry does not recapture today's Project or restore
+old state again. Preparation is read-only and does not reserve a future commit.
+
+A complete capture contains all authenticated non-history Project research
+participants: graph, research metadata, ontology/configuration/composition,
+provenance and enabled domain ledgers. It records locally verified Artifact
+identities/digests/lengths and explicit external-only or unverifiable references.
+The frozen Artifact table distinguishes missing-local from unverifiable status.
+Complete means the complete recorded research state; it does not promise that
+external or already-missing bytes were archived. Historical payload reads never
+fetch external resources and are bounded to 256 MiB per returned Artifact.
+
+`ResearchVersionView` runs real read-only native Cypher and reads frozen
+ontology, metadata and Artifact records/bytes. Materialization authenticates
+retained CAS content into a private temporary Project, including after source
+generations were reclaimed. The Version record remains its original immutable
+citation; temporary generation identity is not a replacement research identity.
+Writes through a historical view are refused. Storage-created projections retain
+their distinct identity and cannot expand beyond their retained closure. The
+public complete-Project capture refuses raw participant/projection registration
+without domain-owner closure; Slice and Branch owners supply those semantics in
+their own implementation issues.
+
+`RestoreProject` explicitly replaces frozen Project research and creates a fresh
+Version under the source's owner context. It retains current research receipts,
+identity tombstones, retention roots, other context heads and restoration
+history. It rejects a projection as a complete Project source. `Restore` is the
+separate context-only primitive for future Branch consumers; it does not replace
+Project graph state. Both use the same CURRENT publication as their receipt.
+After a committed error or replay on a stale facade, graph and metadata authority
+are refreshed consistently; an unrecoverable refresh makes that facade unusable
+until reopen rather than mixing generations.
+
+`RetainRoot`, `ReleaseRoot`, `DeleteVersion` and `Compact` use explicit operation
+identities and expected generation preconditions. Deletion reports current
+head/root/required-Version blockers. Released payload does not erase the
+operation's receipt or allow its identity to be reused. The existing registry
+limits (1,024 retained Versions, 4,096 receipts/identities and roots, 256 contexts,
+8 MiB canonical registry) are hard limits, not silent expiry or eviction.
+
+Python exposes the corresponding snake_case methods; Node uses camelCase and
+returns an asynchronous commit with optional `AbortSignal`. Python commits
+accept a native cancellation token. Both expose historical query, ontology,
+metadata, Artifact metadata and payload methods. Tabular results are Arrow
+(Python tables, Node IPC); operation/identity/retention records are control JSON.
+The CLI mirrors these under `gf research version`: `prepare --file`,
+`commit --file`, `list`, `show`, `retention`, `query`, `ontology`, `metadata`,
+`artifact` and `artifact-payload`. Requests are Rust-validated JSON and CLI files
+are bounded to 1 MiB.
+
+For example, a Python caller keeps the prepared operation for both publication
+and any retry:
+
+```python
+prepared = graph.prepare_research_version({
+    "operation_uuid": operation_uuid,
+    "version_uuid": version_uuid,
+    "context_uuid": project_context_uuid,
+    "label": "Before annotation review",
+    "description": None,
+    "created_at": created_at_microseconds,
+    "required_versions": [],
+})
+receipt = graph.commit_research_version_operation(prepared)
+historical = graph.query_research_version(
+    version_uuid, "MATCH (n:Person) RETURN n.node_uuid"
+)
+```
+
+These APIs establish the Version foundation. They do not implement Branch edits,
+Proposal acceptance, or interchange lifecycle. Their real composition remains
+owned by #1352, #1356 and #1357; #1350 remains subject to its full acceptance audit.

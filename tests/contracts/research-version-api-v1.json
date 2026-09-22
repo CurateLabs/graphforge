@@ -1,0 +1,39 @@
+{
+  "contract_id": "graphforge-research-version-api/1",
+  "storage_capability": "research@2",
+  "registry": "registry@2",
+  "rust_request": "PrepareResearchVersionRequest",
+  "prepared_request": "ResearchOperation",
+  "receipt": "ResearchOperationReceipt",
+  "identity": "ResearchVersionRecord.version_uuid",
+  "request_unknown_fields": "reject",
+  "capture": "complete authenticated non-history Project participants and owner-derived Artifact evidence",
+  "projection_registration": "requires domain-owner closure; raw public registration is rejected",
+  "restoration": {
+    "restore_project": "complete Project research replacement plus new Version and receipt in one CURRENT publication",
+    "restore": "context head only; never implicit Project graph replacement",
+    "preserved": ["research registry receipts", "identity tombstones", "retention roots", "other context heads", "workspace restoration history"]
+  },
+  "retry": "retain and resubmit exact prepared request; returns original receipt without reinstalling old current state",
+  "limits": {
+    "retained_versions": 1024,
+    "receipts_and_identities": 4096,
+    "contexts": 256,
+    "roots": 4096,
+    "registry_bytes": 8388608,
+    "artifact_read_bytes": 268435456,
+    "cli_request_bytes": 1048576
+  },
+  "arrow": {
+    "versions": {"version_uuid": "utf8", "context_uuid": "utf8", "label": "nullable utf8", "description": "nullable utf8", "complete": "bool", "source_version": "nullable utf8"},
+    "artifact_payload": {"payload": "binary"},
+    "historical_query": "native read-only Cypher result schema",
+    "artifact_metadata": "frozen knowledge Artifact schema"
+  },
+  "evidence": {
+    "rust": "crates/graphforge-api/tests/research_versions.rs",
+    "python": "crates/graphforge-bindings-py/tests/research_versions.py",
+    "node": "crates/graphforge-bindings-node/tests/research-versions.test.mjs",
+    "cli": "crates/graphforge-cli/tests/research_versions.rs"
+  }
+}

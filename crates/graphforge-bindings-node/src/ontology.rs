@@ -80,6 +80,29 @@ pub struct WorkspaceOntologyOutput {
     pub canonical_ontology: Option<serde_json::Value>,
 }
 
+impl From<graphforge_api::WorkspaceOntology> for WorkspaceOntologyOutput {
+    fn from(record: graphforge_api::WorkspaceOntology) -> Self {
+        Self {
+            contract_version: record.contract_version,
+            mode: match record.mode {
+                graphforge_api::WorkspaceOntologyMode::None => "none",
+                graphforge_api::WorkspaceOntologyMode::Advisory => "advisory",
+                graphforge_api::WorkspaceOntologyMode::Strict => "strict",
+            }
+            .into(),
+            source_format: record.source_format.map(|format| {
+                match format {
+                    graphforge_api::WorkspaceOntologySourceFormat::Yaml => "yaml",
+                    graphforge_api::WorkspaceOntologySourceFormat::Json => "json",
+                }
+                .into()
+            }),
+            canonical_ontology_sha256: record.canonical_ontology_sha256,
+            canonical_ontology: record.canonical_ontology,
+        }
+    }
+}
+
 pub(super) fn ontology_mode(value: &str) -> Result<graphforge_api::OntologyMode> {
     match value {
         "advisory" => Ok(graphforge_api::OntologyMode::Advisory),
@@ -237,24 +260,7 @@ impl GraphForge {
         let record = graph
             .workspace_ontology()
             .map_err(|error| to_napi_err(&error))?;
-        Ok(WorkspaceOntologyOutput {
-            contract_version: record.contract_version,
-            mode: match record.mode {
-                graphforge_api::WorkspaceOntologyMode::None => "none",
-                graphforge_api::WorkspaceOntologyMode::Advisory => "advisory",
-                graphforge_api::WorkspaceOntologyMode::Strict => "strict",
-            }
-            .into(),
-            source_format: record.source_format.map(|format| {
-                match format {
-                    graphforge_api::WorkspaceOntologySourceFormat::Yaml => "yaml",
-                    graphforge_api::WorkspaceOntologySourceFormat::Json => "json",
-                }
-                .into()
-            }),
-            canonical_ontology_sha256: record.canonical_ontology_sha256,
-            canonical_ontology: record.canonical_ontology,
-        })
+        Ok(record.into())
     }
 
     /// Adopt an ontology as durable project authority.

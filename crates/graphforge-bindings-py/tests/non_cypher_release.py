@@ -86,6 +86,9 @@ EVIDENCE = {
     "lifecycle-construction": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
+    "research-versions": {
+        "research_versions.py": ["check_research_versions"],
+    },
     "research-project": {
         "research_project.py": ["check_research_metadata_and_discovery"],
     },

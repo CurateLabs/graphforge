@@ -16,6 +16,11 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Capture, inspect, retain or explicitly restore immutable research.
+    Version {
+        #[command(subcommand)]
+        command: crate::research_versions_cli::ResearchVersionCommand,
+    },
     /// Inspect or update research metadata for the open Project.
     Metadata {
         #[command(subcommand)]
@@ -84,6 +89,9 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     match command {
+        ResearchCommand::Version { command } => {
+            crate::research_versions_cli::run(graph, command, json, output)?;
+        }
         ResearchCommand::Metadata { command } => match command {
             ResearchMetadataCommand::Show => {
                 let summary = graph.research_project_summary()?;

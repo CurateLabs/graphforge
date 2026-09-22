@@ -710,3 +710,57 @@ fn pre_and_post_linearization_faults_preserve_truthful_reopen_and_replay() {
 }
 
 mod retention;
+
+#[test]
+fn project_restore_replaces_research_in_one_publication_and_replay_keeps_later_state() {
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path(), "frozen");
+    let context = Uuid::now_v7();
+    let capture = register(root.path(), context);
+    let receipt =
+        publish_research_operation(root.path(), &capture, &AtomicBool::new(false)).unwrap();
+    let source = receipt.version_uuid.unwrap();
+    fixture(root.path(), "newer");
+    let other = register(root.path(), Uuid::now_v7());
+    publish_research_operation(root.path(), &other, &AtomicBool::new(false)).unwrap();
+    let before = state(root.path());
+    let restore = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: current(root.path()),
+        mutation: ResearchMutation::RestoreProject {
+            context_uuid: context,
+            source_version: source,
+            version_uuid: Uuid::now_v7(),
+            created_at: 42,
+        },
+    };
+    let restored =
+        publish_research_operation(root.path(), &restore, &AtomicBool::new(false)).unwrap();
+    let generation = crate::resolve_project_generation(root.path()).unwrap();
+    assert_eq!(generation.generation_uuid(), restored.generation_uuid);
+    assert_eq!(
+        generation
+            .participant_snapshot("workspace", "research_fixture")
+            .unwrap()
+            .unwrap()
+            .bytes,
+        json(&"frozen").unwrap()
+    );
+    let after = state(root.path());
+    assert_eq!(after.versions[&source], before.versions[&source]);
+    for (owner, head) in before.heads {
+        if owner != context {
+            assert_eq!(after.heads[&owner], head);
+        }
+    }
+    for (id, receipt) in before.receipts {
+        assert_eq!(after.receipts[&id], receipt);
+    }
+    fixture(root.path(), "after-restore");
+    let newest = current(root.path());
+    assert_eq!(
+        publish_research_operation(root.path(), &restore, &AtomicBool::new(false)).unwrap(),
+        restored
+    );
+    assert_eq!(current(root.path()), newest);
+}
