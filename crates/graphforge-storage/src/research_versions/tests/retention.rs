@@ -551,3 +551,45 @@ fn research_cleanup_with_busy_cas_guard_returns_without_mutation_or_waiting() {
     cleanup(root);
     inspect_research_version(root, &state(root).versions[&id]).unwrap();
 }
+
+#[test]
+fn object_root_project_restore_and_private_materialization_do_not_attach_a_graph_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    publish_graph(root, 2);
+    let context = Uuid::now_v7();
+    let version = execute(root, &register(root, context))
+        .version_uuid
+        .unwrap();
+    let original = state(root).versions[&version].clone();
+    let private = tempfile::tempdir().unwrap();
+    let hydrated = super::super::project_restore::materialize_research_project(
+        root,
+        &original,
+        private.path(),
+    )
+    .unwrap();
+    assert_eq!(
+        hydrated.graph_files_inventory().unwrap(),
+        crate::resolve_project_generation(root)
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+    );
+    publish_graph(root, 4);
+    mutate(
+        root,
+        ResearchMutation::RestoreProject {
+            context_uuid: context,
+            source_version: version,
+            version_uuid: Uuid::now_v7(),
+            created_at: 3,
+        },
+    );
+    let restored = crate::resolve_project_generation(root).unwrap();
+    assert_eq!(
+        restored.graph_files_inventory().unwrap(),
+        hydrated.graph_files_inventory().unwrap()
+    );
+    assert!(!restored.graph_tree_root().exists());
+}

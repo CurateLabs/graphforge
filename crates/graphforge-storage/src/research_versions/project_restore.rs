@@ -30,9 +30,18 @@ pub(super) fn prepare(
             family: p.record_family_id.clone(),
         })
     });
-    let has_files = snapshots
+    let needs_graph_tree = snapshots
         .iter()
-        .any(|p| p.capability_id == "graph" && p.record_family_id == "files");
+        .filter(|p| p.capability_id == "graph" && p.record_family_id == "files")
+        .try_fold(false, |_, p| {
+            Ok::<_, GfError>(matches!(
+                crate::graph_files::decode_versioned_graph_files_participant(
+                    p.record_version,
+                    &p.bytes
+                )?,
+                crate::GraphFilesParticipant::V1(_)
+            ))
+        })?;
     for p in snapshots {
         publication.participants.push(ProjectParticipant {
             capability_id: p.capability_id,
@@ -69,7 +78,7 @@ pub(super) fn prepare(
             capability_version,
         })
         .collect();
-    if !has_files {
+    if !needs_graph_tree {
         return Ok(None);
     }
     let graph =
@@ -92,11 +101,9 @@ pub fn materialize_research_project(
     let lease = crate::begin_graph_object_publication(target)?;
     let graph =
         tempfile::tempdir().map_err(|_| invalid("cannot allocate historical graph workspace"))?;
-    let mut has_graph = false;
+    let mut needs_graph_tree = false;
     for p in &snapshots {
         if p.capability_id == "graph" && p.record_family_id == "files" {
-            has_graph = true;
-            materialize_research_graph(root, version, graph.path())?;
             if matches!(
                 crate::graph_files::decode_versioned_graph_files_participant(
                     p.record_version,
@@ -122,6 +129,9 @@ pub fn materialize_research_project(
                         file.byte_length,
                     )?;
                 }
+            } else {
+                needs_graph_tree = true;
+                materialize_research_graph(root, version, graph.path())?;
             }
         }
     }
@@ -161,7 +171,7 @@ pub fn materialize_research_project(
     let staged = crate::stage_project_generation_with_graph_tree_mode(
         target,
         &publication,
-        has_graph.then_some(graph.path()),
+        needs_graph_tree.then_some(graph.path()),
         crate::filesystem_admission::ProjectLifecycleMode::Ephemeral,
     )?;
     if let ProjectStageOutcome::Staged(staged) = staged {

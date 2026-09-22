@@ -617,3 +617,109 @@ fn registered_public_contract_matches_native_schema_and_storage_limits() {
     let invalid = serde_json::json!({"operation_uuid": Uuid::now_v7(), "version_uuid": Uuid::now_v7(), "context_uuid": Uuid::now_v7(), "created_at": 1, "required_versions": [], "unknown": true});
     assert!(serde_json::from_value::<PrepareResearchVersionRequest>(invalid).is_err());
 }
+
+#[test]
+fn selected_object_root_version_executes_after_ancestor_release_and_cleanup() {
+    use graphforge_storage::research_versions::{
+        RegisterResearchVersion, ResearchGraphSelection, publish_research_operation,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    graph
+        .execute("CREATE (:Person {name: 'selected'}), (:Person {name: 'outside'})")
+        .unwrap();
+    let result = graph
+        .execute("MATCH (n {name: 'selected'}) RETURN n.node_uuid")
+        .unwrap();
+    let selected = Uuid::from_slice(
+        result.batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap()
+            .value(0),
+    )
+    .unwrap();
+    let owner = Uuid::now_v7();
+    let original = version_id(&capture(&mut graph, owner));
+    let version = graph.research_version(original).unwrap();
+    let projection = Uuid::now_v7();
+    let operation = ResearchOperation {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: graph
+            .research_project_summary()
+            .unwrap()
+            .identity
+            .generation_uuid,
+        mutation: ResearchMutation::RegisterGraphProjection {
+            spec: RegisterResearchVersion {
+                version_uuid: projection,
+                context_uuid: owner,
+                source_generation_uuid: version.content.generation_uuid,
+                selection: Some(
+                    version
+                        .content
+                        .participants
+                        .iter()
+                        .map(|p| p.key.clone())
+                        .collect(),
+                ),
+                source_version: Some(original),
+                required_versions: BTreeSet::new(),
+                label: None,
+                description: None,
+                created_at: 2,
+                evidence: vec![],
+            },
+            selection: ResearchGraphSelection {
+                nodes: BTreeSet::from([selected]),
+                edges: BTreeSet::new(),
+                induced_edges: false,
+                exclude_properties: BTreeSet::new(),
+            },
+        },
+    };
+    publish_research_operation(
+        &root,
+        &operation,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    drop(graph);
+    let mut graph = GraphForge::new(root.to_str()).unwrap();
+    mutation(
+        &mut graph,
+        ResearchMutation::DeleteVersion {
+            version_uuid: original,
+        },
+    );
+    drop(graph);
+    graphforge_storage::execute_project_cleanup(
+        &root,
+        graphforge_storage::ProjectRetentionPolicy {
+            retained_ancestors: 0,
+        },
+        graphforge_storage::ProjectRetentionLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        graphforge_storage::resolve_generation_by_uuid(&root, version.content.generation_uuid)
+            .is_err()
+    );
+    let graph = GraphForge::new(root.to_str()).unwrap();
+    assert_eq!(
+        count(
+            graph
+                .open_research_version(projection)
+                .unwrap()
+                .execute("MATCH (n) RETURN count(n)")
+                .unwrap()
+        ),
+        1
+    );
+    assert_eq!(
+        count(graph.execute("MATCH (n) RETURN count(n)").unwrap()),
+        2
+    );
+}
