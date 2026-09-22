@@ -91,6 +91,7 @@ the Repository Policy job (#1390).
 | 0042 | Contextual research decisions extend immutable knowledge | Accepted | [`../../adr/0042-contextual-research-claims.md`](../../adr/0042-contextual-research-claims.md) |
 | 0043 | Proposal acceptance shares the Project publication owner | Accepted | [`../../adr/0043-atomic-research-proposal-acceptance.md`](../../adr/0043-atomic-research-proposal-acceptance.md) |
 | 0044 | Research interchange preserves content identity separately from authority | Accepted | [`../../adr/0044-research-interchange-authority.md`](../../adr/0044-research-interchange-authority.md) |
+| 0045 | Ingest authentication regime — hash once on write, verify at trust boundaries | Accepted | [`../../adr/0045-ingest-authentication-regime.md`](../../adr/0045-ingest-authentication-regime.md) |
 
 ### Superseded
 

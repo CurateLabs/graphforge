@@ -165,6 +165,7 @@ const PAGES = [
   'adr/0042-contextual-research-claims.md',
   'adr/0043-atomic-research-proposal-acceptance.md',
   'adr/0044-research-interchange-authority.md',
+  'adr/0045-ingest-authentication-regime.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

@@ -391,6 +391,10 @@ export default defineConfig({
                   label: '0044 — Research interchange preserves content identity separately from authority',
                   slug: 'adr/0044-research-interchange-authority',
                 },
+                {
+                  label: '0045 — Ingest authentication regime — hash once on write, verify at trust boundaries',
+                  slug: 'adr/0045-ingest-authentication-regime',
+                },
                 // END generated ADR records
               ],
             },
