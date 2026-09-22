@@ -1,6 +1,7 @@
 //! Preview reads real native Branch state without advancing either authority.
 mod history;
 mod recovery;
+mod repeated;
 use super::*;
 use crate::*;
 use uuid::Uuid;
