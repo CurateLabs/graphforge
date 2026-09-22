@@ -1,4 +1,5 @@
 //! Preview reads real native Branch state without advancing either authority.
+mod assertions;
 mod history;
 mod recovery;
 mod repeated;
