@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -37,8 +38,36 @@ from tests.host_run_fixture import write_host_bundle
 from tests.test_progressive_run import passed_rung as local_passed_rung
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK_PARENT = Path("/home/ubuntu/graphforge-ladder")
+# Native filesystem admission requires ext4, xfs, or btrfs. /tmp on this host
+# is tmpfs, so host-run tests take a scratch root from GF_LADDER_TEST_ROOT.
+# The default directory is documented next to that ext4 requirement in
+# docs/development/perf-g500-ladder.md.
+_DEFAULT_SCRATCH_ROOT = Path("/home/ubuntu") / "graphforge-ladder-test"
+WORK_PARENT = Path(os.environ.get("GF_LADDER_TEST_ROOT") or _DEFAULT_SCRATCH_ROOT)
 COMMIT = "f013587f0123456789abcdef0123456789abcdef"
+_SCRATCH_TOP_LEVEL: list[set[str]] = []
+
+
+def scratch_top_level() -> set[str]:
+    return {path.name for path in WORK_PARENT.iterdir()}
+
+
+def setUpModule() -> None:
+    WORK_PARENT.mkdir(parents=True, exist_ok=True)
+    _SCRATCH_TOP_LEVEL[:] = [scratch_top_level()]
+
+
+def tearDownModule() -> None:
+    if not _SCRATCH_TOP_LEVEL:
+        raise AssertionError("scratch root top level was not recorded")
+    before = _SCRATCH_TOP_LEVEL[0]
+    after = scratch_top_level()
+    if after != before:
+        raise AssertionError(
+            f"{WORK_PARENT} top level changed: "
+            f"added {sorted(after - before)}, "
+            f"removed {sorted(before - after)}"
+        )
 
 
 def sha256(path: Path) -> str:
@@ -181,9 +210,28 @@ class ProgressiveHostRunTests(unittest.TestCase):
             self.assertTrue(inventory["empty"])
             self.assertEqual(inventory["host_profile_id"], HOST_PROFILE_ID)
 
+    def test_scratch_root_top_level_is_unchanged_after_host_bundle(self) -> None:
+        before = scratch_top_level()
+        with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
+            root = Path(temporary)
+            output = root / "evidence"
+            output.mkdir()
+            write_host_bundle(output, 18)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fixture_executables(bin_dir)
+            self.assertEqual(scratch_top_level() - before, {root.name})
+            self.assertTrue((output / "gf").is_file())
+            self.assertTrue((bin_dir / "gf").is_file())
+            self.assertFalse((WORK_PARENT / "gf").exists())
+            self.assertFalse((WORK_PARENT / "certify").exists())
+            self.assertFalse((WORK_PARENT / "generator").exists())
+        self.assertEqual(scratch_top_level(), before)
+
     def test_completed_prefix_rejects_gaps(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORK_PARENT) as temporary:
-            output = Path(temporary)
+            output = Path(temporary) / "evidence"
+            output.mkdir()
             write_host_bundle(output, 18)
             (output / "s20-rung.json").write_text(json.dumps(passed_rung(20)), encoding="utf-8")
             (output / "s20-result.json").write_text(json.dumps(host_result(20)), encoding="utf-8")
@@ -453,6 +501,8 @@ class RungPhaseFailureTests(unittest.TestCase):
             work_root.mkdir()
             output = parent / "evidence"
             stage = self.stage(parent)
+            bin_dir = parent / "bin"
+            bin_dir.mkdir()
             with (
                 patch("graphforge_bench.progressive_host_run._native_authority"),
                 patch("graphforge_bench.progressive_host_run._safe_stage_host", return_value=stage),
@@ -465,7 +515,7 @@ class RungPhaseFailureTests(unittest.TestCase):
                     work_root=work_root,
                     scale=22,
                     plan=plan,
-                    executables=fixture_executables(parent),
+                    executables=fixture_executables(bin_dir),
                 )
             result = json.loads((output / "s22-result.json").read_text())
             _validate(ROOT, "progressive-host-run-result.json", result)

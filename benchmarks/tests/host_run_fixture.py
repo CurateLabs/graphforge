@@ -25,7 +25,9 @@ def write_host_bundle(output: Path, scale: int, plan: dict | None = None) -> Non
     output.mkdir(parents=True, exist_ok=True)
     result = host_result(scale)
     if plan is None:
-        tools = executables(output.parent)
+        # `output` is inside the caller's temporary directory. Writing the
+        # fixture executables there keeps them off the scratch root.
+        tools = executables(output)
         identities = result["identities"]
         identities.update(
             {
