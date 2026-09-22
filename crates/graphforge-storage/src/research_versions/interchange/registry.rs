@@ -8,12 +8,26 @@ pub(in crate::research_versions) fn validate_registry(
         return Err(invalid("research interchange history capacity exceeded"));
     }
     let mut branches = BTreeMap::new();
+    let mut projects = BTreeMap::new();
     for (id, archive) in &registry.interchange {
         archive.validate()?;
         if *id != archive.selected_version_uuid {
             return Err(invalid(
                 "imported research archive key differs from selection",
             ));
+        }
+        for (version, project) in archive.version_projects.iter().chain(
+            archive
+                .proof_exports
+                .iter()
+                .map(|(original, exported)| (original, &archive.version_projects[exported])),
+        ) {
+            if projects
+                .insert(*version, *project)
+                .is_some_and(|old| old != *project)
+            {
+                return Err(invalid("conflicting imported Version Project citations"));
+            }
         }
         for (version, identity) in &archive.identities {
             if registry.identities.get(version) != Some(identity) {
@@ -66,9 +80,17 @@ impl ResearchRegistry {
     /// Original Project citation for an imported Version, never local governance.
     #[must_use]
     pub fn historical_project(&self, version_uuid: Uuid) -> Option<Uuid> {
-        self.interchange
-            .values()
-            .find(|archive| archive.versions.contains_key(&version_uuid))
-            .map(|archive| archive.source_project_uuid)
+        self.interchange.values().find_map(|archive| {
+            archive
+                .version_projects
+                .get(&version_uuid)
+                .or_else(|| {
+                    archive
+                        .proof_exports
+                        .get(&version_uuid)
+                        .and_then(|exported| archive.version_projects.get(exported))
+                })
+                .copied()
+        })
     }
 }

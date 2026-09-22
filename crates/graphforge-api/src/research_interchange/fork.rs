@@ -128,6 +128,8 @@ pub(super) fn configure(
         ProjectCapability, ProjectGenerationRequest, ProjectParticipantEncoding,
         ProjectStageOutcome,
     };
+    let lease = graphforge_storage::begin_graph_object_publication(generation.container_root())
+        .map_err(|_| invalid())?;
     let mut participants = Vec::new();
     for snapshot in generation.participant_snapshots().map_err(|_| invalid())? {
         if snapshot.capability_id == "workspace" && snapshot.record_family_id == "research_metadata"
@@ -187,7 +189,7 @@ pub(super) fn configure(
         staged
             .validate(|_| Ok(()), |_, _| Ok(()))
             .map_err(|_| invalid())?
-            .publish()
+            .publish_with_graph_objects(&lease)
             .map_err(|_| invalid())?;
     }
     graphforge_storage::resolve_project_generation(generation.container_root())

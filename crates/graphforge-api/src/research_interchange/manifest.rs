@@ -88,22 +88,8 @@ pub(super) fn build(
                 .and_then(|id| registry.historical_branch(id));
         }
     }
-    let source_project_uuid = registry
-        .historical_project(selected.version_uuid)
-        .or_else(|| {
-            registry
-                .historical_branch(selected.context_uuid)
-                .map(|branch| branch.project_uuid)
-        })
-        .or_else(|| {
-            selected
-                .content
-                .source_version
-                .and_then(|id| registry.historical_project(id))
-        })
-        .unwrap_or(crate::research_claims::authority::project_uuid(
-            &owner.generation_for_read()?,
-        )?);
+    let version_projects = project_citations(owner, registry, &versions)?;
+    let source_project_uuid = version_projects[&selected.version_uuid];
     let manifest = ResearchInterchangeManifest {
         contract_version: 1,
         research_capability_version: graphforge_storage::research_versions::RESEARCH_VERSION,
@@ -119,6 +105,7 @@ pub(super) fn build(
             source_version_uuid: selected.version_uuid,
         },
         versions,
+        version_projects,
         identities,
         genealogy,
         accepted: proofs.accepted.clone(),
@@ -139,4 +126,33 @@ fn cite(
         .ok_or_else(|| GfError::Validation("research provenance identity is unavailable".into()))?;
     identities.insert(id, *identity);
     Ok(())
+}
+
+fn project_citations(
+    owner: &GraphForge,
+    registry: &ResearchRegistry,
+    versions: &BTreeMap<Uuid, ResearchVersionRecord>,
+) -> Result<BTreeMap<Uuid, Uuid>, GfError> {
+    let current_project =
+        crate::research_claims::authority::project_uuid(&owner.generation_for_read()?)?;
+    Ok(versions
+        .values()
+        .map(|version| {
+            let project = registry
+                .historical_project(version.version_uuid)
+                .or_else(|| {
+                    registry
+                        .historical_branch(version.context_uuid)
+                        .map(|branch| branch.project_uuid)
+                })
+                .or_else(|| {
+                    version
+                        .content
+                        .source_version
+                        .and_then(|id| registry.historical_project(id))
+                })
+                .unwrap_or(current_project);
+            (version.version_uuid, project)
+        })
+        .collect())
 }

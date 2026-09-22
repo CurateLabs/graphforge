@@ -65,6 +65,8 @@ pub struct ResearchInterchangeManifest {
     pub selection: ResearchInterchangeSelection,
     /// Only selected content and its explicit required Version closure.
     pub versions: BTreeMap<Uuid, ResearchVersionRecord>,
+    /// Original Project citation for each retained Version; independent of local governance.
+    pub version_projects: BTreeMap<Uuid, Uuid>,
     /// Permanent original identity commitments, including unavailable ancestors.
     pub identities: BTreeMap<Uuid, [u8; 32]>,
     /// Historical Branch records; these are never destination live heads.
@@ -98,6 +100,26 @@ impl ResearchInterchangeManifest {
         {
             return Err(invalid(
                 "unsupported or oversized research interchange manifest",
+            ));
+        }
+        if self.version_projects.keys().ne(self.versions.keys())
+            || self.version_projects.values().any(Uuid::is_nil)
+            || self.version_projects.get(&self.selected_version_uuid)
+                != Some(&self.source_project_uuid)
+        {
+            return Err(invalid(
+                "research Version Project citations differ from selected closure",
+            ));
+        }
+        if self.fork_project_uuid.is_some_and(|id| {
+            self.version_projects.values().any(|project| *project == id)
+                || self
+                    .genealogy
+                    .values()
+                    .any(|branch| branch.project_uuid == id)
+        }) {
+            return Err(invalid(
+                "Fork identity reuses known research Project authority",
             ));
         }
         match (&self.fork, self.fork_project_uuid) {
@@ -226,6 +248,12 @@ impl ResearchInterchangeManifest {
                 return Err(invalid("invalid imported accepted-contribution provenance"));
             }
             let branch = &self.genealogy[&mapping.source_branch_uuid];
+            let exported = self.proof_exports[&mapping.proof_version_uuid];
+            if self.version_projects.get(&exported) != Some(&branch.project_uuid) {
+                return Err(invalid(
+                    "accepted proof Project citation differs from its source Branch",
+                ));
+            }
             let destination = match branch.parent_branch_uuid {
                 Some(branch_uuid) => {
                     super::super::ResearchProposalDestination::Branch { branch_uuid }
@@ -248,7 +276,7 @@ impl ResearchInterchangeManifest {
             if *id != branch.branch_uuid
                 || id.is_nil()
                 || branch.creator_uuid.is_nil()
-                || branch.project_uuid != self.source_project_uuid
+                || branch.project_uuid.is_nil()
                 || branch.label.is_empty()
                 || branch.label.len() > 4096
                 || !self.identities.contains_key(&branch.base_version_uuid)
@@ -262,11 +290,27 @@ impl ResearchInterchangeManifest {
                 if !seen.insert(parent) {
                     return Err(invalid("cyclic imported Branch genealogy"));
                 }
-                next = self
+                let ancestor = self
                     .genealogy
                     .get(&parent)
-                    .ok_or_else(|| invalid("imported Branch ancestor metadata is unavailable"))?
-                    .parent_branch_uuid;
+                    .ok_or_else(|| invalid("imported Branch ancestor metadata is unavailable"))?;
+                if ancestor.project_uuid != branch.project_uuid {
+                    return Err(invalid(
+                        "imported Branch ancestry crosses Project authority",
+                    ));
+                }
+                next = ancestor.parent_branch_uuid;
+            }
+        }
+        for (id, version) in &self.versions {
+            if self
+                .genealogy
+                .get(&version.context_uuid)
+                .is_some_and(|branch| self.version_projects.get(id) != Some(&branch.project_uuid))
+            {
+                return Err(invalid(
+                    "imported Version Project citation differs from its Branch",
+                ));
             }
         }
         Ok(())

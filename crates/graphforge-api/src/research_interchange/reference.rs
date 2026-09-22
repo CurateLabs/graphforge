@@ -30,6 +30,8 @@ pub struct ResearchReference {
     pub target: ResearchReferenceTarget,
     /// Project authority in which this reference was resolved.
     pub project_uuid: Uuid,
+    /// Original Project owning this immutable Version, distinct from a Fork's authority.
+    pub origin_project_uuid: Uuid,
     /// Exact owning CURRENT used to resolve a live head.
     pub resolved_generation_uuid: Uuid,
     /// Frozen research identity and content commitments.
@@ -84,10 +86,15 @@ impl GraphForge {
                 .map(|parent| registry.historical_branch(parent).ok_or_else(unavailable))
                 .transpose()?;
         }
+        let project_uuid = crate::research_claims::authority::project_uuid(&current)?;
+        let origin_project_uuid = registry.historical_project(version_uuid)
+            .or_else(|| registry.historical_branch(version.context_uuid).map(|branch| branch.project_uuid))
+            .unwrap_or(project_uuid);
         Ok(ResearchReference {
             contract_version: 1,
             target: target.clone(),
-            project_uuid: crate::research_claims::authority::project_uuid(&current)?,
+            project_uuid,
+            origin_project_uuid,
             resolved_generation_uuid: current.generation_uuid(),
             version: version.clone(),
             identity_sha256,

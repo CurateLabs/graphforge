@@ -700,11 +700,15 @@ exercise both sides of that boundary without rolling back committed parent conte
 
 `research_reference` resolves a live Branch head once or an exact immutable
 Version, including its identity commitment, original base/origin, and derivative
-authorship. Hosting URLs remain an application concern.
+authorship. `project_uuid` identifies the local authority; `origin_project_uuid`
+identifies the Version's original Project, including after a Fork. Hosting URLs
+remain an application concern.
 
 `export_research` packages one retained Version or a distinct selected projection.
 The versioned research component authenticates required content and selected
-acceptance proofs separately from historical ancestor identities. It preserves
+acceptance proofs separately from historical ancestor identities. Per-Version
+Project citations preserve mixed original/Fork genealogy without making foreign
+acceptance local authority. It preserves
 field baselines and exact accepted-contribution mappings without copying active
 heads, proposal receipts, or unrelated ancestor data. Native selected-field
 freezing physically materializes effective property rows so deletion overlays

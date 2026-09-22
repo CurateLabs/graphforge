@@ -30,6 +30,11 @@ preserves the original Version record and identity commitment. Every subset or
 redaction receives a distinct projection identity and cites its source Version.
 Package and transport digests remain separate from research identities.
 
+Record the original Project citation for each retained Version. A Fork can create
+local research while retaining acceptance evidence from another Project; those
+Project identities and genealogy remain distinct. Conflicting citations for one
+immutable Version are rejected.
+
 Carry selected genealogy and acceptance evidence as historical provenance, not
 as imported live Branch heads or destination governance decisions. Historical
 ancestor references need identity metadata; they do not require full ancestor
