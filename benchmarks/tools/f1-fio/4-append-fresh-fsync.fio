@@ -1,0 +1,24 @@
+# F1 job 4 — append-only writes into files that do not exist yet, buffered, fsync
+# every 7 writes. GraphForge writes each object once, extending it as it goes, so
+# every fsync also commits fresh extent allocation. Jobs 2 and 3 overwrite
+# pre-laid files and cannot show that cost; this job isolates it.
+[global]
+directory=${F1_DIR}
+ioengine=psync
+iodepth=1
+direct=0
+rw=write
+bssplit=${F1_BSSPLIT_WRITES}
+fsync=${F1_FSYNC_EVERY}
+nrfiles=4
+filesize=${F1_FILESIZE}
+size=${F1_JOBSIZE}
+filename_format=app.$jobnum.$filenum
+create_on_open=1
+fallocate=none
+numjobs=${F1_NUMJOBS}
+group_reporting=1
+time_based=0
+loops=1
+
+[a-append-fresh-buffered]
