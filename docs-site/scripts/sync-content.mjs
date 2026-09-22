@@ -160,6 +160,7 @@ const PAGES = [
   'adr/0037-adjacency-published-with-generation.md',
   'adr/0038-determinism-at-the-publication-boundary.md',
   'adr/0039-research-version-publication.md',
+  'adr/0040-frozen-slice-membership.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

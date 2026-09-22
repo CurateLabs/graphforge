@@ -219,7 +219,7 @@ pub struct ResearchOperationReceiptOutput {
 // SAFETY: `signal` is a validated N-API Object belonging to the injected Env;
 // AbortSignal conversion validates and installs its native callback state.
 #[allow(unsafe_code)]
-fn native_abort_signal(
+pub(crate) fn native_abort_signal(
     env: crate::Env,
     signal: &crate::Object<'_>,
 ) -> napi::Result<crate::AbortSignal> {

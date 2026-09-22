@@ -86,6 +86,7 @@ the Repository Policy job (#1390).
 | 0037 | Derived adjacency is published with the generation | Accepted | [`../../adr/0037-adjacency-published-with-generation.md`](../../adr/0037-adjacency-published-with-generation.md) |
 | 0038 | Determinism belongs at the publication boundary | Accepted | [`../../adr/0038-determinism-at-the-publication-boundary.md`](../../adr/0038-determinism-at-the-publication-boundary.md) |
 | 0039 | Research Versions share Project publication authority | Accepted | [`../../adr/0039-research-version-publication.md`](../../adr/0039-research-version-publication.md) |
+| 0040 | Frozen Slices reference retained Version context | Accepted | [`../../adr/0040-frozen-slice-membership.md`](../../adr/0040-frozen-slice-membership.md) |
 
 ### Superseded
 

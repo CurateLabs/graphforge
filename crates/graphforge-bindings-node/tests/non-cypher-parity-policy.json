@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 295,
-  "releaseSurfaceDigest": "a97f6ec15b957d01a59ea874afe819dc9d36da3b932fc5e283179d119984853c",
+  "releaseSurfaceCount": 299,
+  "releaseSurfaceDigest": "03bdba7634c9fab144030ff75c316350d108973ef0030088b2f7caa15d7083a1",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -34,7 +34,8 @@
     "resumable-construction": "resumableConstruction",
     "semantic-generation-diff": "semanticGenerationDiff",
     "portable-v2-facade": "portableV2",
-    "research-versions": "researchVersions"
+    "research-versions": "researchVersions",
+    "slices": "slices"
   },
   "classification": {
     "equivalent": [
@@ -223,7 +224,11 @@
       "GraphForge.commit_research_version_operation",
       "GraphForge.research_version",
       "GraphForge.list_research_versions",
-      "GraphForge.research_version_retention"
+      "GraphForge.research_version_retention",
+      "GraphForge.preview_slice",
+      "GraphForge.freeze_slice",
+      "GraphForge.inspect_frozen_slice",
+      "GraphForge.revise_frozen_slice"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
@@ -564,6 +569,11 @@
       "research-versions.test.mjs": [
         "historical graph ontology and Artifact bytes survive compaction, reopen and restore",
         "malformed Version requests do not echo private values or field names"
+      ]
+    },
+    "slices": {
+      "slices.test.mjs": [
+        "native Slice boundary, freeze, revision and cancellation"
       ]
     }
   }

@@ -469,6 +469,15 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "slices",
+    srcs = ["tests/slices.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:slice-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+
+gf_rust_integration_test(
     name = "research_project",
     srcs = ["tests/research_project.rs"],
     crate = ":graphforge_api",
@@ -622,6 +631,7 @@ test_suite(
         ":release_load_construction",
         ":research_project",
         ":research_versions",
+        ":slices",
         ":resumable_construction_surface",
         ":ontology_adoption_retry",
         ":permanent_storage_budgets",
