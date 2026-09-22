@@ -612,6 +612,7 @@ fn sweep_unreachable_graph_objects(
     }
     let generations = root.join(GENERATIONS_DIR);
     let mut graph_roots = Vec::new();
+    let mut evidence_roots = BTreeSet::new();
     if generations.exists() {
         let mut entries = generations
             .read_dir()
@@ -634,6 +635,9 @@ fn sweep_unreachable_graph_objects(
                 continue;
             };
             let generation = crate::resolve_generation_by_uuid(root, uuid)?;
+            evidence_roots.extend(crate::research_versions::evidence_object_roots(
+                &generation,
+            )?);
             if let Some(crate::GraphFilesParticipant::V2(graph_root)) =
                 generation.declared_graph_files_participant()?
             {
@@ -641,10 +645,11 @@ fn sweep_unreachable_graph_objects(
             }
         }
     }
-    let evidence = crate::graph_object_store::gc_graph_objects_guarded(
+    let evidence = crate::graph_object_store::gc_graph_objects_with_evidence_guarded(
         gc_guard,
         &graph_roots,
         crate::GraphManifestLimits::default(),
+        &evidence_roots,
     )?;
     Ok(ProjectGraphObjectSweepReport::completed(&evidence))
 }

@@ -1997,6 +1997,56 @@ mod tests {
         fs::write(root.join(CURRENT_FILE), canonical_line(&current)).unwrap();
     }
 
+    #[test]
+    fn future_research_capability_refuses_publication_without_creating_files() {
+        fn inventory(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+            let mut files = std::collections::BTreeMap::new();
+            for entry in fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files.extend(inventory(&path));
+                } else {
+                    files.insert(path.clone(), fs::read(path).unwrap());
+                }
+            }
+            files
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        crate::open_or_initialize_project(root).unwrap();
+        let generation_uuid = Uuid::now_v7();
+        install_generation(root, generation_uuid);
+        let manifest_path = root
+            .join("generations")
+            .join(generation_uuid.to_string())
+            .join(MANIFEST_FILE);
+        let mut manifest: GenerationManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.capabilities.push(CapabilityDescriptor {
+            capability_id: "research".into(),
+            capability_version: 2,
+        });
+        let bytes = canonical_line(&manifest);
+        fs::write(manifest_path, &bytes).unwrap();
+        write_current(root, generation_uuid, Sha256::digest(bytes).into());
+        let before = inventory(root);
+        let request = crate::research_versions::ResearchOperation {
+            operation_uuid: Uuid::now_v7(),
+            expected_generation_uuid: generation_uuid,
+            mutation: crate::research_versions::ResearchMutation::DeleteVersion {
+                version_uuid: Uuid::now_v7(),
+            },
+        };
+        let error = crate::research_versions::publish_research_operation(
+            root,
+            &request,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_code(error, "GF_UNSUPPORTED_CAPABILITY_VERSION");
+        assert_eq!(inventory(root), before);
+    }
+
     fn install_graph_generation(
         root: &Path,
         generation_uuid: Uuid,

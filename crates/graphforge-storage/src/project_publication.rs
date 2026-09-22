@@ -1065,6 +1065,14 @@ impl StagedProjectGeneration {
             )?;
         }
         verify_optional_generation_graph_tree(&self.generation_root, &self.participants)?;
+        crate::research_versions::validate_publication_transition(
+            &self.parent,
+            &self.participants,
+            &self.generation_root.join(PARTICIPANTS_DIR),
+            self.capabilities
+                .iter()
+                .any(|c| c.capability_id == crate::research_versions::RESEARCH_CAPABILITY),
+        )?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",

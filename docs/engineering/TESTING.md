@@ -215,6 +215,16 @@ upstream updates #1355; Proposals #1356; Fork/interchange #1357; and integrated
 consumer/journey evidence #1358. Each implementation issue owns its direct tests;
 #1358 verifies composition rather than substituting for those tests.
 
+The #1535 foundation suite is
+`cargo test -p graphforge-storage research_versions --lib`. It exercises real
+Project publication/recovery, independently advancing context-head fixtures,
+immutable identity conflicts, root-release blockers, permanent receipt replay,
+compact Parquet object corruption, local evidence through GC/reopen, and process
+faults before/after `CURRENT` replacement. These are storage-foundation tests,
+not actual Branch/Proposal lifecycle or thin-binding journey certification.
+#1536 owns bounded selected physical retention and growing-history measurements;
+#1537 owns facade/binding integration. All remain within #1350's close gate.
+
 ### Analyst journey comprehension
 
 Use the [journey questions](analyst-ux.md#journey-questions-and-user-stories)

@@ -44,6 +44,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0036 | [The GraphForge release version contract](0036-release-version-contract.md) | `0036-release-version-contract.md` |
 | 0037 | [Derived adjacency is published with the generation](0037-adjacency-published-with-generation.md) | `0037-adjacency-published-with-generation.md` |
 | 0038 | [Determinism belongs at the publication boundary](0038-determinism-at-the-publication-boundary.md) | `0038-determinism-at-the-publication-boundary.md` |
+| 0039 | [Research Versions share Project publication authority](0039-research-version-publication.md) | `0039-research-version-publication.md` |
 
 ## Superseded records
 
