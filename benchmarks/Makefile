@@ -1,4 +1,4 @@
-.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim
+.PHONY: install smoke smoke-python smoke-rust fly-adapter-static progressive-provider-attempt-static progressive-fly-transport-static local-admission progressive-qualification-list progressive-qualification-plan progressive-qualification-run progressive-qualification-project-s20 progressive-storage-qualification progressive-qualification-binaries progressive-provider-plan qualification-operator esc-readiness ingest-ladder-bundle parity-gate progressive-host-ladder-binaries progressive-host-ladder-plan progressive-host-ladder-run progressive-host-ladder-inventory progressive-host-ladder-reclaim retain-ladder-evidence
 
 install:
 	uv sync --locked
@@ -156,3 +156,15 @@ progressive-host-ladder-reclaim: install
 	test -n "$(RUNG_SCALE)" && test -n "$(OUTPUT_DIR)" && test -n "$(WORK_ROOT)"
 	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.progressive_host_run \
 		--reclaim "$(RUNG_SCALE)" --output-dir "$(OUTPUT_DIR)" --work-root "$(WORK_ROOT)"
+
+# #1530: retain one completed clean ladder's evidence before reporting the run.
+# DESTINATION is docs/development/evidence/ladder/<commit>/ when staging a PR,
+# or any out-of-tree archive whose path and digest go on the citing issues.
+retain-ladder-evidence: install
+	test -n "$(DESTINATION)" && test -n "$(EVIDENCE_DIR)$(SUMMARY_LOG)"
+	PYTHONPATH=$(CURDIR)/harness uv run --locked python -m graphforge_bench.ladder_retention \
+		$(if $(EVIDENCE_DIR),--evidence-dir "$(EVIDENCE_DIR)",) \
+		$(if $(SUMMARY_LOG),--summary-log "$(SUMMARY_LOG)",) \
+		$(if $(SHA),--sha "$(SHA)",) \
+		$(if $(filter 1 true yes,$(INCLUDE_BENCHEXEC)),--include-benchexec,) \
+		--destination "$(DESTINATION)"

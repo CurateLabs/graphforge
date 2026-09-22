@@ -438,6 +438,24 @@ passed evidence is validated before continuation; failed attempts are retained
 for diagnosis. Native execution has no Fly image, spend, or provider teardown
 requirement.
 
+### Retain the evidence before reporting the run (#1530)
+
+The work root is scratch. Before a completed clean ladder's numbers are
+reported anywhere, copy its rung JSON, result JSON, receipts, and the
+controller summary into a retained location — `docs/development/evidence/ladder/<full-sha>/`
+staged in a PR, or an out-of-tree archive whose path and manifest digest are
+recorded on the citing issues:
+
+```bash
+make -C benchmarks retain-ladder-evidence \
+  EVIDENCE_DIR=$OUTPUT_DIR SUMMARY_LOG=/home/ubuntu/gf-clean-ladder-<sha>.log \
+  DESTINATION=docs/development/evidence/ladder/<full-sha> [INCLUDE_BENCHEXEC=1]
+```
+
+Every rung receipt is verified against the digests in its `s<scale>-result.json`
+before anything is copied, and the destination is append-only. The retained
+index lives in [`docs/development/evidence/ladder/README.md`](../docs/development/evidence/ladder/README.md).
+
 Terminal teardown proof:
 
 ```bash

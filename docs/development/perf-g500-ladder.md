@@ -187,6 +187,17 @@ manual capacity rates and Fly image identities are not required. RSS limits
 and plateau checks remain unchanged. See the native command and terminal
 inventory in `benchmarks/README.md`.
 
+### Retaining ladder evidence (#1530)
+
+The work root is scratch and has already been lost twice. A completed clean
+ladder's rung JSON, result JSON, receipts, and controller summary are retained
+before its numbers are reported — under
+[`docs/development/evidence/ladder/<commit>/`](evidence/ladder/README.md) in a
+PR, or in an out-of-tree archive whose path and manifest digest are recorded on
+the citing issues. The retention step verifies each receipt against the digests
+recorded in its `s<scale>-result.json`; the command is
+`make -C benchmarks retain-ladder-evidence` (see `benchmarks/README.md`).
+
 ## Historical reference-client commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /
