@@ -208,7 +208,7 @@ complete generation; it never moves `CURRENT` backward. Active checkpoint
 references add explicit retention roots, while deletion releases only that
 root and cannot invalidate an already leased reader.
 
-**Research Version retention (M11, Designed).**
+**Research Version retention (M11).**
 
 The [research workspace contract](research-workspaces.md) adds semantic Branch,
 Version, and Proposal state above these generation/checkpoint primitives.
@@ -237,8 +237,9 @@ prior state; after linearization reconcile/report committed state, never roll
 it back. Forks provide independent Project authority. M11 adds no pre-v1
 migration guarantee.
 
-The layout below documents current storage. M11 implementation must register
-and test any added participants and retention roots before claiming support.
+The layout below documents current storage. Research participants and retention
+roots are registered by their native owners; the [acceptance evidence](../../engineering/TESTING.md#analyst-ux-acceptance)
+maps real Branch/Proposal retention, cleanup and recovery tests.
 
 ```
 project/

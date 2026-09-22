@@ -81,8 +81,8 @@ extension documents are eligible for publication.
 
 | Document | Question it answers |
 | --- | --- |
-| [`engineering/analyst-ux.md`](engineering/analyst-ux.md) | What analyst experience and consumer contract must M11 deliver? (Designed.) |
-| [`book/architecture/research-workspaces.md`](book/architecture/research-workspaces.md) | How must Slices, Branches, Versions, and Proposals behave? (Designed.) |
+| [`engineering/analyst-ux.md`](engineering/analyst-ux.md) | What analyst experience and consumer contract does Core provide? |
+| [`book/architecture/research-workspaces.md`](book/architecture/research-workspaces.md) | How do Slices, Branches, Versions, and Proposals behave? |
 | [`engineering/ARCHITECTURE.md`](engineering/ARCHITECTURE.md) | Which concepts, boundaries, and components shape the system? |
 | [`engineering/TESTING.md`](engineering/TESTING.md) | How do we prove it before release? |
 | [`engineering/PUBLISHING.md`](engineering/PUBLISHING.md) | How do verified artifacts reach users safely? |

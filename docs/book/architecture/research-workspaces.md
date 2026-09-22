@@ -148,7 +148,7 @@ without rerunning its selector, even after the Version payload is released.
 outside Version returns `GF_RESULT_NOT_RETAINED`; current parent bytes are never
 substituted. Capsules bind Version, selector, ontology and Artifact commitments,
 but establish no new retention root. They are not self-contained graph packages
-or signed authorization. Future Branch creation must retain and validate its
+or signed authorization. Native Branch creation retains and validates its
 chosen source. See [ADR 0040](../../adr/0040-frozen-slice-membership.md).
 
 Limits bound decoded source/selector rows, active objects, required references,

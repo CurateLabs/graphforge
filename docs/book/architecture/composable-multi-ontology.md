@@ -58,7 +58,7 @@ fingerprint before query or write. A mismatch is `coherence.fingerprint`.
 
 ## Project authority and enforcement
 
-### Branch authority (M11, Designed)
+### Branch authority (M11)
 
 The [research workspace contract](research-workspaces.md) requires a Branch
 to inherit exact ontology composition and enforcement context at its base
@@ -67,8 +67,9 @@ Upstream updates and Proposals preview ontology dependencies before adoption;
 deferring a required extension also prevents acceptance of dependent research.
 Competing classifications coexist only when valid under the selected authority.
 Module identity, composition identity, and runtime catalog identity remain
-distinct. These are additional research lifecycle requirements, not a claim
-that current project authority APIs already provide Branches.
+distinct. Native Branch, update and Proposal APIs implement this lifecycle;
+[acceptance evidence](../../engineering/TESTING.md#analyst-ux-acceptance) identifies
+the ontology isolation, selected adoption and dependency-valid acceptance tests.
 
 ### Current project authority
 

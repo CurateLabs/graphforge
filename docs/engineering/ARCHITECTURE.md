@@ -71,7 +71,7 @@ architecture deep-dives in [`../book/architecture/`](../book/architecture/overvi
 | Catalog ID vs ontology ID | Distinct ID spaces | Never substitute one for the other |
 | Analyst verb | Intent API bypassing Cypher | rank/cluster/paths/analyze/similar/find → Arrow |
 
-### M11 research model (Designed)
+### M11 research model
 
 The [analyst research experience](analyst-ux.md) supersedes the earlier
 portable-workspace-only Project definition and expands the workflow to
@@ -108,9 +108,9 @@ portable selection are foundations. None alone constitutes a Branch lifecycle.
 Retained research Versions pin selected dependency/baseline closure, not whole
 ancestors merely for genealogy. Measure retained storage as well as copy cost;
 external-only evidence and unavailable historical expansion must be disclosed.
-Compatible-reader reproduction is not pre-v1 migration support. Define consumer
-projections in #1346; each implementation issue proves its own contract and
-#1358 verifies composition. See [acceptance evidence](TESTING.md#analyst-ux-acceptance).
+Compatible-reader reproduction is not pre-v1 migration support. The consumer
+projections defined in #1346 have native owner tests; #1358 supplies the composed
+Rust/Python/Node/CLI journey and captured consumer outputs. See [acceptance evidence](TESTING.md#analyst-ux-acceptance).
 
 ## Key flows
 
