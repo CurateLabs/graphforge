@@ -23,13 +23,19 @@ use crate::error::to_napi_err;
 use crate::{Result, napi_validation};
 
 pub(crate) fn to_portable_napi_err(error: PortableV2Error) -> crate::NodeError {
+    let committed = error.committed_import.clone();
     let envelope = MultiOntologyError::from(error);
-    let reason = serde_json::to_string(&envelope)
+    let mut value = serde_json::to_value(&envelope).expect("native error serializes");
+    if let Some(receipt) = committed {
+        value["committed_import"] =
+            serde_json::to_value(receipt).expect("native receipt serializes");
+    }
+    let reason = serde_json::to_string(&value)
         .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", envelope.code()));
     napi::Error::new(envelope.code().to_owned(), reason)
 }
 
-fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
+pub(crate) fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
     let value = napi::JsError::from(to_portable_napi_err(error)).into_unknown(env);
     napi::Error::from(value)
 }
@@ -252,6 +258,17 @@ fn signature_state_token(value: PortableV2OciSignatureState) -> String {
 
 fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> PortableVerifyOutput {
     PortableVerifyOutput {
+        research_interchange: report.research_interchange,
+        research_entries: report
+            .research_entries
+            .into_iter()
+            .map(|entry| PortableResearchEntryOutput {
+                component_id: entry.component_id,
+                path: entry.path,
+                length: BigInt::from(entry.length),
+                sha256: entry.sha256,
+            })
+            .collect(),
         contract: report.contract.to_owned(),
         representation: match report.representation {
             graphforge_api::PortableV2Representation::Expanded => "expanded".into(),
@@ -452,6 +469,10 @@ pub struct PortableExportOutput {
 
 #[napi(object)]
 pub struct PortableVerifyOutput {
+    /// Whether the registered native research interchange component was found.
+    pub research_interchange: bool,
+    /// Manifest-authenticated research files, preserving exact integer lengths.
+    pub research_entries: Vec<PortableResearchEntryOutput>,
     pub contract: String,
     pub representation: String,
     pub package_digest: String,
@@ -467,6 +488,14 @@ pub struct PortableVerifyOutput {
     pub ontology_composition: serde_json::Value,
     /// Authenticated entries; lengths preserve the binding's bigint contract.
     pub ontology_composition_entries: Vec<PortableCompositionEntryOutput>,
+}
+
+#[napi(object)]
+pub struct PortableResearchEntryOutput {
+    pub component_id: String,
+    pub path: String,
+    pub length: BigInt,
+    pub sha256: String,
 }
 
 #[napi(object)]

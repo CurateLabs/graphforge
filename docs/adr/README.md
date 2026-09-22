@@ -49,6 +49,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0041 | [Branch state publishes through Project CURRENT](0041-branch-current-publication.md) | `0041-branch-current-publication.md` |
 | 0042 | [Contextual research decisions extend immutable knowledge](0042-contextual-research-claims.md) | `0042-contextual-research-claims.md` |
 | 0043 | [Proposal acceptance shares the Project publication owner](0043-atomic-research-proposal-acceptance.md) | `0043-atomic-research-proposal-acceptance.md` |
+| 0044 | [Research interchange preserves content identity separately from authority](0044-research-interchange-authority.md) | `0044-research-interchange-authority.md` |
 
 ## Superseded records
 

@@ -39,7 +39,8 @@ Every selection root and dependency names that globally unique participant ID;
 unknown, duplicate, self, or cyclic required dependencies fail compatibility.
 
 The closed component kinds are `ontology`, `schema`, `migration`, `settings`,
-`graph-data`, `derived-artifact`, `evidence`, `provenance`, and `compatibility`.
+`graph-data`, `derived-artifact`, `evidence`, `provenance`, `compatibility`, and
+`research`.
 Package classes are `complete`, `ontology-only`, `component-selective`, and
 `graph-data-subset`. Selection records the requested roots, complete required
 dependency closure, explicit omissions and redactions, and graph subset. It
@@ -127,8 +128,14 @@ result. Since v2 is uncompressed, decompressed length equals bundle payload
 length; a compression marker is unsupported, not auto-detected.
 
 Cancellation is checked before each header, before each copy-buffer operation,
-and before publication. Validation and import stage privately; no failure,
-cancellation, unsupported semantic, or hostile entry may mutate a project.
+and before publication. Validation and import stage privately; unsupported
+semantics and hostile entries are rejected before publication. Failure or
+cancellation before `CURRENT` replacement preserves the prior authority.
+After replacement, errors report the committed outcome without rollback,
+including failures during reopen, acknowledgement, or staging cleanup.
+Cleanup success requires confirmed removal and namespace synchronization;
+commitment alone is not a cleanup receipt. Reopen and exact-operation replay
+resolve interrupted responses under the documented receipt lifetime.
 Symlinks, hard links, devices, FIFOs, sockets, traversal, absolute paths,
 non-NFC paths, case-fold collisions, duplicate normalized paths, missing or
 extra entries, length/digest mismatch, unstable files, and truncated/end-marker
@@ -290,13 +297,13 @@ without any registry.
 
 ### Media types and digests
 
-| Role | Media type |
-| --- | --- |
-| Artifact type | `application/vnd.graphforge.project.v2` |
-| Config | `application/vnd.graphforge.project.v2.config+json` |
-| Bundle layer | `application/vnd.graphforge.project.v2+tar` |
-| Signature artifact | `application/vnd.graphforge.project.v2.signature` |
-| Signature payload | `application/vnd.graphforge.project.v2.signature+json` |
+| Role               | Media type                                             |
+| ------------------ | ------------------------------------------------------ |
+| Artifact type      | `application/vnd.graphforge.project.v2`                |
+| Config             | `application/vnd.graphforge.project.v2.config+json`    |
+| Bundle layer       | `application/vnd.graphforge.project.v2+tar`            |
+| Signature artifact | `application/vnd.graphforge.project.v2.signature`      |
+| Signature payload  | `application/vnd.graphforge.project.v2.signature+json` |
 
 The GraphForge `package_digest` remains authoritative for package equivalence.
 The OCI manifest digest is transport/distribution identity only. Human tags may
@@ -354,3 +361,30 @@ Operators retain registry credentials, retention, immutability, and visibility
 policy. Offline/air-gapped users keep using `.gfpb` / `.gfproject/` copies.
 Binding parity for these Rust-owned verbs is owned by the portable promotion
 parity slice (#744).
+
+### Research interchange components
+
+Research export remains a complete portable-v2 package: its selected working
+state can be imported atomically. `research@1` is an explicit required portable
+capability. Two authenticated `research` components carry the native registry
+and exact content-addressed closure; the runtime map must identify the matching
+research capability and registry record version. This implementation requires
+native research capability/registry version 6 and interchange manifest contract
+1, including exact reader/producer checks. An older reader refuses the new
+capability; no pre-v1 migration is implied.
+
+The registry contains the selected immutable Version, required Version/proof
+payloads, identity-only ancestor citations, per-Version original Project
+citations, Branch genealogy, and exact accepted-contribution mappings. It does
+not install source live heads or operational acceptance receipts. Re-projected
+acceptance evidence preserves its original Project even when combined with new
+research in an independent Fork. A selected projection has a distinct Version
+UUID and source citation; it is never an interchangeable copy of its source.
+
+Verification checks the exact object inventory and every native historical
+domain before target admission. Missing closure, unsupported formats, forged
+immutable commitments, conflicting citations, and secret-bearing configuration
+are refused. Physical selected-field projection merges deletion overlays and
+excludes deleted values from payload Parquet. Artifact bytes and external-only
+limitations follow their native evidence owner. Hash verification establishes
+integrity, not authorship or access authorization.

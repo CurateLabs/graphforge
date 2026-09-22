@@ -460,7 +460,9 @@ pub(crate) fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, Port
 }
 
 pub(crate) fn component_kind(capability: &str, family: &str) -> &'static str {
-    if capability == crate::GRAPH_CAPABILITY_ID {
+    if capability == "research" {
+        "research"
+    } else if capability == crate::GRAPH_CAPABILITY_ID {
         "graph-data"
     } else if family.contains("ontology") {
         "ontology"
@@ -502,7 +504,10 @@ fn validate_settings(
     validate_setting_value(None, &value)
 }
 
-fn validate_setting_value(key: Option<&str>, value: &Value) -> Result<(), PortableV2Error> {
+pub(crate) fn validate_setting_value(
+    key: Option<&str>,
+    value: &Value,
+) -> Result<(), PortableV2Error> {
     if key.is_some_and(|key| {
         let key = key.to_ascii_lowercase();
         ["secret", "password", "token", "credential", "private_key"]

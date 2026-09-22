@@ -37,9 +37,14 @@ pub use upstream::{
     ResearchUpstreamResolutionRecord, ResearchUpstreamReview,
 };
 mod branches;
+pub(crate) mod interchange;
 pub use branches::ResearchBranchRecord;
+pub use interchange::{
+    ResearchForkRecord, ResearchInterchangeManifest, ResearchInterchangeSelection,
+    canonicalize_prepared_research_projection, materialize_research_interchange,
+};
 mod project_restore;
-pub use project_restore::materialize_research_project;
+pub use project_restore::{materialize_prepared_research_version, materialize_research_project};
 mod projection;
 mod retained_content;
 pub use projection::{ResearchGraphProjection, ResearchGraphSelection};
@@ -53,7 +58,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 5;
+pub const RESEARCH_VERSION: u32 = 6;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -69,7 +74,7 @@ pub const MAX_ROOTS: usize = 4_096;
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/5"
+    ";research/6"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -218,6 +223,9 @@ pub struct ResearchOperationReceipt {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRegistry {
+    /// Imported provenance, separate from live heads and local acceptance authority.
+    #[serde(default)]
+    pub interchange: BTreeMap<Uuid, ResearchInterchangeManifest>,
     /// Restore-independent frozen submissions and permanent accepted mappings.
     pub proposals: ResearchProposalHistory,
     /// Restore-independent upstream review history; operation decisions never expire.
@@ -481,6 +489,7 @@ impl ResearchRegistry {
         branches::validate(self)?;
         proposal_validation::validate(self)?;
         self.validate_dependency_cycles()?;
+        interchange::validate_registry(self)?;
         for (context, version) in &self.heads {
             if self
                 .versions
@@ -571,7 +580,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/5").into(),
+            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/6").into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -633,7 +642,7 @@ pub fn read_research_registry(
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
         || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/5"))
+            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/6"))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -1302,7 +1311,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
         || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/5").into())
+            != hex(&Sha256::digest(b"graphforge-research-registry/6").into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1312,6 +1321,7 @@ pub(crate) fn validate_publication_transition(
         .map_err(|_| invalid("malformed research registry publication"))?;
     after.validate()?;
     proposals::preserve(&before, &after)?;
+    interchange::preserve(&before, &after)?;
     if json(&after)? != bytes {
         return Err(invalid("research registry publication is not canonical"));
     }

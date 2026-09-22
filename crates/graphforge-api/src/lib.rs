@@ -162,6 +162,7 @@ mod query_execution;
 mod repository;
 mod research_claims;
 mod research_comparison;
+mod research_interchange;
 mod research_proposals;
 mod research_upstream;
 pub use research_claims::{
@@ -171,6 +172,7 @@ pub use research_claims::{
     ResearchContext, ResearchDecisionInput,
 };
 pub use research_comparison::*;
+pub use research_interchange::*;
 pub use research_proposals::*;
 pub use research_upstream::*;
 mod research_project;

@@ -11,6 +11,7 @@ pub(crate) mod domains;
 pub(crate) mod edit;
 pub(crate) mod field_application;
 pub(crate) mod field_ontology;
+pub(crate) mod field_selection;
 pub(crate) mod fields;
 pub(crate) mod import_graph;
 pub(crate) mod import_semantic;

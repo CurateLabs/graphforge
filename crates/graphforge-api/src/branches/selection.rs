@@ -1,5 +1,5 @@
 //! Frozen Slice preparation and pre-publication domain validation.
-use super::{domains, publication};
+use super::domains;
 use crate::{CancellationToken, GfError, GraphForge, slices::branch};
 use graphforge_storage::research_versions::{
     PreparedBranchContent, RegisterResearchVersion, ResearchParticipantKey,
@@ -7,7 +7,7 @@ use graphforge_storage::research_versions::{
 use std::collections::BTreeSet;
 
 pub(crate) fn prepare(
-    command: &publication::Command,
+    root: &std::path::Path,
     mut selected: branch::BranchSelection,
     spec: &mut RegisterResearchVersion,
     cancellation: &CancellationToken,
@@ -41,7 +41,7 @@ pub(crate) fn prepare(
         .any(|p| p.key.capability == "workspace" && p.key.family == "branch_fields")
     {
         super::baseline::preserve_selected(
-            &command.root,
+            root,
             &selected.view,
             &mut selected.prepared,
             &selected.active.union(&selected.required).cloned().collect(),
@@ -53,7 +53,7 @@ pub(crate) fn prepare(
     selected.prepared.version.created_at = spec.created_at;
     selected.prepared.version.label.clone_from(&spec.label);
     graphforge_storage::research_versions::replace_prepared_branch_domains(
-        &command.root,
+        root,
         &mut selected.prepared,
         spec.selection.as_ref().expect("selected participant keys"),
         &replacements,
@@ -62,7 +62,7 @@ pub(crate) fn prepare(
     let prepared = selected.prepared;
     let private = tempfile::tempdir().map_err(|error| GfError::Storage(error.to_string()))?;
     let generation = graphforge_storage::research_versions::materialize_prepared_branch(
-        &command.root,
+        root,
         &prepared,
         private.path(),
     )?;

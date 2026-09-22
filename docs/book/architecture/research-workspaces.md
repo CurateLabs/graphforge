@@ -615,7 +615,7 @@ historical = graph.query_research_version(
 ```
 
 These APIs establish the Version foundation used by native Branch edits and
-Proposal acceptance. Portable interchange lifecycle remains #1357 work.
+Proposal acceptance. Portable interchange is implemented by the native contract below.
 
 ### Native selective Proposal contract (#1356)
 
@@ -695,3 +695,37 @@ returns `GF_CANCELLED`. Publication errors retain the native `committed:false` /
 `committed:true` distinction around CURRENT replacement. After an ambiguous response,
 reopen and retry the exact operation to recover its durable receipt. Native tests
 exercise both sides of that boundary without rolling back committed parent content.
+
+### Native research interchange contract (#1357)
+
+`research_reference` resolves a live Branch head once or an exact immutable
+Version, including its identity commitment, original base/origin, and derivative
+authorship. `project_uuid` identifies the local authority; `origin_project_uuid`
+identifies the Version's original Project, including after a Fork. Hosting URLs
+remain an application concern.
+
+`export_research` packages one retained Version or a distinct selected projection.
+The versioned research component authenticates required content and selected
+acceptance proofs separately from historical ancestor identities. Per-Version
+Project citations preserve mixed original/Fork genealogy without making foreign
+acceptance local authority. It preserves
+field baselines and exact accepted-contribution mappings without copying active
+heads, proposal receipts, or unrelated ancestor data. Native selected-field
+freezing physically materializes effective property rows so deletion overlays
+cannot leave private values in exported Parquet. Expanded and bundled forms
+have equal semantic identity. Re-export preserves immutable proof identities
+only after checking the exact selected native content closure.
+
+Existing `verify_portable_v2` and `import_portable_v2` validate archived native
+domains before destination admission. Imported genealogy supports citation and
+explicit Version comparison, but is not local Branch or acceptance authority.
+Unavailable ancestor payloads stay unavailable after reopen and cleanup.
+`fork_research` adds explicit independent Project identity, workspace metadata,
+governance, and ontology adoption. Its durable exact-intent receipt supports
+replay without resetting later destination changes or requiring source payloads.
+
+Portable errors after CURRENT replacement carry `committed_import` with the
+operation, generation, manifest, and package identities. This reports a committed
+outcome, not rollback; an absent receipt alone does not prove rollback. See
+[ADR 0044](../../adr/0044-research-interchange-authority.md) and
+[portable publication guarantees](portable-project-v2.md).

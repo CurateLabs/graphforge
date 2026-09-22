@@ -557,6 +557,7 @@ mod query;
 mod recorded;
 mod research_claims;
 mod research_comparison;
+mod research_interchange;
 mod research_project;
 mod research_proposals;
 mod research_upstream;

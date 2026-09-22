@@ -23,11 +23,18 @@ use crate::{
 /// Map a sanitized portable-v2 failure without credentials, headers, or host paths.
 pub(crate) fn to_portable_pyerr(py: Python<'_>, error: PortableV2Error) -> PyErr {
     let entry = error.entry.clone();
+    let committed = error.committed_import.clone();
     let projected = graphforge_api::MultiOntologyError::from(error);
     let err = crate::multi_ontology::to_multi_ontology_pyerr(py, &projected);
     let value = err.value(py);
     if let Some(entry) = &entry {
         let _ = value.setattr("entry", entry.as_str());
+    }
+    if let Some(receipt) = committed
+        && let Ok(json) = serde_json::to_value(receipt)
+        && let Ok(receipt) = crate::json_value_to_python(py, &json)
+    {
+        let _ = value.setattr("committed_import", receipt);
     }
     err
 }

@@ -103,3 +103,49 @@ fn composition_control_rejects_duplicate_dangling_and_unbounded_closure() {
         PortableV2ErrorCode::LimitExceeded
     );
 }
+
+#[test]
+fn research_runtime_cannot_be_relabelled_or_downgraded_to_generic_settings() {
+    let mut manifest: Manifest = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
+    ))
+    .unwrap();
+    manifest.requirements.capabilities.push("research@1".into());
+    let registry_id = "research-registry";
+    for id in [registry_id, "research-content"] {
+        manifest.components.push(
+            serde_json::from_value(serde_json::json!({
+                "kind": "research", "participant_id": id, "required_dependencies": [], "files": []
+            }))
+            .unwrap(),
+        );
+    }
+    let version = crate::research_versions::RESEARCH_VERSION;
+    let mut runtime: RuntimeGenerationMap = serde_json::from_value(serde_json::json!({
+        "contract": "graphforge-runtime-generation-map/1",
+        "capabilities": [{"capability_id":"research", "capability_version":version}],
+        "participants": [{
+            "participant_id": registry_id, "capability_id":"research", "capability_version":version,
+            "record_family_id":"registry", "record_version":version, "encoding":"json",
+            "schema_fingerprint":"0".repeat(64), "row_count":1
+        }], "graph_tree":null
+    }))
+    .unwrap();
+    validate_research_runtime(&runtime, &manifest).unwrap();
+    manifest.components.last_mut().unwrap().kind = "settings".into();
+    assert!(validate_research_runtime(&runtime, &manifest).is_err());
+    manifest.components.last_mut().unwrap().kind = "research".into();
+    manifest
+        .requirements
+        .capabilities
+        .retain(|v| v != "research@1");
+    assert!(validate_research_runtime(&runtime, &manifest).is_err());
+    manifest.requirements.capabilities.push("research@1".into());
+    runtime.participants[0].record_version = version + 1;
+    assert_eq!(
+        validate_research_runtime(&runtime, &manifest)
+            .unwrap_err()
+            .code,
+        PortableV2ErrorCode::UnsupportedFuture
+    );
+}

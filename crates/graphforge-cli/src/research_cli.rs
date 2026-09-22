@@ -3,6 +3,7 @@
 mod branches;
 mod claims;
 mod comparison;
+mod interchange;
 mod proposals;
 mod slices;
 mod upstream;
@@ -23,6 +24,11 @@ use crate::{canonical_uuid, write_execution_result};
 
 #[derive(Subcommand)]
 pub(crate) enum ResearchCommand {
+    /// Cite, export, and independently Fork native research.
+    Interchange {
+        #[command(subcommand)]
+        command: interchange::InterchangeCommand,
+    },
     /// Submit and review selective native proposals.
     Proposal {
         #[command(subcommand)]
@@ -121,8 +127,9 @@ pub(crate) fn run_research(
     command: ResearchCommand,
     json: bool,
     output: &mut dyn Write,
-) -> Result<(), graphforge_api::GfError> {
+) -> Result<(), crate::CliRuntimeError> {
     match command {
+        ResearchCommand::Interchange { command } => interchange::run(graph, command, output)?,
         ResearchCommand::Proposal { command } => proposals::run(graph, command, json, output)?,
         ResearchCommand::Upstream { command } => upstream::run(graph, command, json, output)?,
         ResearchCommand::Compare(args) => comparison::run(graph, args, json, output)?,

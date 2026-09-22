@@ -29,14 +29,20 @@ test("every native task uses structured cooperative error transport", () => {
     .join("\n");
   const errors = readFileSync(join(srcDir, "error.rs"), "utf8");
   const taskCount = source.match(/impl Task for /g)?.length ?? 0;
-  assert.equal(taskCount, 75);
+  assert.equal(taskCount, 76);
   assert.equal(
     source.match(/type Output =\s*(?:\n\s*)?std::result::Result</g)?.length,
     taskCount,
   );
   assert.equal(
     source.match(/to_(?:napi|portable|multi)_deferred_err\(env,/g)?.length,
-    taskCount,
+    // Interchange preserves the distinct native-reference and portable lifecycle
+    // error contracts; its one Task has one transport arm for each error owner.
+    taskCount + 1,
+  );
+  assert.match(
+    source,
+    /ResearchInterchangeError::Native\(error\) => crate::to_napi_deferred_err\(env, &error\),[\s\S]*?ResearchInterchangeError::Portable\(error\) => \{\s*crate::portable::to_portable_deferred_err\(env, error\)/,
   );
   assert.match(
     source,

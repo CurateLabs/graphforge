@@ -805,6 +805,32 @@ pub fn plan_selected_portable_v2(
             files: owned,
         });
     }
+    if selection.includes("research", "registry") {
+        let objects = crate::research_versions::interchange::portable::object_inventory(g)?;
+        let lease = crate::graph_object_store::begin_graph_object_read(g.container_root())?;
+        let mut owned = Vec::new();
+        for digest in objects {
+            let length = std::fs::metadata(crate::graph_object_path(g.container_root(), &digest)?)
+                .map_err(storage)?
+                .len();
+            let path = format!("data/components/research/research-content/{digest}");
+            let file = inspect_cas(&lease, &digest, length, &path, limits, &mut total)?;
+            owned.push(ComponentFile {
+                media_type: "application/octet-stream".into(),
+                path,
+                length,
+                sha256: digest,
+            });
+            files.push(file);
+        }
+        roots.push("research-content".into());
+        components.push(Component {
+            kind: "research".into(),
+            participant_id: "research-content".into(),
+            required_dependencies: vec![portable_participant_id("research", "registry")],
+            files: owned,
+        });
+    }
     runtime_participants.sort_by(|left, right| {
         left.participant_id
             .as_bytes()
@@ -881,9 +907,33 @@ pub fn plan_selected_portable_v2(
         }
         capabilities
     };
+    let research = if selection.includes("research", "registry") {
+        let snapshot = g
+            .participant_snapshot("research", "registry")?
+            .ok_or_else(|| err("GF_INCOMPATIBLE", "research registry is unavailable"))?;
+        Some(crate::research_versions::interchange::portable::portable_registry(&snapshot.bytes)?)
+    } else {
+        None
+    };
+    let selected_research = research
+        .as_ref()
+        .and_then(|registry| registry.interchange.values().next())
+        .map(|archive| &archive.versions[&archive.selected_version_uuid]);
+    let source_generation =
+        selected_research.map_or(g.generation_uuid(), |v| v.content.generation_uuid);
+    let source_manifest =
+        selected_research.map_or(g.manifest_sha256(), |v| v.content.manifest_sha256);
+    let selection_fingerprint = if let Some(registry) = &research {
+        format!(
+            "sha256:{}",
+            hex(Sha256::digest(serde_json::to_vec(&registry.interchange).map_err(storage)?).into())
+        )
+    } else {
+        selection.selection_fingerprint.clone()
+    };
     let source = || Source {
-        generation_uuid: g.generation_uuid().hyphenated().to_string(),
-        manifest_sha256: hex(g.manifest_sha256()),
+        generation_uuid: source_generation.hyphenated().to_string(),
+        manifest_sha256: hex(source_manifest),
     };
     let draft = Manifest {
         format: "graphforge-project/2",
@@ -959,12 +1009,12 @@ pub fn plan_selected_portable_v2(
         return Err(limit("semantic manifest exceeds configured limit"));
     }
     Ok(PortableV2ExportPlan {
-        generation_uuid: g.generation_uuid(),
+        generation_uuid: source_generation,
         files,
         manifest,
         package_digest,
         payload_bytes: total,
-        selection_fingerprint: selection.selection_fingerprint.clone(),
+        selection_fingerprint,
         package_class: package_class(&selection.package_class)?,
         retained_subset: None,
     })
@@ -1133,7 +1183,7 @@ pub(super) fn portable_id(s: &str) -> String {
     }
     o
 }
-pub(super) fn portable_participant_id(capability: &str, family: &str) -> String {
+pub(crate) fn portable_participant_id(capability: &str, family: &str) -> String {
     let mut prefix = portable_id(&format!("{capability}-{family}"));
     prefix.truncate(220);
     let mut digest = Sha256::new();

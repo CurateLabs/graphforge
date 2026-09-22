@@ -276,6 +276,7 @@ pub(super) fn validate_semantics(
         "provenance@1",
         "compatibility@1",
         "ontology-composition@1",
+        "research@1",
     ];
     if m.requirements
         .capabilities
@@ -905,6 +906,7 @@ fn validate_runtime_map_contents(
         .iter()
         .map(|component| component.participant_id.as_str())
         .collect();
+    validate_research_runtime(runtime, manifest)?;
     let mut prior = None;
     let mut runtime_ids = BTreeSet::new();
     for participant in &runtime.participants {
@@ -955,6 +957,66 @@ fn validate_runtime_map_contents(
             RUNTIME_MAP_PATH,
             "runtime graph placement",
         ));
+    }
+    Ok(())
+}
+
+fn validate_research_runtime(
+    runtime: &RuntimeGenerationMap,
+    manifest: &Manifest,
+) -> Result<(), PortableV2Error> {
+    let research_parts: Vec<_> = runtime
+        .participants
+        .iter()
+        .filter(|p| p.capability_id == "research")
+        .collect();
+    let research_components: Vec<_> = manifest
+        .components
+        .iter()
+        .filter(|c| c.kind == "research")
+        .collect();
+    let research_caps: Vec<_> = runtime
+        .capabilities
+        .iter()
+        .filter(|c| c.capability_id == "research")
+        .collect();
+    let declares_research = manifest
+        .requirements
+        .capabilities
+        .iter()
+        .any(|c| c == "research@1");
+    if !research_parts.is_empty()
+        || !research_components.is_empty()
+        || !research_caps.is_empty()
+        || declares_research
+    {
+        if research_parts.len() != 1
+            || research_components.len() != 2
+            || research_caps.len() != 1
+            || !declares_research
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Incompatible,
+                "research component/runtime mismatch",
+            ));
+        }
+        let part = research_parts[0];
+        if part.record_family_id != "registry"
+            || part.record_version != crate::research_versions::RESEARCH_VERSION
+            || part.capability_version != crate::research_versions::RESEARCH_VERSION
+            || research_caps[0].capability_version != crate::research_versions::RESEARCH_VERSION
+            || !research_components
+                .iter()
+                .any(|c| c.participant_id == part.participant_id)
+            || !research_components
+                .iter()
+                .any(|c| c.participant_id == "research-content")
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::UnsupportedFuture,
+                "research runtime contract",
+            ));
+        }
     }
     Ok(())
 }
@@ -1018,6 +1080,7 @@ fn valid_kind(s: &str) -> bool {
             | "evidence"
             | "provenance"
             | "compatibility"
+            | "research"
     )
 }
 fn valid_id(s: &str) -> bool {

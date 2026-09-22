@@ -178,6 +178,40 @@ pub fn materialize_portable_graph_tree_projection(
     materialize_graph_projection_with_options(source, target, selection, false)
 }
 
+/// Compact effective rows without retaining deleted property bases or indexes.
+pub(crate) fn repack_portable_graph_tree(source: &Path, target: &Path) -> Result<(), GfError> {
+    let nodes = crate::mutator::node_parquet_files(source).map_err(storage)?;
+    let edges = sorted_parquet_files(&source.join("topology/edges"))?;
+    let authority = TransformRoutes::capture(source)?;
+    let mut names = BTreeSet::new();
+    let mut present = BTreeSet::new();
+    for (kind, edge, key) in [
+        (crate::PropertyRouteKind::Node, false, "node_uuid"),
+        (crate::PropertyRouteKind::Edge, true, "edge_uuid"),
+    ] {
+        for route in authority.properties.routes(kind) {
+            for batch in authority.property_batches(source, route, edge)? {
+                for (field, values) in batch.schema().fields().iter().zip(batch.columns()) {
+                    if field.name() != key {
+                        names.insert(field.name().clone());
+                        if values.null_count() < values.len() {
+                            present.insert(field.name().clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let selection = GraphProjectionSelection {
+        node_uuids: uuid_rows_files(&nodes, "node_uuid")?,
+        edge_uuids: edge_endpoints(&edges)?.into_keys().collect(),
+        closure: GraphProjectionClosure::Referential,
+        exclude_properties: names.difference(&present).cloned().collect(),
+    };
+    materialize_portable_graph_tree_projection(source, target, &selection)?;
+    Ok(())
+}
+
 fn materialize_graph_projection_with_options(
     source: &Path,
     target: &Path,

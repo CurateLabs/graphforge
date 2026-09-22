@@ -4,6 +4,8 @@ mod claims;
 mod edge_dependencies;
 mod helpers;
 mod historical_comparison;
+mod interchange;
+mod mixed_authority_tests;
 mod nested;
 mod ontology_dependencies;
 mod partial_review;

@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 330,
-  "releaseSurfaceDigest": "d994cc32962df81365adae61f1ac61f2bb723b8247ab65d41a05b0eef39a4b43",
+  "releaseSurfaceCount": 333,
+  "releaseSurfaceDigest": "b3d1632bbb5ba39c2cd9f720a88fe777ef85d89c69a0bf3cb231125a91b3b090",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -40,7 +40,8 @@
     "research-claims": "researchClaims",
     "research-comparison": "researchComparison",
     "research-proposals": "researchProposals",
-    "research-upstream": "researchUpstream"
+    "research-upstream": "researchUpstream",
+    "research-interchange": "researchInterchange"
   },
   "classification": {
     "equivalent": [
@@ -258,7 +259,10 @@
       "GraphForge.research_proposal_history",
       "GraphForge.preview_research_upstream",
       "GraphForge.update_research_branch",
-      "GraphForge.research_upstream_history"
+      "GraphForge.research_upstream_history",
+      "GraphForge.research_reference",
+      "GraphForge.export_research",
+      "GraphForge.fork_research"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
@@ -669,6 +673,11 @@
     "researchUpstream": {
       "research-upstream.test.mjs": [
         "native upstream review advances only the selected baseline and replays its receipt"
+      ]
+    },
+    "researchInterchange": {
+      "research-interchange.test.mjs": [
+        "native research interchange preserves citations exports and independent Fork replay"
       ]
     }
   }

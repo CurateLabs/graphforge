@@ -1,5 +1,11 @@
 //! Verification-first, bounded portable-v2 project import.
 
+mod native_validation;
+pub use native_validation::{
+    NativeResearchValidator, import_complete_portable_v2_with_native_validation,
+    validate_research_package,
+};
+
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -19,6 +25,8 @@ use crate::project_portable_v2::{
     PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
 };
 mod adjacency;
+mod outcome;
+use outcome::{storage, storage_or_cancel};
 
 use crate::project_publication::{
     ProjectCapability, ProjectFileParticipant, ProjectGenerationRequest, ProjectParticipant,
@@ -253,8 +261,35 @@ pub fn import_complete_portable_v2_with_allocation(
     supported_capabilities: &[ProjectCapability],
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
+    progress: impl FnMut(PortableV2ImportProgress),
+    allocation: Option<&crate::StorageAllocationOperation>,
+) -> Result<PortableV2ImportReceipt, PortableV2Error> {
+    import_complete_portable_v2_native(
+        source,
+        target,
+        transaction_uuid,
+        generation_uuid,
+        supported_capabilities,
+        limits,
+        cancelled,
+        progress,
+        allocation,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_complete_portable_v2_native(
+    source: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    supported_capabilities: &[ProjectCapability],
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
     mut progress: impl FnMut(PortableV2ImportProgress),
     allocation: Option<&crate::StorageAllocationOperation>,
+    validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     let source = source.as_ref();
     let target = target.as_ref();
@@ -305,6 +340,7 @@ pub fn import_complete_portable_v2_with_allocation(
         owned_retry,
         allocation,
         &mut added_stage_entries,
+        validator,
     )
     .map(|mut receipt| {
         receipt.materialized_identity_allocated_bytes = materialized_identity_allocated_bytes;
@@ -320,7 +356,8 @@ pub fn import_complete_portable_v2_with_allocation(
             entry_count.saturating_add(added_stage_entries),
             allocation,
         ) {
-            return cleanup_error.with_allocation_identities(owned_identities);
+            return outcome::preserve_commit(cleanup_error, &error)
+                .with_allocation_identities(owned_identities);
         }
         error
             .with_allocation_identities(owned_identities)
@@ -339,7 +376,13 @@ pub fn import_complete_portable_v2_with_allocation(
             &mut receipt,
             entry_count.saturating_add(added_stage_entries),
             allocation,
-        )?;
+        )
+        .map_err(|error| {
+            error.with_committed_import(outcome::committed(
+                &receipt.publication,
+                &receipt.package_digest,
+            ))
+        })?;
         Ok(receipt)
     });
     if result.is_ok() {
@@ -869,6 +912,7 @@ fn import_materialized(
     owned_retry: bool,
     allocation: Option<&crate::StorageAllocationOperation>,
     added_stage_entries: &mut usize,
+    validator: Option<&mut NativeResearchValidator<'_>>,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     if report.package_class != PortableV2PackageClass::Complete {
         return Err(PortableV2Error::new(
@@ -1027,6 +1071,11 @@ fn import_materialized(
             )
         })?
         .saturating_add(*added_stage_entries);
+    let research =
+        crate::project_portable_v2::research::validate_stage(stage, report, limits, cancelled)?;
+    if let Some((registry, objects)) = &research {
+        native_validation::validate(stage, registry, objects, cancelled, validator)?;
+    }
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         target,
         crate::filesystem_admission::ProjectLifecycleMode::Durable,
@@ -1041,7 +1090,9 @@ fn import_materialized(
         .is_some();
     let existing = if replay {
         Some(crate::resolve_project_generation(admission.root()).map_err(|error| storage(&error))?)
-    } else if owned_retry {
+    } else if owned_retry
+        || outcome::aborted_retry(admission.root(), transaction_uuid, generation_uuid)?
+    {
         let generation =
             semantically_pristine_generation(admission.root()).map_err(|error| storage(&error))?;
         if generation.is_none() {
@@ -1069,6 +1120,14 @@ fn import_materialized(
         stage_entry_count,
         allocation,
     )?;
+    let _research_lease = if let Some((_, objects)) = &research {
+        let lease = crate::begin_graph_object_publication(admission.root())
+            .map_err(|error| storage(&error))?;
+        crate::project_portable_v2::research::install(stage, admission.root(), objects)?;
+        Some(lease)
+    } else {
+        None
+    };
     let request = ProjectGenerationRequest {
         transaction_uuid,
         generation_uuid,
@@ -1099,20 +1158,38 @@ fn import_materialized(
             let validated = staged
                 .validate(|_| Ok(()), |_, _| Ok(()))
                 .map_err(|error| storage(&error))?;
-            match graph_object_lease.as_ref() {
-                Some(lease) => validated
-                    .publish_with_graph_objects(lease)
-                    .map_err(|error| storage(&error))?,
-                None => validated.publish().map_err(|error| storage(&error))?,
-            }
+            let published = match graph_object_lease.as_ref() {
+                Some(lease) => validated.publish_with_graph_objects(lease),
+                None => validated.publish(),
+            };
+            published.map_err(|error| {
+                outcome::publication_error(
+                    target,
+                    transaction_uuid,
+                    generation_uuid,
+                    &report.package_digest,
+                    &error,
+                )
+            })?
         }
     };
-    let reopened = crate::resolve_project_generation(target).map_err(|error| storage(&error))?;
+    let committed = outcome::committed(&publication, &report.package_digest);
+    crate::project_failpoint::hit(
+        "portable_import.before_reopen",
+        Some(transaction_uuid),
+        Some(generation_uuid),
+        "IMPORT_REOPEN",
+        true,
+    )
+    .map_err(|error| storage(&error).with_committed_import(committed.clone()))?;
+    let reopened = crate::resolve_project_generation(target)
+        .map_err(|error| storage(&error).with_committed_import(committed.clone()))?;
     if reopened.generation_uuid() != generation_uuid {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::Io,
             "published generation did not reopen",
-        ));
+        )
+        .with_committed_import(committed));
     }
     Ok(PortableV2ImportReceipt {
         package_digest: report.package_digest.clone(),
@@ -1123,7 +1200,7 @@ fn import_materialized(
         published_identity_allocated_bytes: crate::capture_project_storage_identity_union(
             &reopened,
         )
-        .map_err(|error| storage(&error))?
+        .map_err(|error| storage(&error).with_committed_import(committed))?
         .physical_identity_allocated_bytes,
         materialized_cleanup: PortableV2ImportCleanupReceipt::default(),
     })
@@ -1925,25 +2002,10 @@ fn parse_digest(value: &str) -> Result<[u8; 32], PortableV2Error> {
     Ok(digest)
 }
 
-fn storage(error: &GfError) -> PortableV2Error {
-    let _ = error;
-    PortableV2Error::new(
-        PortableV2ErrorCode::Io,
-        "portable import publication failed",
-    )
-}
-
-fn storage_or_cancel(error: &GfError, cancelled: Option<&AtomicBool>) -> PortableV2Error {
-    if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-        PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled")
-    } else {
-        storage(error)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod returned_errors;
 
     const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
     const COOKIE: &str = "graphforge-internal-subprocess-v1";
@@ -2623,7 +2685,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(conflict.code, PortableV2ErrorCode::Io);
+        assert_eq!(conflict.code, PortableV2ErrorCode::ConcurrentMutation);
         assert_eq!(
             crate::resolve_project_generation(&target)
                 .unwrap()
@@ -2860,6 +2922,12 @@ mod tests {
         )
         .expect_err("cleanup failure must fail closed");
         INJECT_IMPORT_CLEANUP_FAILURE.with(|value| value.set(false));
+        let committed = error
+            .committed_import
+            .as_ref()
+            .expect("cleanup error retains commit evidence");
+        assert_eq!(committed.operation_uuid, transaction);
+        assert_eq!(committed.generation_uuid, generation);
         assert_eq!(
             crate::resolve_project_generation(&target)
                 .unwrap()
@@ -2875,6 +2943,18 @@ mod tests {
             stage.exists(),
             "failed cleanup residue must remain attributable"
         );
+        let retry = import_complete_portable_v2(
+            &package,
+            &target,
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap();
+        assert!(retry.publication.idempotent_replay);
+        assert!(retry.materialized_cleanup.parent_sync_confirmed);
     }
 
     #[test]
