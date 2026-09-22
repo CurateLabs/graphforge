@@ -8,6 +8,7 @@ mod materialization;
 pub use materialization::materialize_verified_portable_v2;
 pub(crate) use materialization::materialize_verified_portable_v2_observed;
 use materialization::{materialize_bundle, materialize_expanded};
+pub(crate) mod research;
 mod semantic_validation;
 use semantic_validation::{
     admit_composition_features, package_class, validate_ontology_composition, validate_runtime_map,
@@ -178,7 +179,9 @@ pub fn verify_portable_v2(
             "source is not a regular file or directory",
         ));
     }?;
-    if mode == PortableV2Mode::Full && report.ontology_composition.is_some() {
+    if mode == PortableV2Mode::Full
+        && (report.ontology_composition.is_some() || report.research_interchange)
+    {
         let staging = tempfile::tempdir().map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::Io,
@@ -203,6 +206,7 @@ pub fn verify_portable_v2(
             )?;
         }
         validate_materialized_ontology_composition(staging.path(), &report, limits, cancelled)?;
+        research::validate_stage(staging.path(), &report, limits, cancelled)?;
     }
     Ok(report)
 }
@@ -797,6 +801,25 @@ fn validate_package(
         validate_ontology_composition(&map, &manifest, limits)?;
     let full = mode == PortableV2Mode::Full;
     Ok(PortableV2Report {
+        research_entries: manifest
+            .components
+            .iter()
+            .filter(|component| component.kind == "research")
+            .flat_map(|component| {
+                component.files.iter().map(|file| {
+                    graphforge_core::portable::PortableV2ResearchEntry {
+                        component_id: component.participant_id.clone(),
+                        path: file.path.clone(),
+                        length: file.length,
+                        sha256: file.sha256.clone(),
+                    }
+                })
+            })
+            .collect(),
+        research_interchange: manifest
+            .components
+            .iter()
+            .any(|component| component.kind == "research"),
         contract: "graphforge-portable-verify/2",
         representation,
         package_digest: manifest.package_digest.clone(),

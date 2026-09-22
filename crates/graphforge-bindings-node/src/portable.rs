@@ -23,13 +23,19 @@ use crate::error::to_napi_err;
 use crate::{Result, napi_validation};
 
 pub(crate) fn to_portable_napi_err(error: PortableV2Error) -> crate::NodeError {
+    let committed = error.committed_import.clone();
     let envelope = MultiOntologyError::from(error);
-    let reason = serde_json::to_string(&envelope)
+    let mut value = serde_json::to_value(&envelope).expect("native error serializes");
+    if let Some(receipt) = committed {
+        value["committed_import"] =
+            serde_json::to_value(receipt).expect("native receipt serializes");
+    }
+    let reason = serde_json::to_string(&value)
         .unwrap_or_else(|_| format!("{{\"code\":\"{}\"}}", envelope.code()));
     napi::Error::new(envelope.code().to_owned(), reason)
 }
 
-fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
+pub(crate) fn to_portable_deferred_err(env: Env, error: PortableV2Error) -> napi::Error {
     let value = napi::JsError::from(to_portable_napi_err(error)).into_unknown(env);
     napi::Error::from(value)
 }

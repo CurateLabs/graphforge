@@ -127,8 +127,14 @@ result. Since v2 is uncompressed, decompressed length equals bundle payload
 length; a compression marker is unsupported, not auto-detected.
 
 Cancellation is checked before each header, before each copy-buffer operation,
-and before publication. Validation and import stage privately; no failure,
-cancellation, unsupported semantic, or hostile entry may mutate a project.
+and before publication. Validation and import stage privately; unsupported
+semantics and hostile entries are rejected before publication. Failure or
+cancellation before `CURRENT` replacement preserves the prior authority.
+After replacement, errors report the committed outcome without rollback,
+including failures during reopen, acknowledgement, or staging cleanup.
+Cleanup success requires confirmed removal and namespace synchronization;
+commitment alone is not a cleanup receipt. Reopen and exact-operation replay
+resolve interrupted responses under the documented receipt lifetime.
 Symlinks, hard links, devices, FIFOs, sockets, traversal, absolute paths,
 non-NFC paths, case-fold collisions, duplicate normalized paths, missing or
 extra entries, length/digest mismatch, unstable files, and truncated/end-marker

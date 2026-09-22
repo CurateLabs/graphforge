@@ -60,7 +60,7 @@ pub(crate) fn load(
         .transpose()?;
     let selected = expanded.as_ref();
     let fields = fields::read_selected(&graph, selected, cancel)?;
-    let branch = version.and_then(|v| registry.branches.get(&v.context_uuid));
+    let branch = version.and_then(|v| registry.historical_branch(v.context_uuid));
     let mut baseline = if let Some(branch) = branch {
         crate::branches::baseline_context::read(
             owner,
@@ -80,7 +80,9 @@ pub(crate) fn load(
     }
     let suppressed = local_suppression(
         &graph,
-        current,
+        version
+            .and_then(|v| registry.historical_project(v.version_uuid))
+            .unwrap_or(crate::research_claims::authority::project_uuid(current)?),
         registry,
         branch.map(|b| b.branch_uuid),
         &fields,
@@ -98,6 +100,17 @@ pub(crate) fn load(
         ),
         authority_context: match (branch, version) {
             (Some(branch), _) => (1, branch.branch_uuid),
+            (None, Some(version))
+                if registry.historical_project(version.version_uuid).is_some()
+                    && version.content.source_version.is_none() =>
+            {
+                (
+                    0,
+                    registry
+                        .historical_project(version.version_uuid)
+                        .expect("historical project"),
+                )
+            }
             (None, Some(version)) if version.content.source_version.is_some() => {
                 (2, version.context_uuid)
             }
@@ -253,7 +266,7 @@ fn unavailable() -> GfError {
 
 fn local_suppression(
     graph: &GraphForge,
-    current: &ResolvedProjectGeneration,
+    project_context: Uuid,
     registry: &ResearchRegistry,
     branch: Option<Uuid>,
     fields: &Fields,
@@ -273,12 +286,11 @@ fn local_suppression(
                 return Err(super::invalid("cyclic research ancestry"));
             }
             next = registry
-                .branches
-                .get(&id)
+                .historical_branch(id)
                 .and_then(|b| b.parent_branch_uuid);
         }
     } else {
-        contexts.insert(crate::research_claims::authority::project_uuid(current)?);
+        contexts.insert(project_context);
     }
     let suppressions =
         crate::research_claims::ledger::read_suppressions(&graph.generation_for_read()?)?;
@@ -306,3 +318,7 @@ fn local_suppression(
     );
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "../research_interchange/context_tests.rs"]
+mod context_tests;

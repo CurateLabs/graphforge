@@ -47,7 +47,7 @@ impl GraphForge {
             created_at: request.created_at,
             evidence: selected.evidence.clone(),
         };
-        let source_content = selection::prepare(&command, selected, &mut spec, cancellation)?;
+        let source_content = selection::prepare(&command.root, selected, &mut spec, cancellation)?;
         let source = private_view::open(self, &source_content)?;
         let (destination, mut version) = edit::prepare(self, &command, request.branch_uuid)?;
         if source.workspace_ontology()? != destination.workspace_ontology()?

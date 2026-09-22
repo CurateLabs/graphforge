@@ -22,13 +22,13 @@ progress, and typed failures.
 A portable multi-ontology workflow has five intentionally different identity
 domains. Do not copy a value from one domain into another:
 
-| Identity | What it names | Stable across expanded and bundle forms? |
-| --- | --- | --- |
-| module identity | one authored ontology document: URI, opaque version, and canonical digest | yes |
-| composition identity | the exact ordered module, bridge, and activation authority | yes |
-| package identity | the selected logical portable content | yes |
-| runtime catalog identity | a project-local exploratory observation | no; it is not portable authority |
-| evidence identity | a TCK report, validation transcript, or benchmark attached as provenance | only as ordinary selected evidence content |
+| Identity                 | What it names                                                             | Stable across expanded and bundle forms?   |
+| ------------------------ | ------------------------------------------------------------------------- | ------------------------------------------ |
+| module identity          | one authored ontology document: URI, opaque version, and canonical digest | yes                                        |
+| composition identity     | the exact ordered module, bridge, and activation authority                | yes                                        |
+| package identity         | the selected logical portable content                                     | yes                                        |
+| runtime catalog identity | a project-local exploratory observation                                   | no; it is not portable authority           |
+| evidence identity        | a TCK report, validation transcript, or benchmark attached as provenance  | only as ordinary selected evidence content |
 
 The project generation pins authority at a publication boundary, but it is not
 an ontology, composition, or package identity. Likewise, a package digest does
@@ -53,15 +53,30 @@ An ambiguous selector or missing dependency fails. GraphForge never widens a
 selection silently. Selective packages do not imply graph merge or ontology
 adoption; they require an explicit class-specific consumer.
 
-In the designed M11 research workflow, a Slice focuses content, a Branch
-preserves independent research, a Fork creates a separately governed Project,
-and a Proposal requests semantic integration. A portable subset is transport
-for selected content, not any of those lifecycle operations by itself.
-Research-aware export/import must preserve the selected Version and its
-required evidence/ontology/baseline closure and lineage metadata without
-silently including the complete ancestor. A genealogical reference does not
-guarantee historical expansion beyond retained content. Reproduction requires a
-compatible reader, not pre-v1 migration support. See [research workspace semantics](../book/architecture/research-workspaces.md).
+Research interchange uses `GraphForge.research_reference`, `export_research`, and
+`fork_research`. Python and Node expose the same native JSON contracts; CLI
+commands are `research interchange reference|export|fork --file request.json`.
+A reference explicitly selects a current Branch or an immutable Version. Export
+selects a retained Version and optionally a frozen Slice plus explicit native
+fields and a fresh projection Version UUID. A subset/redaction cites its source
+Version but has its own immutable identity.
+
+The authenticated `research@1` component carries selected Version commitments,
+required evidence/ontology/baseline closure, genealogy, and selected acceptance
+proofs. Export physically compacts selected property values; removed values and
+unselected ancestor payloads are excluded. Imported lineage is historical:
+import does not create live Branch heads or accept a contribution locally.
+Historical expansion beyond retained content returns unavailable. Full native
+verification and import reject unsupported readers and incomplete closure before
+destination admission. There is no pre-v1 migration promise.
+
+Fork requires an independent Project UUID, author, governance declaration,
+complete workspace metadata (including access policy), and explicit adoption of
+the selected ontology. This metadata does not enforce remote access. A Fork
+records its origin while keeping destination metadata and subsequent history
+independent. Its operation UUID supports exact replay after source Version
+release and subsequent destination edits; a changed request is rejected.
+See [research workspace semantics](../book/architecture/research-workspaces.md).
 
 ```text
 graphforge portable preview --current --profile complete --strict
@@ -132,8 +147,12 @@ without mutating the destination.
 
 Portable operations use finite component, manifest-byte, and copy-buffer
 limits. Cancellation is observed while parsing and between streaming buffers.
-On any failure GraphForge removes private staging residue and keeps the previous
-generation and composition authority unchanged. Re-exporting the same pinned
+Failures before `CURRENT` replacement leave the previous generation and composition
+authority unchanged. After replacement, the imported generation is committed:
+reopen or acknowledgement errors do not roll it back. Inspect the committed
+operation outcome and retry with the same operation identity and exact input.
+Private staging cleanup is reported separately; a cleanup error does not claim
+that removal or its directory synchronization succeeded. Re-exporting the same pinned
 selection is deterministic; host paths, runtime catalog IDs, session state, and
 machine configuration cannot enter the semantic package identity.
 
@@ -196,14 +215,14 @@ authenticity is absent.
 
 All surfaces call the same Rust authority:
 
-| Workflow | Rust API authority | CLI |
-| --- | --- | --- |
-| Preview | `GraphForge::preview_portable_v2_selection` | `portable preview` |
-| Export | `GraphForge::export_portable_v2` | `portable export` |
-| Inspect / verify | `verify_portable_v2` | `portable verify` |
-| Complete import | `GraphForge::import_portable_v2` | `portable import` |
-| OCI publish | `publish_portable_v2_oci` | `portable publish-oci` |
-| OCI pull | `pull_portable_v2_oci` | `portable pull-oci` |
+| Workflow         | Rust API authority                          | CLI                    |
+| ---------------- | ------------------------------------------- | ---------------------- |
+| Preview          | `GraphForge::preview_portable_v2_selection` | `portable preview`     |
+| Export           | `GraphForge::export_portable_v2`            | `portable export`      |
+| Inspect / verify | `verify_portable_v2`                        | `portable verify`      |
+| Complete import  | `GraphForge::import_portable_v2`            | `portable import`      |
+| OCI publish      | `publish_portable_v2_oci`                   | `portable publish-oci` |
+| OCI pull         | `pull_portable_v2_oci`                      | `portable pull-oci`    |
 
 Python and Node expose equivalent preview, export, verify, import, publish, and
 pull methods without wrapper-owned archive, selection, registry, or fallback

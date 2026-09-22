@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicBool;
 pub struct PreparedResearchContent {
     /// Canonical research Version ready for one publication.
     pub version: ResearchVersionRecord,
-    pub(super) _lease: crate::GraphObjectPublicationLease,
+    pub(super) lease: crate::GraphObjectPublicationLease,
 }
 
 /// Selected Branch content prepared by the Branch domain owner.
@@ -99,10 +99,7 @@ pub(super) fn prepare_content(
     version.content.producer = super::PRODUCER.into();
     retained_content::inspect(root, &version, None)?;
     cancelled(cancellation)?;
-    Ok(PreparedResearchContent {
-        version,
-        _lease: lease,
-    })
+    Ok(PreparedResearchContent { version, lease })
 }
 
 fn install_graph(

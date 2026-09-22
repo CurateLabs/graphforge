@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "ab4eed7873b8aa4c245137651a6a697fdf2a4e0c2463776e70b824391cb1415e"
-EXPECTED_RELEASE_DIGEST = "d994cc32962df81365adae61f1ac61f2bb723b8247ab65d41a05b0eef39a4b43"
+EXPECTED_RUST_DIGEST = "d375cd237ccb225bfe60a5a779d90861df3342647914b58e5713b558fe8ec781"
+EXPECTED_RELEASE_DIGEST = "68915b5ccdf93dab928ce7681e7c5cddebeab4c4c8d91cfae8a4521791186494"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -68,6 +68,7 @@ PYTHON_ONLY_METHODS = frozenset(
 )
 
 EVIDENCE = {
+    "research-interchange": {"research_interchange.py": ["main"]},
     "research-proposals": {"research_proposals.py": ["main"]},
     "research-upstream": {"research_upstream.py": ["main"]},
     "research-comparison": {"research_comparison.py": ["main"]},

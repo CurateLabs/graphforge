@@ -315,3 +315,13 @@ Mystery then changes age again. Proposal history remains tied to the submitted
 Version, comparison cites the prior accepted contribution, and the new exact value
 can form a second Proposal. This bounded Rust facade example is prerequisite
 proof for interchange; #1358 still owns the complete cross-surface consumer journey.
+
+### Core research interchange evidence
+
+Native interchange regressions cover complete and disjoint/redacted Version
+round trips, explicit Fork governance and exact replay, and nested accepted
+lineage through import and re-export. They inspect physical exported Parquet,
+including content-addressed proof objects, to exclude private selected fields
+and unrelated ancestor content. Imported provenance remains separate from live
+heads and local acceptance. Full cross-surface journey certification remains
+#1358's close gate.

@@ -1368,9 +1368,7 @@ fn run_with_allocation(
             return ontology_cli::run_ontology(&mut graph, command, cli.json, output).map(|()| 0);
         }
         Command::Research { command } => {
-            return research_cli::run_research(&mut graph, command, cli.json, output)
-                .map(|()| 0)
-                .map_err(Into::into);
+            return research_cli::run_research(&mut graph, command, cli.json, output).map(|()| 0);
         }
         Command::SourceArtifact { command } => {
             return source_artifact_cli::run_source_artifact(&mut graph, command, cli.json, output)

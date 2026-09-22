@@ -387,6 +387,10 @@ export default defineConfig({
                   label: '0043 — Proposal acceptance shares the Project publication owner',
                   slug: 'adr/0043-atomic-research-proposal-acceptance',
                 },
+                {
+                  label: '0044 — Research interchange preserves content identity separately from authority',
+                  slug: 'adr/0044-research-interchange-authority',
+                },
                 // END generated ADR records
               ],
             },

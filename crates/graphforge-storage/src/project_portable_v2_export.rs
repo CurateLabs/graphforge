@@ -12,7 +12,7 @@ use crate::{
     verify_portable_v2,
 };
 use uuid::Uuid;
-mod planning;
+pub(crate) mod planning;
 mod transport;
 use planning::{inspect, package_class};
 pub use planning::{plan_complete_portable_v2, plan_selected_portable_v2};

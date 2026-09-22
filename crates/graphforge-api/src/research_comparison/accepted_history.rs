@@ -26,8 +26,26 @@ pub(super) fn verify(
     let selected = select(registry, request, left, right, cancel)?;
     let mut groups = BTreeMap::new();
     for (key, (_, mapping)) in selected {
+        let proof_id = if registry.versions.contains_key(&mapping.proof_version_uuid) {
+            mapping.proof_version_uuid
+        } else {
+            registry
+                .interchange
+                .values()
+                .find_map(|archive| {
+                    (archive.accepted.get(&mapping.mapping_uuid) == Some(mapping))
+                        .then(|| {
+                            archive
+                                .proof_exports
+                                .get(&mapping.proof_version_uuid)
+                                .copied()
+                        })
+                        .flatten()
+                })
+                .ok_or_else(|| super::invalid("historical accepted proof is unavailable"))?
+        };
         groups
-            .entry(mapping.proof_version_uuid)
+            .entry(proof_id)
             .or_insert_with(Vec::new)
             .push((key, mapping));
     }
@@ -60,8 +78,12 @@ pub(super) fn verify(
             return Err(super::limit());
         }
         for (key, mapping) in mappings {
-            if registry.versions[&proof_id].content.source_version
-                != Some(mapping.source_version_uuid)
+            let expected_source = if proof_id == mapping.proof_version_uuid {
+                mapping.source_version_uuid
+            } else {
+                mapping.proof_version_uuid
+            };
+            if registry.versions[&proof_id].content.source_version != Some(expected_source)
                 || proof
                     .baseline
                     .get(&key)
@@ -138,21 +160,32 @@ fn select<'a>(
             explicit.unit.object_uuid,
             explicit.unit.field.clone(),
         );
-        if let Some(mapping) = registry.proposals.accepted.values().find(|m| {
-            let authority = match m.destination {
-                ResearchProposalDestination::Project { project_uuid } => (0, project_uuid),
-                ResearchProposalDestination::Branch { branch_uuid } => (1, branch_uuid),
-            };
-            authority == right.authority_context
-                && m.source_version_uuid == explicit.source_version_uuid
-                && m.destination_version_uuid == explicit.destination_version_uuid
-                && m.contribution_uuid == explicit.contribution_uuid
-                && (
-                    m.unit.object_kind.as_str(),
-                    m.unit.object_uuid,
-                    m.unit.field.as_str(),
-                ) == (key.0.as_str(), key.1, key.2.as_str())
-        }) {
+        let historical = registry
+            .interchange
+            .values()
+            .flat_map(|archive| archive.accepted.values())
+            .filter(|_| matches!(request.right, ResearchComparisonEndpoint::Version { .. }));
+        if let Some(mapping) = registry
+            .proposals
+            .accepted
+            .values()
+            .chain(historical)
+            .find(|m| {
+                let authority = match m.destination {
+                    ResearchProposalDestination::Project { project_uuid } => (0, project_uuid),
+                    ResearchProposalDestination::Branch { branch_uuid } => (1, branch_uuid),
+                };
+                authority == right.authority_context
+                    && m.source_version_uuid == explicit.source_version_uuid
+                    && m.destination_version_uuid == explicit.destination_version_uuid
+                    && m.contribution_uuid == explicit.contribution_uuid
+                    && (
+                        m.unit.object_kind.as_str(),
+                        m.unit.object_uuid,
+                        m.unit.field.as_str(),
+                    ) == (key.0.as_str(), key.1, key.2.as_str())
+            })
+        {
             selected.insert(key, (0, mapping));
         }
     }

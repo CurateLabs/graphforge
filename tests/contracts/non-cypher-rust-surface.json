@@ -1326,6 +1326,27 @@
           "symbol": "both_current_boundaries_preserve_atomic_baseline_history_and_exact_replay"
         }
       ]
+    },
+    "research-interchange": {
+      "ids": [
+        "GraphForge.research_reference",
+        "GraphForge.export_research",
+        "GraphForge.fork_research"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/research_interchange/tests.rs",
+          "symbol": "complete_research_roundtrip_preserves_version_and_historical_genealogy"
+        },
+        {
+          "path": "crates/graphforge-api/src/research_interchange/tests.rs",
+          "symbol": "fork_has_independent_governance_metadata_and_exact_retry"
+        },
+        {
+          "path": "crates/graphforge-api/src/research_interchange/tests.rs",
+          "symbol": "disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_identity"
+        }
+      ]
     }
   },
   "algorithm_registry": {

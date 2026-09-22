@@ -250,12 +250,27 @@ pub struct PortableImportResult {
     pub idempotent_replay: bool,
 }
 
-/// Verify portable-v2 content without opening or mutating a project.
+/// Verify portable-v2 content without admitting or mutating a destination Project.
+/// Research archives additionally run native owner checks in disposable private views.
 pub fn verify_portable_v2(
     request: &PortableVerifyRequest,
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableVerifyResult, graphforge_core::portable::PortableV2Error> {
-    graphforge_storage::verify_portable_v2(&request.input, request.mode, request.limits, cancelled)
+    let report = graphforge_storage::verify_portable_v2(
+        &request.input,
+        request.mode,
+        request.limits,
+        cancelled,
+    )?;
+    if report.research_interchange {
+        return graphforge_storage::validate_research_package(
+            &request.input,
+            request.limits,
+            cancelled,
+            &mut crate::research_interchange::validation::validate,
+        );
+    }
+    Ok(report)
 }
 
 /// Publish a verified portable-v2 package through an OCI Distribution registry.
@@ -553,7 +568,7 @@ impl GraphForge {
     ) -> Result<PortableV2ImportResult, graphforge_core::portable::PortableV2Error> {
         let generation_uuid =
             graphforge_core::uuid::portable_v2_import_generation(&request.operation_id.0);
-        let receipt = graphforge_storage::import_complete_portable_v2_with_allocation(
+        let receipt = graphforge_storage::import_complete_portable_v2_with_native_validation(
             &request.input,
             project_root,
             request.operation_id.0,
@@ -563,12 +578,20 @@ impl GraphForge {
             cancelled,
             |_| {},
             allocation,
+            &mut crate::research_interchange::validation::validate,
         )?;
+        let committed = graphforge_core::portable::PortableV2CommittedImport {
+            operation_uuid: receipt.publication.transaction_uuid,
+            generation_uuid: receipt.publication.generation_uuid,
+            generation_manifest_sha256: receipt.publication.generation_manifest_sha256,
+            package_digest: receipt.package_digest.clone(),
+        };
         let root = project_root.to_str().ok_or_else(|| {
             graphforge_core::portable::PortableV2Error::new(
                 graphforge_core::portable::PortableV2ErrorCode::InvalidPath,
                 "invalid project path",
             )
+            .with_committed_import(committed.clone())
         })?;
         let reopened = match allocation {
             Some(allocation) => {
@@ -581,12 +604,14 @@ impl GraphForge {
                 graphforge_core::portable::PortableV2ErrorCode::Io,
                 "imported project did not reopen",
             )
+            .with_committed_import(committed.clone())
         })?;
         if reopened.resolved_generation.generation_uuid() != receipt.publication.generation_uuid {
             return Err(graphforge_core::portable::PortableV2Error::new(
                 graphforge_core::portable::PortableV2ErrorCode::Io,
                 "imported generation did not reopen",
-            ));
+            )
+            .with_committed_import(committed));
         }
         Ok(PortableV2ImportResult {
             package_digest: receipt.package_digest,
@@ -612,19 +637,24 @@ fn portable_resolve_err(_error: GfError) -> graphforge_core::portable::PortableV
     )
 }
 
-fn supported_capabilities() -> Vec<ProjectCapability> {
+pub(crate) fn supported_capabilities() -> Vec<ProjectCapability> {
     [
         "epistemic",
         "graph",
         "knowledge",
         "provenance",
+        "research",
         "valid_time",
         "workspace",
     ]
     .into_iter()
     .map(|capability_id| ProjectCapability {
         capability_id: capability_id.into(),
-        capability_version: 1,
+        capability_version: if capability_id == "research" {
+            graphforge_storage::research_versions::RESEARCH_VERSION
+        } else {
+            1
+        },
     })
     .collect()
 }

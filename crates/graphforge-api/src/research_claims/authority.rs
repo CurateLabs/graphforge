@@ -18,7 +18,12 @@ pub(crate) fn project_uuid(g: &ResolvedProjectGeneration) -> Result<Uuid, GfErro
         .events()
         .first()
         .map(|event| event.authority.project_uuid);
-    let id = if let Some(id) = registered.or(recorded) {
+    let imported = registry.interchange.values().next().map(|archive| {
+        archive
+            .fork_project_uuid
+            .unwrap_or(archive.source_project_uuid)
+    });
+    let id = if let Some(id) = imported.or(registered).or(recorded) {
         id
     } else {
         let identity = graphforge_storage::summarize_research_project(g.container_root())?.identity;

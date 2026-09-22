@@ -107,6 +107,16 @@ pub fn materialize_research_project(
     materialize(root, version, target, false)
 }
 
+/// Materialize authenticated prepared CAS content without requiring source history.
+/// The caller must validate the immutable Version identity before using this seam.
+pub fn materialize_prepared_research_version(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    target: &Path,
+) -> Result<ResolvedProjectGeneration, GfError> {
+    materialize(root, version, target, true)
+}
+
 pub(super) fn materialize(
     root: &Path,
     version: &ResearchVersionRecord,

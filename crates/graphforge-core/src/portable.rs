@@ -80,6 +80,10 @@ pub enum PortableV2Authenticity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableV2Report {
+    /// Whether full verification includes the registered research interchange component.
+    pub research_interchange: bool,
+    /// Manifest-authenticated research files for bounded native semantic verification.
+    pub research_entries: Vec<PortableV2ResearchEntry>,
     pub contract: &'static str,
     pub representation: PortableV2Representation,
     pub package_digest: String,
@@ -95,6 +99,15 @@ pub struct PortableV2Report {
     pub ontology_composition: Option<PortableV2OntologyComposition>,
     /// Authenticated bounded payload entries available to explicit lifecycle consumers.
     pub ontology_composition_entries: Vec<PortableV2CompositionEntry>,
+}
+
+/// An authenticated file in the versioned research component.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2ResearchEntry {
+    pub component_id: String,
+    pub path: String,
+    pub length: u64,
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -180,6 +193,8 @@ pub enum PortableV2ErrorCode {
 
 #[derive(Debug)]
 pub struct PortableV2Error {
+    /// Authenticated committed import, even when acknowledgement or cleanup failed.
+    pub committed_import: Option<Box<PortableV2CommittedImport>>,
     pub code: PortableV2ErrorCode,
     pub entry: Option<String>,
     detail: &'static str,
@@ -200,6 +215,7 @@ impl PortableV2Error {
     #[must_use]
     pub fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
         Self {
+            committed_import: None,
             code,
             entry: None,
             detail,
@@ -211,6 +227,7 @@ impl PortableV2Error {
     #[must_use]
     pub fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
         Self {
+            committed_import: None,
             code,
             entry: Some(entry.chars().take(4096).collect()),
             detail,
@@ -235,10 +252,34 @@ impl PortableV2Error {
         self.recovery_reauthentication_read_calls = read_calls;
         self
     }
+
+    /// Attach exact publication evidence without claiming successful staging cleanup.
+    #[must_use]
+    pub fn with_committed_import(mut self, receipt: PortableV2CommittedImport) -> Self {
+        self.committed_import = Some(Box::new(receipt));
+        self
+    }
+}
+
+/// Payload-free receipt evidence for an import whose CURRENT replacement committed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PortableV2CommittedImport {
+    pub operation_uuid: uuid::Uuid,
+    pub generation_uuid: uuid::Uuid,
+    pub generation_manifest_sha256: [u8; 32],
+    pub package_digest: String,
 }
 impl fmt::Display for PortableV2Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "portable-v2 {:?}: {}", self.code, self.detail)
+        write!(f, "portable-v2 {:?}: {}", self.code, self.detail)?;
+        if let Some(receipt) = &self.committed_import {
+            write!(
+                f,
+                " committed=true operation_uuid={} generation_uuid={}",
+                receipt.operation_uuid, receipt.generation_uuid
+            )?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for PortableV2Error {}

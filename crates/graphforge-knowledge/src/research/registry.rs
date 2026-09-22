@@ -63,7 +63,7 @@ pub(crate) fn schema_registry_entries() -> Vec<SchemaRegistryEntry> {
         },
         SchemaRegistryEntry {
             capability_id: "research",
-            capability_version: 5,
+            capability_version: 6,
             record_family: "canonical_decisions",
             record_version: RESEARCH_RECORD_VERSION,
             schema: Arc::clone(&RESEARCH_DECISION_SCHEMA),

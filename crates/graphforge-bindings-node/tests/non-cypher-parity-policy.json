@@ -40,7 +40,8 @@
     "research-claims": "researchClaims",
     "research-comparison": "researchComparison",
     "research-proposals": "researchProposals",
-    "research-upstream": "researchUpstream"
+    "research-upstream": "researchUpstream",
+    "research-interchange": "researchInterchange"
   },
   "classification": {
     "equivalent": [
@@ -669,6 +670,11 @@
     "researchUpstream": {
       "research-upstream.test.mjs": [
         "native upstream review advances only the selected baseline and replays its receipt"
+      ]
+    },
+    "researchInterchange": {
+      "research-interchange.test.mjs": [
+        "native research interchange preserves citations exports and independent Fork replay"
       ]
     }
   }

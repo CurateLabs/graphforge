@@ -66,10 +66,7 @@ pub fn prepare_branch_selection(
     replace_domains(root, &mut version, replacements, cancellation)?;
     retained_content::inspect(root, &version, None)?;
     cancelled(cancellation)?;
-    Ok(PreparedBranchContent {
-        version,
-        _lease: lease,
-    })
+    Ok(PreparedBranchContent { version, lease })
 }
 
 /// Replace domain-owner commitments on an already projected graph, preserving

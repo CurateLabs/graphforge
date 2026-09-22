@@ -68,7 +68,7 @@ impl GraphForge {
         );
         let active = selected.as_ref().map(|s| s.active.clone());
         let mut prepared = if let Some(selected) = selected {
-            super::selection::prepare(&command, selected, &mut spec, cancellation)?
+            super::selection::prepare(&command.root, selected, &mut spec, cancellation)?
         } else {
             prepare_branch_selection(
                 &command.root,
