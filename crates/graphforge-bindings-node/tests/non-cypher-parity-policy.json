@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 299,
-  "releaseSurfaceDigest": "03bdba7634c9fab144030ff75c316350d108973ef0030088b2f7caa15d7083a1",
+  "releaseSurfaceCount": 313,
+  "releaseSurfaceDigest": "c50ce071932f644ea411d1faf1b0e0a0b7c25b46b4dd60fe841db41ac46f7f44",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -35,7 +35,8 @@
     "semantic-generation-diff": "semanticGenerationDiff",
     "portable-v2-facade": "portableV2",
     "research-versions": "researchVersions",
-    "slices": "slices"
+    "slices": "slices",
+    "branches": "branches"
   },
   "classification": {
     "equivalent": [
@@ -228,7 +229,15 @@
       "GraphForge.preview_slice",
       "GraphForge.freeze_slice",
       "GraphForge.inspect_frozen_slice",
-      "GraphForge.revise_frozen_slice"
+      "GraphForge.revise_frozen_slice",
+      "GraphForge.bring_research_branch",
+      "GraphForge.change_research_branch_ontology",
+      "GraphForge.create_research_branch",
+      "GraphForge.execute_research_branch",
+      "GraphForge.reference_research_branch",
+      "GraphForge.research_branch_selection",
+      "GraphForge.restore_research_branch",
+      "GraphForge.suppress_research_branch_assertion"
     ],
     "languageSpecific": {
       "GraphForge.import_session_status": {
@@ -353,6 +362,42 @@
           "GraphForge.researchVersionArtifactPayload"
         ],
         "reason": "Node takes an explicit immutable Version UUID and delegates to the Rust historical view without exposing a mutable view handle."
+      },
+      "GraphForge.open_research_branch": {
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "ResearchBranchView.fields": {
+        "nodeMembers": [
+          "GraphForge.researchBranchFields"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "ResearchBranchView.graph": {
+        "nodeMembers": [
+          "GraphForge.queryResearchBranch"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "ResearchBranchView.record": {
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "ResearchBranchView.references": {
+        "nodeMembers": [
+          "GraphForge.researchBranchReferences"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
+      },
+      "ResearchBranchView.version_uuid": {
+        "nodeMembers": [
+          "GraphForge.researchBranch"
+        ],
+        "reason": "Explicit Branch UUID transport opens the native immutable Branch view and returns metadata or Arrow IPC."
       }
     },
     "nodeOnly": {
@@ -377,7 +422,11 @@
       "GraphForge.researchVersionOntology": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
       "GraphForge.researchVersionMetadata": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
       "GraphForge.researchVersionArtifact": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
-      "GraphForge.researchVersionArtifactPayload": "Explicit immutable Version UUID adapter for Rust ResearchVersionView."
+      "GraphForge.researchVersionArtifactPayload": "Explicit immutable Version UUID adapter for Rust ResearchVersionView.",
+      "GraphForge.researchBranch": "Explicit Branch UUID adapter for the native immutable Branch view.",
+      "GraphForge.queryResearchBranch": "Explicit Branch UUID adapter for the native immutable Branch view.",
+      "GraphForge.researchBranchFields": "Explicit Branch UUID adapter for the native immutable Branch view.",
+      "GraphForge.researchBranchReferences": "Explicit Branch UUID adapter for the native immutable Branch view."
     },
     "notExposedDefaults": {
       "crate": "Rust discovery/repack orchestration remains a CLI/facade workflow; existing Node portable operations use their explicit adapters.",
@@ -574,6 +623,11 @@
     "slices": {
       "slices.test.mjs": [
         "native Slice boundary, freeze, revision and cancellation"
+      ]
+    },
+    "branches": {
+      "branches.test.mjs": [
+        "native Branch isolation, exact retry, scoped restore and durable reopen"
       ]
     }
   }

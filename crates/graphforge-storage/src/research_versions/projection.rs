@@ -2,7 +2,7 @@
 use super::{
     BTreeSet, Deserialize, Digest, GfError, PRODUCER, Path, RegisterResearchVersion,
     ResearchParticipantKey, ResearchRegistry, ResearchVersionRecord, ResolvedProjectGeneration,
-    Serialize, Sha256, Uuid, insert_version, inspect_research_version, invalid, retained_content,
+    Serialize, Sha256, Uuid, insert_version, inspect_with_registry, invalid, retained_content,
 };
 
 /// Explicit graph selection, never a mutable query against a live parent.
@@ -48,7 +48,7 @@ pub(super) fn register(
         .selection
         .as_ref()
         .ok_or_else(|| invalid("graph projection requires explicit participant selection"))?;
-    let snapshots = inspect_research_version(root, &origin)?;
+    let snapshots = inspect_with_registry(root, &origin, registry)?;
     let graph = snapshots
         .iter()
         .find(|p| p.capability_id == "graph" && p.record_family_id == "files")
@@ -172,7 +172,6 @@ fn validate_scope(
             .evidence
             .iter()
             .any(|e| !origin.content.evidence.contains(e))
-        || (selection.nodes.is_empty() && selection.edges.is_empty())
         || (selection.induced_edges && !selection.edges.is_empty())
         || selection.exclude_properties.iter().any(|field| {
             matches!(

@@ -149,6 +149,7 @@ pub use discovery_portable_v2::{
     DiscoveryPortableV2Request, verify_discovered_portable_v2,
 };
 pub use research_project::{DiscoverResearchProjectsRequest, UpdateResearchMetadataRequest};
+mod branches;
 mod portable;
 mod provenance;
 mod provider_embedding;
@@ -161,6 +162,11 @@ mod query_execution;
 mod repository;
 mod research_project;
 mod research_versions;
+pub use branches::{
+    BranchSource, BringResearchBranchRequest, ChangeResearchBranchOntologyRequest,
+    CreateResearchBranchRequest, ExecuteResearchBranchRequest, ReferenceResearchBranchRequest,
+    ResearchBranchView, RestoreResearchBranchRequest, SuppressResearchBranchAssertionRequest,
+};
 mod slices;
 pub use graphforge_storage::research_versions::{
     ResearchMutation, ResearchOperation, ResearchOperationReceipt, ResearchRegistry,

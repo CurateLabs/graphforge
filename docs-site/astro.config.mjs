@@ -375,6 +375,10 @@ export default defineConfig({
                   label: '0040 — Frozen Slices reference retained Version context',
                   slug: 'adr/0040-frozen-slice-membership',
                 },
+                {
+                  label: '0041 — Branch state publishes through Project CURRENT',
+                  slug: 'adr/0041-branch-current-publication',
+                },
                 // END generated ADR records
               ],
             },

@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod branch_content;
+pub use branch_content::{
+    PreparedBranchContent, materialize_prepared_branch, prepare_branch_content,
+};
+mod branch_selection;
+pub use branch_selection::{prepare_branch_selection, replace_prepared_branch_domains};
+mod branches;
+pub use branches::ResearchBranchRecord;
 mod project_restore;
 pub use project_restore::materialize_research_project;
 mod projection;
@@ -28,7 +36,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 2;
+pub const RESEARCH_VERSION: u32 = 3;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -44,7 +52,7 @@ pub const MAX_ROOTS: usize = 4_096;
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/2"
+    ";research/3"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -176,6 +184,9 @@ pub struct ResearchRetentionRoot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchOperationReceipt {
+    /// Native public Branch request commitment, separate from prepared content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_sha256: Option<[u8; 32]>,
     /// Caller-stable operation identity.
     pub operation_uuid: Uuid,
     /// Commitment to the complete request.
@@ -190,6 +201,8 @@ pub struct ResearchOperationReceipt {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchRegistry {
+    /// Immutable Branch creation and genealogy; heads are stored separately below.
+    pub branches: BTreeMap<Uuid, ResearchBranchRecord>,
     /// Immutable records still retained explicitly or by required dependencies.
     pub versions: BTreeMap<Uuid, ResearchVersionRecord>,
     /// Independently advancing context heads.
@@ -234,6 +247,18 @@ pub struct RegisterResearchVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchMutation {
+    /// Atomically publish domain-owner prepared Branch content and creation metadata.
+    /// All committed content must already be authenticated in this Project CAS.
+    PublishBranch {
+        /// Canonical native public request, used before repeating preparation.
+        intent_sha256: [u8; 32],
+        /// Optional authenticated current-Project origin, recorded as genealogy only.
+        origin_capture: Option<Box<RegisterResearchVersion>>,
+        /// Present only for first publication; immutable after creation.
+        creation: Option<ResearchBranchRecord>,
+        /// Complete effective Branch state, not a mutable upstream lookup.
+        version: Box<ResearchVersionRecord>,
+    },
     /// Register a separately identified selected graph/evidence closure.
     RegisterGraphProjection {
         /// Metadata and explicit participant/evidence selection from a Version.
@@ -337,17 +362,7 @@ fn history(key: &ResearchParticipantKey) -> bool {
 impl ResearchRegistry {
     /// Validate bounded identities and dependency closure before publication or use.
     pub fn validate(&self) -> Result<(), GfError> {
-        if self.versions.len() > MAX_VERSIONS
-            || self.receipts.len() > MAX_RECEIPTS
-            || self.heads.len() > MAX_CONTEXTS
-            || self.roots.len() > MAX_ROOTS
-            || self.identities.len() > MAX_RECEIPTS
-        {
-            return Err(error(
-                ProjectErrorCode::ResourceLimit,
-                "research registry capacity exceeded; receipts do not expire implicitly",
-            ));
-        }
+        self.validate_capacity()?;
         for (id, version) in &self.versions {
             if id.is_nil()
                 || *id != version.version_uuid
@@ -400,6 +415,7 @@ impl ResearchRegistry {
         {
             return Err(invalid("materialized research identity is unavailable"));
         }
+        branches::validate(self)?;
         self.validate_dependency_cycles()?;
         for (context, version) in &self.heads {
             if self
@@ -433,6 +449,22 @@ impl ResearchRegistry {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
                 "research registry byte limit exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_capacity(&self) -> Result<(), GfError> {
+        if self.branches.len() > MAX_CONTEXTS
+            || self.versions.len() > MAX_VERSIONS
+            || self.receipts.len() > MAX_RECEIPTS
+            || self.heads.len() > MAX_CONTEXTS
+            || self.roots.len() > MAX_ROOTS
+            || self.identities.len() > MAX_RECEIPTS
+        {
+            return Err(error(
+                ProjectErrorCode::ResourceLimit,
+                "research registry capacity exceeded; receipts do not expire implicitly",
             ));
         }
         Ok(())
@@ -474,7 +506,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/2").into(),
+            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/3").into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -484,6 +516,11 @@ impl ResearchRegistry {
     #[must_use]
     pub fn deletion_blockers(&self, version: Uuid) -> Vec<String> {
         let mut blockers = Vec::new();
+        for (id, branch) in &self.branches {
+            if branch.base_version_uuid == version {
+                blockers.push(format!("branch_base:{id}"));
+            }
+        }
         for (context, head) in &self.heads {
             if *head == version {
                 blockers.push(format!("context:{context}"));
@@ -531,7 +568,7 @@ pub fn read_research_registry(
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
         || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/2"))
+            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/3"))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -671,13 +708,63 @@ fn identity_digest(version: &ResearchVersionRecord) -> Result<[u8; 32], GfError>
     Ok(Sha256::digest(json(&logical)?).into())
 }
 
+fn restore_context(
+    root: &Path,
+    registry: &mut ResearchRegistry,
+    mutation: &ResearchMutation,
+    context_uuid: Uuid,
+    source_version: Uuid,
+    version_uuid: Uuid,
+    created_at: i64,
+) -> Result<Option<Uuid>, GfError> {
+    let mut version = registry
+        .versions
+        .get(&source_version)
+        .cloned()
+        .ok_or_else(|| invalid("restore Version is unavailable"))?;
+    if version.context_uuid != context_uuid || registry.versions.contains_key(&version_uuid) {
+        return Err(invalid(
+            "restore requires its owning context and a new Version identity",
+        ));
+    }
+    if matches!(mutation, ResearchMutation::RestoreProject { .. })
+        && version.content.source_version.is_some()
+    {
+        return Err(invalid(
+            "Project restore requires a complete Version, not a projection",
+        ));
+    }
+    inspect_research_version(root, &version)?;
+    version.version_uuid = version_uuid;
+    version.created_at = created_at;
+    if registry.materialized.contains(&source_version) {
+        registry.materialized.insert(version_uuid);
+    }
+    Ok(Some(insert_version(registry, version)?))
+}
+
 fn apply_mutation(
     root: &Path,
     mutation: &ResearchMutation,
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
     let version_uuid = match mutation {
+        ResearchMutation::PublishBranch {
+            origin_capture,
+            creation,
+            version,
+            ..
+        } => Some(branches::publish_with_origin(
+            root,
+            registry,
+            origin_capture.as_deref(),
+            creation.as_ref(),
+            version,
+        )?),
         ResearchMutation::RegisterGraphProjection { spec, selection } => {
+            if registry.branches.contains_key(&spec.context_uuid) {
+                return Err(invalid("raw projection cannot replace a Branch context"));
+            }
             Some(projection::register(root, registry, spec, selection)?)
         }
         ResearchMutation::Compact { versions } => {
@@ -685,6 +772,9 @@ fn apply_mutation(
             None
         }
         ResearchMutation::Register(spec) => {
+            if registry.branches.contains_key(&spec.context_uuid) {
+                return Err(invalid("Project capture cannot replace a Branch context"));
+            }
             let version = capture(root, spec, registry)?;
             Some(insert_version(registry, version)?)
         }
@@ -699,33 +789,15 @@ fn apply_mutation(
             source_version,
             version_uuid,
             created_at,
-        } => {
-            let mut version = registry
-                .versions
-                .get(source_version)
-                .cloned()
-                .ok_or_else(|| invalid("restore Version is unavailable"))?;
-            if version.context_uuid != *context_uuid || registry.versions.contains_key(version_uuid)
-            {
-                return Err(invalid(
-                    "restore requires its owning context and a new Version identity",
-                ));
-            }
-            if matches!(mutation, ResearchMutation::RestoreProject { .. })
-                && version.content.source_version.is_some()
-            {
-                return Err(invalid(
-                    "Project restore requires a complete Version, not a projection",
-                ));
-            }
-            inspect_research_version(root, &version)?;
-            version.version_uuid = *version_uuid;
-            version.created_at = *created_at;
-            if registry.materialized.contains(source_version) {
-                registry.materialized.insert(*version_uuid);
-            }
-            Some(insert_version(registry, version)?)
-        }
+        } => restore_context(
+            root,
+            registry,
+            mutation,
+            *context_uuid,
+            *source_version,
+            *version_uuid,
+            *created_at,
+        )?,
         ResearchMutation::RetainRoot { root } => {
             if registry
                 .roots
@@ -880,14 +952,19 @@ pub fn publish_research_operation_with_mode(
             "research operation CURRENT precondition changed",
         ));
     }
+    let operation_fingerprint = branches::publication_fingerprint(request);
     let graph_objects = crate::begin_graph_object_publication(root)?;
     let version_uuid = apply_mutation(root, &request.mutation, &mut registry)?;
     let mut identity = Sha256::new();
     identity.update(b"graphforge-research-publication/1");
     identity.update(request.operation_uuid.as_bytes());
-    identity.update(request_sha256);
+    identity.update(operation_fingerprint.unwrap_or(request_sha256));
     let generation_uuid = graphforge_core::canonical::uuid_v8(identity.finalize().into());
     let receipt = ResearchOperationReceipt {
+        intent_sha256: match &request.mutation {
+            ResearchMutation::PublishBranch { intent_sha256, .. } => Some(*intent_sha256),
+            _ => None,
+        },
         operation_uuid: request.operation_uuid,
         request_sha256,
         generation_uuid,
@@ -922,13 +999,15 @@ pub fn publish_research_operation_with_mode(
         let tree = parent.graph_tree_root();
         tree.is_dir().then_some(tree)
     };
-    let staged = crate::project_publication::stage_project_generation_from_admitted_parent(
-        admission,
-        parent,
-        &publication,
-        graph_tree.as_deref(),
-        None,
-    )?;
+    let staged =
+        crate::project_publication::stage_project_generation_from_admitted_parent_with_fingerprint(
+            admission,
+            parent,
+            &publication,
+            graph_tree.as_deref(),
+            None,
+            operation_fingerprint,
+        )?;
     if let ProjectStageOutcome::Staged(staged) = staged {
         staged
             .validate(|_| registry.validate(), |_, _| Ok(()))?
@@ -947,6 +1026,14 @@ pub fn inspect_research_version(
 ) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
     let current = crate::resolve_project_generation(root)?;
     let registry = read_research_registry(&current)?;
+    inspect_with_registry(root, version, &registry)
+}
+
+fn inspect_with_registry(
+    root: &Path,
+    version: &ResearchVersionRecord,
+    registry: &ResearchRegistry,
+) -> Result<Vec<crate::ProjectParticipantSnapshot>, GfError> {
     if !registry.versions.contains_key(&version.version_uuid) {
         return Err(GfError::Api {
             code: ApiErrorCode::ResultNotRetained,
@@ -1087,7 +1174,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
         || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/2").into())
+            != hex(&Sha256::digest(b"graphforge-research-registry/3").into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1098,6 +1185,13 @@ pub(crate) fn validate_publication_transition(
     after.validate()?;
     if json(&after)? != bytes {
         return Err(invalid("research registry publication is not canonical"));
+    }
+    for (id, branch) in &before.branches {
+        if after.branches.get(id) != Some(branch) {
+            return Err(invalid(
+                "publication cannot erase or rewrite Branch creation history",
+            ));
+        }
     }
     for (id, receipt) in &before.receipts {
         if after.receipts.get(id) != Some(receipt) {

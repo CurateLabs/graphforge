@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "32c55ba453bb675306caf525aa9f30090f0f1c175479d9ac2393b74f8c1579b3",
+  "public_method_digest": "7f589970811af62c469492e1a67f5f6f4bcbd643b66af858e1ab7d980c45e840",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -33,7 +33,8 @@
       "SearchIndexOptions": "introspection",
       "ExecutionResourcePolicy": "introspection",
       "ImportCallTiming": "introspection",
-      "ResearchVersionView": "release-tested"
+      "ResearchVersionView": "release-tested",
+      "ResearchBranchView": "release-tested"
     },
     "overrides": {
       "GraphForge.index": "release-tested",
@@ -1142,6 +1143,70 @@
         {
           "path": "crates/graphforge-api/tests/slices.rs",
           "symbol": "selectors_page_bounds_and_cancellation_use_real_execution"
+        }
+      ]
+    },
+    "branches": {
+      "ids": [
+        "GraphForge.bring_research_branch",
+        "GraphForge.change_research_branch_ontology",
+        "GraphForge.create_research_branch",
+        "GraphForge.execute_research_branch",
+        "GraphForge.open_research_branch",
+        "GraphForge.reference_research_branch",
+        "GraphForge.research_branch_selection",
+        "GraphForge.restore_research_branch",
+        "GraphForge.suppress_research_branch_assertion",
+        "ResearchBranchView.fields",
+        "ResearchBranchView.graph",
+        "ResearchBranchView.record",
+        "ResearchBranchView.references",
+        "ResearchBranchView.version_uuid"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "two_branches_restore_independently_of_parent_and_keep_receipts_after_reopen"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "exact_branch_retries_refresh_parent_changes_from_another_facade"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "slice_branch_preserves_selected_identity_without_parent_graph_membership"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "assertion_slice_branch_retains_only_selected_evidence_after_reopen"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "field_origins_and_contributions_survive_local_edits_and_slice_children"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "source_only_slice_branch_has_empty_graph_and_selected_source_membership"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "local_composition_is_exact_and_does_not_change_parent_or_sibling"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "selected_branch_releases_large_parent_after_evolution_and_cleanup"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "required_roles_survive_branch_and_historical_branch_version_creation"
+        },
+        {
+          "path": "crates/graphforge-api/tests/branches.rs",
+          "symbol": "branch_cancel_stale_current_and_conflicting_retry_preserve_authority"
         }
       ]
     }

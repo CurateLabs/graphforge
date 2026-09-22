@@ -1,7 +1,7 @@
 //! `graphforge-api` orchestration for immutable UUID-referenced assertions.
 
 mod assertions;
-mod ledger;
+pub(crate) mod ledger;
 mod lineage;
 mod source_artifact;
 mod supporting;

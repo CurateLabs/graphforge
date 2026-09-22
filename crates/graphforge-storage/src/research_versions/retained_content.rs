@@ -218,6 +218,14 @@ pub fn materialize_research_graph(
             return Ok(());
         }
     }
+    materialize_graph_snapshot(root, graph, target)
+}
+
+pub(super) fn materialize_graph_snapshot(
+    root: &Path,
+    graph: &crate::ProjectParticipantSnapshot,
+    target: &Path,
+) -> Result<(), GfError> {
     let (files, _) = graph_closure(root, graph.record_version, &graph.bytes, None)?;
     let inventory_version = if matches!(
         graph.record_version,

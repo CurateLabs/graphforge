@@ -133,7 +133,7 @@ impl ResearchVersionView {
     }
 }
 
-pub(super) fn materialize(
+pub(crate) fn materialize(
     owner: &GraphForge,
     version: &ResearchVersionRecord,
 ) -> Result<GraphForge, GfError> {
