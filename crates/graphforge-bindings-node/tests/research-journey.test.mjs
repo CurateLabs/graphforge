@@ -97,6 +97,7 @@ class Journey {
         derivationInputs,
       });
     }
+    const artifactCursor = await this.inspectEvidence();
     await this.graph.setPreferredArtifact({
       operationUuid: identity(),
       preferenceEventUuid: identity(),
@@ -104,6 +105,16 @@ class Journey {
       artifactUuid: this.ocr,
       reason: "Selected transcription",
     });
+    const afterPreference = this.current();
+    await assert.rejects(
+      this.graph.listArtifacts({
+        sourceUuid: this.source,
+        limit: 1,
+        after: artifactCursor,
+      }),
+      (error) => error.code === "GF_PAGE_SNAPSHOT_GONE",
+    );
+    assert.equal(this.current(), afterPreference);
     await this.graph.createResearchClaim({
       operation_uuid: identity(),
       expected_generation_uuid: this.current(),
@@ -138,6 +149,61 @@ class Journey {
       }),
     );
     assert.ok(lineage.some((row) => uuid(row.input_uuid) === this.scan));
+  }
+  async inspectEvidence() {
+    const before = this.current();
+    const source = rows(await this.graph.source(this.source));
+    assert.equal(source.length, 1);
+    assert.equal(uuid(source[0].source_uuid), this.source);
+    assert.equal(source[0].label, corpus.source_label);
+    assert.equal(source[0].source_kind, "manuscript");
+    assert.deepEqual(rows(await this.graph.listSources()), source);
+
+    const artifacts = [];
+    for (const [id, kind, text] of [
+      [this.scan, "raw_scan", corpus.scan_bytes],
+      [this.ocr, "ocr_text", corpus.ocr_text],
+    ]) {
+      const found = rows(await this.graph.artifact(id));
+      assert.equal(found.length, 1);
+      assert.equal(uuid(found[0].artifact_uuid), id);
+      assert.equal(uuid(found[0].source_uuid), this.source);
+      assert.equal(found[0].artifact_kind, kind);
+      assert.equal(found[0].availability, "local_verified");
+      assert.equal(found[0].payload_kind, "local_sha256");
+      assert.equal(found[0].content_length, BigInt(Buffer.byteLength(text)));
+      artifacts.push(found[0]);
+    }
+    const first = tableFromIPC(
+      await this.graph.listArtifacts({ sourceUuid: this.source, limit: 1 }),
+    );
+    assert.equal(first.numRows, 1);
+    const after = first.schema.metadata.get("graphforge.next_page_token");
+    assert.ok(after);
+    const second = tableFromIPC(
+      await this.graph.listArtifacts({
+        sourceUuid: this.source,
+        limit: 1,
+        after,
+      }),
+    );
+    assert.equal(second.numRows, 1);
+    assert.equal(
+      second.schema.metadata.has("graphforge.next_page_token"),
+      false,
+    );
+    const pages = [...first.toArray(), ...second.toArray()].map((row) =>
+      row.toJSON(),
+    );
+    assert.equal(new Set(pages.map((row) => uuid(row.artifact_uuid))).size, 2);
+    assert.deepEqual(pages, artifacts);
+    assert.equal(
+      tableFromIPC(await this.graph.listArtifacts({ sourceUuid: identity() }))
+        .numRows,
+      0,
+    );
+    assert.equal(this.current(), before);
+    return after;
   }
   async capture() {
     const version = identity();
