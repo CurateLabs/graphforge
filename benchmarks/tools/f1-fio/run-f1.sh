@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # F1 runner. Sequential fio jobs on a quiet host, raw output kept verbatim.
 #   ./run-f1.sh <rung.json> <out-dir> [data-dir]
-# Refuses to start any job unless /home/ubuntu/.claude/gf-quiet-host.sh prints QUIET
+# Refuses to start any job unless QUIET_HELPER prints QUIET
 # immediately before it; drops the page cache before every job.
 set -euo pipefail
 RUNG=${1:?rung json}; OUT=${2:?out dir}; F1_PARENT=${3:?dedicated data parent directory}
@@ -22,7 +22,9 @@ export F1_BSSPLIT_WRITES=${F1_BSSPLIT#*,}
   lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,ROTA,MODEL || true; cat /proc/mdstat
   sudo -n mdadm --detail /dev/md3 || true
   for d in nvme0n1 nvme1n1 md3; do echo "$d scheduler: $(cat /sys/block/$d/queue/scheduler 2>/dev/null)"; done
-  cat /sys/block/md3/queue/read_ahead_kb 2>/dev/null | sed 's/^/md3 read_ahead_kb: /'
+  if [[ -r /sys/block/md3/queue/read_ahead_kb ]]; then
+    sed 's/^/md3 read_ahead_kb: /' /sys/block/md3/queue/read_ahead_kb
+  fi
   echo "derived params: F1_RWMIXREAD=$F1_RWMIXREAD F1_FSYNC_EVERY=$F1_FSYNC_EVERY F1_BSSPLIT=$F1_BSSPLIT"
 } > "$OUT/host-state.txt" 2>&1
 
