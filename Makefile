@@ -429,7 +429,7 @@ pnpm-test-bdd:  ## Run BDD tests across Node workspace packages
 	pnpm -r test:bdd
 
 # Node JS API coverage via c8 over hand-written lib/*.mjs (and exercised loader).
-# Requires a built native addon (*.node); does not build it here (heavy — see AGENTS.md).
+# Requires a built native addon (*.node); does not build it here (heavy — see docs/development/agent-environment.md).
 coverage-node:  ## Run @curatelabs/graphforge JS API tests under c8 (requires *.node)
 	@set -- crates/graphforge-bindings-node/*.node; \
 	if [ ! -e "$$1" ]; then \

@@ -228,7 +228,8 @@ All PRs must:
 - Have a clear description
 - Reference the issue number in the commit and PR body (`Closes #XX` or `Refs #XX`)
 
-See [AGENTS.md](../../AGENTS.md) for agent workflow and
+See [AGENTS.md](../../AGENTS.md) for agent workflow,
+[agent-environment.md](agent-environment.md) for sandbox and native-binding caveats, and
 [CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution, conduct, and licensing
 onboarding contract.
 
