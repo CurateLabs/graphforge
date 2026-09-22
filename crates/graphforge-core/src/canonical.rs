@@ -74,6 +74,14 @@ pub enum CanonicalDomain {
     ArtifactPreference,
     /// Retention-dependency record/table.
     RetentionDependency,
+    /// Immutable research classification of an existing assertion.
+    ResearchClaim,
+    /// Explicit relation between immutable assertions.
+    ResearchClaimRelation,
+    /// Scoped integration and canonical authority decision.
+    ResearchDecision,
+    /// Immutable scoped knowledge suppression event.
+    ResearchClaimSuppression,
 }
 
 impl CanonicalDomain {
@@ -106,6 +114,10 @@ impl CanonicalDomain {
             Self::ArtifactDerivation => "graphforge/artifact-derivation",
             Self::ArtifactPreference => "graphforge/artifact-preference",
             Self::RetentionDependency => "graphforge/retention-dependency",
+            Self::ResearchClaim => "graphforge/research-claim",
+            Self::ResearchClaimRelation => "graphforge/research-claim-relation",
+            Self::ResearchDecision => "graphforge/research-decision",
+            Self::ResearchClaimSuppression => "graphforge/research-claim-suppression",
         }
     }
 }
@@ -502,6 +514,19 @@ mod tests {
     #[test]
     fn every_domain_and_error_code_has_a_frozen_external_spelling() {
         let domains = [
+            (CanonicalDomain::ResearchClaim, "graphforge/research-claim"),
+            (
+                CanonicalDomain::ResearchClaimSuppression,
+                "graphforge/research-claim-suppression",
+            ),
+            (
+                CanonicalDomain::ResearchClaimRelation,
+                "graphforge/research-claim-relation",
+            ),
+            (
+                CanonicalDomain::ResearchDecision,
+                "graphforge/research-decision",
+            ),
             (CanonicalDomain::Schema, "graphforge/schema"),
             (CanonicalDomain::Assertion, "graphforge/assertion"),
             (CanonicalDomain::EvidenceLink, "graphforge/evidence-link"),

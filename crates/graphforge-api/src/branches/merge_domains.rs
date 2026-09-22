@@ -43,6 +43,10 @@ pub(super) fn merge(
         read_supersession_ledger => encode_supersession_ledger,
     );
     ledgers!("valid_time", crate::valid_time, knowledge_error; read_ledger => encode_ledger);
+    ledgers!("epistemic", crate::research_claims::ledger, knowledge_error;
+        read_claims => encode_claims,
+        read_suppressions => encode_suppressions,
+    );
     if src.capability("provenance")?.is_some() {
         let incoming = crate::provenance::read_ledger(&src)?;
         let existing = if dst.capability("provenance")?.is_some() {

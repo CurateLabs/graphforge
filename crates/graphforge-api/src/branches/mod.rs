@@ -1,18 +1,19 @@
 //! Native independent Branch contexts inside the owning Project CURRENT.
 mod baseline;
 mod bring;
+mod claim_fields;
 mod create;
 pub(crate) mod domain_bounds;
 mod domain_state;
 mod domains;
-mod edit;
+pub(crate) mod edit;
 mod fields;
 mod import_graph;
 mod merge_domains;
 mod model;
 mod ontology;
 mod private_view;
-mod publication;
+pub(crate) mod publication;
 mod reference;
 mod selection;
 mod suppress;
@@ -23,6 +24,9 @@ use graphforge_storage::research_versions::{
     ResearchBranchRecord, ResearchMutation, ResearchOperationReceipt,
 };
 use uuid::Uuid;
+pub(crate) fn inspect_fields(graph: &GraphForge) -> Result<crate::ExecutionResult, GfError> {
+    baseline::inspect(graph)
+}
 
 /// An immutable effective Branch view. All query and analyst reads use this graph.
 #[derive(Debug)]

@@ -26,6 +26,15 @@ pub(super) fn retained(
     mut ids: BTreeSet<(String, Uuid)>,
 ) -> Result<Vec<ProjectParticipant>, GfError> {
     super::domain_bounds::preflight(generation)?;
+    if generation.capability("epistemic")?.is_some() {
+        for claim in crate::research_claims::ledger::read_claims(generation)?.claims() {
+            if has(&ids, "assertion", claim.assertion_uuid)
+                && let Some(run) = claim.run_uuid
+            {
+                ids.insert(("algorithm_run".into(), run));
+            }
+        }
+    }
     let mut participants = Vec::new();
     if generation.capability("knowledge")?.is_some() {
         participants.extend(knowledge_rows(generation, &mut ids)?);

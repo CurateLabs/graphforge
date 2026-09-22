@@ -78,6 +78,7 @@ pub(super) fn read(
         })?;
     }
     domain_objects(graph, &mut fields, &mut field_bytes, cancellation)?;
+    super::claim_fields::read(graph, &mut fields, &mut field_bytes, cancellation)?;
     Ok(fields)
 }
 fn fingerprint(array: arrow::array::ArrayRef) -> Result<[u8; 32], GfError> {
@@ -230,7 +231,7 @@ fn domain_objects(
 
 // Reserve for map keys, digests and the expanded twelve-column baseline before
 // inserting, including caller-controlled field-name lengths.
-fn insert(
+pub(super) fn insert(
     fields: &mut Fields,
     bytes: &mut usize,
     key: Key,

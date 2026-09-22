@@ -47,6 +47,7 @@ Roadmap-only ADRs are not retained in this tree.
 | 0039 | [Research Versions share Project publication authority](0039-research-version-publication.md) | `0039-research-version-publication.md` |
 | 0040 | [Frozen Slices reference retained Version context](0040-frozen-slice-membership.md) | `0040-frozen-slice-membership.md` |
 | 0041 | [Branch state publishes through Project CURRENT](0041-branch-current-publication.md) | `0041-branch-current-publication.md` |
+| 0042 | [Contextual research decisions extend immutable knowledge](0042-contextual-research-claims.md) | `0042-contextual-research-claims.md` |
 
 ## Superseded records
 

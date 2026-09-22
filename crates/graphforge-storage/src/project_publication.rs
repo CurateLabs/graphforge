@@ -1180,7 +1180,7 @@ impl ValidatedProjectGeneration {
     }
 
     /// Publish a compact graph while polling cooperative cancellation before `CURRENT`.
-    pub(crate) fn publish_with_graph_objects_cancellable(
+    pub fn publish_with_graph_objects_cancellable(
         mut self,
         lease: &crate::GraphObjectPublicationLease,
         cancelled: &mut dyn FnMut() -> bool,

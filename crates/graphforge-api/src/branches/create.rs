@@ -86,16 +86,9 @@ impl GraphForge {
             active.as_ref(),
             cancellation,
         )?;
-        let project_uuid = if let Some(existing) = command.registry.branches.values().next() {
-            existing.project_uuid
-        } else {
-            let identity = graphforge_storage::summarize_research_project(&command.root)?.identity;
-            let mut digest = Sha256::new();
-            digest.update(b"graphforge-project-lineage/1");
-            digest.update(identity.volume_serial.to_le_bytes());
-            digest.update(identity.file_id_hex.as_bytes());
-            graphforge_core::canonical::uuid_v8(digest.finalize().into())
-        };
+        let project_uuid = crate::research_claims::authority::project_uuid(
+            &graphforge_storage::resolve_project_generation(&command.root)?,
+        )?;
         let creation = ResearchBranchRecord {
             branch_uuid: request.branch_uuid,
             project_uuid,

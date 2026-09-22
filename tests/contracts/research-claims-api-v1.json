@@ -1,0 +1,72 @@
+{
+  "contract_version": 1,
+  "authority": "owning Project CURRENT with explicit Project or Branch context and optional community",
+  "mutation_methods": [
+    "create_research_claim",
+    "relate_research_claims",
+    "record_research_decisions",
+    "change_research_branch_claim"
+  ],
+  "inspection_methods": [
+    "inspect_research_claims",
+    "research_claim_history",
+    "research_decision_history",
+    "research_canonical_choices"
+  ],
+  "categories": [
+    "machine_extraction",
+    "analyst_assertion",
+    "interpretation",
+    "hypothesis",
+    "theory",
+    "annotation"
+  ],
+  "relation_kinds": [
+    "alternative_to",
+    "contradicts",
+    "disputes",
+    "refines",
+    "supersedes",
+    "supports"
+  ],
+  "subject_kinds": [
+    "node",
+    "edge",
+    "assertion"
+  ],
+  "decision_kinds": [
+    "integrate",
+    "promote",
+    "revoke"
+  ],
+  "branch_changes": [
+    "create",
+    "challenge",
+    "relate",
+    "revise",
+    "suppress"
+  ],
+  "history_families": [
+    "classification",
+    "relations",
+    "suppressions",
+    "status",
+    "reasoning",
+    "evidence"
+  ],
+  "family_rows": 65536,
+  "family_decoded_bytes": 67108864,
+  "decisions_per_publication": 256,
+  "canonical_history": "research/3 canonical_decisions; survives Project and Branch restore",
+  "frozen_content": "epistemic/1 research_claims, claim_relations and claim_suppressions",
+  "suppression": "explicit knowledge view only; frozen ancestor events inherit, unrelated source scope does not",
+  "integration": "does not grant canonical promotion or replace destination choices",
+  "raw_graph": "ordinary Cypher and analyst algorithms do not filter by claims or canonical status",
+  "bindings": "Python native dict and Arrow; Node async native JSON and Arrow IPC; CLI JSON file requests and Arrow IPC data",
+  "mutation_result": "Arrow owner records; Branch changes return durable ResearchOperationReceipt",
+  "cli_request_json_bytes": 2097152,
+  "project_claim_relation_request_json_bytes": 2097152,
+  "branch_request_json_bytes": 1048576,
+  "decision_request_json_bytes": 262144,
+  "claim_text_bytes": 1048576
+}

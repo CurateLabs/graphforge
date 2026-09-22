@@ -43,6 +43,12 @@ pub(crate) fn empty_epistemic_participants() -> Result<Vec<ProjectParticipant>, 
     )?);
     participants.extend(crate::hypotheses::empty_participants()?);
     participants.extend(crate::belief_projection::empty_participants()?);
+    participants.extend(crate::research_claims::ledger::encode_claims(
+        &graphforge_knowledge::research::ResearchClaimLedger::default(),
+    )?);
+    participants.extend(crate::research_claims::ledger::encode_suppressions(
+        &graphforge_knowledge::research::ResearchSuppressionLedger::default(),
+    )?);
     Ok(participants)
 }
 
@@ -270,7 +276,7 @@ pub(crate) fn read_supersession_ledger(
     }
 }
 
-pub(super) fn merged_provenance(
+pub(crate) fn merged_provenance(
     parent: &ResolvedProjectGeneration,
     request: &CreateAssertionRequest,
     staged: &AssertionLedger,

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub(super) struct Command {
+pub(crate) struct Command {
     pub root: PathBuf,
     pub registry: ResearchRegistry,
     pub intent: [u8; 32],
@@ -18,7 +18,7 @@ pub(super) struct Command {
     operation_uuid: Uuid,
     expected: Uuid,
 }
-pub(super) fn begin<T: Serialize>(
+pub(crate) fn begin<T: Serialize>(
     owner: &GraphForge,
     operation_uuid: Uuid,
     expected: Uuid,
@@ -77,7 +77,7 @@ pub(super) fn begin<T: Serialize>(
     })
 }
 impl Command {
-    pub(super) fn replay(
+    pub(crate) fn replay(
         &self,
         owner: &mut GraphForge,
     ) -> Result<Option<ResearchOperationReceipt>, GfError> {
@@ -94,7 +94,7 @@ impl Command {
         Ok(Some(receipt.clone()))
     }
 
-    pub(super) fn publish(
+    pub(crate) fn publish(
         self,
         owner: &mut GraphForge,
         mutation: ResearchMutation,
