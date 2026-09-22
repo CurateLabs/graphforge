@@ -134,3 +134,35 @@ These runs completed correctly but the quiet guard saw other agents' cargo/rustc
 ```
 
 Raw receipts, BenchExec outputs, quiet samples and the harness (`run-measured.sh`, `ingest.py`, `quiet.py`, `run-pairs.sh`, `analyze.py`, `render-report.py`) are retained in `/home/ubuntu/gf-1481-evidence/` on OVHC-AGENCY. The machine-readable companion is `publication-attribution-1481.json`.
+
+## Predeclared A/B protocol for the publication repair (declared before measurement)
+
+The S18 attribution justified one bounded repair: reader preparation
+(`hydration` + `read_authority`) moves from after `CURRENT` to against the
+durable candidate immediately before `CURRENT`, using the publisher's existing
+pre-`CURRENT` preparation seam. Its primary predicted effect is fail-closed
+publication (a candidate that cannot be hydrated never becomes visible); the
+wall-time effect is bounded by work moved inside the same publish region and is
+not assumed to be a gain. The A/B decision rule, declared before any
+candidate-build measurement:
+
+- **Builds.** Baseline = release CLI at the pre-repair integrated tree; candidate
+  = the same tree plus the repair commit only. Binaries hashed; inputs are the
+  recorded Graph500 parquet files (SHA-256 verified); fresh project per run.
+- **Resources.** Every observation runs under BenchExec `runexec --no-container
+  --cores 0-15 --memlimit 4GB`; quiet-host guard before, during (1 s samples)
+  and after; contended attempts are retained under their run directory and
+  excluded. Scheduler statistics enabled for the runs and restored afterwards.
+- **Rungs.** S18 first, three accepted alternating observations per arm; S22
+  two accepted observations per arm if the repair shows an S18 effect or a
+  correctness-shaped benefit, else S22 records the baseline reconciliation
+  only.
+- **Comparison.** Medians of complete-ingest wall (the five-command boundary).
+  A whole-ingest benefit is demonstrated only when candidate median improves on
+  baseline median by more than `max(3% of baseline median, 2× baseline spread)`;
+  publication-region changes are reported separately as µs/edge and never
+  counted as whole-ingest gains on their own.
+- **Correctness gate.** The repair lands only with the existing
+  recovery/corruption/cancellation suites unweakened plus new tests proving
+  preparation runs before `CURRENT` and that preparation failure keeps
+  `CURRENT` unchanged.

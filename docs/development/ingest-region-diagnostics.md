@@ -75,15 +75,21 @@ authority checks), `cas_install` (appending authenticated graph objects to the
 content-addressed store), `publication_intent` (the durable intent record),
 `generation_commit` (staging the generation and committing `CURRENT`),
 `publication_receipt` (authenticating the published target and recording the
-receipt), `hydration` (materializing the published workspace) and
+receipt), `hydration` (materializing the reader workspace) and
 `read_authority` (runtime catalog, property inventory, ordinal handle and
 adjacency provider). The residual of `commit/publish` is the visibility swap
 plus uninstrumented time between those children. Boundaries to keep in mind
 when reading the numbers: `cas_install` opens before the route-table authority
 read (a few kilobytes) that the append needs, so that read counts as install;
-`hydration` opens before the published generation is resolved, so the manifest
-resolution counts as hydration; an idempotent replay of an already-published
-session skips publication and reports only `hydration` and `read_authority`. Adjacency CSR encoding runs
+an idempotent replay of an already-published session skips publication and
+reports `hydration` and `read_authority` as siblings of `publication_receipt`.
+For a fresh publication, reader preparation runs against the durable candidate
+inside `generation_commit`, immediately before `CURRENT`: the receipts nest
+`hydration` and `read_authority` under `generation_commit`, and a preparation
+failure leaves `CURRENT` unchanged (fail-closed) instead of committing a
+generation that cannot be hydrated. Candidate verification before that callback
+(the durable manifest and lease authentication) remains in `generation_commit`'s
+residual. Adjacency CSR encoding runs
 inside `validate/seal/canonical_encoding/adjacency_encoding`, not inside
 publish; reconcile publication against that region rather than assuming CSR
 cost lands in `commit`. Measured attribution on the integrated tree is recorded in

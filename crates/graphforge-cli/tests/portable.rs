@@ -621,6 +621,9 @@ fn import_operation_timings_survive_separate_cli_processes() {
     assert_eq!(committed["region_diagnostics"]["complete"], true);
     let publish_regions = &committed["region_diagnostics"]["regions"];
     assert!(publish_regions["import_command/commit/publish"].is_object());
+    // Reader preparation for a fresh publication runs against the durable
+    // candidate before CURRENT, so hydration and read_authority nest under
+    // generation_commit; the remaining regions stay sequential siblings.
     for child in [
         "prepare_encoding",
         "publication_authentication",
@@ -628,10 +631,13 @@ fn import_operation_timings_survive_separate_cli_processes() {
         "publication_intent",
         "generation_commit",
         "publication_receipt",
-        "hydration",
-        "read_authority",
     ] {
         let path = format!("import_command/commit/publish/{child}");
+        assert!(publish_regions[&path].is_object(), "missing {path}");
+        assert_eq!(publish_regions[&path]["calls"], 1, "{path}");
+    }
+    for prepared in ["hydration", "read_authority"] {
+        let path = format!("import_command/commit/publish/generation_commit/{prepared}");
         assert!(publish_regions[&path].is_object(), "missing {path}");
         assert_eq!(publish_regions[&path]["calls"], 1, "{path}");
     }
