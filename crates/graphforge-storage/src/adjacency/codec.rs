@@ -41,6 +41,15 @@ pub(super) fn encoded_limit(nodes: u64, edges: u64) -> Result<u64, GfError> {
     Ok(decoded_bytes(nodes, edges)? + METADATA_MAX_BYTES as u64)
 }
 
+/// Admission for a freshly encoded shard before any byte reaches the
+/// filesystem: the same bound [`read`] enforces on the way back in.
+pub(super) fn admit_encoded_len(bytes_len: u64, nodes: u64, edges: u64) -> Result<(), GfError> {
+    if bytes_len > encoded_limit(nodes, edges)? {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub(super) fn read(path: &Path, encoded_bytes: u64, limit: u64) -> Result<Vec<u8>, GfError> {
     if encoded_bytes > limit {
         return Err(invalid());
@@ -241,8 +250,8 @@ mod tests {
             edge_ids: vec![u64::MAX; 128],
             neighbor_ids: vec![u64::MAX - 1; 128],
         };
-        super::super::write_csr_shard_file(&path, &csr).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
+        let bytes = super::super::encode_csr_shard_bytes(&csr).unwrap();
+        super::super::write_csr_shard_bytes(&path, &bytes).unwrap();
         (dir, path, bytes)
     }
 

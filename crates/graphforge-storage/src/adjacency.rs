@@ -538,25 +538,25 @@ fn write_csr_shard(
 ) -> Result<CsrShardRecord, GfError> {
     let file = format!("{ordinal:020}.csr");
     let path = root.join(&file);
-    write_csr_shard_file(&path, shard)?;
-    let encoded_bytes = std::fs::metadata(&path).map_err(storage_err)?.len();
-    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, encoded_bytes, 1);
-    let bytes = codec::read(
-        &path,
-        encoded_bytes,
-        codec::encoded_limit(shard.node_count(), shard.edge_count())?,
-    )?;
-    // The post-write read-back that hashes the shard is real rebuild I/O of
-    // the whole shard; attribute it with the write it verifies (#1449).
-    crate::lifecycle_io::record_read(crate::StorageIoPhase::ReadPathScan, bytes.len() as u64, 1);
+    // Hash-on-write (#1384, accepted decision 1): encode once, then verify and
+    // hash the exact bytes that land on disk before writing them once. No pass
+    // reads a shard back in order to hash it. The recorded digest still names
+    // the shard, so the consuming boundaries keep their refusals: CAS install
+    // re-derives the digest while copying, and shard reads preflight against
+    // the manifest before Arrow decodes anything.
+    let bytes = encode_csr_shard_bytes(shard)?;
+    codec::admit_encoded_len(bytes.len() as u64, shard.node_count(), shard.edge_count())?;
     codec::preflight(&bytes, shard.node_count(), shard.edge_count())?;
+    let encoded_bytes = bytes.len() as u64;
+    crate::lifecycle_io::record_write(crate::StorageIoPhase::ReadPathScan, encoded_bytes, 1);
+    write_csr_shard_bytes(&path, &bytes)?;
     Ok(CsrShardRecord {
         first_node,
         node_count: shard.node_count(),
         edge_count: shard.edge_count(),
         file,
         sha256: sha256_hex(&bytes),
-        encoded_bytes: bytes.len() as u64,
+        encoded_bytes,
         decoded_bytes: codec::decoded_bytes(shard.node_count(), shard.edge_count())?,
     })
 }
@@ -868,7 +868,9 @@ pub fn manifest_path(project_dir: &Path) -> PathBuf {
 /// # Errors
 /// Returns [`GfError::Storage`] if `csr` violates its invariants or on
 /// I/O/encode failure; on failure `path` is untouched.
-fn write_csr_shard_file(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
+/// Encode one bounded shard into the exact Arrow IPC bytes a shard file
+/// carries. Shards are admission-bounded, so the buffer is bounded too.
+fn encode_csr_shard_bytes(csr: &CsrIndex) -> Result<Vec<u8>, GfError> {
     csr.validate()?;
     codec::decoded_bytes(csr.node_count(), csr.edge_count())?;
 
@@ -899,6 +901,24 @@ fn write_csr_shard_file(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
     let batch = RecordBatch::try_new(Arc::clone(&ADJACENCY_CSR_SCHEMA), vec![Arc::new(adjacency)])
         .map_err(storage_err)?;
 
+    let options = arrow::ipc::writer::IpcWriteOptions::default()
+        .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
+        .map_err(storage_err)?;
+    let mut writer = FileWriter::try_new_with_options(
+        std::io::Cursor::new(Vec::<u8>::new()),
+        &ADJACENCY_CSR_SCHEMA,
+        options,
+    )
+    .map_err(storage_err)?;
+    writer.write(&batch).map_err(storage_err)?;
+    writer.finish().map_err(storage_err)?;
+    Ok(writer.into_inner().map_err(storage_err)?.into_inner())
+}
+
+/// Write produced shard bytes once, atomically replacing any prior content.
+fn write_csr_shard_bytes(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+    use std::io::Write as _;
+
     let parent = path.parent().ok_or_else(|| {
         GfError::Storage(format!(
             "CSR path {} has no parent directory",
@@ -914,15 +934,7 @@ fn write_csr_shard_file(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
         .suffix(".tmp")
         .tempfile_in(parent)
         .map_err(storage_err)?;
-
-    let options = arrow::ipc::writer::IpcWriteOptions::default()
-        .try_with_compression(Some(arrow::ipc::CompressionType::ZSTD))
-        .map_err(storage_err)?;
-    let mut writer =
-        FileWriter::try_new_with_options(tmp.as_file(), &ADJACENCY_CSR_SCHEMA, options)
-            .map_err(storage_err)?;
-    writer.write(&batch).map_err(storage_err)?;
-    writer.finish().map_err(storage_err)?;
+    tmp.as_file().write_all(bytes).map_err(storage_err)?;
     persist_temp(tmp, path)?;
     Ok(())
 }
