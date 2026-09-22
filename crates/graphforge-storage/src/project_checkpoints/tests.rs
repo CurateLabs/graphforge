@@ -289,74 +289,103 @@ pub(super) fn preserve_checkpoint_intent_after_lock_handoff(root: &Path, phase: 
     checkpoint_lock_handoff(root, phase, false);
 }
 
+// Callers have returned from the owner operation or reaped its child. The
+// correctness condition is immediate lock availability, not a wall-clock bound
+// on scheduling and durable recovery I/O.
 fn checkpoint_lock_handoff(root: &Path, phase: &str, recover_durable_intent: bool) {
     let lock_root = root.join(LOCKS_DIR);
     let writer_path = lock_root.join(WRITER_LOCK_FILE);
     let checkpoint_path = lock_root.join(CHECKPOINT_LOCK_FILE);
     let checkpoint_root = root.join(CHECKPOINTS_DIR);
-    let worker_writer_path = writer_path.clone();
-    let worker_checkpoint_path = checkpoint_path.clone();
-    let (sender, receiver) = mpsc::sync_channel(0);
-    std::thread::Builder::new()
-        .name("checkpoint-lock-handoff-recovery".into())
-        .spawn(move || {
-            let result = (|| {
-                let writer = open_regular_lock(&worker_writer_path)
-                    .map_err(|error| format!("open writer.lock failed: {error}"))?;
-                crate::file_lock::lock_exclusive(&writer)
-                    .map_err(|error| format!("acquire writer.lock failed: {error}"))?;
-
-                let checkpoint = match open_regular_lock(&worker_checkpoint_path) {
-                    Ok(checkpoint) => checkpoint,
-                    Err(error) => {
-                        let writer_unlock = crate::file_lock::unlock(&writer);
-                        return Err(format!(
-                            "open checkpoints.lock failed: {error}; \
-                                 writer_unlock={writer_unlock:?}"
-                        ));
-                    }
-                };
-                if let Err(error) = crate::file_lock::lock_exclusive(&checkpoint) {
-                    let writer_unlock = crate::file_lock::unlock(&writer);
-                    return Err(format!(
-                        "acquire checkpoints.lock failed: {error}; writer_unlock={writer_unlock:?}"
-                    ));
-                }
-
-                let recovery =
-                    if recover_durable_intent && checkpoint_root.join(INTENT_FILE).exists() {
-                        recover_pair(&checkpoint_root).map_err(|error| {
-                            format!("recover durable checkpoint intent failed: {error}")
-                        })
-                    } else {
-                        Ok(())
-                    };
-                let checkpoint_unlock = crate::file_lock::unlock(&checkpoint)
-                    .map_err(|error| format!("unlock checkpoints.lock failed: {error}"));
-                let writer_unlock = crate::file_lock::unlock(&writer)
-                    .map_err(|error| format!("unlock writer.lock failed: {error}"));
-
-                recovery?;
-                checkpoint_unlock?;
-                writer_unlock
-            })();
-            let _ = sender.send(result);
-        })
-        .unwrap();
-    match receiver.recv_timeout(Duration::from_secs(1)) {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => panic!(
+    let result = (|| {
+        let writer = open_regular_lock(&writer_path)
+            .map_err(|error| format!("open writer.lock failed: {error}"))?;
+        match crate::file_lock::try_lock_exclusive(&writer) {
+            Ok(true) => {}
+            Ok(false) => return Err("writer.lock remains held after handoff".to_owned()),
+            Err(error) => return Err(format!("acquire writer.lock failed: {error}")),
+        }
+        let checkpoint = match open_regular_lock(&checkpoint_path) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                let writer_unlock = crate::file_lock::unlock(&writer);
+                return Err(format!(
+                    "open checkpoints.lock failed: {error}; writer_unlock={writer_unlock:?}"
+                ));
+            }
+        };
+        match crate::file_lock::try_lock_exclusive(&checkpoint) {
+            Ok(true) => {}
+            acquired => {
+                let writer_unlock = crate::file_lock::unlock(&writer);
+                return Err(format!(
+                    "checkpoints.lock unavailable after handoff: {acquired:?}; \
+                     writer_unlock={writer_unlock:?}"
+                ));
+            }
+        }
+        let recovery = if recover_durable_intent && checkpoint_root.join(INTENT_FILE).exists() {
+            recover_pair(&checkpoint_root)
+                .map_err(|error| format!("recover durable checkpoint intent failed: {error}"))
+        } else {
+            Ok(())
+        };
+        let checkpoint_unlock = crate::file_lock::unlock(&checkpoint)
+            .map_err(|error| format!("unlock checkpoints.lock failed: {error}"));
+        let writer_unlock = crate::file_lock::unlock(&writer)
+            .map_err(|error| format!("unlock writer.lock failed: {error}"));
+        recovery?;
+        checkpoint_unlock?;
+        writer_unlock
+    })();
+    if let Err(error) = result {
+        panic!(
             "checkpoint lock handoff/recovery failed at {phase}; writer_path={}; \
-                 checkpoint_path={}: {error}",
+             checkpoint_path={}: {error}",
             writer_path.display(),
             checkpoint_path.display()
-        ),
-        Err(error) => panic!(
-            "checkpoint lock handoff/recovery timed out at {phase}; writer_path={}; \
-                 checkpoint_path={}; timeout=1s; channel={error}",
-            writer_path.display(),
-            checkpoint_path.display()
-        ),
+        );
+    }
+}
+
+#[test]
+fn checkpoint_handoff_rejects_each_held_lock_without_releasing_its_owner() {
+    for name in [WRITER_LOCK_FILE, CHECKPOINT_LOCK_FILE] {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        create_checkpoint(directory.path(), &create_request(Uuid::now_v7(), "Handoff")).unwrap();
+        let path = directory.path().join(LOCKS_DIR).join(name);
+        let held = open_regular_lock(&path).unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&held).unwrap());
+        let failure = catch_unwind(AssertUnwindSafe(|| {
+            checkpoint_lock_handoff(directory.path(), "held-lock-regression", true);
+        }))
+        .expect_err("handoff must reject a still-held lock");
+        let message = failure.downcast_ref::<String>().unwrap();
+        assert!(message.contains("held-lock-regression"));
+        assert!(message.contains(if name == WRITER_LOCK_FILE {
+            "writer.lock remains held"
+        } else {
+            "checkpoints.lock unavailable"
+        }));
+        let probe = open_regular_lock(&path).unwrap();
+        assert!(!crate::file_lock::try_lock_exclusive(&probe).unwrap());
+        crate::file_lock::unlock(&held).unwrap();
+        assert_mutation_locks_free(directory.path(), "rejected handoff released its own locks");
+        checkpoint_lock_handoff(directory.path(), "released-lock-regression", true);
+    }
+}
+
+#[test]
+fn checkpoint_handoff_preserves_registry_and_releases_both_locks() {
+    let directory = tempdir().unwrap();
+    crate::open_or_initialize_project(directory.path()).unwrap();
+    create_checkpoint(directory.path(), &create_request(Uuid::now_v7(), "Handoff")).unwrap();
+    let before = list_checkpoints(directory.path()).unwrap();
+    for recover in [false, true] {
+        checkpoint_lock_handoff(directory.path(), "unlocked-handoff-regression", recover);
+        assert_mutation_locks_free(directory.path(), "completed handoff");
+        assert_eq!(list_checkpoints(directory.path()).unwrap(), before);
     }
 }
 
