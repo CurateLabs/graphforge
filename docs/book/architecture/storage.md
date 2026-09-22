@@ -27,6 +27,14 @@ The unused `StorageProvider`, `StorageRow`, and `ParquetProvider` stubs were rem
 
 ## Lifecycle implementation ownership
 
+Research Version publication uses the same Project authority, under the
+`research@1` capability and `registry@1` participant. The storage foundation
+and its conservative generation retention are specified in
+[ADR 0039](../../adr/0039-research-version-publication.md). Context restoration
+preserves unrelated heads and permanent receipt/identity history. Explicit
+root release cannot delete accepted provenance. Selected physical reclamation
+and public integration remain #1536/#1537 work under #1350.
+
 Object-store manifest updates, materialization, installation, and garbage collection
 have private modules under `graph_object_store`. Read/publication leases and shared
 lifecycle locking remain in the parent. `project_publication` retains commit order,

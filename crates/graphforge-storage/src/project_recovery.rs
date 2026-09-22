@@ -746,6 +746,29 @@ pub(crate) fn compute_reachable_generations(
         }
         retained.insert(*uuid);
     }
+    // Research roots are authenticated by retained generations, never inferred
+    // from directory names. The foundation conservatively retains sources;
+    // selected-content reclamation is owned by #1536.
+    let mut pending: Vec<_> = retained.iter().copied().collect();
+    while let Some(uuid) = pending.pop() {
+        let generation = crate::resolve_generation_by_uuid(root, uuid)?;
+        for (source, digest) in crate::research_versions::source_generation_roots(&generation)? {
+            if validated_generation_manifest_sha256(root, source)? != digest {
+                return Err(recovery_corrupt(
+                    "research source manifest digest does not match registry",
+                ));
+            }
+            if retained.insert(source) {
+                if retained.len() > crate::research_versions::MAX_RECEIPTS {
+                    return Err(project_error(
+                        ProjectErrorCode::ResourceLimit,
+                        "research generation root traversal exceeds its bound",
+                    ));
+                }
+                pending.push(source);
+            }
+        }
+    }
     Ok(retained)
 }
 

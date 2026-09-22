@@ -367,6 +367,10 @@ export default defineConfig({
                   label: '0038 — Determinism belongs at the publication boundary',
                   slug: 'adr/0038-determinism-at-the-publication-boundary',
                 },
+                {
+                  label: '0039 — Research Versions share Project publication authority',
+                  slug: 'adr/0039-research-version-publication',
+                },
                 // END generated ADR records
               ],
             },

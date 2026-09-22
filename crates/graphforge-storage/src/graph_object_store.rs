@@ -1588,7 +1588,7 @@ pub(crate) use gc::capture_retained_graph_object_identities;
     reason = "preserve the existing staged CAS root API across feature and test configurations"
 )]
 pub use gc::gc_graph_objects;
-pub(crate) use gc::gc_graph_objects_guarded;
+pub(crate) use gc::gc_graph_objects_with_evidence_guarded;
 #[allow(
     unused_imports,
     reason = "preserve the existing staged CAS root API across feature and test configurations"
