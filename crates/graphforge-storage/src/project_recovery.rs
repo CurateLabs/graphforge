@@ -517,6 +517,7 @@ fn recover_project_transactions_admitted_with_allocation(
 ) -> Result<ProjectRecoveryReport, GfError> {
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let root = selected.container_root().to_owned();
+    let _research_objects = crate::research_versions::read_objects_before_writer(&root)?;
     let writer_lock = acquire_recovery_lock(&root)?;
     if let Some(allocation) = allocation {
         allocation.replace_file_at(
@@ -535,6 +536,7 @@ fn recover_project_transactions_admitted_with_allocation(
         &selected,
         &checkpoint_roots.roots,
         DEFAULT_RETAINED_ANCESTORS,
+        None,
     )?;
     let mut report = ProjectRecoveryReport {
         selected_generation_uuid: selected_uuid,
@@ -716,6 +718,7 @@ pub(crate) fn compute_reachable_generations(
     selected: &crate::ResolvedProjectGeneration,
     checkpoint_roots: &[(Uuid, [u8; 32])],
     retained_ancestors: usize,
+    graph_gc_guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
 ) -> Result<BTreeSet<Uuid>, GfError> {
     if retained_ancestors > MAX_RETAINED_ANCESTORS {
         return Err(project_error(
@@ -752,7 +755,9 @@ pub(crate) fn compute_reachable_generations(
     let mut pending: Vec<_> = retained.iter().copied().collect();
     while let Some(uuid) = pending.pop() {
         let generation = crate::resolve_generation_by_uuid(root, uuid)?;
-        for (source, digest) in crate::research_versions::source_generation_roots(&generation)? {
+        for (source, digest) in
+            crate::research_versions::source_generation_roots(&generation, graph_gc_guard)?
+        {
             if validated_generation_manifest_sha256(root, source)? != digest {
                 return Err(recovery_corrupt(
                     "research source manifest digest does not match registry",
@@ -814,6 +819,7 @@ pub(crate) fn cleanup_unreachable_generation(
     generation_uuid: Uuid,
     checkpoint_roots: &[(Uuid, [u8; 32])],
     retained_ancestors: usize,
+    graph_gc_guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
 ) -> Result<GenerationCleanupOutcome, GfError> {
     let generation_name = generation_uuid.hyphenated().to_string();
     let generation_path = root.join(GENERATIONS_DIR).join(&generation_name);
@@ -843,8 +849,13 @@ pub(crate) fn cleanup_unreachable_generation(
         return Ok(GenerationCleanupOutcome::Retained);
     }
     // Fresh reachability after lease acquisition (ADR 0013 step 4).
-    let reachable =
-        compute_reachable_generations(root, &current, checkpoint_roots, retained_ancestors)?;
+    let reachable = compute_reachable_generations(
+        root,
+        &current,
+        checkpoint_roots,
+        retained_ancestors,
+        graph_gc_guard,
+    )?;
     if reachable.contains(&generation_uuid) {
         return Ok(GenerationCleanupOutcome::Retained);
     }

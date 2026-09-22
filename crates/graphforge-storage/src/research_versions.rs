@@ -1,8 +1,8 @@
 //! Immutable research content, independent context heads and durable receipts.
 //!
 //! All records are authenticated participants of the Project's sole CURRENT.
-//! Foundation retention pins source generations; selected physical reclamation
-//! is deliberately a separate implementation (#1536, ADR 0039).
+//! Unmaterialized content pins source generations. Authenticated CAS placement
+//! retains exact selected content independently of physical ancestors (ADR 0039).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod projection;
+mod retained_content;
+pub use projection::{ResearchGraphProjection, ResearchGraphSelection};
+pub use retained_content::materialize_research_graph;
+
 use crate::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectStageOutcome, ResolvedProjectGeneration,
@@ -21,7 +26,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 1;
+pub const RESEARCH_VERSION: u32 = 2;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -37,7 +42,7 @@ pub const MAX_ROOTS: usize = 4_096;
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/1"
+    ";research/2"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -80,6 +85,8 @@ pub struct ResearchVersionContent {
     pub manifest_sha256: [u8; 32],
     /// None denotes complete Project research; Some denotes a projection's origin.
     pub source_version: Option<Uuid>,
+    /// Selected graph identity when shared physical units have been repacked.
+    pub graph_projection: Option<ResearchGraphProjection>,
     /// Exact frozen selected participants, in canonical key order.
     pub participants: Vec<ResearchParticipantCommitment>,
     /// Required retained research dependencies, distinct from provenance.
@@ -191,6 +198,8 @@ pub struct ResearchRegistry {
     pub receipts: BTreeMap<Uuid, ResearchOperationReceipt>,
     /// Permanent immutable identity commitments, including released payloads.
     pub identities: BTreeMap<Uuid, [u8; 32]>,
+    /// Versions whose exact participant and graph payloads are rooted in CAS.
+    pub materialized: BTreeSet<Uuid>,
 }
 
 /// Request to capture frozen research from an authenticated generation.
@@ -223,6 +232,18 @@ pub struct RegisterResearchVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResearchMutation {
+    /// Register a separately identified selected graph/evidence closure.
+    RegisterGraphProjection {
+        /// Metadata and explicit participant/evidence selection from a Version.
+        spec: RegisterResearchVersion,
+        /// Exact graph identities and closure.
+        selection: ResearchGraphSelection,
+    },
+    /// Share exact selected content in CAS and release physical ancestor pins.
+    Compact {
+        /// Retained Versions to materialize; identity and replay history stay fixed.
+        versions: BTreeSet<Uuid>,
+    },
     /// Capture research and advance only the named context head.
     Register(RegisterResearchVersion),
     /// Restore frozen content into a new Version of its owning context.
@@ -359,6 +380,13 @@ impl ResearchRegistry {
                 }
             }
         }
+        if self
+            .materialized
+            .iter()
+            .any(|id| !self.versions.contains_key(id))
+        {
+            return Err(invalid("materialized research identity is unavailable"));
+        }
         self.validate_dependency_cycles()?;
         for (context, version) in &self.heads {
             if self
@@ -433,7 +461,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/1").into(),
+            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/2").into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -490,7 +518,7 @@ pub fn read_research_registry(
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
         || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/1"))
+            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/2"))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -591,6 +619,7 @@ fn capture(
             generation_uuid: source.generation_uuid(),
             manifest_sha256: source.manifest_sha256(),
             source_version: request.source_version,
+            graph_projection: None,
             participants,
             required_versions: request.required_versions.clone(),
             producer: PRODUCER.into(),
@@ -635,6 +664,13 @@ fn apply_mutation(
     registry: &mut ResearchRegistry,
 ) -> Result<Option<Uuid>, GfError> {
     let version_uuid = match mutation {
+        ResearchMutation::RegisterGraphProjection { spec, selection } => {
+            Some(projection::register(root, registry, spec, selection)?)
+        }
+        ResearchMutation::Compact { versions } => {
+            retained_content::compact(root, registry, versions)?;
+            None
+        }
         ResearchMutation::Register(spec) => {
             let version = capture(root, spec, registry)?;
             Some(insert_version(registry, version)?)
@@ -659,6 +695,9 @@ fn apply_mutation(
             inspect_research_version(root, &version)?;
             version.version_uuid = *version_uuid;
             version.created_at = *created_at;
+            if registry.materialized.contains(source_version) {
+                registry.materialized.insert(*version_uuid);
+            }
             Some(insert_version(registry, version)?)
         }
         ResearchMutation::RetainRoot { root } => {
@@ -699,6 +738,7 @@ fn apply_mutation(
                     ),
                 ));
             }
+            registry.materialized.remove(version_uuid);
             if registry.versions.remove(version_uuid).is_none() {
                 return Err(invalid("research Version is unavailable"));
             }
@@ -820,6 +860,7 @@ pub fn publish_research_operation(
     let source_pins = registry
         .versions
         .values()
+        .filter(|version| !registry.materialized.contains(&version.version_uuid))
         .map(|version| {
             let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
             if source.manifest_sha256() != version.content.manifest_sha256 {
@@ -869,6 +910,9 @@ pub fn inspect_research_version(
         ));
     }
     authenticate_evidence(root, &version.content.evidence)?;
+    if registry.materialized.contains(&version.version_uuid) {
+        return retained_content::inspect(root, version, None);
+    }
     let source = crate::resolve_generation_by_uuid(root, version.content.generation_uuid)?;
     if source.manifest_sha256() != version.content.manifest_sha256 {
         return Err(invalid("research source manifest identity changed"));
@@ -926,8 +970,10 @@ fn hex(digest: &[u8; 32]) -> String {
 /// Exact local evidence objects required by the authenticated registry.
 pub(crate) fn evidence_object_roots(
     generation: &ResolvedProjectGeneration,
+    guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
 ) -> Result<BTreeSet<String>, GfError> {
-    Ok(read_research_registry(generation)?
+    let registry = read_research_registry(generation)?;
+    let mut roots: BTreeSet<_> = registry
         .versions
         .values()
         .flat_map(|v| &v.content.evidence)
@@ -935,16 +981,31 @@ pub(crate) fn evidence_object_roots(
             ResearchEvidenceReference::Local { sha256, .. } => Some(hex(sha256)),
             _ => None,
         })
-        .collect())
+        .collect();
+    for id in &registry.materialized {
+        roots.extend(retained_content::object_roots(
+            generation.container_root(),
+            &registry.versions[id],
+            guard,
+        )?);
+    }
+    Ok(roots)
 }
 
 /// Conservative authenticated source-generation roots for recovery and GC.
 pub(crate) fn source_generation_roots(
     generation: &ResolvedProjectGeneration,
+    guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
 ) -> Result<Vec<(Uuid, [u8; 32])>, GfError> {
-    Ok(read_research_registry(generation)?
+    let registry = read_research_registry(generation)?;
+    // Authenticate CAS closure before recovery/cleanup may release any generation.
+    for id in &registry.materialized {
+        retained_content::inspect(generation.container_root(), &registry.versions[id], guard)?;
+    }
+    Ok(registry
         .versions
         .values()
+        .filter(|v| !registry.materialized.contains(&v.version_uuid))
         .map(|v| (v.content.generation_uuid, v.content.manifest_sha256))
         .collect())
 }
@@ -976,7 +1037,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
         || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/1").into())
+            != hex(&Sha256::digest(b"graphforge-research-registry/2").into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1010,6 +1071,10 @@ pub(crate) fn validate_publication_transition(
         }
     }
     for version in after.versions.values() {
+        if after.materialized.contains(&version.version_uuid) {
+            retained_content::inspect(parent.container_root(), version, None)?;
+            continue;
+        }
         authenticate_evidence(parent.container_root(), &version.content.evidence)?;
         let source = crate::resolve_generation_by_uuid(
             parent.container_root(),
@@ -1037,3 +1102,18 @@ pub(crate) fn validate_publication_transition(
 
 #[cfg(test)]
 mod tests;
+
+/// Hold shared CAS lifecycle before writer acquisition when recovery must read
+/// materialized research. Cleanup instead supplies its already-exclusive guard.
+pub(crate) fn read_objects_before_writer(
+    root: &Path,
+) -> Result<Option<crate::graph_object_store::GraphObjectReadLease>, GfError> {
+    if root
+        .join(crate::graph_object_store::GRAPH_OBJECTS_DIR)
+        .exists()
+    {
+        crate::graph_object_store::begin_graph_object_read(root).map(Some)
+    } else {
+        Ok(None)
+    }
+}

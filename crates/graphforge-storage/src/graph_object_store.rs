@@ -131,6 +131,33 @@ pub(crate) struct GraphObjectGcGuard {
     cas: CasRoot,
 }
 
+impl GraphObjectGcGuard {
+    pub(crate) fn read_research_object(
+        &self,
+        digest: &str,
+        max_length: u64,
+    ) -> Result<Vec<u8>, GfError> {
+        self.cas.revalidate_named()?;
+        read_graph_object_by_digest_file_counted(
+            self.cas.open_digest(digest)?,
+            digest,
+            max_length,
+            &self.cas.diagnostic_root,
+        )
+        .map(|value| value.0)
+    }
+
+    pub(crate) fn verify_research_object(&self, digest: &str, length: u64) -> Result<(), GfError> {
+        self.cas.revalidate_named()?;
+        verify_file(
+            self.cas.open_digest(digest)?,
+            digest,
+            length,
+            &self.cas.diagnostic_root,
+        )
+    }
+}
+
 struct CasRoot {
     allocation: Option<crate::StorageAllocationOperation>,
     diagnostic_root: PathBuf,

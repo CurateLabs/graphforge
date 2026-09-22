@@ -1541,3 +1541,11 @@ copy/sendfile and fsync/fdatasync families. Traced and sampled runs are separate
 from latency observations. Source-only conditional policies, Bloom consumers
 and stronger immutable authentication handles are not silently counted as
 implemented improvements.
+
+Research revision 2 adds authenticated CAS placement for immutable Version
+participants and graph-row projections (ADR 0039). Retention passes the existing
+exclusive CAS guard through content authentication, then rechecks generation
+reachability before deletion. Recovery/read-side reachability acquires shared
+CAS access before the writer lock. No callback reacquires a shared CAS lock
+while cleanup holds it exclusively. Historical materialization writes only to
+an empty private target and preserves the Project's read-only state.

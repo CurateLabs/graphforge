@@ -280,6 +280,18 @@ claiming perpetual latest-reader compatibility or adding pre-v1 migration.
 Diagnostics expose bounded identity, phase, and commitment information, never
 credentials, raw source content, or private annotations.
 
+The #1536 `research_versions::tests::retention` suite covers real mapped
+Parquet projection, ontology-fixture equality, local Artifact retention and
+ancestor release after GC/reopen. With 32→512 parent nodes, selected graph
+bytes stay at 6,331 and total retained CAS bytes at 16,320; parent payload grows
+11,590→38,603 bytes. Only required route controls are copied during source
+preparation. A whole-Version control still reads outside-selection rows.
+Six labeled frozen-Proposal root fixtures share graph bytes; releasing four
+1 KiB Artifact roots reduces CAS bytes 22,042→17,946, preserving accepted
+dependencies and original receipts. Corruption, legacy paths, busy CAS and
+pre/post-CURRENT crash/error tests cover safe cleanup. These remain storage
+consumer fixtures, not actual Branch/Proposal acceptance proof.
+
 ## What counts as proof
 
 | Claim | Acceptable evidence | Not enough alone |

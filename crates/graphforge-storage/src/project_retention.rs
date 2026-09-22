@@ -336,6 +336,7 @@ pub fn inspect_project_reachability_with_mode(
     let policy = policy.validate()?;
     let limits = limits.validate()?;
     let root = admission.root();
+    let _research_objects = crate::research_versions::read_objects_before_writer(root)?;
     let writer_lock = acquire_recovery_lock(root)?;
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
@@ -344,6 +345,7 @@ pub fn inspect_project_reachability_with_mode(
         &selected,
         &checkpoint_roots.roots,
         policy.retained_ancestors,
+        None,
     )?;
     let checkpoint_set = checkpoint_roots
         .roots
@@ -469,6 +471,51 @@ fn run_cleanup(
     run_cleanup_with_lock_observer(root, policy, limits, dry_run, mode, |_| {})
 }
 
+struct CleanupCasGuards {
+    gc: Option<crate::graph_object_store::GraphObjectGcGuard>,
+    _read: Option<crate::graph_object_store::GraphObjectReadLease>,
+}
+
+fn acquire_cleanup_cas(root: &Path, dry_run: bool) -> Result<CleanupCasGuards, GfError> {
+    // Lifecycle lock order is CAS lifecycle -> project writer everywhere.
+    // Publishers already hold the shared lifecycle guard before acquiring the
+    // writer for CURRENT; cleanup must acquire its exclusive guard first to
+    // avoid a writer/lifecycle inversion deadlock.
+    let graph_gc_guard = (!dry_run)
+        .then(|| crate::graph_object_store::try_begin_graph_object_gc(root))
+        .transpose()?
+        .flatten();
+    let research_objects = if dry_run {
+        crate::research_versions::read_objects_before_writer(root)?
+    } else {
+        None
+    };
+    Ok(CleanupCasGuards {
+        gc: graph_gc_guard,
+        _read: research_objects,
+    })
+}
+
+fn resolve_cleanup_generation(
+    root: &Path,
+    dry_run: bool,
+    cas_guards: &CleanupCasGuards,
+) -> Result<crate::ResolvedProjectGeneration, GfError> {
+    let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
+    if !dry_run
+        && cas_guards.gc.is_none()
+        && selected
+            .capability(crate::research_versions::RESEARCH_CAPABILITY)?
+            .is_some()
+    {
+        return Err(project_error(
+            ProjectErrorCode::WriterBusy,
+            "research cleanup requires the CAS lifecycle guard; no content was removed",
+        ));
+    }
+    Ok(selected)
+}
+
 fn run_cleanup_with_lock_observer(
     root: &Path,
     policy: ProjectRetentionPolicy,
@@ -487,17 +534,10 @@ fn run_cleanup_with_lock_observer(
     let root = admission.root();
     let policy = policy.validate()?;
     let limits = limits.validate()?;
-    // Lifecycle lock order is CAS lifecycle -> project writer everywhere.
-    // Publishers already hold the shared lifecycle guard before acquiring the
-    // writer for CURRENT; cleanup must acquire its exclusive guard first to
-    // avoid a writer/lifecycle inversion deadlock.
-    let graph_gc_guard = (!dry_run)
-        .then(|| crate::graph_object_store::try_begin_graph_object_gc(root))
-        .transpose()?
-        .flatten();
+    let cas_guards = acquire_cleanup_cas(root, dry_run)?;
     let writer_lock = acquire_recovery_lock(root)?;
     observe_lock(writer_lock.file());
-    let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
+    let selected = resolve_cleanup_generation(root, dry_run, &cas_guards)?;
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
     let classification = classify_cleanup_candidates(
         root,
@@ -506,6 +546,7 @@ fn run_cleanup_with_lock_observer(
         policy,
         limits,
         dry_run,
+        cas_guards.gc.as_ref(),
     )?;
 
     let mut removed = 0_u64;
@@ -530,6 +571,7 @@ fn run_cleanup_with_lock_observer(
                     *uuid,
                     &checkpoint_roots.roots,
                     policy.retained_ancestors,
+                    cas_guards.gc.as_ref(),
                 )?,
                 ProjectCleanupLocation::Trash => cleanup_trash_generation(root, *uuid)?,
             };
@@ -549,7 +591,7 @@ fn run_cleanup_with_lock_observer(
         ProjectGraphObjectSweepReport::without_sweep(
             ProjectGraphObjectSweepDisposition::DeferredBoundedCleanup,
         )
-    } else if let Some(gc_guard) = graph_gc_guard.as_ref() {
+    } else if let Some(gc_guard) = cas_guards.gc.as_ref() {
         sweep_unreachable_graph_objects(root, gc_guard)?
     } else if crate::graph_object_publication_is_live(root)? {
         ProjectGraphObjectSweepReport::without_sweep(
@@ -637,6 +679,7 @@ fn sweep_unreachable_graph_objects(
             let generation = crate::resolve_generation_by_uuid(root, uuid)?;
             evidence_roots.extend(crate::research_versions::evidence_object_roots(
                 &generation,
+                Some(gc_guard),
             )?);
             if let Some(crate::GraphFilesParticipant::V2(graph_root)) =
                 generation.declared_graph_files_participant()?
@@ -675,9 +718,15 @@ fn classify_cleanup_candidates(
     policy: ProjectRetentionPolicy,
     limits: ProjectRetentionLimits,
     dry_run: bool,
+    graph_gc_guard: Option<&crate::graph_object_store::GraphObjectGcGuard>,
 ) -> Result<Classification, GfError> {
-    let reachable =
-        compute_reachable_generations(root, selected, checkpoint_roots, policy.retained_ancestors)?;
+    let reachable = compute_reachable_generations(
+        root,
+        selected,
+        checkpoint_roots,
+        policy.retained_ancestors,
+        graph_gc_guard,
+    )?;
     let mut classification = Classification {
         reachable_count: reachable.len() as u64,
         candidates: 0,

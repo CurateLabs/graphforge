@@ -271,3 +271,24 @@ enforced authorization.
   interchange; packaging is not semantic integration.
 - [Testing](../../engineering/TESTING.md#analyst-ux-acceptance) defines the
   acceptance evidence needed to call this capability implemented.
+
+### Selected storage retention
+
+The storage primitive uses `research@2` and `registry@2`. Explicit compaction
+moves exact selected participant commitments into shared CAS placement without
+changing Version identity. Required graph manifests/payloads and local Artifact
+bytes remain roots; the physical source generation becomes provenance only.
+Graph projection has a separate immutable selector/content identity and repacks
+shared Parquet units. Genealogy alone cannot retain an ancestor or expand a
+historical view. Whole-Version retention remains an explicit complete-state
+control. These are storage fixtures for later Branch/Proposal consumers, not
+implemented Branch or Proposal lifecycles.
+
+Root release removes only releasable dependencies. Accepted-provenance roots
+remain permanent and operation receipts retain their separate lifetime limits.
+CAS placement materialization allows at most 256 MiB of participant bytes per
+Version (graph payloads are separately streamed and bounded by graph manifest
+limits); explicit graph selectors allow at most one million identities.
+Cleanup authenticates all retained CAS content before removing generations. A
+busy CAS lifecycle guard returns `GF_WRITER_BUSY` for research cleanup without
+mutation. Revision-1 readers refuse revision 2; there is no migration command.
