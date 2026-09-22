@@ -161,6 +161,7 @@ const PAGES = [
   'adr/0038-determinism-at-the-publication-boundary.md',
   'adr/0039-research-version-publication.md',
   'adr/0040-frozen-slice-membership.md',
+  'adr/0041-branch-current-publication.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

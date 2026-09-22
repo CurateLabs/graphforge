@@ -27,8 +27,8 @@ production_source = runpy.run_path(str(Path(__file__).with_name("native_sources.
     "production_source"
 ]
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "32c55ba453bb675306caf525aa9f30090f0f1c175479d9ac2393b74f8c1579b3"
-EXPECTED_RELEASE_DIGEST = "03bdba7634c9fab144030ff75c316350d108973ef0030088b2f7caa15d7083a1"
+EXPECTED_RUST_DIGEST = "7f589970811af62c469492e1a67f5f6f4bcbd643b66af858e1ab7d980c45e840"
+EXPECTED_RELEASE_DIGEST = "c50ce071932f644ea411d1faf1b0e0a0b7c25b46b4dd60fe841db41ac46f7f44"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -68,6 +68,7 @@ PYTHON_ONLY_METHODS = frozenset(
 )
 
 EVIDENCE = {
+    "branches": {"branches.py": ["main"]},
     "slices": {"slices.py": ["main"]},
     "infra-validation": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
@@ -275,7 +276,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 299
+    assert len(release_methods) == 313
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -329,6 +330,12 @@ def _classification_report() -> dict[str, object]:
         ),
     }
     research_adapters = {
+        "GraphForge.open_research_branch": "GraphForge.research_branch",
+        "ResearchBranchView.record": "GraphForge.research_branch",
+        "ResearchBranchView.version_uuid": "GraphForge.research_branch",
+        "ResearchBranchView.graph": "GraphForge.query_research_branch",
+        "ResearchBranchView.fields": "GraphForge.research_branch_fields",
+        "ResearchBranchView.references": "GraphForge.research_branch_references",
         "GraphForge.open_research_version": "GraphForge.query_research_version",
         "ResearchVersionView.execute": "GraphForge.query_research_version",
         "ResearchVersionView.version": "GraphForge.research_version",

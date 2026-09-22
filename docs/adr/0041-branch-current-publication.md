@@ -31,7 +31,7 @@ Restore creates a fresh Version under the same Branch context and moves only tha
 
 Reference records an outside origin locator and never imports active content. Bring requires explicitly retained source history, authenticates selected objects and closure, preserves graph UUIDs and origins, and publishes only that expansion. If source history is unavailable, refuse instead of reading current parent bytes. Local ontology extensions use exact composition IDs and scoped validation; runtime catalog IDs never stand in for ontology IDs.
 
-Limits apply to Branch count, operation receipts, retained Versions, selected objects/rows, prepared bytes and returned Arrow pages. No time-based replay expiry or silent receipt eviction is introduced. Baseline roots retain selected state needed for future comparison. Deliberately retained named historical Versions are separate roots. Changes to any capability/record version are documented before implementation and unsupported prior formats fail closed under the pre-v1 policy.
+Limits apply to operation receipts, retained Versions, selected objects/rows, prepared bytes and returned Arrow results. Branch creation is indirectly bounded by retained base-Version limits. No time-based replay expiry or silent receipt eviction is introduced. Baseline roots retain selected state needed for future comparison. Deliberately retained named historical Versions are separate roots. Changes to any capability/record version are documented before implementation and unsupported prior formats fail closed under the pre-v1 policy.
 
 Acceptance evidence must include actual Rust-facade parent/A/B edits and scoped A restoration after independent parent/B advances and reopen; graph-versus-assertion suppression; Reference versus Bring; nested origin identity; Branch-only ontology; fault/retry/conflict behavior; and fixed-selection parent-growth measurements after release/compaction/reopen. Record source scope and actual copied/reused/retained bytes separately; do not infer constant creation work from constant retained bytes. Python, Node and CLI must execute the same Rust behavior.
 
@@ -75,3 +75,9 @@ facades can recognize an exact request before repeating private preparation,
 even if CURRENT has advanced. This is separate from the complete prepared
 operation digest: raw operation replay still checks every prepared commitment,
 and a changed public request under the same operation identity conflicts.
+
+The permanent base's object rows are the inspectable `exact_membership/1`
+creation definition. Its immutable membership and active/required roles survive
+source release and Branch edits. The original predicate digest remains separate
+provenance, not a promise to recover the original query text. The public Arrow
+selection projection reads the permanent base, never current field membership.

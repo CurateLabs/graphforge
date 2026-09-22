@@ -1421,6 +1421,36 @@
       "bazel_label": "//crates/graphforge-api:slices",
       "exception_id": null,
       "notes": "#1351 reproducible native Slice membership"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "branches",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/branches.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:branches",
+      "exception_id": null,
+      "notes": "#1352 native independent Branch acceptance"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "branch_projection_provenance",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/branch_projection_provenance.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:branch_projection_provenance",
+      "exception_id": null,
+      "notes": "#1352 native independent Branch acceptance"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "branches",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/branches.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:branches",
+      "exception_id": null,
+      "notes": "#1352 native independent Branch acceptance"
     }
   ],
   "exceptions": [

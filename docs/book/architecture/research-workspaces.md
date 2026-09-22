@@ -31,6 +31,73 @@ This decision is recorded in [ADR 0032](../../adr/0032-research-project-authorit
 Shared immutable payloads and bounded selection may avoid copying;
 reconstruction must never consult the parent's current state implicitly.
 
+## Implemented Branch facade (#1352)
+
+`create_research_branch` creates an independent research context from current
+Project research, an exact retained Version, a Branch head, or a frozen Slice.
+It publishes one immutable base and head through the owning Project's `CURRENT`.
+`open_research_branch` returns the effective read-only native graph for Cypher,
+analyst and domain reads. `execute_research_branch` applies native graph changes
+to a private prepared view and publishes a fresh Branch Version. Parent and
+sibling heads do not advance. Graph suppression uses ordinary native deletion;
+`suppress_research_branch_assertion` removes the assertion and its owned
+interpretation state without deleting referenced graph objects.
+
+`research_branch_selection` exposes the permanent base's `exact_membership/1`
+selector as Arrow `object_kind`, `object_uuid`, and `role` rows. This is the
+retained selection definition, independent of later edits or parent cleanup.
+Schema metadata identifies the origin and base Versions and the original source
+selector digest. That digest is provenance; it does not recover an original
+query predicate. Required context remains required in whole-Branch and historical
+Branch-Version children unless explicitly incorporated as active research.
+
+The view's `fields()` Arrow result exposes immutable original Version/value,
+incorporated Version/value, current value, stable contribution identity, role,
+and inherited/local/suppressed status. UUID identity is not a revision counter.
+`record()` exposes frozen genealogy and creation metadata; `version_uuid()` names
+the opened head. Existing Version listing supplies retained names and labels.
+The base is a retention root. Origin genealogy alone does not pin complete
+ancestor payload, and expansion beyond selected content requires explicitly
+retained source history (`GF_RESULT_NOT_RETAINED` otherwise).
+
+`reference_research_branch` adds a Version-qualified citation; `references()`
+returns Arrow citations without expanding active research or pinning source
+payload. `bring_research_branch` authenticates a frozen Slice and incorporates
+its selected graph/domain closure with original UUIDs and source baselines.
+Conflicting existing object values refuse before publication. Bring requires
+identical ontology and composition; `change_research_branch_ontology` performs
+an explicit exact-composition change with native stored-data validation first.
+Selected unsupported domain dependencies refuse rather than drop state or import
+unselected content. Automatic conflict resolution, updates and Proposal
+acceptance belong to subsequent M11 issues.
+
+`restore_research_branch` requires a retained Version of that same Branch and
+publishes a new Version under only its context. It preserves parent research,
+other Branch heads and Project operation history. Every mutation accepts a
+stable operation UUID, an exact expected `CURRENT`, and cooperative cancellation.
+Exact retry returns the original receipt and reconciles the local facade with
+live authority; changed content under an operation UUID conflicts.
+
+Python exposes matching snake-case methods with dict controls and Arrow tables.
+Node exposes asynchronous camel-case methods with metadata or Arrow IPC results.
+Both use explicit Branch UUID read adapters for info, query, fields, references
+and creation selection. `gf research branch` provides create, execute, restore,
+ontology, reference, bring, suppress-assertion, info, selection, fields,
+references and query commands. Mutation `--file` inputs contain the native JSON
+request. Read data defaults to Arrow IPC; `--json` uses the existing CLI renderer.
+The versioned contract is `tests/contracts/branch-api-v1.json`.
+
+Requests are bounded to 1 MiB canonical JSON (including encoded capsule bytes).
+Native query/selection and semantic-field preparation use 64 MiB working bounds;
+prepared immutable participant transfer is bounded to 256 MiB. Baseline reads
+preflight uncompressed Parquet and field allocation before decoding/expansion.
+These are bounded operations, not streaming arbitrary-sized whole-Project
+Branch creation. Materializing a selected view can copy its selected closure;
+there is no zero-copy claim. The native retention regression grows unrelated
+parent content, measures selected payload and retained CAS after parent evolution
+and cleanup, releases the source Version, then reopens the Branch and its frozen
+selection. Creation time can still include parent metadata scans.
+
 ## Identity and state
 
 | Identity or state    | Required contract                                                                                                                                               |

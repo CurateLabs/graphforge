@@ -597,6 +597,12 @@ fn field_origins_and_contributions_survive_local_edits_and_slice_children() {
         .unwrap();
     let object = shared_uuid(&graph);
     let parent = create(&mut graph, "parent branch");
+    let baseline = graph
+        .open_research_branch(parent.branch_uuid)
+        .unwrap()
+        .fields()
+        .unwrap();
+    assert!(baseline.batches.iter().map(|b| b.num_rows()).sum::<usize>() >= 3);
     let inherited = field(&graph, parent.branch_uuid, object, "property:name");
     edit(
         &mut graph,

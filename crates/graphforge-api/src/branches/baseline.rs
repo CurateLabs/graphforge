@@ -85,6 +85,18 @@ fn contribution(branch: Uuid, operation: Uuid, key: &Key) -> Uuid {
     graphforge_core::canonical::uuid_v8(digest.finalize().into())
 }
 fn batch(rows: &BTreeMap<Key, Row>) -> Result<RecordBatch, GfError> {
+    let estimated = rows.values().try_fold(0_usize, |total, row| {
+        let next = total
+            .saturating_add(1536)
+            .saturating_add(row.key.0.len().saturating_mul(3))
+            .saturating_add(row.key.2.len().saturating_mul(3));
+        if next > 64 * 1024 * 1024 {
+            Err(invalid())
+        } else {
+            Ok(next)
+        }
+    })?;
+    let _ = estimated;
     let mut columns: [Vec<String>; 12] = std::array::from_fn(|_| Vec::new());
     for row in rows.values() {
         let values = [
@@ -123,13 +135,14 @@ fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
         return Ok(BTreeMap::new());
     };
     if snapshot.bytes.len() > 64 * 1024 * 1024
-        || snapshot.row_count > 1_000_000
+        || snapshot.row_count.saturating_mul(1536) > 64 * 1024 * 1024
         || snapshot.record_version != 1
         || snapshot.schema_fingerprint != fingerprint()
     {
         return Err(invalid());
     }
     let mut rows = BTreeMap::new();
+    let mut allocated = 0_usize;
     for batch in crate::knowledge::read_parquet(&snapshot.bytes)? {
         if batch.schema().fields() != schema().fields() {
             return Err(invalid());
@@ -142,6 +155,13 @@ fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
         for index in 0..batch.num_rows() {
             use arrow::array::Array;
             if columns.iter().any(|c| c.is_null(index)) {
+                return Err(invalid());
+            }
+            allocated = allocated
+                .saturating_add(1536)
+                .saturating_add(columns[0].value(index).len().saturating_mul(3))
+                .saturating_add(columns[2].value(index).len().saturating_mul(3));
+            if allocated > 64 * 1024 * 1024 {
                 return Err(invalid());
             }
             let text = |n: usize| columns[n].value(index).to_owned();
@@ -160,7 +180,20 @@ fn read(graph: &GraphForge) -> Result<BTreeMap<Key, Row>, GfError> {
                 contribution: uuid(8)?,
                 role: text(9),
             };
-            if text(10) != row.status()
+            if !matches!(row.role.as_str(), "active" | "required")
+                || row.origin.is_nil()
+                || row.contribution.is_nil()
+                || row.key.1.is_nil()
+                || [&row.original, &row.baseline, &row.current]
+                    .iter()
+                    .any(|h| {
+                        !h.is_empty()
+                            && (h.len() != 64
+                                || !h
+                                    .bytes()
+                                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+                    })
+                || text(10) != row.status()
                 || text(11) != "1"
                 || rows.insert(row.key.clone(), row).is_some()
             {

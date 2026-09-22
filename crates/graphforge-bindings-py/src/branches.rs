@@ -242,12 +242,13 @@ impl GraphForge {
         let id = canonical_operation_id(branch_uuid)
             .map_err(|e| to_pyerr(py, &e))?
             .0;
+        let query = query.to_owned();
         let graph = self.ensure_open()?;
         let result = py
             .detach(|| {
                 graph
                     .open_research_branch(id)
-                    .and_then(|view| view.graph().execute(query))
+                    .and_then(|view| view.graph().execute(&query))
             })
             .map_err(|e| to_pyerr(py, &e))?;
         result_to_pyarrow(py, &result)

@@ -48,7 +48,7 @@ pub(super) fn merge(
         let existing = if dst.capability("provenance")?.is_some() {
             crate::provenance::read_ledger(&dst)?
         } else {
-            Default::default()
+            graphforge_provenance::ProvenanceLedger::default()
         };
         out.extend(crate::provenance::encode_ledger(
             &crate::provenance::union_selected(&existing, &incoming)?,

@@ -469,6 +469,22 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "branch_projection_provenance",
+    srcs = ["tests/branch_projection_provenance.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:branch-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "branches",
+    srcs = ["tests/branches.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:branch-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "slices",
     srcs = ["tests/slices.rs"],
     crate = ":graphforge_api",
@@ -631,6 +647,8 @@ test_suite(
         ":release_load_construction",
         ":research_project",
         ":research_versions",
+        ":branches",
+        ":branch_projection_provenance",
         ":slices",
         ":resumable_construction_surface",
         ":ontology_adoption_retry",

@@ -249,3 +249,36 @@ fn insert(
     fields.insert(key, digest);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn field_budget_refuses_before_insertion_and_charges_field_names() {
+        let mut fields = Fields::new();
+        let mut bytes = 64 * 1024 * 1024 - 1536;
+        let key = (
+            "assertion".into(),
+            Uuid::now_v7(),
+            "large-domain-field".into(),
+        );
+        assert!(insert(&mut fields, &mut bytes, key, [0; 32]).is_err());
+        assert!(fields.is_empty());
+        let mut bytes = 0;
+        for i in 0..100_000 {
+            if insert(
+                &mut fields,
+                &mut bytes,
+                ("source".into(), Uuid::now_v7(), format!("field:{i}")),
+                [0; 32],
+            )
+            .is_err()
+            {
+                assert!(fields.len() < 44_000);
+                assert!(bytes <= 64 * 1024 * 1024);
+                return;
+            }
+        }
+        panic!("domain fields exceeded bounded allocation");
+    }
+}
