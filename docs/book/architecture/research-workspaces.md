@@ -183,6 +183,14 @@ Parent publication never follows the live Branch automatically.
 
 ## Versions, retention, restoration, and interchange
 
+[ADR 0039](../../adr/0039-research-version-publication.md) defines the
+`research@1` storage foundation (#1535): authenticated Version records, context
+heads, explicit dependency roots and permanent bounded receipts under the same
+`CURRENT`. Its tests use storage context/root fixtures, including real Parquet
+objects and local Artifact bytes. They are not Branch/Proposal or public-facade
+proof. Source-generation retention is conservative until #1536; #1537 owns the
+public Version surface. #1350 remains open until all original outcomes pass.
+
 Retained Versions preserve graph, local changes, Sources/references, local
 Artifact bytes, ontology composition, assertions, and research metadata.
 Branch bases, child Branches, Proposals, and accepted-provenance dependencies

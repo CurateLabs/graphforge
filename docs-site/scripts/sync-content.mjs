@@ -159,6 +159,7 @@ const PAGES = [
   'adr/0036-release-version-contract.md',
   'adr/0037-adjacency-published-with-generation.md',
   'adr/0038-determinism-at-the-publication-boundary.md',
+  'adr/0039-research-version-publication.md',
   // END generated ADR records
   'releases/roadmap.md',
   'legal/licensing.md',

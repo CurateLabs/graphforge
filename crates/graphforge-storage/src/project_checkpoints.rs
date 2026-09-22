@@ -572,6 +572,15 @@ where
     }
 
     let prior_extension = load_revert_journal_extension(&root, transaction_uuid)?;
+    if prior_current
+        .capability(crate::research_versions::RESEARCH_CAPABILITY)?
+        .is_some()
+    {
+        return Err(project_error(
+            ProjectErrorCode::UnsupportedCapabilityVersion,
+            "whole-workspace checkpoint revert cannot rewind research history; use explicitly scoped research restoration",
+        ));
+    }
     let (checkpoint, source, restored_at, registry_revision) =
         if let Some(extension) = prior_extension.as_ref() {
             let checkpoint_uuid = parse_uuid(&extension.checkpoint_uuid)?;

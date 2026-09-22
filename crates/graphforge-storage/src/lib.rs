@@ -48,6 +48,7 @@ pub use storage_attribution::{
 pub use transient_composition::{TransientComponent, classify_allocation_path};
 
 pub mod generation;
+pub mod research_versions;
 pub use generation::{
     commit_topology_aware, commit_topology_aware_with_auxiliary, read_search_generation,
     read_topology_generation, touches_search_source,

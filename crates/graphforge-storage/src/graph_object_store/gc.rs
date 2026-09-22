@@ -128,8 +128,19 @@ pub(crate) fn gc_graph_objects_guarded(
     roots: &[GraphFilesRootV2],
     limits: crate::GraphManifestLimits,
 ) -> Result<GraphObjectGcEvidence, GfError> {
+    gc_graph_objects_with_evidence_guarded(guard, roots, limits, &BTreeSet::new())
+}
+
+/// Include authenticated research Artifact objects in the same mark/sweep.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn gc_graph_objects_with_evidence_guarded(
+    guard: &GraphObjectGcGuard,
+    roots: &[GraphFilesRootV2],
+    limits: crate::GraphManifestLimits,
+    evidence: &BTreeSet<String>,
+) -> Result<GraphObjectGcEvidence, GfError> {
     guard.cas.revalidate_named()?;
-    let mut marked = BTreeSet::new();
+    let mut marked = evidence.clone();
     for graph_root in roots {
         let mut segment_digests = Vec::new();
         let (files, _) = crate::resolve_graph_manifest(graph_root, limits, |digest| {
