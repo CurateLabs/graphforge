@@ -1305,7 +1305,9 @@ class ProgressiveRunControllerTests(unittest.TestCase):
         )
         (stage / "bin").mkdir()
         (stage / "benchmark.xml").write_text("fixture", encoding="utf-8")
-        work = Path("/home/ubuntu/graphforge-ladder")
+        from tests.test_progressive_host_run import WORK_PARENT
+
+        work = WORK_PARENT
         with (
             patch("graphforge_bench.progressive_run.subprocess.run") as execute,
             patch.object(Path, "mkdir"),

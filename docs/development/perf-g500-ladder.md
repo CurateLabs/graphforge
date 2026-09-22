@@ -187,6 +187,12 @@ manual capacity rates and Fly image identities are not required. RSS limits
 and plateau checks remain unchanged. See the native command and terminal
 inventory in `benchmarks/README.md`.
 
+Host filesystem admission requires an ext4, xfs, or btrfs volume. `/tmp` on
+OVHC-AGENCY is tmpfs, so host-run tests take their scratch root from
+`GF_LADDER_TEST_ROOT` (default `/home/ubuntu/graphforge-ladder-test`). The
+evidence root `/home/ubuntu/graphforge-ladder` is retained data that tests
+and cleanup tooling must not touch.
+
 ## Historical reference-client commands
 
 Always-on CI (SCALE-10 smoke + all reconciliation / determinism / bounded /
