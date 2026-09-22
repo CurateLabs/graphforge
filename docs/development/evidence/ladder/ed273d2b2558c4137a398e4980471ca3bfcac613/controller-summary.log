@@ -1,0 +1,199 @@
+Running as unit: gf-1384-ladder.scope; invocation ID: 7906b52c10474137aa17d35680e72b43
+make: Entering directory '/home/ubuntu/gf-1384b/benchmarks'
+uv sync --locked
+Using CPython 3.12.13
+Creating virtual environment at: .venv
+Resolved 24 packages in 0.72ms
+Installed 23 packages in 16ms
+ + archspec==0.2.6
+ + argcomplete==3.7.2
+ + attrs==26.1.0
+ + benchexec==3.35
+ + certifi==2026.7.22
+ + charset-normalizer==3.5.1
+ + clustershell==1.10.1
+ + fasteners==0.20
+ + idna==3.19
+ + jinja2==3.1.6
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + lxml==6.1.2
+ + markupsafe==3.0.3
+ + pyyaml==6.0.3
+ + referencing==0.37.0
+ + reframe-hpc==4.10.3
+ + requests==2.34.2
+ + rpds-py==2026.6.3
+ + semver==3.0.4
+ + tabulate==0.10.0
+ + typing-extensions==4.16.0
+ + urllib3==2.7.0
+CARGO_TARGET_DIR="/home/ubuntu/gf-1384b/benchmarks/../target-host-ladder" cargo build --locked --release --manifest-path ../Cargo.toml -p graphforge-cli
+warning: /home/ubuntu/gf-1384b/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-io/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-ir/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-search/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-rel/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-discovery/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-knowledge/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-bindings-py/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-plan/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-cypher/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-ontology/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-portable-oci/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-cli/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-core/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-observability/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-exec/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-ast/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-value/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-provenance/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-bindings-node/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.22s
+CARGO_TARGET_DIR="/home/ubuntu/gf-1384b/benchmarks/../target-host-ladder" cargo build --locked --release --manifest-path Cargo.toml --bin graphforge-benchmark-certify --bin graphforge-benchmark-graph500-generator
+warning: /home/ubuntu/gf-1384b/crates/graphforge-filesystem/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-api/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+warning: /home/ubuntu/gf-1384b/crates/graphforge-storage/Cargo.toml: only one of `license` or `license-file` is necessary
+`license` should be used if the package license can be expressed with a standard SPDX expression.
+`license-file` should be used if the package uses a non-standard license.
+See https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields for more information.
+    Finished `release` profile [optimized] target(s) in 0.18s
+test -n "/home/ubuntu/gf-1384b-evidence" && test -n "/home/ubuntu/gf-1384b-work"
+PYTHONPATH=/home/ubuntu/gf-1384b/benchmarks/harness uv run --locked python -m graphforge_bench.progressive_host_run \
+	--maximum-scale "20" --output-dir "/home/ubuntu/gf-1384b-evidence" --work-root "/home/ubuntu/gf-1384b-work" --gf "/home/ubuntu/gf-1384b/benchmarks/../target-host-ladder/release/gf" --certify "/home/ubuntu/gf-1384b/benchmarks/../target-host-ladder/release/graphforge-benchmark-certify" --generator "/home/ubuntu/gf-1384b/benchmarks/../target-host-ladder/release/graphforge-benchmark-graph500-generator" --benchexec-python "/usr/bin/python3" --reserved-headroom-bytes "80530636800" --wall-margin "0.10" 
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-22 19:33:59,389 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-22 19:33:59,418 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+19:33:59   profile.json            2026-09-22 19:33:59,430 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+DONE                        37.87   44.98
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/gf-1384b-work/.gf-host-authority-lb1im6ba/gf-host-progressive-3h3a6xhu/raw/benchmark.2026-09-22_19-33-59.results.graphforge-progressive-qualification-v1.profile.xml
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-22 19:34:48,189 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-22 19:34:48,218 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+19:34:48   profile.json            2026-09-22 19:34:48,229 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-22 19:36:18,684 - WARNING - System has swapped during benchmarking. Benchmark results are unreliable!
+DONE                        77.01   90.34
+2026-09-22 19:36:18,688 - WARNING - System has swapped during benchmarking. Benchmark results are unreliable!
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/gf-1384b-work/.gf-host-authority-h14hv0tu/gf-host-progressive-kmyx_869/raw/benchmark.2026-09-22_19-34-48.results.graphforge-progressive-qualification-v1.profile.xml
+WARNING:root:Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-22 19:36:22,586 - WARNING - No propertyfile specified. Score computation will ignore the results.
+2026-09-22 19:36:22,613 - INFO - Unable to find pqos_wrapper, please install it for cache allocation and monitoring if your CPU supports Intel RDT (cf. https://gitlab.com/sosy-lab/software/pqos-wrapper).
+
+executing run set 'graphforge-progressive-qualification-v1.profile'     (1 file)
+19:36:22   profile.json            2026-09-22 19:36:22,624 - WARNING - Home directory in container should be /home/benchexec but this directory cannot be created due to directory mode of parent directory. It is recommended to use '--overlay-dir /home' or '--hidden-dir /home' and overwrite directory modes for subdirectories where necessary.
+2026-09-22 19:39:24,405 - WARNING - System has swapped during benchmarking. Benchmark results are unreliable!
+DONE                       156.61  181.67
+2026-09-22 19:39:24,409 - WARNING - System has swapped during benchmarking. Benchmark results are unreliable!
+
+Statistics:              1 Files
+  correct:               0
+    correct true:        0
+    correct false:       0
+  incorrect:             0
+    incorrect true:      0
+    incorrect false:     0
+  unknown:               1
+
+In order to get HTML and CSV tables, run
+table-generator /home/ubuntu/gf-1384b-work/.gf-host-authority-3serbbl0/gf-host-progressive-asecawm8/raw/benchmark.2026-09-22_19-36-22.results.graphforge-progressive-qualification-v1.profile.xml
+make: Leaving directory '/home/ubuntu/gf-1384b/benchmarks'
