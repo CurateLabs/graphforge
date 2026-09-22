@@ -227,7 +227,7 @@ gf_rust_integration_test(
     crate = ":graphforge_cli",
     data = _CLI_TEST_DATA,
     rustc_env = _CLI_BIN_ENV,
-    deps = _CLI_DEPS,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
 )
 
 test_suite(
