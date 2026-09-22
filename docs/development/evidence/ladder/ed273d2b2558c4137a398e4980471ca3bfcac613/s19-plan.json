@@ -1,0 +1,41 @@
+{
+  "claim": "engineering_evidence_only",
+  "execution": "native_linux_benchexec_host",
+  "identities": {
+    "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+    "benchexec_version": "3.35",
+    "certify_sha256": "e829eb35314ef1d7935cdaeb650de3b814cca26d17be9e2901e535438bda97db",
+    "commit": "ed273d2b2558c4137a398e4980471ca3bfcac613",
+    "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+    "generator_executable_sha256": "f6d13b5bdd2b10f2d9775a720adf9a7c283f9139fd99a62e00f8164f728a2ef3",
+    "gf_sha256": "7d699cd58615745b47e0a1e13b2ec286bfff7b56ece1c9f4218d2fee3e8bc71d",
+    "host_profile_id": "local-linux-cgroups-v2",
+    "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+    "producer_sha256": "027464cba0e2fbfb2982803595fd3e9610184ec4600921a0870ce96e1efbb449",
+    "profile_id": "graph500-s19-local",
+    "profile_sha256": "daaf67a221b92f25491f16713329315eb1cc70cd23297bc737de954cec39baa9"
+  },
+  "limits": {
+    "cores": 16,
+    "memory_bytes": 4294967296,
+    "wall_seconds": 14400
+  },
+  "outputs": [
+    "s19-plan.json",
+    "s19-benchexec.json",
+    "s19-graphforge.json",
+    "s19-rung.json",
+    "s19-result.json"
+  ],
+  "rung": "S19",
+  "schema": "graphforge-progressive-host-run-plan/1",
+  "wall_policy": {
+    "margin": 0.1,
+    "maximum_wall_seconds": 14400,
+    "reference_wall_seconds": null
+  },
+  "work_root_capacity": {
+    "free_bytes": 534861348864,
+    "reserved_headroom_bytes": 80530636800
+  }
+}

@@ -28,6 +28,7 @@ Each rung receipt is verified against the digests recorded in its
 | Commit | Contents | Archive digest (SHA-256 of `MANIFEST.sha256`) |
 |---|---|---|
 | `b6ffb088405150afc117ba7180c876659cec729f` | Full S18–S22 rung evidence + controller summary; the #1478 baseline of record (step 0, contains #1452, #1519, the #1526 fix) | `807609f97477e91c3cb5321261a4e9274f51573c150da88b320baf3b55c8342d` |
+| `ed273d2b2558c4137a398e4980471ca3bfcac613` | Full S18–S20 rung evidence + controller summary; the #1384 closeout measurement (contains #1552) | `9baee1212766be7eca7672b11ea5b2b9d4e43accf4a08df7d68d5d4c3f40aaf1` |
 | `f80f69fe02612fa789d1b4df21606d2ff79aac50` | Controller summary only (S18–S22, 2026-09-17) | `08ce651c2672a2fb7660e402e6ef3de2149db1edb70cc123702e9ae33b6fdc71` |
 | `9269362fdda951756aa6887779179c5acdf214ec` | Controller summary only (S18–S20, 2026-09-17) | `04f6e8c680c6aeb02f4fd498d49b677d6ac7b924277e484afbd354dc204a9ef4` |
 | `7febcb4fd855c097fc0ff69835f6e74e9a816ff4` | Controller summary only (2026-09-20) | `3fe719c5b6290e3d88c040a7cfc7276139f1325e912fe723a6d27fd967205bff` |

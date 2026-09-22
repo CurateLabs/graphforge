@@ -1,0 +1,42 @@
+{
+  "claim": "engineering_evidence_only",
+  "execution": "native_linux_benchexec_host",
+  "identities": {
+    "admitted_projection_sha256": "ef3f96d2524690a0f927a6dd9700f219d75c4eba633d9d840b2f3138d0eac7f6",
+    "benchexec_python_sha256": "52e0a13e60a981d8c4b6478be2ba5176f69da07948a056bf49cf6f077e30cb41",
+    "benchexec_version": "3.35",
+    "certify_sha256": "e829eb35314ef1d7935cdaeb650de3b814cca26d17be9e2901e535438bda97db",
+    "commit": "ed273d2b2558c4137a398e4980471ca3bfcac613",
+    "generator": "sha256:a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+    "generator_executable_sha256": "f6d13b5bdd2b10f2d9775a720adf9a7c283f9139fd99a62e00f8164f728a2ef3",
+    "gf_sha256": "7d699cd58615745b47e0a1e13b2ec286bfff7b56ece1c9f4218d2fee3e8bc71d",
+    "host_profile_id": "local-linux-cgroups-v2",
+    "host_profile_sha256": "21cbcd01a0896ad8ed9d4aae1ab933cb143d41636fdf66297ead9bb89c3681bf",
+    "producer_sha256": "027464cba0e2fbfb2982803595fd3e9610184ec4600921a0870ce96e1efbb449",
+    "profile_id": "graph500-s20-provider",
+    "profile_sha256": "b8af47526cad5641bfe85c8c68e507c46edf0de106f92bffd712e6ae90c9b59d"
+  },
+  "limits": {
+    "cores": 16,
+    "memory_bytes": 4294967296,
+    "wall_seconds": 14400
+  },
+  "outputs": [
+    "s20-plan.json",
+    "s20-benchexec.json",
+    "s20-graphforge.json",
+    "s20-rung.json",
+    "s20-result.json"
+  ],
+  "rung": "S20",
+  "schema": "graphforge-progressive-host-run-plan/1",
+  "wall_policy": {
+    "margin": 0.1,
+    "maximum_wall_seconds": 14400,
+    "reference_wall_seconds": null
+  },
+  "work_root_capacity": {
+    "free_bytes": 534858334208,
+    "reserved_headroom_bytes": 80530636800
+  }
+}
