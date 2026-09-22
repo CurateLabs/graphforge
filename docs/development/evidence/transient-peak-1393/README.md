@@ -190,3 +190,86 @@ envelope. The target leaves 28% of the envelope free instead of 1.6%.
 Nothing in this document raises the reserve, frees host disk, or reclassifies
 bytes out of the peak. The target is reached by deleting the merge tree, which
 the write-path redesign already deletes for unrelated reasons.
+
+## Phase two — the composed peak on the integrated tree (2026-09-22)
+
+Phase one's reductions have landed: the merge tree is deleted (#1430) and the
+staged input retires per shard (#1418, #1519). This phase re-measures the
+composition on the integrated tree (`18b8c8ab`, contains #1552), with the same
+probe, the same generator seed, and the same chaining as phase one.
+
+### The realized reduction, measured at four scales
+
+| rung | pre-redesign (`fa6447cc`-era series, phase one) | integrated tree (`ed273d2b` archive) | reduction |
+|---|---:|---:|---:|
+| S18 | 546.80 B/edge | 454.7 B/edge (1.91 GB) | 16.8% |
+| S19 | 546.79 B/edge | 454.4 B/edge (3.81 GB) | 16.9% |
+| S20 | 546.78 B/edge | 449.4 B/edge (7.54 GB) | 17.8% |
+| S22 | 547.78 B/edge | 449.4 B/edge (30.16 GB) | 17.9% |
+
+Both series are flat in scale (0.18% and 1.2% drift over sixteen-fold), so the
+reduction is structural and the S26 projection stays linear. Every rung passes
+its correctness, digest-reconciliation and recovery checks — durability and
+the registration ownership property are unchanged, as #1430/#1418/#1519 each
+proved for their own mechanism.
+
+### Composition of the current peak (S17 and S18, this run)
+
+The probe reproduces the recorded rung peaks exactly (S18: 1,907,130,368
+probed against 1,907,134,464 recorded — 4,096 bytes, 0.0002%):
+
+| component | S17 B/edge | S18 B/edge | S18 share | classification |
+|---|---:|---:|---:|---|
+| `shaped_partition_run` | 199.8 | 199.3 | 43.8% | reducible (retirement candidate) |
+| `shaped_output` | 81.9 | 81.9 | 18.0% | removed-by-redesign candidate no longer applies; coexists at the peak |
+| `staged_domain_run` | 66.0 | 66.0 | 14.5% | reducible (retirement candidate) |
+| `source_parquet` | 49.0 | 49.0 | 10.8% | immovable |
+| `registered_source_copy` | 49.0 | 49.0 | 10.8% | immovable (settled policy) |
+| `staged_chunk_run` | 25.3 | 4.2 | 0.9% | was 137.3 — retired by #1418/#1519 |
+| `staged_chunk_parquet` | 9.0 | 1.5 | 0.3% | was 49.1 — retired by #1418/#1519 |
+| `construction_control` | 3.9 | 3.7 | 0.8% | control |
+| everything else | ~0 | ~0 | 0.0% | control |
+
+`merge_tree_level` no longer exists at any transition, and `merge_source_copy`
+is gone with it. The staged-chunk bucket that phase one classified reducible
+(186.4 B/edge) is now 5.7 B/edge: the retirement machinery works as designed.
+
+The peak is now held by the range-partition design's own durable artifacts:
+partition runs (199.3 B/edge) still resident while shaped outputs (81.9) are
+already being produced. These are not merge intermediates — each partition run
+is consumed exactly once by its shaped-output slice.
+
+### Remaining reducible, and why it is not required here
+
+Retiring each partition run as its shaped-output slice completes would clip
+the up-to-199.3 B/edge tail (bounded below by one partition's worth). That is
+a shaping-pipeline sequencing change with its own crash-recovery surface; it
+belongs to the byte-removal lane of the ingest floor workstream (#1478, D2),
+which owns reduction sequencing. This issue's gate is the S26 admission
+margin, and the margin below is stated from the measured, landed state.
+
+### Target and margin, from the measured slope
+
+449.4 B/edge at S22 (67,108,864 edges), flat to 1.2% over sixteen-fold:
+
+| | B/edge | projected S26 peak | margin | margin as % of peak |
+|---|---:|---:|---:|---:|
+| when this issue was filed | 547.78 | 588.5 GB | 9.6 GB | 1.6% |
+| **measured now** | **449.4** | **482.5 GB** | **115.5 GB** | **23.9%** |
+
+Projection: 1,073,741,824 edges at the measured slope; envelope 598.0 GB
+(739.3 GB available, the recorded bench-host sample, minus the unchanged
+141.3 GB reserve). Free space is point-in-time: the same host held 600 GB a
+day earlier and 466 GB the hour after this run, because shared build caches
+move it in both directions; the retained practice is that #1194's audited
+cleanup runs precede admitted rungs. The margin is stated against the
+recorded sample, not manufactured by freeing disk.
+
+### Provenance
+
+- Recorded rung peaks: `ladder/ed273d2b…/` (S18–S20) and
+  `ladder/b6ffb088…/` (S22), both retained with verified receipts.
+- Composition runs: `s17-composition.json`, `s18-composition.json` in this
+  directory; the probe driver and method are unchanged from phase one, run at
+  `TMPDIR` on the work-root filesystem (the CAS install renames within one
+  filesystem; a tmpfs `TMPDIR` refuses with `GF_PUBLICATION_FAILED`).
