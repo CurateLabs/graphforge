@@ -69,7 +69,7 @@ Merge only when:
 - `closingIssuesReferences` contains exactly the intended issue;
 - the diff contains no unrelated changes.
 
-The ruleset enforces a squash merge queue: `gh pr merge --squash --delete-branch` enqueues the PR, the queue reruns CI on the merge group, and the merge lands when that passes. Do not rerun an unchanged tree to attach extra CI results; exact-head PR CI plus the queue run is the gate. After the merge, verify the squash commit on `main` and the issue closure.
+The ruleset enforces a squash merge queue: `gh pr merge --squash` enqueues the PR (the queue rejects `--delete-branch`), the queue reruns CI on the merge group, the merge lands when that passes, and delete the branch after the merge lands. Do not rerun an unchanged tree to attach extra CI results; exact-head PR CI plus the queue run is the gate. After the merge, verify the squash commit on `main` and the issue closure.
 
 ## Issue close
 
