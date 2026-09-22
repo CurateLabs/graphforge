@@ -260,7 +260,7 @@ fn a_corrupted_reachable_object_is_refused_one_way_or_another() {
 
     let sha256_root = project.join("graph-objects").join("sha256");
     let mut corrupted = false;
-    for prefix in fs::read_dir(&sha256_root).unwrap() {
+    'outer: for prefix in fs::read_dir(&sha256_root).unwrap() {
         let prefix = prefix.unwrap().path();
         if !prefix.is_dir() {
             continue;
@@ -268,6 +268,12 @@ fn a_corrupted_reachable_object_is_refused_one_way_or_another() {
         for object in fs::read_dir(&prefix).unwrap() {
             let object = object.unwrap().path();
             let mut bytes = fs::read(&object).unwrap();
+            // Directory order is not deterministic and a populated project can
+            // legitimately retain zero-byte objects; corrupt a non-empty one
+            // so the bit flip is real.
+            if bytes.is_empty() {
+                continue;
+            }
             bytes[0] ^= 0xFF;
             // Sealed CAS objects are mode 0444; reopen them writable first.
             let mut permissions = fs::metadata(&object).unwrap().permissions();
@@ -281,10 +287,7 @@ fn a_corrupted_reachable_object_is_refused_one_way_or_another() {
             fs::set_permissions(&object, permissions).unwrap();
             fs::write(&object, &bytes).unwrap();
             corrupted = true;
-            break;
-        }
-        if corrupted {
-            break;
+            break 'outer;
         }
     }
     assert!(
