@@ -376,7 +376,11 @@
         },
         {
           "path": "crates/graphforge-api/src/resumable_construction.rs",
-          "symbol": "post_publication_refresh_failure_reports_committed_authority"
+          "symbol": "before_install_refresh_failure_reports_committed_authority"
+        },
+        {
+          "path": "crates/graphforge-api/src/resumable_construction.rs",
+          "symbol": "pre_publication_reader_preparation_failure_fails_closed"
         },
         {
           "path": "crates/graphforge-api/tests/resumable_construction_surface.rs",

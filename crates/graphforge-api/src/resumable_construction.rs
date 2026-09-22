@@ -273,6 +273,7 @@ impl GraphConstructionSession<'_> {
         self.seal_and_publish_inner(Some(cancellation))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn seal_and_publish_inner(
         &mut self,
         cancellation: Option<&crate::CancellationToken>,
@@ -288,7 +289,7 @@ impl GraphConstructionSession<'_> {
             .expect("adjacency visibility lock poisoned");
         let target = derived_uuid(self.session_uuid, b"generation");
         let transaction = derived_uuid(self.session_uuid, b"transaction");
-        let published = if let Some(replay) =
+        let outcome = if let Some(replay) =
             self.inner
                 .replay_committed_publication(target, transaction, || {
                     cancellation.is_some_and(crate::CancellationToken::is_cancelled)
@@ -302,7 +303,7 @@ impl GraphConstructionSession<'_> {
                     idempotent_replay: true,
                 });
             }
-            replay
+            PublicationOutcome::FromCurrent(replay)
         } else {
             let prepare = RegionScope::named("prepare_encoding");
             let encoding = self.prepare_encoding(cancellation)?;
@@ -310,64 +311,132 @@ impl GraphConstructionSession<'_> {
             if let Some(token) = cancellation {
                 token.checkpoint()?;
             }
-            self.inner.publish_canonical_with_cancellation(
+            // Reader preparation runs against the durable candidate before
+            // CURRENT. Failure leaves CURRENT unchanged, so a candidate that
+            // cannot be hydrated or authorized never becomes visible; a
+            // refresh that once had to recover a committed generation now
+            // fails closed before the commit point.
+            let graph = self.graph;
+            let mut prepared: Option<PreparedGenerationRefresh> = None;
+            let mut prepare_readers =
+                |candidate: &graphforge_storage::ResolvedProjectGeneration| -> Result<(), GfError> {
+                    refresh_boundary(RefreshBoundary::BeforeHydrate)?;
+                    if candidate.generation_uuid() != target {
+                        return Err(GfError::Storage(
+                            "durable publication candidate differs from the construction target"
+                                .into(),
+                        ));
+                    }
+                    let hydration = RegionScope::named("hydration");
+                    let (prepared_dir, prepared_guard, hydration_evidence) =
+                        super::hydrate_graph_workspace(candidate, false)?;
+                    drop(hydration);
+                    refresh_boundary(RefreshBoundary::AfterHydrate)?;
+                    let read_authority = RegionScope::named("read_authority");
+                    let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
+                    let read_authority_prepared =
+                        graph.prepare_generation_read_authority(candidate, &prepared_dir)?;
+                    drop(read_authority);
+                    prepared = Some(PreparedGenerationRefresh {
+                        workspace: super::GraphWorkspace {
+                            dir: prepared_dir,
+                            _owner: prepared_guard,
+                        },
+                        runtime_catalog,
+                        read_authority: read_authority_prepared,
+                        hydration_evidence,
+                    });
+                    Ok(())
+                };
+            let published = self.inner.publish_canonical_with_cancellation(
                 &encoding,
                 target,
                 transaction,
                 || cancellation.is_some_and(crate::CancellationToken::is_cancelled),
-            )?
-        };
-
-        let refresh = (|| {
-            refresh_boundary(RefreshBoundary::BeforeHydrate)?;
-            let hydration = RegionScope::named("hydration");
-            let root = self.graph.resolved_generation.container_root();
-            let resolved = graphforge_storage::resolve_project_generation(root)?;
-            if resolved.generation_uuid() != published.generation_uuid {
-                return Err(GfError::Storage(
-                    "construction publication did not resolve its exact generation".into(),
-                ));
+                Some(&mut prepare_readers),
+            )?;
+            match prepared {
+                Some(refreshed) => {
+                    let refreshed = Box::new(refreshed);
+                    self.inner
+                        .record_hydration_evidence(&refreshed.hydration_evidence)?;
+                    // The commit point is behind us: CURRENT already names the
+                    // published generation, so an install-boundary failure
+                    // keeps the committed-generation recovery contract.
+                    refresh_boundary(RefreshBoundary::BeforeInstall).map_err(
+                        |error: GfError| {
+                            GfError::Storage(format!(
+                                "phase=POST_PUBLICATION_REFRESH committed=true generation_uuid={} recovery=reopen_or_resume cause={error}",
+                                published.generation_uuid
+                            ))
+                        },
+                    )?;
+                    PublicationOutcome::Prepared(published, refreshed)
+                }
+                // The publisher replayed an already-published transaction
+                // without invoking preparation; refresh from CURRENT below.
+                None => PublicationOutcome::FromCurrent(published),
             }
-            let (prepared_dir, prepared_guard, hydration_evidence) =
-                super::hydrate_graph_workspace(&resolved, false)?;
-            self.inner.record_hydration_evidence(&hydration_evidence)?;
-            drop(hydration);
-            refresh_boundary(RefreshBoundary::AfterHydrate)?;
-            let read_authority = RegionScope::named("read_authority");
-            let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
-            let prepared = self
-                .graph
-                .prepare_generation_read_authority(&resolved, &prepared_dir)?;
-            drop(read_authority);
-            refresh_boundary(RefreshBoundary::BeforeInstall)?;
-            Ok((
-                resolved,
-                super::GraphWorkspace {
-                    dir: prepared_dir,
-                    _owner: prepared_guard,
-                },
-                runtime_catalog,
-                prepared,
-            ))
-        })();
-        let (resolved, prepared_guard, runtime_catalog, prepared) =
-            refresh.map_err(|error: GfError| {
-                GfError::Storage(format!(
-                    "phase=POST_PUBLICATION_REFRESH committed=true generation_uuid={} recovery=reopen_or_resume cause={error}",
-                    published.generation_uuid
-                ))
-            })?;
+        };
+        let (published, refreshed) = match outcome {
+            PublicationOutcome::Prepared(published, refreshed) => (published, refreshed),
+            PublicationOutcome::FromCurrent(published) => {
+                let graph = self.graph;
+                let inner = &mut self.inner;
+                let refresh = (|| {
+                    refresh_boundary(RefreshBoundary::BeforeHydrate)?;
+                    let hydration = RegionScope::named("hydration");
+                    let resolved = graphforge_storage::resolve_project_generation(
+                        graph.resolved_generation.container_root(),
+                    )?;
+                    if resolved.generation_uuid() != published.generation_uuid {
+                        return Err(GfError::Storage(
+                            "construction publication did not resolve its exact generation".into(),
+                        ));
+                    }
+                    let (prepared_dir, prepared_guard, hydration_evidence) =
+                        super::hydrate_graph_workspace(&resolved, false)?;
+                    inner.record_hydration_evidence(&hydration_evidence)?;
+                    drop(hydration);
+                    refresh_boundary(RefreshBoundary::AfterHydrate)?;
+                    let read_authority = RegionScope::named("read_authority");
+                    let runtime_catalog = super::load_runtime_catalog(&prepared_dir)?;
+                    let read_authority_prepared =
+                        graph.prepare_generation_read_authority(&resolved, &prepared_dir)?;
+                    drop(read_authority);
+                    refresh_boundary(RefreshBoundary::BeforeInstall)?;
+                    Ok(PreparedGenerationRefresh {
+                        workspace: super::GraphWorkspace {
+                            dir: prepared_dir,
+                            _owner: prepared_guard,
+                        },
+                        runtime_catalog,
+                        read_authority: read_authority_prepared,
+                        hydration_evidence,
+                    })
+                })();
+                let refreshed = refresh.map_err(|error: GfError| {
+                    GfError::Storage(format!(
+                        "phase=POST_PUBLICATION_REFRESH committed=true generation_uuid={} recovery=reopen_or_resume cause={error}",
+                        published.generation_uuid
+                    ))
+                })?;
+                (published, Box::new(refreshed))
+            }
+        };
         // Readers retain stable paths and capabilities. Never rename a workspace
         // pinned by an ordinal handle or an unconsumed stream (including Windows).
         // All fallible preparation precedes this transition under write visibility.
-        let old_workspace = self.graph.replace_workspace_owner(prepared_guard);
+        let old_workspace = self.graph.replace_workspace_owner(refreshed.workspace);
         *self
             .graph
             .runtime_catalog
             .lock()
-            .expect("runtime catalog poisoned") = runtime_catalog;
-        self.graph
-            .install_prepared_generation_read_authority(resolved.generation_uuid(), prepared);
+            .expect("runtime catalog poisoned") = refreshed.runtime_catalog;
+        self.graph.install_prepared_generation_read_authority(
+            published.generation_uuid,
+            refreshed.read_authority,
+        );
         *self
             .graph
             .uuid_membership_index
@@ -410,11 +479,33 @@ impl GraphConstructionSession<'_> {
     }
 }
 
+/// How a completed publication delivers its reader refresh.
+enum PublicationOutcome {
+    /// CURRENT already names the replayed target; refresh from CURRENT with
+    /// the committed generation's recovery contract.
+    FromCurrent(graphforge_storage::ProjectPublicationReceipt),
+    /// Fresh publication; readers were prepared against the durable candidate
+    /// before CURRENT, so installation alone remains.
+    Prepared(
+        graphforge_storage::ProjectPublicationReceipt,
+        Box<PreparedGenerationRefresh>,
+    ),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RefreshBoundary {
     BeforeHydrate,
     AfterHydrate,
     BeforeInstall,
+}
+
+/// Reader workspace and authorities prepared for one publication outcome,
+/// ready to install atomically under write visibility.
+struct PreparedGenerationRefresh {
+    workspace: super::GraphWorkspace,
+    runtime_catalog: super::RuntimeCatalog,
+    read_authority: super::PreparedGenerationReadAuthority,
+    hydration_evidence: graphforge_storage::GraphFilesOpenEvidence,
 }
 
 #[cfg(not(test))]
@@ -633,14 +724,18 @@ mod tests {
     }
 
     #[test]
-    fn post_publication_refresh_failure_reports_committed_authority() {
+    fn pre_publication_reader_preparation_failure_fails_closed() {
         for boundary in [
             RefreshBoundary::BeforeHydrate,
             RefreshBoundary::AfterHydrate,
-            RefreshBoundary::BeforeInstall,
         ] {
-            let graph = GraphForge::new(None).unwrap();
+            let directory = tempfile::TempDir::new().unwrap();
+            let path = directory.path().to_str().unwrap().to_owned();
+            let graph = GraphForge::new(Some(&path)).unwrap();
             let root = graph.resolved_generation.container_root().to_path_buf();
+            let parent = graphforge_storage::resolve_project_generation(&root)
+                .unwrap()
+                .generation_uuid();
             let old_workspace = graph.workspace_for_session();
             let old_generation = *graph.current_generation_uuid.lock().unwrap();
             let mut session = graph.begin_graph_construction(Default::default()).unwrap();
@@ -650,27 +745,85 @@ mod tests {
             REFRESH_FAILURE.with(|failure| failure.set(Some(boundary)));
             let error = session.seal_and_publish().unwrap_err();
             REFRESH_FAILURE.with(|failure| failure.set(None));
-            assert!(session.progress().publication_committed);
-            let committed = graphforge_storage::resolve_project_generation(&root)
-                .unwrap()
-                .generation_uuid();
+            // The commit point was never crossed: CURRENT is unchanged and
+            // the candidate never became visible.
+            assert!(!session.progress().publication_committed);
+            let session_uuid = session.progress().session_uuid;
+            assert_eq!(
+                graphforge_storage::resolve_project_generation(&root)
+                    .unwrap()
+                    .generation_uuid(),
+                parent
+            );
             let message = error.to_string();
-            assert!(message.contains("phase=POST_PUBLICATION_REFRESH"));
-            assert!(message.contains("committed=true"));
-            assert!(message.contains(&format!("generation_uuid={committed}")));
-            assert!(message.contains("recovery=reopen_or_resume"));
+            assert!(message.contains("committed=false"), "{message}");
             assert_eq!(old_workspace.path(), graph.workspace_for_session().path());
             assert_eq!(
                 *graph.current_generation_uuid.lock().unwrap(),
                 old_generation
             );
             assert_eq!(graph.node_count("Person").unwrap(), 0);
+            // The interrupted attempt leaves a PREPARING transaction journal;
+            // the documented recovery path is reopen (recovery runs on open),
+            // then resume the session and publish.
+            drop(session);
+            drop(graph);
+            let reopened = GraphForge::new(Some(&path)).unwrap();
+            assert_eq!(
+                graphforge_storage::resolve_project_generation(
+                    &reopened.resolved_generation.container_root()
+                )
+                .unwrap()
+                .generation_uuid(),
+                parent
+            );
+            let mut session = reopened
+                .resume_graph_construction(session_uuid, Default::default())
+                .unwrap();
             let retry = session.seal_and_publish().unwrap();
-            assert!(retry.idempotent_replay);
-            assert_eq!(retry.generation_uuid, committed);
-            assert_eq!(graph.node_count("Person").unwrap(), 1);
-            assert_ne!(old_workspace.path(), graph.workspace_for_session().path());
+            assert!(!retry.idempotent_replay);
+            assert_ne!(retry.generation_uuid, parent);
+            assert_eq!(reopened.node_count("Person").unwrap(), 1);
+            assert_ne!(
+                old_workspace.path(),
+                reopened.workspace_for_session().path()
+            );
         }
+    }
+
+    #[test]
+    fn before_install_refresh_failure_reports_committed_authority() {
+        let graph = GraphForge::new(None).unwrap();
+        let root = graph.resolved_generation.container_root().to_path_buf();
+        let old_workspace = graph.workspace_for_session();
+        let old_generation = *graph.current_generation_uuid.lock().unwrap();
+        let mut session = graph.begin_graph_construction(Default::default()).unwrap();
+        session
+            .append_nodes("nodes", &nodes(&[Uuid::now_v7()]))
+            .unwrap();
+        REFRESH_FAILURE.with(|failure| failure.set(Some(RefreshBoundary::BeforeInstall)));
+        let error = session.seal_and_publish().unwrap_err();
+        REFRESH_FAILURE.with(|failure| failure.set(None));
+        assert!(session.progress().publication_committed);
+        let committed = graphforge_storage::resolve_project_generation(&root)
+            .unwrap()
+            .generation_uuid();
+        let message = error.to_string();
+        assert!(message.contains("phase=POST_PUBLICATION_REFRESH"));
+        assert!(message.contains("committed=true"));
+        assert!(message.contains(&format!("generation_uuid={committed}")));
+        assert!(message.contains("recovery=reopen_or_resume"));
+        assert_eq!(old_workspace.path(), graph.workspace_for_session().path());
+        assert_eq!(
+            *graph.current_generation_uuid.lock().unwrap(),
+            old_generation
+        );
+        assert_eq!(graph.node_count("Person").unwrap(), 0);
+        let retry = session.seal_and_publish().unwrap();
+        assert!(retry.idempotent_replay);
+        assert_eq!(retry.generation_uuid, committed);
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+        assert_ne!(old_workspace.path(), graph.workspace_for_session().path());
     }
 
     fn relationship_identities(batches: &[RecordBatch]) -> std::collections::BTreeSet<[Uuid; 3]> {

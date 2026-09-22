@@ -2245,6 +2245,123 @@ fn canonical_publication_rejects_replaced_durable_inventory_without_payload_read
 }
 
 #[test]
+fn reader_preparation_runs_against_candidate_before_current() {
+    let root = TempDir::new().unwrap();
+    let parent = crate::open_or_initialize_project(root.path()).unwrap();
+    let prior = parent.generation_uuid();
+    drop(parent);
+    let prior_current = std::fs::read(root.path().join("CURRENT")).unwrap();
+    let mut session = GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(9_471),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+    let encoding = session.encode_canonical(&shape, 1).unwrap();
+    let saw_candidate_pre_current = std::cell::Cell::new(false);
+    let publication = session
+        .publish_canonical_with_cancellation(
+            &encoding,
+            Uuid::from_u128(9_472),
+            Uuid::from_u128(9_473),
+            || false,
+            Some(&mut |candidate| {
+                assert_eq!(candidate.generation_uuid(), Uuid::from_u128(9_472));
+                assert_eq!(candidate.parent_generation_uuid(), Some(prior));
+                // CURRENT still names the parent: the candidate is not
+                // visible yet.
+                assert_eq!(
+                    std::fs::read(root.path().join("CURRENT")).unwrap(),
+                    prior_current
+                );
+                saw_candidate_pre_current.set(true);
+                Ok(())
+            }),
+        )
+        .unwrap();
+    assert_eq!(publication.generation_uuid, Uuid::from_u128(9_472));
+    assert!(saw_candidate_pre_current.get());
+    assert_eq!(
+        crate::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        Uuid::from_u128(9_472)
+    );
+    assert_eq!(
+        session.checkpoint.publication_state,
+        Some(ConstructionPublicationState::Published)
+    );
+}
+
+#[test]
+fn reader_preparation_failure_leaves_current_unchanged_and_retryable() {
+    let root = TempDir::new().unwrap();
+    let parent = crate::open_or_initialize_project(root.path()).unwrap();
+    drop(parent);
+    let prior_current = std::fs::read(root.path().join("CURRENT")).unwrap();
+    let mut session = GraphConstructionSession::open(
+        root.path(),
+        Uuid::from_u128(9_474),
+        0,
+        GraphConstructionBudgets::default(),
+    )
+    .unwrap();
+    session
+        .append(ConstructionChunkKind::Node, "nodes", &node_batch(1, 2))
+        .unwrap();
+    session.seal().unwrap();
+    let shape = session.shape_canonical_with_cancellation(|| false).unwrap();
+    let encoding = session.encode_canonical(&shape, 1).unwrap();
+    let error = session
+        .publish_canonical_with_cancellation(
+            &encoding,
+            Uuid::from_u128(9_475),
+            Uuid::from_u128(9_476),
+            || false,
+            Some(&mut |_candidate| {
+                Err(crate::GfError::Validation(
+                    "injected reader preparation failure".into(),
+                ))
+            }),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("committed=false"), "{error}");
+    assert_eq!(
+        std::fs::read(root.path().join("CURRENT")).unwrap(),
+        prior_current
+    );
+    assert_ne!(
+        session.checkpoint.publication_state,
+        Some(ConstructionPublicationState::Published)
+    );
+    // The interrupted attempt leaves a PREPARING project journal; the standard
+    // recovery entrypoint cleans it (as reopen would), and the retry publishes.
+    crate::recover_project_transactions(root.path()).unwrap();
+    let publication = session
+        .publish_canonical_with_cancellation(
+            &encoding,
+            Uuid::from_u128(9_475),
+            Uuid::from_u128(9_476),
+            || false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(publication.generation_uuid, Uuid::from_u128(9_475));
+    assert_eq!(
+        crate::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid(),
+        Uuid::from_u128(9_475)
+    );
+}
+
+#[test]
 fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
     let root = TempDir::new().unwrap();
     let parent = crate::open_or_initialize_project(root.path()).unwrap();
@@ -2268,10 +2385,16 @@ fn canonical_publication_cancels_at_named_immediate_pre_current_boundary() {
     let transaction = Uuid::from_u128(9_467);
     let mut checkpoints = 0_u8;
     let error = session
-        .publish_canonical_with_cancellation(&encoding, target, transaction, || {
-            checkpoints += 1;
-            checkpoints == 2
-        })
+        .publish_canonical_with_cancellation(
+            &encoding,
+            target,
+            transaction,
+            || {
+                checkpoints += 1;
+                checkpoints == 2
+            },
+            None,
+        )
         .unwrap_err();
     assert_eq!(error.code(), "GF_CANCELLED");
     assert!(error.to_string().contains("before_current_replace"));

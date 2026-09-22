@@ -1142,7 +1142,8 @@ impl StagedProjectGeneration {
     }
 }
 
-type ReaderPreparation<'a> = &'a mut dyn FnMut(&ResolvedProjectGeneration) -> Result<(), GfError>;
+pub(crate) type ReaderPreparation<'a> =
+    &'a mut dyn FnMut(&ResolvedProjectGeneration) -> Result<(), GfError>;
 
 impl ValidatedProjectGeneration {
     /// Durably install the generation, then atomically replace `CURRENT`.
@@ -1163,14 +1164,31 @@ impl ValidatedProjectGeneration {
         self.publish_with_optional_graph_objects(Some(lease), None, None)
     }
 
-    /// Publish a compact graph while polling cancellation until the atomic
-    /// `CURRENT` replacement commit point.
+    /// Publish a compact graph while polling cooperative cancellation before `CURRENT`.
     pub(crate) fn publish_with_graph_objects_cancellable(
         mut self,
         lease: &crate::GraphObjectPublicationLease,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<ProjectPublicationReceipt, GfError> {
         self.publish_with_optional_graph_objects(Some(lease), Some(cancelled), None)
+    }
+
+    /// Publish a compact graph with pre-`CURRENT` reader preparation while
+    /// polling cooperative cancellation through the atomic `CURRENT`
+    /// replacement commit point.
+    ///
+    /// The preparation callback runs under the publication lock after the
+    /// candidate generation is durable and lease-verified and immediately
+    /// before `CURRENT`; it cannot select a generation. Callback failure
+    /// leaves `CURRENT` unchanged (fail-closed), and cancellation remains
+    /// pollable until the commit point.
+    pub(crate) fn publish_with_graph_objects_preparation_cancellable(
+        mut self,
+        lease: &crate::GraphObjectPublicationLease,
+        cancelled: &mut dyn FnMut() -> bool,
+        preparation: ReaderPreparation<'_>,
+    ) -> Result<ProjectPublicationReceipt, GfError> {
+        self.publish_with_optional_graph_objects(Some(lease), Some(cancelled), Some(preparation))
     }
 
     /// Prepare authenticated readers against the durable candidate before CURRENT.

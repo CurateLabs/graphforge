@@ -1,875 +1,1010 @@
 {
-  "provenance": {
-    "contract": "graphforge-publication-attribution-1481/1",
-    "host": "OVHC-AGENCY (16 CPUs, md RAID1 ext4 root)",
-    "main_sha": "a902f23f83af2fa0cf018bccbf1c1e9997e03603",
-    "stock_tree": "097e7631d12dea22ca24bff2601ad31801684cb3",
-    "binaries": {
-      "stock-gf": "6b6e62566c37044e006fdbeddd588d1e54966c4ac15b60d341486b866e6e90c0",
-      "instrumented-gf": "8627f201182520610a3fab171ac44681d05f1408109f34b331f58d6b9662c098"
-    },
-    "inputs": {
-      "generator_source_sha256": "a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
-      "seed": 13907095936298285200,
-      "edge_factor": 16,
-      "s18": {
-        "edges.parquet": "f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4",
-        "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075"
-      },
-      "s22": {
-        "edges.parquet": "1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13",
-        "nodes.parquet": "bcbcbea526e61ceb63f6006ee5f56de6bb4f74cffdd68dc6eff6d230d3897f06"
-      }
-    },
-    "resource_limits": "BenchExec runexec --cores 0-15 --memlimit 4 GiB, systemd user scope, fresh project per run",
-    "boundary": "complete five-command ingest: begin, register-parquet x2, validate, commit (walltime from BenchExec)",
-    "quiet_guard": "gf-quiet-host.sh + per-process guard before/during(1 s)/after; contended observations retained under contended/ and excluded",
-    "scheduler_stats": "kernel.sched_schedstats=1 for the runs, restored to 0 afterwards",
-    "floor_edges_per_second": 1000000
+ "provenance": {
+  "contract": "graphforge-publication-attribution-1481/1",
+  "host": "OVHC-AGENCY (16 CPUs, md RAID1 ext4 root)",
+  "main_sha": "a902f23f83af2fa0cf018bccbf1c1e9997e03603",
+  "stock_tree": "097e7631d12dea22ca24bff2601ad31801684cb3",
+  "binaries": {
+   "stock-gf": "6b6e62566c37044e006fdbeddd588d1e54966c4ac15b60d341486b866e6e90c0",
+   "instrumented-gf": "8627f201182520610a3fab171ac44681d05f1408109f34b331f58d6b9662c098"
   },
+  "inputs": {
+   "generator_source_sha256": "a7cd8397ce191c48094d8812eb43dfc894084645dd439e76fb8704b35bb61fdc",
+   "seed": 13907095936298285200,
+   "edge_factor": 16,
+   "s18": {
+    "edges.parquet": "f112ccbec94875f36f113e9bdf3e6e7d88e3105bafbaeeb3a7cb42ac4883e9c4",
+    "nodes.parquet": "44c9dfd9325013d0f6ea2f03bd86b00d2bea01265254cb28f70f0881a6478075"
+   },
+   "s22": {
+    "edges.parquet": "1c0ff75485f75e904cbd59b6f5d42da1d8b1af6ddac59ee6c495a4948a428d13",
+    "nodes.parquet": "bcbcbea526e61ceb63f6006ee5f56de6bb4f74cffdd68dc6eff6d230d3897f06"
+   }
+  },
+  "resource_limits": "BenchExec runexec --cores 0-15 --memlimit 4 GiB, systemd user scope, fresh project per run",
+  "boundary": "complete five-command ingest: begin, register-parquet x2, validate, commit (walltime from BenchExec)",
+  "quiet_guard": "gf-quiet-host.sh + per-process guard before/during(1 s)/after; contended observations retained under contended/ and excluded",
+  "scheduler_stats": "kernel.sched_schedstats=1 for the runs, restored to 0 afterwards",
+  "floor_edges_per_second": 1000000
+ },
+ "summary": {
+  "s18-stock": {
+   "n": 3,
+   "edges": 4194304,
+   "ingest_wall_s_median": 28.477053155889735,
+   "ingest_cpu_s_median": 26.70837,
+   "publish_wall_s_median": 2.325707523,
+   "publish_cpu_s_median": 1.33,
+   "publish_us_per_edge_median": 0.5544918830394745,
+   "publish_share_of_allowance_median": 0.5544918830394745,
+   "ingest_over_allowance_median": 6.789458550426897,
+   "remaining_allowance_after_publish_s": 1.8685964769999996
+  },
+  "s18-inst": {
+   "n": 3,
+   "edges": 4194304,
+   "ingest_wall_s_median": 27.900627356022596,
+   "ingest_cpu_s_median": 26.60741,
+   "publish_wall_s_median": 2.245882281,
+   "publish_cpu_s_median": 1.34,
+   "publish_us_per_edge_median": 0.5354600622653961,
+   "publish_share_of_allowance_median": 0.5354600622653962,
+   "ingest_over_allowance_median": 6.652027930265092,
+   "remaining_allowance_after_publish_s": 1.9484217189999997
+  }
+ },
+ "observations": [
+  {
+   "name": "s18-inst-b1-a1",
+   "edges": 4194304,
+   "ingest_wall_s": 28.1731459510047,
+   "ingest_cpu_s": 26.323544,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.717001426459479,
+   "publish_wall_s": 2.354633366,
+   "publish_cpu_s": 1.34,
+   "publish_residual_wall_s": 0.00100748,
+   "publish_us_per_edge": 0.5613883414268493,
+   "publish_share_of_allowance": 0.5613883414268493,
+   "publish_children": {
+    "cas_install": {
+     "wall_s": 0.736928568,
+     "cpu_s": 0.36,
+     "thread_sleeping_s": 0.37612617,
+     "thread_runnable_s": 0.00021377,
+     "thread_unknown_s": 3.312e-05
+    },
+    "generation_commit": {
+     "wall_s": 0.743020683,
+     "cpu_s": 0.44,
+     "thread_sleeping_s": 0.308079151,
+     "thread_runnable_s": 0.0012017,
+     "thread_unknown_s": 4.0412e-05
+    },
+    "hydration": {
+     "wall_s": 0.437516261,
+     "cpu_s": 0.26,
+     "thread_sleeping_s": 0.170935924,
+     "thread_runnable_s": 6.66e-05,
+     "thread_unknown_s": 1.5347e-05
+    },
+    "prepare_encoding": {
+     "wall_s": 0.024341794,
+     "cpu_s": 0.03,
+     "thread_sleeping_s": 0.00071684,
+     "thread_runnable_s": 2.175e-05,
+     "thread_unknown_s": 7.242e-06
+    },
+    "publication_authentication": {
+     "wall_s": 0.005511082,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.00175518,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "publication_intent": {
+     "wall_s": 0.001574142,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.00040475,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": 3.11e-07
+    },
+    "publication_receipt": {
+     "wall_s": 0.359666071,
+     "cpu_s": 0.2,
+     "thread_sleeping_s": 0.155069744,
+     "thread_runnable_s": 0.00015085,
+     "thread_unknown_s": 2.4567e-05
+    },
+    "read_authority": {
+     "wall_s": 0.045067285,
+     "cpu_s": 0.05,
+     "thread_sleeping_s": 0.002036932,
+     "thread_runnable_s": 4.73e-06,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 25.206429921,
+   "seal_wall_s": 19.640837006,
+   "shaping_wall_s": 12.211073771,
+   "shaping_cpu_s": 11.16,
+   "canonical_encoding_wall_s": 7.371143496,
+   "canonical_encoding_cpu_s": 7.01,
+   "adjacency_encoding_wall_s": 3.652046113,
+   "adjacency_encoding_cpu_s": 3.49,
+   "commands_wall_s": {
+    "begin": [
+     0.000624182
+    ],
+    "register-parquet": [
+     0.007557753,
+     0.464200073
+    ],
+    "validate": [
+     25.206915141
+    ],
+    "commit": [
+     2.386937902
+    ]
+   },
+   "blkio_read_bytes": 10787782656.0,
+   "blkio_write_bytes": 9784037376.0,
+   "peak_cgroup_bytes": 848764928.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s18-inst-b2-a2",
+   "edges": 4194304,
+   "ingest_wall_s": 27.900627356022596,
+   "ingest_cpu_s": 26.661043,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.652027930265092,
+   "publish_wall_s": 2.245882281,
+   "publish_cpu_s": 1.34,
+   "publish_residual_wall_s": 0.001093751,
+   "publish_us_per_edge": 0.5354600622653961,
+   "publish_share_of_allowance": 0.5354600622653962,
+   "publish_children": {
+    "cas_install": {
+     "wall_s": 0.73105601,
+     "cpu_s": 0.35,
+     "thread_sleeping_s": 0.376355225,
+     "thread_runnable_s": 0.00010339,
+     "thread_unknown_s": null
+    },
+    "generation_commit": {
+     "wall_s": 0.69841306,
+     "cpu_s": 0.44,
+     "thread_sleeping_s": 0.258489429,
+     "thread_runnable_s": 0.00025364,
+     "thread_unknown_s": 2.4213e-05
+    },
+    "hydration": {
+     "wall_s": 0.409343174,
+     "cpu_s": 0.26,
+     "thread_sleeping_s": 0.144007152,
+     "thread_runnable_s": 0.0002266,
+     "thread_unknown_s": 1.4364e-05
+    },
+    "prepare_encoding": {
+     "wall_s": 0.021991884,
+     "cpu_s": 0.02,
+     "thread_sleeping_s": 0.00047061,
+     "thread_runnable_s": 1.027e-05,
+     "thread_unknown_s": 5.03e-07
+    },
+    "publication_authentication": {
+     "wall_s": 0.003778596,
+     "cpu_s": 0.01,
+     "thread_sleeping_s": 0.00090181,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "publication_intent": {
+     "wall_s": 0.001835387,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.00046804,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": 2.46e-07
+    },
+    "publication_receipt": {
+     "wall_s": 0.333457732,
+     "cpu_s": 0.21,
+     "thread_sleeping_s": 0.129767332,
+     "thread_runnable_s": 5.358e-05,
+     "thread_unknown_s": null
+    },
+    "read_authority": {
+     "wall_s": 0.044912687,
+     "cpu_s": 0.05,
+     "thread_sleeping_s": 0.001739801,
+     "thread_runnable_s": 1.396e-05,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 25.064276914,
+   "seal_wall_s": 19.54455427,
+   "shaping_wall_s": 11.861517314,
+   "shaping_cpu_s": 11.18,
+   "canonical_encoding_wall_s": 7.627582607,
+   "canonical_encoding_cpu_s": 7.28,
+   "adjacency_encoding_wall_s": 3.693216211,
+   "adjacency_encoding_cpu_s": 3.53,
+   "commands_wall_s": {
+    "begin": [
+     0.000851108
+    ],
+    "register-parquet": [
+     0.007452461,
+     0.455120917
+    ],
+    "validate": [
+     25.064712423
+    ],
+    "commit": [
+     2.273436299
+    ]
+   },
+   "blkio_read_bytes": 10750492672.0,
+   "blkio_write_bytes": 9782652928.0,
+   "peak_cgroup_bytes": 835006464.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s18-inst-b3-a2",
+   "edges": 4194304,
+   "ingest_wall_s": 27.55895388801582,
+   "ingest_cpu_s": 26.60741,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.570566627506214,
+   "publish_wall_s": 2.135956954,
+   "publish_cpu_s": 1.33,
+   "publish_residual_wall_s": 0.000960698,
+   "publish_us_per_edge": 0.5092518219947815,
+   "publish_share_of_allowance": 0.5092518219947816,
+   "publish_children": {
+    "cas_install": {
+     "wall_s": 0.670038153,
+     "cpu_s": 0.36,
+     "thread_sleeping_s": 0.311223026,
+     "thread_runnable_s": 0.00014462,
+     "thread_unknown_s": 3.459e-06
+    },
+    "generation_commit": {
+     "wall_s": 0.669024743,
+     "cpu_s": 0.43,
+     "thread_sleeping_s": 0.239569063,
+     "thread_runnable_s": 6.766e-05,
+     "thread_unknown_s": 2.1211e-05
+    },
+    "hydration": {
+     "wall_s": 0.400162233,
+     "cpu_s": 0.26,
+     "thread_sleeping_s": 0.136681916,
+     "thread_runnable_s": 0.000112631,
+     "thread_unknown_s": 8.568e-06
+    },
+    "prepare_encoding": {
+     "wall_s": 0.024031107,
+     "cpu_s": 0.03,
+     "thread_sleeping_s": 0.000493521,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "publication_authentication": {
+     "wall_s": 0.003967099,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.000807871,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "publication_intent": {
+     "wall_s": 0.001591062,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.000415781,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "publication_receipt": {
+     "wall_s": 0.322008214,
+     "cpu_s": 0.21,
+     "thread_sleeping_s": 0.118678591,
+     "thread_runnable_s": 0.00016877,
+     "thread_unknown_s": 1.1329e-05
+    },
+    "read_authority": {
+     "wall_s": 0.044173645,
+     "cpu_s": 0.04,
+     "thread_sleeping_s": 0.001491282,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 24.868073806,
+   "seal_wall_s": 19.304182777,
+   "shaping_wall_s": 11.871513011,
+   "shaping_cpu_s": 11.34,
+   "canonical_encoding_wall_s": 7.37686707,
+   "canonical_encoding_cpu_s": 7.07,
+   "adjacency_encoding_wall_s": 3.566066114,
+   "adjacency_encoding_cpu_s": 3.45,
+   "commands_wall_s": {
+    "begin": [
+     0.000665263
+    ],
+    "register-parquet": [
+     0.007334036,
+     0.418383503
+    ],
+    "validate": [
+     24.868543925
+    ],
+    "commit": [
+     2.165796234
+    ]
+   },
+   "blkio_read_bytes": 10750533632.0,
+   "blkio_write_bytes": 9781665792.0,
+   "peak_cgroup_bytes": 834674688.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s18-stock-b1-a1",
+   "edges": 4194304,
+   "ingest_wall_s": 28.554480377817526,
+   "ingest_cpu_s": 26.566627,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.807918638662702,
+   "publish_wall_s": 2.350280087,
+   "publish_cpu_s": 1.34,
+   "publish_residual_wall_s": 2.316979458,
+   "publish_us_per_edge": 0.5603504388332367,
+   "publish_share_of_allowance": 0.5603504388332367,
+   "publish_children": {
+    "fsync": {
+     "wall_s": 0.005677934,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.002453081,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "lock_wait": {
+     "wall_s": 0.027622695,
+     "cpu_s": 0.04,
+     "thread_sleeping_s": 0.0,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 25.529906323,
+   "seal_wall_s": 19.974481896,
+   "shaping_wall_s": 12.391598565,
+   "shaping_cpu_s": 11.24,
+   "canonical_encoding_wall_s": 7.528068467,
+   "canonical_encoding_cpu_s": 7.16,
+   "adjacency_encoding_wall_s": null,
+   "adjacency_encoding_cpu_s": null,
+   "commands_wall_s": {
+    "begin": [
+     0.000688124
+    ],
+    "register-parquet": [
+     0.007953962,
+     0.530194693
+    ],
+    "validate": [
+     25.530388963
+    ],
+    "commit": [
+     2.380237915
+    ]
+   },
+   "blkio_read_bytes": 10750500864.0,
+   "blkio_write_bytes": 9781583872.0,
+   "peak_cgroup_bytes": 849596416.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s18-stock-b2-a2",
+   "edges": 4194304,
+   "ingest_wall_s": 28.477053155889735,
+   "ingest_cpu_s": 26.70837,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.789458550426897,
+   "publish_wall_s": 2.325707523,
+   "publish_cpu_s": 1.3,
+   "publish_residual_wall_s": 2.293445333,
+   "publish_us_per_edge": 0.5544918830394745,
+   "publish_share_of_allowance": 0.5544918830394745,
+   "publish_children": {
+    "fsync": {
+     "wall_s": 0.005834137,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.002556454,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "lock_wait": {
+     "wall_s": 0.026428053,
+     "cpu_s": 0.04,
+     "thread_sleeping_s": 0.0,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 25.509664287,
+   "seal_wall_s": 19.927901631,
+   "shaping_wall_s": 12.039065291,
+   "shaping_cpu_s": 11.1,
+   "canonical_encoding_wall_s": 7.834159251,
+   "canonical_encoding_cpu_s": 7.43,
+   "adjacency_encoding_wall_s": null,
+   "adjacency_encoding_cpu_s": null,
+   "commands_wall_s": {
+    "begin": [
+     0.000711735
+    ],
+    "register-parquet": [
+     0.007701181,
+     0.503027609
+    ],
+    "validate": [
+     25.510187238
+    ],
+    "commit": [
+     2.354241147
+    ]
+   },
+   "blkio_read_bytes": 10750558208.0,
+   "blkio_write_bytes": 9784307712.0,
+   "peak_cgroup_bytes": 835305472.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s18-stock-b3-a1",
+   "edges": 4194304,
+   "ingest_wall_s": 28.158744712127373,
+   "ingest_cpu_s": 26.738163,
+   "allowance_s": 4.194304,
+   "ingest_over_allowance": 6.713567903549045,
+   "publish_wall_s": 2.217208442,
+   "publish_cpu_s": 1.33,
+   "publish_residual_wall_s": 2.184245194,
+   "publish_us_per_edge": 0.5286236863136291,
+   "publish_share_of_allowance": 0.5286236863136292,
+   "publish_children": {
+    "fsync": {
+     "wall_s": 0.005480949,
+     "cpu_s": 0.0,
+     "thread_sleeping_s": 0.002279762,
+     "thread_runnable_s": 0.0,
+     "thread_unknown_s": null
+    },
+    "lock_wait": {
+     "wall_s": 0.027482299,
+     "cpu_s": 0.02,
+     "thread_sleeping_s": 0.0,
+     "thread_runnable_s": 5.24e-06,
+     "thread_unknown_s": null
+    }
+   },
+   "validate_wall_s": 25.327320768,
+   "seal_wall_s": 19.709761919,
+   "shaping_wall_s": 11.980257643,
+   "shaping_cpu_s": 11.13,
+   "canonical_encoding_wall_s": 7.672142248,
+   "canonical_encoding_cpu_s": 7.32,
+   "adjacency_encoding_wall_s": null,
+   "adjacency_encoding_cpu_s": null,
+   "commands_wall_s": {
+    "begin": [
+     0.000650943
+    ],
+    "register-parquet": [
+     0.00741546,
+     0.475860659
+    ],
+    "validate": [
+     25.327801938
+    ],
+    "commit": [
+     2.248087086
+    ]
+   },
+   "blkio_read_bytes": 10750582784.0,
+   "blkio_write_bytes": 9780867072.0,
+   "peak_cgroup_bytes": 852598784.0,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 987,
+     "object_count": 0,
+     "read_bytes": 260169318,
+     "read_calls": 4422,
+     "write_bytes": 211326479,
+     "write_calls": 3478
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 177,
+     "object_count": 0,
+     "read_bytes": 869276687,
+     "read_calls": 1308,
+     "write_bytes": 259708551,
+     "write_calls": 9582
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 3997,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 21022759,
+     "read_calls": 329,
+     "write_bytes": 10511291,
+     "write_calls": 164
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 32767,
+     "read_calls": 3,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 24463
+   }
+  },
+  {
+   "name": "s22-inst-b1-a1",
+   "edges": 67108864,
+   "contended": true,
+   "publish_wall_s": 40.288774961,
+   "publish_children": {
+    "cas_install": 15.439570888,
+    "generation_commit": 11.159621698,
+    "hydration": 6.575292822,
+    "prepare_encoding": 0.309143399,
+    "publication_authentication": 0.006760464,
+    "publication_intent": 0.00200503,
+    "publication_receipt": 6.167400332,
+    "read_authority": 0.627610021
+   },
+   "adjacency_encoding_wall_s": 83.065041375,
+   "canonical_encoding_wall_s": 150.608065706,
+   "publication_work": {
+    "cas_install_read_write": {
+     "block_count": 0,
+     "fsync_calls": 16418,
+     "object_count": 0,
+     "read_bytes": 4613555361,
+     "read_calls": 78658,
+     "write_bytes": 3703277279,
+     "write_calls": 60965
+    },
+    "contract": "graphforge-publication-work/1",
+    "encode_write_postwrite_authentication": {
+     "block_count": 0,
+     "fsync_calls": 2220,
+     "object_count": 0,
+     "read_bytes": 13908319247,
+     "read_calls": 13745,
+     "write_bytes": 4604333607,
+     "write_calls": 170337
+    },
+    "fsync_synchronization": {
+     "block_count": 0,
+     "fsync_calls": 105626,
+     "object_count": 0,
+     "read_bytes": 0,
+     "read_calls": 0,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "hydration_verification": {
+     "block_count": 0,
+     "fsync_calls": 16,
+     "object_count": 0,
+     "read_bytes": 336290399,
+     "read_calls": 5137,
+     "write_bytes": 168145111,
+     "write_calls": 2568
+    },
+    "publication_preauthentication": {
+     "block_count": 0,
+     "fsync_calls": 0,
+     "object_count": 0,
+     "read_bytes": 434070,
+     "read_calls": 4,
+     "write_bytes": 0,
+     "write_calls": 0
+    },
+    "semantic_total_operations": 455694
+   }
+  }
+ ],
+ "current_tree_baseline_2026_09_22": {
+  "main_sha": "aaf20d83",
+  "note": "main moved after the 097e7631 S18 observations (#1502, #1531); re-baselined before the repair A/B",
   "summary": {
-    "s18-stock": {
-      "n": 3,
-      "edges": 4194304,
-      "ingest_wall_s_median": 28.477053155889735,
-      "ingest_cpu_s_median": 26.70837,
-      "publish_wall_s_median": 2.325707523,
-      "publish_cpu_s_median": 1.33,
-      "publish_us_per_edge_median": 0.5544918830394745,
-      "publish_share_of_allowance_median": 0.5544918830394745,
-      "ingest_over_allowance_median": 6.789458550426897,
-      "remaining_allowance_after_publish_s": 1.8685964769999996
-    },
-    "s18-inst": {
-      "n": 3,
-      "edges": 4194304,
-      "ingest_wall_s_median": 27.900627356022596,
-      "ingest_cpu_s_median": 26.60741,
-      "publish_wall_s_median": 2.245882281,
-      "publish_cpu_s_median": 1.34,
-      "publish_us_per_edge_median": 0.5354600622653961,
-      "publish_share_of_allowance_median": 0.5354600622653962,
-      "ingest_over_allowance_median": 6.652027930265092,
-      "remaining_allowance_after_publish_s": 1.9484217189999997
-    }
+   "s18-base": {
+    "n": 3,
+    "edges": 4194304,
+    "ingest_wall_s_median": 31.818,
+    "ingest_us_per_edge_median": 7.586,
+    "ingest_over_allowance_median": 7.586,
+    "publish_wall_s_median": 2.394,
+    "publish_us_per_edge_median": 0.571
+   },
+   "s22-base": {
+    "n": 3,
+    "edges": 67108864,
+    "ingest_wall_s_median": 547.803,
+    "ingest_us_per_edge_median": 8.163,
+    "ingest_over_allowance_median": 8.163,
+    "publish_wall_s_median": 42.014,
+    "publish_us_per_edge_median": 0.626
+   }
   },
-  "observations": [
+  "observations": {
+   "s22-base": [
     {
-      "name": "s18-inst-b1-a1",
-      "edges": 4194304,
-      "ingest_wall_s": 28.1731459510047,
-      "ingest_cpu_s": 26.323544,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.717001426459479,
-      "publish_wall_s": 2.354633366,
-      "publish_cpu_s": 1.34,
-      "publish_residual_wall_s": 0.00100748,
-      "publish_us_per_edge": 0.5613883414268493,
-      "publish_share_of_allowance": 0.5613883414268493,
-      "publish_children": {
-        "cas_install": {
-          "wall_s": 0.736928568,
-          "cpu_s": 0.36,
-          "thread_sleeping_s": 0.37612617,
-          "thread_runnable_s": 0.00021377,
-          "thread_unknown_s": 3.312e-05
-        },
-        "generation_commit": {
-          "wall_s": 0.743020683,
-          "cpu_s": 0.44,
-          "thread_sleeping_s": 0.308079151,
-          "thread_runnable_s": 0.0012017,
-          "thread_unknown_s": 4.0412e-05
-        },
-        "hydration": {
-          "wall_s": 0.437516261,
-          "cpu_s": 0.26,
-          "thread_sleeping_s": 0.170935924,
-          "thread_runnable_s": 6.66e-05,
-          "thread_unknown_s": 1.5347e-05
-        },
-        "prepare_encoding": {
-          "wall_s": 0.024341794,
-          "cpu_s": 0.03,
-          "thread_sleeping_s": 0.00071684,
-          "thread_runnable_s": 2.175e-05,
-          "thread_unknown_s": 7.242e-06
-        },
-        "publication_authentication": {
-          "wall_s": 0.005511082,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.00175518,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "publication_intent": {
-          "wall_s": 0.001574142,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.00040475,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": 3.11e-07
-        },
-        "publication_receipt": {
-          "wall_s": 0.359666071,
-          "cpu_s": 0.2,
-          "thread_sleeping_s": 0.155069744,
-          "thread_runnable_s": 0.00015085,
-          "thread_unknown_s": 2.4567e-05
-        },
-        "read_authority": {
-          "wall_s": 0.045067285,
-          "cpu_s": 0.05,
-          "thread_sleeping_s": 0.002036932,
-          "thread_runnable_s": 4.73e-06,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 25.206429921,
-      "seal_wall_s": 19.640837006,
-      "shaping_wall_s": 12.211073771,
-      "shaping_cpu_s": 11.16,
-      "canonical_encoding_wall_s": 7.371143496,
-      "canonical_encoding_cpu_s": 7.01,
-      "adjacency_encoding_wall_s": 3.652046113,
-      "adjacency_encoding_cpu_s": 3.49,
-      "commands_wall_s": {
-        "begin": [
-          0.000624182
-        ],
-        "register-parquet": [
-          0.007557753,
-          0.464200073
-        ],
-        "validate": [
-          25.206915141
-        ],
-        "commit": [
-          2.386937902
-        ]
-      },
-      "blkio_read_bytes": 10787782656.0,
-      "blkio_write_bytes": 9784037376.0,
-      "peak_cgroup_bytes": 848764928.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
+     "name": "base-s22-1-a1",
+     "ingest_wall_s": 547.803,
+     "ingest_cpu_s": 495.9,
+     "publish_wall_s": 42.014,
+     "publish_decomposition_wall_s": {
+      "cas_install": 16.296,
+      "generation_commit": 11.637,
+      "hydration": 7.318,
+      "publication_receipt": 5.723,
+      "read_authority": 0.715,
+      "prepare_encoding": 0.313,
+      "publication_authentication": 0.008,
+      "publication_intent": 0.002
+     }
     },
     {
-      "name": "s18-inst-b2-a2",
-      "edges": 4194304,
-      "ingest_wall_s": 27.900627356022596,
-      "ingest_cpu_s": 26.661043,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.652027930265092,
-      "publish_wall_s": 2.245882281,
-      "publish_cpu_s": 1.34,
-      "publish_residual_wall_s": 0.001093751,
-      "publish_us_per_edge": 0.5354600622653961,
-      "publish_share_of_allowance": 0.5354600622653962,
-      "publish_children": {
-        "cas_install": {
-          "wall_s": 0.73105601,
-          "cpu_s": 0.35,
-          "thread_sleeping_s": 0.376355225,
-          "thread_runnable_s": 0.00010339,
-          "thread_unknown_s": null
-        },
-        "generation_commit": {
-          "wall_s": 0.69841306,
-          "cpu_s": 0.44,
-          "thread_sleeping_s": 0.258489429,
-          "thread_runnable_s": 0.00025364,
-          "thread_unknown_s": 2.4213e-05
-        },
-        "hydration": {
-          "wall_s": 0.409343174,
-          "cpu_s": 0.26,
-          "thread_sleeping_s": 0.144007152,
-          "thread_runnable_s": 0.0002266,
-          "thread_unknown_s": 1.4364e-05
-        },
-        "prepare_encoding": {
-          "wall_s": 0.021991884,
-          "cpu_s": 0.02,
-          "thread_sleeping_s": 0.00047061,
-          "thread_runnable_s": 1.027e-05,
-          "thread_unknown_s": 5.03e-07
-        },
-        "publication_authentication": {
-          "wall_s": 0.003778596,
-          "cpu_s": 0.01,
-          "thread_sleeping_s": 0.00090181,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "publication_intent": {
-          "wall_s": 0.001835387,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.00046804,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": 2.46e-07
-        },
-        "publication_receipt": {
-          "wall_s": 0.333457732,
-          "cpu_s": 0.21,
-          "thread_sleeping_s": 0.129767332,
-          "thread_runnable_s": 5.358e-05,
-          "thread_unknown_s": null
-        },
-        "read_authority": {
-          "wall_s": 0.044912687,
-          "cpu_s": 0.05,
-          "thread_sleeping_s": 0.001739801,
-          "thread_runnable_s": 1.396e-05,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 25.064276914,
-      "seal_wall_s": 19.54455427,
-      "shaping_wall_s": 11.861517314,
-      "shaping_cpu_s": 11.18,
-      "canonical_encoding_wall_s": 7.627582607,
-      "canonical_encoding_cpu_s": 7.28,
-      "adjacency_encoding_wall_s": 3.693216211,
-      "adjacency_encoding_cpu_s": 3.53,
-      "commands_wall_s": {
-        "begin": [
-          0.000851108
-        ],
-        "register-parquet": [
-          0.007452461,
-          0.455120917
-        ],
-        "validate": [
-          25.064712423
-        ],
-        "commit": [
-          2.273436299
-        ]
-      },
-      "blkio_read_bytes": 10750492672.0,
-      "blkio_write_bytes": 9782652928.0,
-      "peak_cgroup_bytes": 835006464.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
+     "name": "base-s22-2-b2",
+     "ingest_wall_s": 582.475,
+     "ingest_cpu_s": 511.773,
+     "publish_wall_s": null,
+     "publish_decomposition_wall_s": null
     },
     {
-      "name": "s18-inst-b3-a2",
-      "edges": 4194304,
-      "ingest_wall_s": 27.55895388801582,
-      "ingest_cpu_s": 26.60741,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.570566627506214,
-      "publish_wall_s": 2.135956954,
-      "publish_cpu_s": 1.33,
-      "publish_residual_wall_s": 0.000960698,
-      "publish_us_per_edge": 0.5092518219947815,
-      "publish_share_of_allowance": 0.5092518219947816,
-      "publish_children": {
-        "cas_install": {
-          "wall_s": 0.670038153,
-          "cpu_s": 0.36,
-          "thread_sleeping_s": 0.311223026,
-          "thread_runnable_s": 0.00014462,
-          "thread_unknown_s": 3.459e-06
-        },
-        "generation_commit": {
-          "wall_s": 0.669024743,
-          "cpu_s": 0.43,
-          "thread_sleeping_s": 0.239569063,
-          "thread_runnable_s": 6.766e-05,
-          "thread_unknown_s": 2.1211e-05
-        },
-        "hydration": {
-          "wall_s": 0.400162233,
-          "cpu_s": 0.26,
-          "thread_sleeping_s": 0.136681916,
-          "thread_runnable_s": 0.000112631,
-          "thread_unknown_s": 8.568e-06
-        },
-        "prepare_encoding": {
-          "wall_s": 0.024031107,
-          "cpu_s": 0.03,
-          "thread_sleeping_s": 0.000493521,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "publication_authentication": {
-          "wall_s": 0.003967099,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.000807871,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "publication_intent": {
-          "wall_s": 0.001591062,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.000415781,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "publication_receipt": {
-          "wall_s": 0.322008214,
-          "cpu_s": 0.21,
-          "thread_sleeping_s": 0.118678591,
-          "thread_runnable_s": 0.00016877,
-          "thread_unknown_s": 1.1329e-05
-        },
-        "read_authority": {
-          "wall_s": 0.044173645,
-          "cpu_s": 0.04,
-          "thread_sleeping_s": 0.001491282,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 24.868073806,
-      "seal_wall_s": 19.304182777,
-      "shaping_wall_s": 11.871513011,
-      "shaping_cpu_s": 11.34,
-      "canonical_encoding_wall_s": 7.37686707,
-      "canonical_encoding_cpu_s": 7.07,
-      "adjacency_encoding_wall_s": 3.566066114,
-      "adjacency_encoding_cpu_s": 3.45,
-      "commands_wall_s": {
-        "begin": [
-          0.000665263
-        ],
-        "register-parquet": [
-          0.007334036,
-          0.418383503
-        ],
-        "validate": [
-          24.868543925
-        ],
-        "commit": [
-          2.165796234
-        ]
-      },
-      "blkio_read_bytes": 10750533632.0,
-      "blkio_write_bytes": 9781665792.0,
-      "peak_cgroup_bytes": 834674688.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
-    },
-    {
-      "name": "s18-stock-b1-a1",
-      "edges": 4194304,
-      "ingest_wall_s": 28.554480377817526,
-      "ingest_cpu_s": 26.566627,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.807918638662702,
-      "publish_wall_s": 2.350280087,
-      "publish_cpu_s": 1.34,
-      "publish_residual_wall_s": 2.316979458,
-      "publish_us_per_edge": 0.5603504388332367,
-      "publish_share_of_allowance": 0.5603504388332367,
-      "publish_children": {
-        "fsync": {
-          "wall_s": 0.005677934,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.002453081,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "lock_wait": {
-          "wall_s": 0.027622695,
-          "cpu_s": 0.04,
-          "thread_sleeping_s": 0.0,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 25.529906323,
-      "seal_wall_s": 19.974481896,
-      "shaping_wall_s": 12.391598565,
-      "shaping_cpu_s": 11.24,
-      "canonical_encoding_wall_s": 7.528068467,
-      "canonical_encoding_cpu_s": 7.16,
-      "adjacency_encoding_wall_s": null,
-      "adjacency_encoding_cpu_s": null,
-      "commands_wall_s": {
-        "begin": [
-          0.000688124
-        ],
-        "register-parquet": [
-          0.007953962,
-          0.530194693
-        ],
-        "validate": [
-          25.530388963
-        ],
-        "commit": [
-          2.380237915
-        ]
-      },
-      "blkio_read_bytes": 10750500864.0,
-      "blkio_write_bytes": 9781583872.0,
-      "peak_cgroup_bytes": 849596416.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
-    },
-    {
-      "name": "s18-stock-b2-a2",
-      "edges": 4194304,
-      "ingest_wall_s": 28.477053155889735,
-      "ingest_cpu_s": 26.70837,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.789458550426897,
-      "publish_wall_s": 2.325707523,
-      "publish_cpu_s": 1.3,
-      "publish_residual_wall_s": 2.293445333,
-      "publish_us_per_edge": 0.5544918830394745,
-      "publish_share_of_allowance": 0.5544918830394745,
-      "publish_children": {
-        "fsync": {
-          "wall_s": 0.005834137,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.002556454,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "lock_wait": {
-          "wall_s": 0.026428053,
-          "cpu_s": 0.04,
-          "thread_sleeping_s": 0.0,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 25.509664287,
-      "seal_wall_s": 19.927901631,
-      "shaping_wall_s": 12.039065291,
-      "shaping_cpu_s": 11.1,
-      "canonical_encoding_wall_s": 7.834159251,
-      "canonical_encoding_cpu_s": 7.43,
-      "adjacency_encoding_wall_s": null,
-      "adjacency_encoding_cpu_s": null,
-      "commands_wall_s": {
-        "begin": [
-          0.000711735
-        ],
-        "register-parquet": [
-          0.007701181,
-          0.503027609
-        ],
-        "validate": [
-          25.510187238
-        ],
-        "commit": [
-          2.354241147
-        ]
-      },
-      "blkio_read_bytes": 10750558208.0,
-      "blkio_write_bytes": 9784307712.0,
-      "peak_cgroup_bytes": 835305472.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
-    },
-    {
-      "name": "s18-stock-b3-a1",
-      "edges": 4194304,
-      "ingest_wall_s": 28.158744712127373,
-      "ingest_cpu_s": 26.738163,
-      "allowance_s": 4.194304,
-      "ingest_over_allowance": 6.713567903549045,
-      "publish_wall_s": 2.217208442,
-      "publish_cpu_s": 1.33,
-      "publish_residual_wall_s": 2.184245194,
-      "publish_us_per_edge": 0.5286236863136291,
-      "publish_share_of_allowance": 0.5286236863136292,
-      "publish_children": {
-        "fsync": {
-          "wall_s": 0.005480949,
-          "cpu_s": 0.0,
-          "thread_sleeping_s": 0.002279762,
-          "thread_runnable_s": 0.0,
-          "thread_unknown_s": null
-        },
-        "lock_wait": {
-          "wall_s": 0.027482299,
-          "cpu_s": 0.02,
-          "thread_sleeping_s": 0.0,
-          "thread_runnable_s": 5.24e-06,
-          "thread_unknown_s": null
-        }
-      },
-      "validate_wall_s": 25.327320768,
-      "seal_wall_s": 19.709761919,
-      "shaping_wall_s": 11.980257643,
-      "shaping_cpu_s": 11.13,
-      "canonical_encoding_wall_s": 7.672142248,
-      "canonical_encoding_cpu_s": 7.32,
-      "adjacency_encoding_wall_s": null,
-      "adjacency_encoding_cpu_s": null,
-      "commands_wall_s": {
-        "begin": [
-          0.000650943
-        ],
-        "register-parquet": [
-          0.00741546,
-          0.475860659
-        ],
-        "validate": [
-          25.327801938
-        ],
-        "commit": [
-          2.248087086
-        ]
-      },
-      "blkio_read_bytes": 10750582784.0,
-      "blkio_write_bytes": 9780867072.0,
-      "peak_cgroup_bytes": 852598784.0,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 987,
-          "object_count": 0,
-          "read_bytes": 260169318,
-          "read_calls": 4422,
-          "write_bytes": 211326479,
-          "write_calls": 3478
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 177,
-          "object_count": 0,
-          "read_bytes": 869276687,
-          "read_calls": 1308,
-          "write_bytes": 259708551,
-          "write_calls": 9582
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 3997,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 21022759,
-          "read_calls": 329,
-          "write_bytes": 10511291,
-          "write_calls": 164
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 32767,
-          "read_calls": 3,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 24463
-      }
-    },
-    {
-      "name": "s22-inst-b1-a1",
-      "edges": 67108864,
-      "contended": true,
-      "publish_wall_s": 40.288774961,
-      "publish_children": {
-        "cas_install": 15.439570888,
-        "generation_commit": 11.159621698,
-        "hydration": 6.575292822,
-        "prepare_encoding": 0.309143399,
-        "publication_authentication": 0.006760464,
-        "publication_intent": 0.00200503,
-        "publication_receipt": 6.167400332,
-        "read_authority": 0.627610021
-      },
-      "adjacency_encoding_wall_s": 83.065041375,
-      "canonical_encoding_wall_s": 150.608065706,
-      "publication_work": {
-        "cas_install_read_write": {
-          "block_count": 0,
-          "fsync_calls": 16418,
-          "object_count": 0,
-          "read_bytes": 4613555361,
-          "read_calls": 78658,
-          "write_bytes": 3703277279,
-          "write_calls": 60965
-        },
-        "contract": "graphforge-publication-work/1",
-        "encode_write_postwrite_authentication": {
-          "block_count": 0,
-          "fsync_calls": 2220,
-          "object_count": 0,
-          "read_bytes": 13908319247,
-          "read_calls": 13745,
-          "write_bytes": 4604333607,
-          "write_calls": 170337
-        },
-        "fsync_synchronization": {
-          "block_count": 0,
-          "fsync_calls": 105626,
-          "object_count": 0,
-          "read_bytes": 0,
-          "read_calls": 0,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "hydration_verification": {
-          "block_count": 0,
-          "fsync_calls": 16,
-          "object_count": 0,
-          "read_bytes": 336290399,
-          "read_calls": 5137,
-          "write_bytes": 168145111,
-          "write_calls": 2568
-        },
-        "publication_preauthentication": {
-          "block_count": 0,
-          "fsync_calls": 0,
-          "object_count": 0,
-          "read_bytes": 434070,
-          "read_calls": 4,
-          "write_bytes": 0,
-          "write_calls": 0
-        },
-        "semantic_total_operations": 455694
-      }
+     "name": "base-s22-3-a1",
+     "ingest_wall_s": 536.856,
+     "ingest_cpu_s": 490.988,
+     "publish_wall_s": null,
+     "publish_decomposition_wall_s": null
     }
-  ]
+   ],
+   "s18-base": [
+    {
+     "name": "base-s18-1-b2",
+     "ingest_wall_s": 35.843,
+     "publish_wall_s": 2.983
+    },
+    {
+     "name": "base-s18-2-a1",
+     "ingest_wall_s": 31.818,
+     "publish_wall_s": 2.357
+    },
+    {
+     "name": "base-s18-3-a1",
+     "ingest_wall_s": 31.257,
+     "publish_wall_s": 2.394
+    }
+   ]
+  }
+ },
+ "reader_preparation_repair_ab_2026_09_22": {
+  "repair": "construction reader preparation (hydration + read_authority) runs against the durable candidate immediately before CURRENT; preparation failure leaves CURRENT unchanged (fail-closed)",
+  "base_sha": "aaf20d83",
+  "candidate": "aaf20d83 + repair commit only",
+  "binaries": {
+   "base-gf": "161a3aaff1e445f1af782bca12f704050a718b55f2e21d5f1fedf72eb5aa5142",
+   "cand-gf": "0f3ed7e8853fb0fb83e79cbf8ef08f4159553549a41d4701b7c0026c84c2fa5b"
+  },
+  "criterion": "benefit demonstrated only when candidate median ingest improves on baseline median by more than max(3% of baseline median, 2x baseline spread)",
+  "result": {
+   "s18": {
+    "base_median_s": 31.818,
+    "cand_median_s": 31.045,
+    "publish_base_s": 2.394,
+    "publish_cand_s": 2.398,
+    "threshold_s": 9.17,
+    "benefit_demonstrated": false
+   },
+   "s22": {
+    "base_median_s": 547.803,
+    "cand_median_s": 534.653,
+    "publish_base_s": 42.014,
+    "publish_cand_s": 41.737,
+    "threshold_s": 91.3,
+    "benefit_demonstrated": false
+   }
+  },
+  "disposition": "repair kept for fail-closed publication semantics, not throughput; publish wall unchanged within noise; the ingest-floor deficit remains owned by the parallel-ingest workstreams under #1387",
+  "observations": {
+   "s18-cand": [
+    {
+     "name": "cand-s18-1-b2",
+     "ingest_wall_s": 31.045,
+     "publish_wall_s": 2.398
+    },
+    {
+     "name": "cand-s18-2-a1",
+     "ingest_wall_s": 30.911,
+     "publish_wall_s": 2.403
+    },
+    {
+     "name": "cand-s18-3-a1",
+     "ingest_wall_s": 31.236,
+     "publish_wall_s": 2.309
+    }
+   ],
+   "s22-cand": [
+    {
+     "name": "cand-s22-1-a1",
+     "ingest_wall_s": 528.0,
+     "publish_wall_s": 38.6
+    },
+    {
+     "name": "cand-s22-2-a1",
+     "ingest_wall_s": 541.3,
+     "publish_wall_s": 44.87
+    }
+   ]
+  }
+ }
 }

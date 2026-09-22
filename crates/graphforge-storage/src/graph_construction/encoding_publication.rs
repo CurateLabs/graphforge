@@ -291,10 +291,15 @@ impl GraphConstructionSession {
             target_generation_uuid,
             transaction_uuid,
             || false,
+            None,
         )
     }
 
-    /// Publish while polling cancellation through the final pre-`CURRENT` boundary.
+    /// Publish while polling cancellation through the final pre-`CURRENT`
+    /// boundary. When `preparation` is `Some`, it runs against the durable,
+    /// lease-verified candidate generation immediately before `CURRENT`;
+    /// preparation failure leaves `CURRENT` unchanged. Replay paths never
+    /// invoke the callback because `CURRENT` already names the target.
     #[allow(clippy::too_many_lines)]
     pub fn publish_canonical_with_cancellation(
         &mut self,
@@ -302,6 +307,7 @@ impl GraphConstructionSession {
         target_generation_uuid: Uuid,
         transaction_uuid: Uuid,
         mut cancelled: impl FnMut() -> bool,
+        mut preparation: Option<crate::project_publication::ReaderPreparation<'_>>,
     ) -> Result<crate::ProjectPublicationReceipt, GfError> {
         reject_cancelled(&mut cancelled)?;
         if self.checkpoint.publication_state == Some(ConstructionPublicationState::Published) {
@@ -639,9 +645,20 @@ impl GraphConstructionSession {
                 None,
                 self.root.allocation(),
             )? {
-                crate::ProjectStageOutcome::Staged(staged) => staged
-                    .validate(|_| Ok(()), |_, _| Ok(()))?
-                    .publish_with_graph_objects_cancellable(&lease, &mut cancelled)?,
+                crate::ProjectStageOutcome::Staged(staged) => {
+                    let staged = staged.validate(|_| Ok(()), |_, _| Ok(()))?;
+                    match preparation.take() {
+                        Some(prepare) => staged
+                            .publish_with_graph_objects_preparation_cancellable(
+                                &lease,
+                                &mut cancelled,
+                                prepare,
+                            )?,
+                        None => {
+                            staged.publish_with_graph_objects_cancellable(&lease, &mut cancelled)?
+                        }
+                    }
+                }
                 crate::ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             };
         drop(generation_commit);
