@@ -1,5 +1,7 @@
 //! Thin CLI projection for research Project metadata and local discovery (#1348).
 
+mod slices;
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ pub(crate) enum ResearchCommand {
     /// Preview or freeze reproducible research selections.
     Slice {
         #[command(subcommand)]
-        command: crate::slices_cli::SliceCommand,
+        command: slices::SliceCommand,
     },
     /// Capture, inspect, retain or explicitly restore immutable research.
     Version {
@@ -94,7 +96,7 @@ pub(crate) fn run_research(
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     match command {
-        ResearchCommand::Slice { command } => crate::slices_cli::run(graph, command, json, output)?,
+        ResearchCommand::Slice { command } => slices::run(graph, command, json, output)?,
         ResearchCommand::Version { command } => {
             crate::research_versions_cli::run(graph, command, json, output)?;
         }
