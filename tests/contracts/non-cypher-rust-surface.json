@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "0618e557318ffc5b89b13f08b83463c9fdb5b84527c482cc423649b83fa068a2",
+  "public_method_digest": "ab4eed7873b8aa4c245137651a6a697fdf2a4e0c2463776e70b824391cb1415e",
   "method_policy": {
     "receiver_defaults": {
       "PortableV2ImportResult": "release-tested",
@@ -1307,6 +1307,23 @@
         {
           "path": "crates/graphforge-api/src/research_proposals/tests/retention.rs",
           "symbol": "fixed_parent_proposal_history_releases_obsolete_payloads_but_preserves_accepted_proof_and_replay"
+        }
+      ]
+    },
+    "research-upstream": {
+      "ids": [
+        "GraphForge.preview_research_upstream",
+        "GraphForge.update_research_branch",
+        "GraphForge.research_upstream_history"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/research_upstream/tests.rs",
+          "symbol": "preview_is_pinned_read_only_and_requires_explicit_conflict_selection"
+        },
+        {
+          "path": "crates/graphforge-api/src/research_upstream/tests/recovery.rs",
+          "symbol": "both_current_boundaries_preserve_atomic_baseline_history_and_exact_replay"
         }
       ]
     }

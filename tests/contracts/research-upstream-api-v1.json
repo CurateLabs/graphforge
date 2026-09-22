@@ -1,0 +1,33 @@
+{
+  "contract_version": 1,
+  "research_registry_version": 5,
+  "methods": ["GraphForge.preview_research_upstream", "GraphForge.update_research_branch", "GraphForge.research_upstream_history"],
+  "scopes": ["branch", "sources", "ontology", "fields"],
+  "selections": ["all_compatible", "selected"],
+  "resolutions": ["adopt_upstream", "keep_local", "retain_both", "explain"],
+  "limits": {
+    "fields": 40000,
+    "working_bytes": 67108864,
+    "dependency_bytes": 8388608,
+    "output_bytes": 16777216,
+    "selected_fields": 256,
+    "history_page_size": 1000,
+    "request_bytes": 1048576,
+    "explanation_bytes": 4096,
+    "retain_both_list_values": 65536
+  },
+  "preview": "Pins the owning CURRENT, immutable original base, local head and exact immediate-parent Version or Project generation. Opening and previewing never advance research.",
+  "dependencies": "Arrow required_fields and required_evidence_acknowledgements expose native structural/evidence closure. All-compatible excludes conflicting items and items whose prerequisites cannot be adopted. Explicit selection must cover each required changed field.",
+  "baselines": "Only reviewed fields advance to the exact upstream value and Version. Keep-local and explain preserve local content and make its divergence explicit; immutable original base, origins and unselected baselines remain unchanged.",
+  "retain_both": "Concatenates existing homogeneous native lists in local-then-upstream order, preserving repetitions. Native property and ontology owners validate the result. Scalar coercion, invented assertions and incompatible representations are refused.",
+  "source_preferences": "The semantic field is the effective preferred Artifact UUID or no preference. Append-only event histories and exact historical derivations remain distinct. Existing native preference events cannot clear a preference; unsupported clear adoption is refused, never implemented by deleting history.",
+  "publication": "Complete Branch content, selected baselines, immutable review, exact upstream citation and permanent receipt publish through one CURRENT. Before replacement failures leave prior authority. After replacement errors reconcile committed authority and durable receipt.",
+  "replay": "Project-lifetime exact receipts and review decisions survive restoration, payload release, cleanup and reopen. Capacity exhaustion refuses new operations; evidence is never silently evicted. Changed request content under an existing operation identity conflicts without mutation.",
+  "history": "Bounded Arrow field-decision rows retain source/destination Version identities independently of payload retention. Continuations bind the exact CURRENT, Branch and page size.",
+  "compatibility": "Research registry versions before 5 fail closed. No synthetic migration infers missing source-preference incorporation history.",
+  "bindings": {
+    "python": "preview_research_upstream/update_research_branch/research_upstream_history(request, cancellation=token)",
+    "node": "previewResearchUpstream/updateResearchBranch/researchUpstreamHistory(request, signal)",
+    "cli": "gf research upstream preview|update|history --file request.json"
+  }
+}

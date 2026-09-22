@@ -7,7 +7,7 @@ pub(crate) mod context_fields;
 mod create;
 pub(crate) mod domain_bounds;
 mod domain_state;
-mod domains;
+pub(crate) mod domains;
 pub(crate) mod edit;
 pub(crate) mod fields;
 pub(crate) mod import_graph;
@@ -20,6 +20,7 @@ pub(crate) mod publication;
 mod reference;
 pub(crate) mod selection;
 pub(crate) mod semantic_fields;
+mod source_fields;
 mod suppress;
 pub use model::*;
 

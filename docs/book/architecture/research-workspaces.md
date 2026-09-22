@@ -334,6 +334,54 @@ from a pinned source Version. Both retain provenance; only the latter enlarges
 active research. Child Branches identify the immediate parent Version, retain
 their selected base/dependency closure, and preserve ultimate Project genealogy.
 
+### Native upstream request contract
+
+`preview_research_upstream`, `update_research_branch`, and
+`research_upstream_history` use the closed
+[`research-upstream-api-v1.json`](../../../tests/contracts/research-upstream-api-v1.json)
+contract. The preview scope is existing Branch research, Sources, ontology, or
+1–256 explicit native fields. Its Arrow metadata binds the owning CURRENT,
+original base, local head, immediate upstream and preview commitment. Required
+fields and evidence acknowledgements are visible before publication. Explicit
+field scope may be widened and previewed again to include those dependencies.
+
+An update supplies that commitment, expected CURRENT, a fresh Version and stable
+operation identity. `all_compatible` selects only reviewed nonconflicting changes
+with adoptable prerequisites. `selected` records each field's explicit resolution.
+Keep-local advances its reviewed upstream baseline while preserving the local
+value. Explain also creates the caller-supplied immutable claim, including its
+native graph references, in the same Branch publication. Retain-both applies only
+to existing compatible list properties: it concatenates the local and upstream
+sequences without losing their order or repetitions, then uses native property
+and ontology validation. It never casts scalar conflicts into lists.
+
+Source preference comparison commits the effective preferred Artifact UUID,
+not the preference event UUID. Its append-only history retains every referenced
+Artifact and provenance dependency. A preference resolution does not rerun a
+historical OCR/extraction or change its input references. Native preference
+publication orders a new choice after prior events even when an imported event
+has a later clock timestamp. Clearing a preference has no native event
+representation and is refused explicitly rather than deleting history. Importing
+a new OCR Artifact does not require adopting its Source's preferred choice:
+that choice remains separately reviewable, including in nested Branches.
+
+Imported fields preserve their upstream origin and contribution identity. The
+complete Project capture used to authenticate an upstream citation is only a
+publication validation witness; permanent review metadata does not copy the
+unselected parent Artifact inventory or keep its payloads alive.
+
+Review records and operation receipts live in the owning Project's research
+registry, outside restorable Branch content. Cleanup may release obsolete
+Version payloads; it cannot erase retained review decisions or turn exact retry
+into a second application. The registry has its existing finite capacity and
+refuses new operations when full. `research@5` rejects earlier incompatible
+registries rather than guessing missing incorporated preference history.
+
+The three transports are Python methods of the same snake-case names, Node
+`previewResearchUpstream` / `updateResearchBranch` / `researchUpstreamHistory`,
+and `gf research upstream preview|update|history --file request.json`. Preview
+and history return native Arrow data; update returns its native receipt.
+
 ## Proposal and acceptance
 
 A proposal is frozen at submission. Later edits or upstream updates do not

@@ -712,6 +712,7 @@ fn pre_and_post_linearization_faults_preserve_truthful_reopen_and_replay() {
 mod project_content;
 mod proposals;
 mod retention;
+mod upstream;
 
 #[test]
 fn project_restore_replaces_research_in_one_publication_and_replay_keeps_later_state() {

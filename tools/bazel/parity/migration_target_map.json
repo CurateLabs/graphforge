@@ -1511,6 +1511,16 @@
       "bazel_label": "//crates/graphforge-cli:research_proposals",
       "exception_id": null,
       "notes": "#1356 native selective proposals"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "research_upstream",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/research_upstream.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:research_upstream",
+      "exception_id": null,
+      "notes": "#1355 native selective upstream review"
     }
   ],
   "exceptions": [

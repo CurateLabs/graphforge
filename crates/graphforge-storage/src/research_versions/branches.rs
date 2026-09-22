@@ -185,7 +185,8 @@ pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Opt
         ResearchMutation::PublishBranch { intent_sha256, .. }
         | ResearchMutation::SubmitProposal { intent_sha256, .. }
         | ResearchMutation::ReviewProposal { intent_sha256, .. }
-        | ResearchMutation::ReleaseProposal { intent_sha256, .. } => {
+        | ResearchMutation::ReleaseProposal { intent_sha256, .. }
+        | ResearchMutation::UpdateBranch { intent_sha256, .. } => {
             let mut digest = Sha256::new();
             digest.update(b"graphforge-branch-publication-intent/1");
             digest.update(request.operation_uuid.as_bytes());

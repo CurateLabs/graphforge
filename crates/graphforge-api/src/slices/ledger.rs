@@ -59,6 +59,19 @@ pub(super) fn dependencies(
             ]);
     }
     source_dependencies(sources, artifacts, &mut exists, &mut adjacency);
+    if has_knowledge {
+        for event in ledger::ledger::read_preference_ledger(&generation)?.events {
+            checkpoint(budget.cancellation)?;
+            let required = adjacency
+                .entry(Object::new("source", event.source_uuid))
+                .or_default();
+            required.insert(Object::new("artifact", event.artifact_uuid));
+            required.insert(Object::new("provenance", event.provenance_uuid));
+            if let Some(prior) = event.prior_artifact_uuid {
+                required.insert(Object::new("artifact", prior));
+            }
+        }
+    }
     assertion_dependencies(
         assertions,
         evidence,
@@ -90,6 +103,7 @@ fn preflight(
         "assertion_graph_refs",
         "evidence",
         "artifact_derivations",
+        "artifact_preference_events",
     ];
     let descriptors = generation.participant_descriptors()?;
     // Preflight trusted row counts and Parquet uncompressed sizes before the

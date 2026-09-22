@@ -29,7 +29,7 @@ test("every native task uses structured cooperative error transport", () => {
     .join("\n");
   const errors = readFileSync(join(srcDir, "error.rs"), "utf8");
   const taskCount = source.match(/impl Task for /g)?.length ?? 0;
-  assert.equal(taskCount, 74);
+  assert.equal(taskCount, 75);
   assert.equal(
     source.match(/type Output =\s*(?:\n\s*)?std::result::Result</g)?.length,
     taskCount,

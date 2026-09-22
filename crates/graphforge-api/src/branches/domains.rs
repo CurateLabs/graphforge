@@ -21,7 +21,7 @@ pub(super) fn selected(selection: &BranchSelection) -> Result<Vec<ProjectPartici
     )
 }
 
-pub(super) fn retained(
+pub(crate) fn retained(
     generation: &graphforge_storage::ResolvedProjectGeneration,
     mut ids: BTreeSet<(String, Uuid)>,
 ) -> Result<Vec<ProjectParticipant>, GfError> {

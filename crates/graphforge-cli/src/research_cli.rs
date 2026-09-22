@@ -5,6 +5,7 @@ mod claims;
 mod comparison;
 mod proposals;
 mod slices;
+mod upstream;
 
 use std::fs;
 use std::io::Write;
@@ -26,6 +27,11 @@ pub(crate) enum ResearchCommand {
     Proposal {
         #[command(subcommand)]
         command: proposals::ProposalCommand,
+    },
+    /// Review and selectively incorporate immediate-upstream research changes.
+    Upstream {
+        #[command(subcommand)]
+        command: upstream::UpstreamCommand,
     },
     /// Compare exact research endpoints without changing authoritative state.
     Compare(comparison::Request),
@@ -118,6 +124,8 @@ pub(crate) fn run_research(
 ) -> Result<(), graphforge_api::GfError> {
     match command {
         ResearchCommand::Proposal { command } => proposals::run(graph, command, json, output)?,
+    },
+        ResearchCommand::Upstream { command } => upstream::run(graph, command, json, output)?,
         ResearchCommand::Compare(args) => comparison::run(graph, args, json, output)?,
         ResearchCommand::Claim { command } => claims::run(graph, command, json, output)?,
         ResearchCommand::Branch { command } => branches::run(graph, command, json, output)?,
