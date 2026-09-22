@@ -14,7 +14,7 @@ use graphforge_storage::{
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub(super) struct State {
+pub(crate) struct State {
     pub fields: Fields,
     pub baseline: BTreeMap<fields::Key, baseline::Row>,
     pub version: Option<Uuid>,
@@ -26,7 +26,7 @@ pub(super) struct State {
     pub missing: Vec<(String, Uuid, String)>,
     pub suppressed: Objects,
 }
-pub(super) fn load(
+pub(crate) fn load(
     owner: &GraphForge,
     current: &ResolvedProjectGeneration,
     registry: &ResearchRegistry,
@@ -109,7 +109,7 @@ pub(super) fn load(
         suppressed,
     })
 }
-fn pinned_project(
+pub(crate) fn pinned_project(
     owner: &GraphForge,
     generation: &ResolvedProjectGeneration,
 ) -> Result<GraphForge, GfError> {
@@ -195,7 +195,7 @@ fn dependencies(
     }
     Ok(missing)
 }
-pub(super) fn canonical(
+pub(crate) fn canonical(
     state: &mut State,
     current: &ResolvedProjectGeneration,
     query: Option<&ResearchComparisonAuthority>,

@@ -107,7 +107,10 @@ pub(super) fn render(
     }
     Ok(crate::knowledge::assertion_result(batch))
 }
-fn changes(rows: &[Row], metadata: HashMap<String, String>) -> Result<RecordBatch, GfError> {
+pub(crate) fn changes(
+    rows: &[Row],
+    metadata: HashMap<String, String>,
+) -> Result<RecordBatch, GfError> {
     let mut fields = Vec::new();
     let mut columns: Vec<ArrayRef> = Vec::new();
     for (name, values) in [

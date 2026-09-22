@@ -86,6 +86,7 @@ pub(crate) fn read_selected(
     super::semantic_fields::read(graph, selected, &mut fields, &mut bytes, cancellation)?;
     domain_objects(graph, &mut fields, &mut bytes, selected, cancellation)?;
     super::claim_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
+    super::source_fields::read(graph, &mut fields, &mut bytes, selected, cancellation)?;
     super::context_fields::read(graph, &mut fields, &mut bytes, cancellation)?;
     if let Some(selected) = selected {
         fields.retain(|key, _| key.0 != "reference" || selected.contains(&(key.0.clone(), key.1)));

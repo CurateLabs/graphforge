@@ -189,7 +189,8 @@ impl GraphForge {
                     None
                 }
                 ResearchMutation::RegisterGraphProjection { .. }
-                | ResearchMutation::PublishBranch { .. } => {
+                | ResearchMutation::PublishBranch { .. }
+                | ResearchMutation::UpdateBranch { .. } => {
                     return Err(GfError::Validation("raw graph projection requires domain-owner closure; use a complete Project capture".into()));
                 }
                 ResearchMutation::RestoreProject { source_version, .. } => {

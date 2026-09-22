@@ -1,11 +1,11 @@
 //! Native semantic comparison over existing research fields and incorporated baselines.
 mod accepted;
 mod accepted_history;
-mod delta;
+pub(crate) mod delta;
 mod model;
-mod output;
+pub(crate) mod output;
 pub(crate) mod scope;
-mod state;
+pub(crate) mod state;
 #[cfg(test)]
 mod tests;
 use crate::{CancellationToken, ExecutionResult, GfError, GraphForge, branches::fields::Objects};

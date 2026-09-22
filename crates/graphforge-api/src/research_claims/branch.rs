@@ -64,7 +64,7 @@ impl GraphForge {
         )
     }
 }
-fn apply(
+pub(crate) fn apply(
     graph: &mut GraphForge,
     request: &ChangeResearchBranchClaimRequest,
     cancellation: &CancellationToken,

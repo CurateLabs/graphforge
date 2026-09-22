@@ -559,6 +559,7 @@ mod research_claims;
 mod research_comparison;
 mod research_project;
 mod research_proposals;
+mod research_upstream;
 mod research_versions;
 mod slices;
 mod source_artifact;

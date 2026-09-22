@@ -4,7 +4,7 @@ use crate::{CancellationToken, GfError, branches::fields::Key};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 #[derive(Clone, Debug, serde::Serialize)]
-pub(super) struct Row {
+pub(crate) struct Row {
     pub key: Key,
     pub change: &'static str,
     pub disposition: &'static str,
@@ -32,7 +32,7 @@ fn decode(value: &str) -> Result<Option<[u8; 32]>, GfError> {
     }
     Ok(Some(bytes))
 }
-pub(super) fn compare(
+pub(crate) fn compare(
     left: &State,
     right: &State,
     accepted: &BTreeMap<Key, Accepted>,

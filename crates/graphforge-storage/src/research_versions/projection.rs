@@ -51,8 +51,15 @@ pub(super) fn register(
     let snapshots = inspect_with_registry(root, &origin, registry)?;
     let graph = snapshots
         .iter()
-        .find(|p| p.capability_id == "graph" && p.record_family_id == "files")
-        .ok_or_else(|| invalid("projection source has no graph"))?;
+        .find(|p| p.capability_id == "graph" && p.record_family_id == "files");
+    let Some(graph) = graph else {
+        if !selection.nodes.is_empty() || !selection.edges.is_empty() {
+            return Err(invalid(
+                "selected graph identities are absent from the source",
+            ));
+        }
+        return register_graphless(root, registry, spec, &origin, &snapshots);
+    };
     let graph_key = ResearchParticipantKey {
         capability: "graph".into(),
         family: "files".into(),
@@ -123,6 +130,56 @@ pub(super) fn register(
                 .bytes
         };
         crate::graph_object_store::install_graph_object_bytes(root, bytes)?;
+    }
+    let version = ResearchVersionRecord {
+        version_uuid: spec.version_uuid,
+        context_uuid: spec.context_uuid,
+        label: spec.label.clone(),
+        description: spec.description.clone(),
+        created_at: spec.created_at,
+        content,
+    };
+    retained_content::inspect(root, &version, None)?;
+    let id = insert_version(registry, version)?;
+    registry.materialized.insert(id);
+    Ok(id)
+}
+
+// A research source can contain only native knowledge records. An empty graph
+// selection must not invent graph data or copy unrelated domain participants.
+fn register_graphless(
+    root: &Path,
+    registry: &mut ResearchRegistry,
+    spec: &RegisterResearchVersion,
+    origin: &ResearchVersionRecord,
+    snapshots: &[crate::ProjectParticipantSnapshot],
+) -> Result<Uuid, GfError> {
+    let keys = spec.selection.as_ref().expect("validated selection");
+    if keys
+        .iter()
+        .any(|key| !origin.content.participants.iter().any(|p| &p.key == key))
+    {
+        return Err(invalid(
+            "projection participant selection is outside source content",
+        ));
+    }
+    let mut content = origin.content.clone();
+    content.source_version = Some(origin.version_uuid);
+    content
+        .required_versions
+        .clone_from(&spec.required_versions);
+    content.evidence.clone_from(&spec.evidence);
+    content.producer = PRODUCER.into();
+    content.participants.retain(|p| keys.contains(&p.key));
+    for participant in &content.participants {
+        let snapshot = snapshots
+            .iter()
+            .find(|p| {
+                p.capability_id == participant.key.capability
+                    && p.record_family_id == participant.key.family
+            })
+            .ok_or_else(|| invalid("projection participant unavailable"))?;
+        crate::graph_object_store::install_graph_object_bytes(root, &snapshot.bytes)?;
     }
     let version = ResearchVersionRecord {
         version_uuid: spec.version_uuid,

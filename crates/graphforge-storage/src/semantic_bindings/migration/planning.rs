@@ -16,12 +16,30 @@ impl SemanticStorageBindings {
     ///
     /// Repeating this method against the same exact parent produces the same
     /// `plan_digest`, allowing preview and publication to compare authority.
-    #[allow(clippy::too_many_lines)] // one canonical derivation keeps digest inputs co-located
     pub fn plan_retained_data_migration(
         previous_composition: &CompiledComposition,
         next: &CompiledComposition,
         previous: &Self,
         pinned_graph_root: &Path,
+    ) -> Result<SemanticMigrationPlan, GfError> {
+        Self::plan_retained_data_migration_identity_equivalent(
+            previous_composition,
+            next,
+            previous,
+            pinned_graph_root,
+            &[],
+        )
+    }
+
+    /// Plan a composition replacement including independently verified,
+    /// document-equivalent module identity upgrades without authored transforms.
+    #[allow(clippy::too_many_lines)] // one canonical derivation keeps digest inputs co-located
+    pub fn plan_retained_data_migration_identity_equivalent(
+        previous_composition: &CompiledComposition,
+        next: &CompiledComposition,
+        previous: &Self,
+        pinned_graph_root: &Path,
+        identity_equivalent: &[(OntologyModuleId, OntologyModuleId)],
     ) -> Result<SemanticMigrationPlan, GfError> {
         previous.validate_against(previous_composition)?;
         let (source_inventory, _) = crate::capture_graph_files(pinned_graph_root)?;
@@ -79,12 +97,29 @@ impl SemanticStorageBindings {
                 });
                 continue;
             };
-            let steps = MigrationEngine::plan(
-                &old_module.id.authored_version,
-                &next_module.id.authored_version,
-                &next_module.doc.migrations,
-            )
-            .map_err(|error| corrupt(&format!("authored migration path is invalid: {error}")))?;
+            let equivalent = identity_equivalent
+                .iter()
+                .any(|(old, new)| old == &old_module.id && new == &next_module.id);
+            let steps = if equivalent {
+                let mut old_document = old_module.doc.clone();
+                old_document.version.clone_from(&next_module.doc.version);
+                old_document
+                    .migrations
+                    .clone_from(&next_module.doc.migrations);
+                if old_document != next_module.doc {
+                    return Err(corrupt(
+                        "claimed identity-equivalent module changes its schema",
+                    ));
+                }
+                Vec::new()
+            } else {
+                MigrationEngine::plan(
+                    &old_module.id.authored_version,
+                    &next_module.id.authored_version,
+                    &next_module.doc.migrations,
+                )
+                .map_err(|error| corrupt(&format!("authored migration path is invalid: {error}")))?
+            };
             let mut local_id = prior.symbol.local_id.clone();
             let mut owner = prior.owner.as_ref().map(|value| value.local_id.clone());
             let mut renamed_entity = false;

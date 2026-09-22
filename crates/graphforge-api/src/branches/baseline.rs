@@ -76,7 +76,7 @@ fn hash(bytes: &[u8; 32]) -> String {
         out
     })
 }
-pub(super) fn contribution(branch: Uuid, operation: Uuid, key: &Key) -> Uuid {
+pub(crate) fn contribution(branch: Uuid, operation: Uuid, key: &Key) -> Uuid {
     let mut digest = Sha256::new();
     digest.update(b"graphforge-branch-contribution/1");
     digest.update(branch.as_bytes());
@@ -287,7 +287,7 @@ pub(super) fn initialize(
         cancellation,
     )
 }
-pub(super) fn update(
+pub(crate) fn update(
     owner: &GraphForge,
     graph: &GraphForge,
     prepared: &mut PreparedBranchContent,

@@ -57,7 +57,7 @@
   "family_rows": 65536,
   "family_decoded_bytes": 67108864,
   "decisions_per_publication": 256,
-  "canonical_history": "research/3 canonical_decisions; survives Project and Branch restore",
+  "canonical_history": "research/5 canonical_decisions; survives Project and Branch restore",
   "frozen_content": "epistemic/1 research_claims, claim_relations and claim_suppressions",
   "suppression": "explicit knowledge view only; frozen ancestor events inherit, unrelated source scope does not",
   "integration": "does not grant canonical promotion or replace destination choices",

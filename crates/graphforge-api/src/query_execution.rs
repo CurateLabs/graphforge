@@ -576,10 +576,18 @@ impl GraphForge {
                 .as_ref()
                 .map(|(context, _, _)| Arc::clone(context)),
         )?;
+        // Read binding may intern structural identities and observed names.
+        // Keep those observations local to this read, including refused writes.
+        let read_catalog = Arc::new(Mutex::new(
+            self.runtime_catalog
+                .lock()
+                .expect("runtime catalog poisoned")
+                .clone(),
+        ));
         let plan = {
             let mut binder = Binder::new(
                 self.ontology.clone(),
-                self.runtime_catalog.clone(),
+                Arc::clone(&read_catalog),
                 self.ontology_mode,
             )
             .with_procedures(self.procedure_snapshot());
@@ -607,7 +615,7 @@ impl GraphForge {
             ));
         }
         let catalog = self.open_query_catalog(
-            &self.runtime_catalog,
+            &read_catalog,
             composition.as_ref().map(|(_, candidate, _)| candidate),
         )?;
         let execution_mode = composition

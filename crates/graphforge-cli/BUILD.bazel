@@ -231,6 +231,15 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "research_upstream",
+    srcs = ["tests/research_upstream.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    deps = _CLI_DEPS + ["//crates/graphforge-storage:graphforge_storage"],
+)
+
+gf_rust_integration_test(
     name = "research_comparison",
     srcs = ["tests/research_comparison.rs"],
     crate = ":graphforge_cli",
@@ -291,6 +300,7 @@ test_suite(
         ":research_claims",
         ":research_comparison",
         ":research_proposals",
+        ":research_upstream",
         ":slices",
         ":source_artifact",
         ":verify",

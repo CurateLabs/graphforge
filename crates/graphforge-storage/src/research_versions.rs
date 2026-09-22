@@ -30,6 +30,12 @@ mod branch_selection;
 mod proposal_publication;
 mod proposal_validation;
 pub use branch_selection::{prepare_branch_selection, replace_prepared_branch_domains};
+mod upstream;
+mod upstream_publication;
+pub use upstream::{
+    ResearchUpstreamField, ResearchUpstreamFieldReview, ResearchUpstreamHistory,
+    ResearchUpstreamResolutionRecord, ResearchUpstreamReview,
+};
 mod branches;
 pub use branches::ResearchBranchRecord;
 mod project_restore;
@@ -47,7 +53,7 @@ use crate::{
 /// Required research capability; unsupported readers must refuse it.
 pub const RESEARCH_CAPABILITY: &str = "research";
 /// Frozen research capability and registry record version.
-pub const RESEARCH_VERSION: u32 = 4;
+pub const RESEARCH_VERSION: u32 = 5;
 /// Authenticated registry record family.
 pub const RESEARCH_REGISTRY: &str = "registry";
 /// Maximum canonical registry payload; no unbounded history growth.
@@ -63,7 +69,7 @@ pub const MAX_ROOTS: usize = 4_096;
 const PRODUCER: &str = concat!(
     "graphforge-storage/",
     env!("CARGO_PKG_VERSION"),
-    ";research/4"
+    ";research/5"
 );
 
 /// Exact participant identity, never a filesystem path.
@@ -214,6 +220,8 @@ pub struct ResearchOperationReceipt {
 pub struct ResearchRegistry {
     /// Restore-independent frozen submissions and permanent accepted mappings.
     pub proposals: ResearchProposalHistory,
+    /// Restore-independent upstream review history; operation decisions never expire.
+    pub upstream: ResearchUpstreamHistory,
     /// Immutable Branch creation and genealogy; heads are stored separately below.
     pub branches: BTreeMap<Uuid, ResearchBranchRecord>,
     /// Immutable records still retained explicitly or by required dependencies.
@@ -290,6 +298,17 @@ pub enum ResearchMutation {
         intent_sha256: [u8; 32],
         /// Proposal whose pending payload is withdrawn or terminal.
         proposal_uuid: Uuid,
+    },
+    /// Atomically publish reviewed upstream fields, baselines and durable resolution history.
+    UpdateBranch {
+        /// Canonical native public request commitment, independent of private preparation.
+        intent_sha256: [u8; 32],
+        /// Complete Project citation only when the immediate upstream is the Project.
+        source_capture: Option<Box<RegisterResearchVersion>>,
+        /// Exact reviewed field decisions and installed state commitments.
+        review: Box<ResearchUpstreamReview>,
+        /// Complete privately prepared Branch content.
+        version: Box<ResearchVersionRecord>,
     },
     /// Atomically publish domain-owner prepared Branch content and creation metadata.
     /// All committed content must already be authenticated in this Project CAS.
@@ -490,6 +509,7 @@ impl ResearchRegistry {
                 return Err(invalid("research receipt identity is invalid"));
             }
         }
+        upstream::validate(self)?;
         if json(self)?.len() > MAX_REGISTRY_BYTES {
             return Err(error(
                 ProjectErrorCode::ResourceLimit,
@@ -551,7 +571,7 @@ impl ResearchRegistry {
             record_family_id: RESEARCH_REGISTRY.into(),
             record_version: RESEARCH_VERSION,
             encoding: ProjectParticipantEncoding::Json,
-            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/4").into(),
+            schema_fingerprint: Sha256::digest(b"graphforge-research-registry/5").into(),
             row_count: 1,
             bytes: json(self)?,
         })
@@ -613,7 +633,7 @@ pub fn read_research_registry(
         || snapshot.row_count != 1
         || snapshot.encoding != "json"
         || snapshot.schema_fingerprint
-            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/4"))
+            != <[u8; 32]>::from(Sha256::digest(b"graphforge-research-registry/5"))
         || snapshot.bytes.len() > MAX_REGISTRY_BYTES
     {
         return Err(invalid(
@@ -809,6 +829,18 @@ fn apply_mutation(
         | ResearchMutation::ReleaseProposal { .. } => {
             proposal_publication::apply(root, registry, operation_uuid, mutation)?
         }
+        ResearchMutation::UpdateBranch {
+            source_capture,
+            review,
+            version,
+            ..
+        } => Some(upstream_publication::apply(
+            root,
+            registry,
+            review,
+            source_capture.as_deref(),
+            version,
+        )?),
         ResearchMutation::PublishBranch {
             origin_capture,
             creation,
@@ -1001,6 +1033,7 @@ pub fn publish_research_operation(
 
 /// Publish using the owning facade's admitted lifecycle mode.
 /// Ephemeral mode is only for process-owned temporary Projects.
+#[allow(clippy::too_many_lines)] // receipt, retained sources, and CURRENT form one publication
 pub fn publish_research_operation_with_mode(
     root: &Path,
     request: &ResearchOperation,
@@ -1037,6 +1070,7 @@ pub fn publish_research_operation_with_mode(
     }
     let operation_fingerprint = branches::publication_fingerprint(request);
     proposal_publication::validate_preview_generation(request)?;
+    upstream_publication::validate_preview_generation(request)?;
     let graph_objects = crate::begin_graph_object_publication(root)?;
     let version_uuid = apply_mutation(
         root,
@@ -1054,7 +1088,8 @@ pub fn publish_research_operation_with_mode(
             ResearchMutation::PublishBranch { intent_sha256, .. }
             | ResearchMutation::SubmitProposal { intent_sha256, .. }
             | ResearchMutation::ReviewProposal { intent_sha256, .. }
-            | ResearchMutation::ReleaseProposal { intent_sha256, .. } => Some(*intent_sha256),
+            | ResearchMutation::ReleaseProposal { intent_sha256, .. }
+            | ResearchMutation::UpdateBranch { intent_sha256, .. } => Some(*intent_sha256),
             _ => None,
         },
         operation_uuid: request.operation_uuid,
@@ -1092,7 +1127,16 @@ pub fn publish_research_operation_with_mode(
         )?;
     if let ProjectStageOutcome::Staged(staged) = staged {
         staged
-            .validate(|_| registry.validate(), |_, _| Ok(()))?
+            .validate_with_upstream_origin(
+                |_| registry.validate(),
+                |_, _| Ok(()),
+                match &request.mutation {
+                    ResearchMutation::UpdateBranch { source_capture, .. } => {
+                        source_capture.as_deref()
+                    }
+                    _ => None,
+                },
+            )?
             .publish_with_graph_objects_cancellable(&graph_objects, &mut || {
                 cancellation.load(Ordering::Relaxed)
             })?;
@@ -1236,6 +1280,8 @@ pub(crate) fn validate_publication_transition(
     participants: &[crate::StagedParticipant],
     directory: &Path,
     declares_research: bool,
+    candidate_generation: Uuid,
+    origin_witness: Option<&RegisterResearchVersion>,
 ) -> Result<(), GfError> {
     let before = read_research_registry(parent)?;
     let candidate = participants.iter().find(|p| {
@@ -1256,7 +1302,7 @@ pub(crate) fn validate_publication_transition(
         || candidate.encoding != "json"
         || candidate.byte_length > MAX_REGISTRY_BYTES as u64
         || candidate.schema_fingerprint
-            != hex(&Sha256::digest(b"graphforge-research-registry/4").into())
+            != hex(&Sha256::digest(b"graphforge-research-registry/5").into())
     {
         return Err(invalid("unsupported research registry publication"));
     }
@@ -1269,6 +1315,13 @@ pub(crate) fn validate_publication_transition(
     if json(&after)? != bytes {
         return Err(invalid("research registry publication is not canonical"));
     }
+    upstream::preserve(
+        &before,
+        &after,
+        parent,
+        candidate_generation,
+        origin_witness,
+    )?;
     for (id, branch) in &before.branches {
         if after.branches.get(id) != Some(branch) {
             return Err(invalid(

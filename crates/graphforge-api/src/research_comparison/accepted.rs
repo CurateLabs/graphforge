@@ -11,13 +11,13 @@ use graphforge_storage::{ResolvedProjectGeneration, research_versions::ResearchR
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 #[derive(Clone)]
-pub(super) struct Accepted {
+pub(crate) struct Accepted {
     pub value: Option<[u8; 32]>,
     pub source: Uuid,
     pub destination: Uuid,
     pub contribution: Uuid,
 }
-pub(super) fn verify(
+pub(crate) fn verify(
     owner: &GraphForge,
     current: &ResolvedProjectGeneration,
     registry: &ResearchRegistry,

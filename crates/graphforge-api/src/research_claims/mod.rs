@@ -1,6 +1,6 @@
 //! Contextual research classifications and independent canonical authority.
 pub(crate) mod authority;
-mod branch;
+pub(crate) mod branch;
 mod create;
 pub(crate) mod decisions;
 mod history;

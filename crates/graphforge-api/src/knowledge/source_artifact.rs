@@ -541,7 +541,23 @@ impl GraphForge {
         }
         let prior_artifact_uuid =
             existing_preferences.current_preferred_artifact(request.source_uuid);
-        let recorded_at_micros = (self.clock.lock().expect("clock lock poisoned"))()?;
+        let now = (self.clock.lock().expect("clock lock poisoned"))()?;
+        let recorded_at_micros = existing_preferences
+            .events
+            .iter()
+            .filter(|event| event.source_uuid == request.source_uuid)
+            .map(|event| event.recorded_at_micros)
+            .max()
+            .map(|prior| {
+                prior
+                    .checked_add(1)
+                    .map(|next| next.max(now))
+                    .ok_or_else(|| {
+                        GfError::Validation("preferred Artifact event order is exhausted".into())
+                    })
+            })
+            .transpose()?
+            .unwrap_or(now);
         let event = ProvenanceEvent::new(
             request.context.operation_uuid.0,
             EventKind::SetArtifactPreference,
