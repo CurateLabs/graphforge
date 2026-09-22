@@ -355,6 +355,11 @@ to existing compatible list properties: it concatenates the local and upstream
 sequences without losing their order or repetitions, then uses native property
 and ontology validation. It never casts scalar conflicts into lists.
 
+Adopting an ontology dependency uses native composition publication. Retained
+graph files are reauthenticated for the new composition and published with its
+bindings; old Versions retain their original files. Read-only field inspection
+keeps runtime name observations local to the read.
+
 Source preference comparison commits the effective preferred Artifact UUID,
 not the preference event UUID. Its append-only history retains every referenced
 Artifact and provenance dependency. A preference resolution does not rerun a
@@ -659,7 +664,7 @@ are deleted. Original source/destination Version citations remain immutable
 identity commitments. Releasing a payload ends its preview/review availability;
 exact operation replay and history inspection remain supported.
 
-The `research@4` registry bounds all history to 8 MiB, 1,024 retained Versions,
+The `research@5` registry bounds all history to 8 MiB, 1,024 retained Versions,
 4,096 receipts/identity commitments, 4,096 roots, and 16,384 accepted mappings.
 It refuses capacity overflow rather than expiring receipts or deduplication
 history. Receipt replay and duplicate prevention are separate permanent bounded

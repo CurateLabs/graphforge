@@ -124,7 +124,6 @@ pub(crate) fn run_research(
 ) -> Result<(), graphforge_api::GfError> {
     match command {
         ResearchCommand::Proposal { command } => proposals::run(graph, command, json, output)?,
-    },
         ResearchCommand::Upstream { command } => upstream::run(graph, command, json, output)?,
         ResearchCommand::Compare(args) => comparison::run(graph, args, json, output)?,
         ResearchCommand::Claim { command } => claims::run(graph, command, json, output)?,

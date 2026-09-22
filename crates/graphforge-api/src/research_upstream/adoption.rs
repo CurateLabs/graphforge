@@ -19,7 +19,7 @@ pub(super) fn apply(
     capture: Option<&RegisterResearchVersion>,
     cancel: &CancellationToken,
 ) -> Result<(GraphForge, ResearchVersionRecord), GfError> {
-    let (graph, mut version) =
+    let (mut graph, mut version) =
         crate::branches::edit::prepare(owner, command, request.preview.branch_uuid)?;
     if !selected.values().any(|resolution| {
         matches!(
@@ -29,21 +29,39 @@ pub(super) fn apply(
     }) {
         return Ok((graph, version));
     }
-    // Graph and ontology integration uses the shared typed owners once available.
-    if selected.iter().any(|(key, resolution)| {
-        matches!(
-            resolution,
-            ResearchUpstreamResolution::AdoptUpstream | ResearchUpstreamResolution::RetainBoth
-        ) && (matches!(key.0.as_str(), "node" | "edge") || key.0.starts_with("ontology"))
-    }) {
-        return Err(invalid(
-            "selected graph or ontology application requires the native typed owner integration",
-        ));
-    }
     let proof =
         super::projection::prepare(owner, command, snapshot, request, selected, capture, cancel)?;
     let source = crate::branches::private_view::open(owner, &proof)?;
+    let changes: Vec<_> = selected
+        .iter()
+        .filter(|(_, resolution)| matches!(resolution, ResearchUpstreamResolution::AdoptUpstream))
+        .map(|(key, _)| crate::branches::field_application::FieldChange {
+            unit: crate::ResearchFieldIdentity {
+                object_kind: key.0.clone(),
+                object_uuid: key.1,
+                field: key.2.clone(),
+            },
+            value_sha256: snapshot.upstream.fields.get(key).copied(),
+        })
+        .collect();
+    crate::branches::field_ontology::apply(
+        &mut graph,
+        &source,
+        &crate::branches::field_application::MutationContext {
+            operation_uuid: request.operation_uuid,
+            actor_uuid: request.actor_uuid,
+        },
+        &changes,
+        cancel,
+    )?;
     let mut domains = crate::branches::merge_domains::merge(&graph, &source)?;
+    crate::branches::field_application::apply(&graph, &source, &changes, cancel)?;
+    for (key, resolution) in selected {
+        if matches!(resolution, ResearchUpstreamResolution::RetainBoth) {
+            super::retain_both::apply(&graph, &source, key, cancel)?;
+        }
+    }
+
     // Incoming preference history must not change any unreviewed Source choice.
     // Explicit adoption appends a new event through the native owner below.
     domains.retain(|participant| {

@@ -69,29 +69,7 @@ impl GraphForge {
             .take(request.page_size)
         {
             cancel.checkpoint()?;
-            let resolution = serde_json::to_string(&field.resolution)
-                .map_err(|_| invalid("invalid upstream resolution"))?;
-            let values = vec![
-                review.sequence.to_string(),
-                review.operation_uuid.to_string(),
-                review.branch_uuid.to_string(),
-                review.original_base_version_uuid.to_string(),
-                review.prior_version_uuid.to_string(),
-                review.upstream_version_uuid.to_string(),
-                review.version_uuid.to_string(),
-                review.preview_generation_uuid.to_string(),
-                review.actor_uuid.to_string(),
-                review.created_at.to_string(),
-                review.explanation.clone(),
-                field.unit.object_kind.clone(),
-                field.unit.object_uuid.to_string(),
-                field.unit.field.clone(),
-                resolution,
-                field.baseline_sha256.as_ref().map(hex).unwrap_or_default(),
-                field.local_sha256.as_ref().map(hex).unwrap_or_default(),
-                field.upstream_sha256.as_ref().map(hex).unwrap_or_default(),
-                field.result_sha256.as_ref().map(hex).unwrap_or_default(),
-            ];
+            let values = row_values(review, field)?;
             bytes = bytes.saturating_add(values.iter().map(String::len).sum::<usize>() + 1024);
             if bytes > 16 * 1024 * 1024 {
                 return Err(GfError::Api {
@@ -101,27 +79,6 @@ impl GraphForge {
             }
             rows.push(values);
         }
-        let names = [
-            "sequence",
-            "operation_uuid",
-            "branch_uuid",
-            "original_base_version_uuid",
-            "prior_version_uuid",
-            "upstream_version_uuid",
-            "version_uuid",
-            "preview_generation_uuid",
-            "actor_uuid",
-            "created_at",
-            "explanation",
-            "object_kind",
-            "object_uuid",
-            "field",
-            "resolution",
-            "baseline_sha256",
-            "local_sha256",
-            "upstream_sha256",
-            "result_sha256",
-        ];
         let next = offset + rows.len();
         let metadata = HashMap::from([
             ("graphforge.upstream.history_contract".into(), "1".into()),
@@ -139,13 +96,13 @@ impl GraphForge {
             ),
         ]);
         let schema = Arc::new(Schema::new_with_metadata(
-            names
+            NAMES
                 .iter()
                 .map(|name| Field::new(*name, DataType::Utf8, false))
                 .collect::<Vec<_>>(),
             metadata,
         ));
-        let columns: Vec<ArrayRef> = (0..names.len())
+        let columns: Vec<ArrayRef> = (0..NAMES.len())
             .map(|column| {
                 Arc::new(StringArray::from(
                     rows.iter()
@@ -164,4 +121,55 @@ fn stale() -> GfError {
         code: graphforge_core::ApiErrorCode::PageSnapshotGone,
         message: "upstream history continuation is stale; restart the same query".into(),
     }
+}
+
+const NAMES: [&str; 19] = [
+    "sequence",
+    "operation_uuid",
+    "branch_uuid",
+    "original_base_version_uuid",
+    "prior_version_uuid",
+    "upstream_version_uuid",
+    "version_uuid",
+    "preview_generation_uuid",
+    "actor_uuid",
+    "created_at",
+    "explanation",
+    "object_kind",
+    "object_uuid",
+    "field",
+    "resolution",
+    "baseline_sha256",
+    "local_sha256",
+    "upstream_sha256",
+    "result_sha256",
+];
+
+fn row_values(
+    review: &graphforge_storage::research_versions::ResearchUpstreamReview,
+    field: &graphforge_storage::research_versions::ResearchUpstreamFieldReview,
+) -> Result<Vec<String>, GfError> {
+    let resolution = serde_json::to_string(&field.resolution)
+        .map_err(|_| invalid("invalid upstream resolution"))?;
+    Ok(vec![
+        review.sequence.to_string(),
+        review.operation_uuid.to_string(),
+        review.branch_uuid.to_string(),
+        review.original_base_version_uuid.to_string(),
+        review.prior_version_uuid.to_string(),
+        review.upstream_version_uuid.to_string(),
+        review.version_uuid.to_string(),
+        review.preview_generation_uuid.to_string(),
+        review.actor_uuid.to_string(),
+        review.created_at.to_string(),
+        review.explanation.clone(),
+        field.unit.object_kind.clone(),
+        field.unit.object_uuid.to_string(),
+        field.unit.field.clone(),
+        resolution,
+        field.baseline_sha256.as_ref().map(hex).unwrap_or_default(),
+        field.local_sha256.as_ref().map(hex).unwrap_or_default(),
+        field.upstream_sha256.as_ref().map(hex).unwrap_or_default(),
+        field.result_sha256.as_ref().map(hex).unwrap_or_default(),
+    ])
 }

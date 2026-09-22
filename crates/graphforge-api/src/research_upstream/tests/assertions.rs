@@ -112,4 +112,100 @@ fn individual_assertion_adoption_preserves_unselected_claims_and_graph_values() 
             0
         );
     }
+    drop(branch);
+    graph
+        .suppress_research_branch_assertion(
+            &SuppressResearchBranchAssertionRequest {
+                operation_uuid: Uuid::now_v7(),
+                expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
+                branch_uuid: seed.preview.branch_uuid,
+                version_uuid: Uuid::now_v7(),
+                assertion_uuid: selected,
+                created_at: 5,
+            },
+            &cancel,
+        )
+        .unwrap();
+    let provenance = crate::knowledge::ledger::read_ledger(&graph.generation_for_read().unwrap())
+        .unwrap()
+        .assertions
+        .into_iter()
+        .find(|assertion| assertion.assertion_uuid == selected)
+        .unwrap()
+        .provenance_uuid;
+    graph
+        .record_assertion_status(RecordAssertionStatusRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            },
+            status_event_uuid: Uuid::now_v7(),
+            assertion_uuid: selected,
+            status: AssertionStatus::Disputed,
+            confidence_uuid: None,
+            reasoning_uuid: None,
+            provenance_uuid: provenance,
+        })
+        .unwrap();
+    let scope = PreviewResearchUpstreamRequest {
+        branch_uuid: seed.preview.branch_uuid,
+        scope: ResearchUpstreamScope::Branch,
+    };
+    let review = preview::load(&graph, &scope, &cancel).unwrap();
+    let changed_status = review
+        .rows
+        .iter()
+        .find(|row| row.key.2.starts_with("$assertion_status_events:"))
+        .unwrap();
+    assert_eq!(changed_status.change, "conflict");
+    let mut update = UpdateResearchBranchRequest {
+        operation_uuid: Uuid::now_v7(),
+        expected_generation_uuid: graph.generation_for_read().unwrap().generation_uuid(),
+        version_uuid: Uuid::now_v7(),
+        preview: scope.clone(),
+        preview_sha256: review.digest,
+        selection: ResearchUpstreamSelection::AllCompatible,
+        acknowledge_evidence: Default::default(),
+        actor_uuid: Uuid::now_v7(),
+        created_at: 6,
+        explanation: "Incorporate only independent compatible fields".into(),
+    };
+    assert!(
+        selection::validate(&review, &update)
+            .unwrap()
+            .keys()
+            .all(|key| key.0 != "assertion")
+    );
+    graph.update_research_branch(&update, &cancel).unwrap();
+    let review = preview::load(&graph, &scope, &cancel).unwrap();
+    let changed_status = review
+        .rows
+        .iter()
+        .find(|row| row.key.2.starts_with("$assertion_status_events:"))
+        .unwrap();
+    assert_eq!(changed_status.change, "conflict");
+    update.operation_uuid = Uuid::now_v7();
+    update.version_uuid = Uuid::now_v7();
+    update.expected_generation_uuid = graph.generation_for_read().unwrap().generation_uuid();
+    update.preview_sha256 = review.digest;
+    update.selection = ResearchUpstreamSelection::Selected {
+        decisions: vec![ResearchUpstreamDecision {
+            unit: ResearchFieldIdentity {
+                object_kind: changed_status.key.0.clone(),
+                object_uuid: changed_status.key.1,
+                field: changed_status.key.2.clone(),
+            },
+            resolution: ResearchUpstreamResolution::KeepLocal,
+        }],
+    };
+    graph.update_research_branch(&update, &cancel).unwrap();
+    let branch = graph
+        .open_research_branch(seed.preview.branch_uuid)
+        .unwrap();
+    assert!(
+        crate::research_claims::ledger::read_claims(&branch.graph().generation_for_read().unwrap())
+            .unwrap()
+            .claims()
+            .is_empty()
+    );
 }

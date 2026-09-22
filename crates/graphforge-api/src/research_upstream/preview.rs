@@ -56,19 +56,7 @@ pub(super) fn load(
         .chain(local.baseline.keys())
         .map(|key| (key.0.clone(), key.1))
         .collect();
-    if let ResearchUpstreamScope::Fields { fields } = &request.scope {
-        let unique: BTreeSet<_> = fields.iter().collect();
-        if fields.is_empty() || fields.len() > 256 || fields.len() != unique.len() {
-            return Err(invalid(
-                "upstream field selection requires 1..256 distinct fields",
-            ));
-        }
-        objects.extend(
-            fields
-                .iter()
-                .map(|field| (field.object_kind.clone(), field.object_uuid)),
-        );
-    }
+    include_explicit_objects(&request.scope, &mut objects)?;
     let endpoint = branch
         .parent_branch_uuid
         .map_or(ResearchComparisonEndpoint::Project, |branch_uuid| {
@@ -198,4 +186,24 @@ pub(super) fn identity(operation: Uuid, role: &str) -> Uuid {
     digest.update(operation.as_bytes());
     digest.update(role.as_bytes());
     graphforge_core::canonical::uuid_v8(digest.finalize().into())
+}
+
+fn include_explicit_objects(
+    scope: &ResearchUpstreamScope,
+    objects: &mut fields::Objects,
+) -> Result<(), GfError> {
+    if let ResearchUpstreamScope::Fields { fields } = scope {
+        let unique: BTreeSet<_> = fields.iter().collect();
+        if fields.is_empty() || fields.len() > 256 || fields.len() != unique.len() {
+            return Err(invalid(
+                "upstream field selection requires 1..256 distinct fields",
+            ));
+        }
+        objects.extend(
+            fields
+                .iter()
+                .map(|field| (field.object_kind.clone(), field.object_uuid)),
+        );
+    }
+    Ok(())
 }

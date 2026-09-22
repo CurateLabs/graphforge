@@ -42,7 +42,9 @@ pub(super) fn prepare(
     let evidence = crate::research_versions::complete_evidence(&generation)?
         .into_iter()
         .filter(|e| {
-            use graphforge_storage::research_versions::ResearchEvidenceReference::*;
+            use graphforge_storage::research_versions::ResearchEvidenceReference::{
+                ExternalOnly, Local, Unverifiable,
+            };
             let id = match e {
                 Local { artifact_uuid, .. }
                 | ExternalOnly { artifact_uuid, .. }
@@ -86,7 +88,38 @@ pub(super) fn prepare(
         created_at: request.created_at,
         evidence,
     };
-    let graph = ResearchGraphSelection {
+    let graph = graph_selection(&objects);
+    let prepared = prepare_branch_selection(
+        &command.root,
+        &spec,
+        capture,
+        Some(&graph),
+        &replacements,
+        cancel.flag(),
+    )?;
+    let mut view = crate::branches::private_view::open(owner, &prepared)?;
+    view.read_only = false;
+    let keys = selected
+        .iter()
+        .filter(|(_, resolution)| {
+            matches!(
+                resolution,
+                ResearchUpstreamResolution::AdoptUpstream | ResearchUpstreamResolution::RetainBoth
+            )
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    crate::branches::field_application::redact_properties(&view, &keys, cancel)?;
+    graphforge_storage::research_versions::prepare_branch_content(
+        &command.root,
+        &view.generation_for_read()?,
+        prepared.version.clone(),
+        cancel.flag(),
+    )
+}
+
+fn graph_selection(objects: &fields::Objects) -> ResearchGraphSelection {
+    ResearchGraphSelection {
         nodes: objects
             .iter()
             .filter(|(kind, _)| kind == "node")
@@ -99,16 +132,5 @@ pub(super) fn prepare(
             .collect(),
         induced_edges: false,
         exclude_properties: BTreeSet::new(),
-    };
-    let prepared = prepare_branch_selection(
-        &command.root,
-        &spec,
-        capture,
-        Some(&graph),
-        &replacements,
-        cancel.flag(),
-    )?;
-    // Domain extraction and graph projection must admit through native checkpoint validation.
-    let _validated = crate::branches::private_view::open(owner, &prepared)?;
-    Ok(prepared)
+    }
 }

@@ -640,3 +640,38 @@ fn semantic_admission_and_decode_share_one_stable_file_handle() {
     assert_eq!(rows, 1);
     assert!(admitted_semantic_parquet(&path).is_err());
 }
+
+#[test]
+fn identity_equivalent_migration_requires_equal_documents() {
+    let root = tempfile::tempdir().unwrap();
+    let old = compiled_with("1", false, true);
+    let bindings = SemanticStorageBindings::project(&old, None).unwrap();
+    let next = compiled_with("2", false, true);
+    let pairs = [(old.modules[0].id.clone(), next.modules[0].id.clone())];
+    assert!(
+        SemanticStorageBindings::plan_retained_data_migration(&old, &next, &bindings, root.path(),)
+            .is_err()
+    );
+    SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
+        &old,
+        &next,
+        &bindings,
+        root.path(),
+        &pairs,
+    )
+    .unwrap();
+    let changed = compiled_with("2", false, false);
+    let pairs = [(old.modules[0].id.clone(), changed.modules[0].id.clone())];
+    assert!(
+        SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
+            &old,
+            &changed,
+            &bindings,
+            root.path(),
+            &pairs,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("changes its schema")
+    );
+}

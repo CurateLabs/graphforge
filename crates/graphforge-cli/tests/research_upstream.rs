@@ -94,13 +94,13 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
                     object_uuid: Uuid::from_slice(ids.value(row)).unwrap(),
                     field: "property:x".into(),
                 },
-                resolution: ResearchUpstreamResolution::KeepLocal,
+                resolution: ResearchUpstreamResolution::AdoptUpstream,
             }],
         },
         acknowledge_evidence: Default::default(),
         actor_uuid: Uuid::now_v7(),
         created_at: 2,
-        explanation: "Reviewed local value".into(),
+        explanation: "Adopt reviewed x only".into(),
     };
     let receipt: serde_json::Value =
         serde_json::from_slice(&run(&root, &file, "update", &request)).unwrap();
@@ -128,6 +128,23 @@ fn cli_upstream_review_reopens_and_replays_native_publication() {
         1
     );
     let reopened = GraphForge::new(root.to_str()).unwrap();
+    let view = reopened.open_research_branch(branch).unwrap();
+    let result = view
+        .graph()
+        .execute("MATCH (n:Item) RETURN n.x AS x,n.y AS y")
+        .unwrap();
+    for (name, expected) in [("x", 1), ("y", 0)] {
+        assert_eq!(
+            result.batches[0]
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0),
+            expected
+        );
+    }
     assert_eq!(
         reopened
             .research_version_retention()

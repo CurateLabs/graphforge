@@ -60,16 +60,22 @@ class ResearchUpstreamTests(unittest.TestCase):
                             "object_uuid": str(UUID(bytes=row["object_uuid"])),
                             "field": row["field"],
                         },
-                        "resolution": {"kind": "keep_local"},
+                        "resolution": {"kind": "adopt_upstream"},
                     }
                 ],
             },
             "acknowledge_evidence": [],
             "actor_uuid": identity(),
             "created_at": 2,
-            "explanation": "Retain reviewed local interpretation",
+            "explanation": "Adopt reviewed x only",
         }
         receipt = graph.update_research_branch(update)
+        self.assertEqual(
+            graph.query_research_branch(
+                branch, "MATCH (n:Item) RETURN n.x AS x,n.y AS y"
+            ).to_pylist(),
+            [{"x": 1, "y": 0}],
+        )
         after = graph.preview_research_upstream(preview_request)
         self.assertEqual(
             {
@@ -77,7 +83,7 @@ class ResearchUpstreamTests(unittest.TestCase):
                 for row in after.to_pylist()
                 if row["field"].startswith("property:")
             },
-            {"property:x": "local", "property:y": "upstream"},
+            {"property:y": "upstream"},
         )
         self.assertEqual(graph.update_research_branch(update), receipt)
         history = graph.research_upstream_history({"branch_uuid": branch, "page_size": 10})

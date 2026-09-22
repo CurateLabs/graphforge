@@ -1033,6 +1033,7 @@ pub fn publish_research_operation(
 
 /// Publish using the owning facade's admitted lifecycle mode.
 /// Ephemeral mode is only for process-owned temporary Projects.
+#[allow(clippy::too_many_lines)] // receipt, retained sources, and CURRENT form one publication
 pub fn publish_research_operation_with_mode(
     root: &Path,
     request: &ResearchOperation,
@@ -1069,15 +1070,7 @@ pub fn publish_research_operation_with_mode(
     }
     let operation_fingerprint = branches::publication_fingerprint(request);
     proposal_publication::validate_preview_generation(request)?;
-    if let ResearchMutation::UpdateBranch { review, .. } = &request.mutation {
-        if review.operation_uuid != request.operation_uuid
-            || review.preview_generation_uuid != request.expected_generation_uuid
-        {
-            return Err(invalid(
-                "upstream review identity differs from the publication request",
-            ));
-        }
-    }
+    upstream_publication::validate_preview_generation(request)?;
     let graph_objects = crate::begin_graph_object_publication(root)?;
     let version_uuid = apply_mutation(
         root,

@@ -62,27 +62,7 @@ pub(super) fn validate(
         }
     }
     if matches!(request.selection, ResearchUpstreamSelection::AllCompatible) {
-        // A compatible item with a conflicting or unselected prerequisite is not compatible as a whole.
-        loop {
-            let blocked: Vec<_> = selected
-                .keys()
-                .filter(|key| {
-                    preview.requirements.get(*key).is_some_and(|requirements| {
-                        requirements
-                            .fields
-                            .iter()
-                            .any(|dependency| !selected.contains_key(dependency))
-                    })
-                })
-                .cloned()
-                .collect();
-            if blocked.is_empty() {
-                break;
-            }
-            for key in blocked {
-                selected.remove(&key);
-            }
-        }
+        retain_compatible(preview, &mut selected);
     }
     let mut needed_evidence = std::collections::BTreeSet::new();
     for (key, resolution) in &selected {
@@ -117,4 +97,31 @@ pub(super) fn validate(
         ));
     }
     Ok(selected)
+}
+
+fn retain_compatible(
+    preview: &Preview,
+    selected: &mut BTreeMap<fields::Key, ResearchUpstreamResolution>,
+) {
+    // A compatible item with a conflicting or unselected prerequisite is not compatible as a whole.
+    loop {
+        let blocked: Vec<_> = selected
+            .keys()
+            .filter(|key| {
+                preview.requirements.get(*key).is_some_and(|requirements| {
+                    requirements
+                        .fields
+                        .iter()
+                        .any(|dependency| !selected.contains_key(dependency))
+                })
+            })
+            .cloned()
+            .collect();
+        if blocked.is_empty() {
+            break;
+        }
+        for key in blocked {
+            selected.remove(&key);
+        }
+    }
 }

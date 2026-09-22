@@ -68,3 +68,17 @@ pub(super) fn apply(
         .insert(review.operation_uuid, review.clone());
     Ok(id)
 }
+
+pub(super) fn validate_preview_generation(
+    request: &super::ResearchOperation,
+) -> Result<(), GfError> {
+    if let super::ResearchMutation::UpdateBranch { review, .. } = &request.mutation
+        && (review.operation_uuid != request.operation_uuid
+            || review.preview_generation_uuid != request.expected_generation_uuid)
+    {
+        return Err(super::invalid(
+            "upstream review identity differs from the publication request",
+        ));
+    }
+    Ok(())
+}

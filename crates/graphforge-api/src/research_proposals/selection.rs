@@ -5,7 +5,7 @@ use crate::{
     branches::{baseline, fields, publication},
 };
 use graphforge_storage::research_versions::{PreparedResearchContent, RegisterResearchVersion};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub(super) struct Selected {
@@ -86,7 +86,7 @@ pub(super) fn freeze(
     let prepared = crate::branches::selection::prepare(command, selected, &mut spec, cancellation)?;
     let mut view = crate::branches::private_view::open(owner, &prepared)?;
     view.read_only = false;
-    redact_properties(&view, &keys, cancellation)?;
+    crate::branches::field_application::redact_properties(&view, &keys, cancellation)?;
     let mut frozen = graphforge_storage::research_versions::prepare_branch_content(
         &command.root,
         &view.generation_for_read()?,
@@ -115,45 +115,6 @@ pub(super) fn freeze(
             .filter(|(key, _)| keys.contains(key))
             .collect(),
     })
-}
-
-fn redact_properties(
-    view: &GraphForge,
-    keys: &BTreeSet<fields::Key>,
-    cancellation: &CancellationToken,
-) -> Result<(), GfError> {
-    for key in fields::read(view, cancellation)?.keys() {
-        let Some(property) = key.2.strip_prefix("property:") else {
-            continue;
-        };
-        if keys.contains(key) {
-            continue;
-        }
-        cancellation.checkpoint()?;
-        let (_pattern, object, uuid) = match key.0.as_str() {
-            "node" => ("(n)", "n", "node_uuid"),
-            "edge" => ("()-[r]->()", "r", "edge_uuid"),
-            _ => continue,
-        };
-        let pattern = crate::branches::semantic_fields::property_pattern(
-            view,
-            &key.0,
-            key.1,
-            property,
-            cancellation,
-        )?;
-        // Property removal uses the native mutation path; do not remove labels or
-        // interpret values in a binding-side representation.
-        let query = format!(
-            "MATCH {pattern} WHERE {object}.{uuid} = $id REMOVE {object}.`{}`",
-            property.replace('`', "``")
-        );
-        view.execute_with_params(
-            &query,
-            &HashMap::from([("id".into(), crate::IrLiteral::Uuid(*key.1.as_bytes()))]),
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn item_identity(proposal: Uuid, unit: &fields::Key) -> Result<Uuid, GfError> {

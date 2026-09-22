@@ -1,6 +1,7 @@
 //! Preview reads real native Branch state without advancing either authority.
 mod assertions;
 mod history;
+mod ontology;
 mod recovery;
 mod repeated;
 use super::*;

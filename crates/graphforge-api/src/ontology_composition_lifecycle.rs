@@ -406,6 +406,7 @@ impl GraphForge {
         preview: &CompositionChangePreview,
         cancellation: Option<&CancellationToken>,
     ) -> Result<CompositionChangeReceipt, GfError> {
+        self.graph_visibility.health.check()?;
         if let Some(receipt) = self.replay_ontology_composition_change(request)? {
             return Ok(receipt);
         }
@@ -446,13 +447,38 @@ impl GraphForge {
         let existing = self.workspace_ontology_composition()?;
         let identity_equivalent =
             identity_equivalent_upgrades(existing.as_ref(), &request.candidate);
-        let published_bindings =
+        let private = tempfile::tempdir().map_err(|_| {
+            GfError::Validation("composition private staging cannot be created".into())
+        })?;
+        let candidate_graph = private.path().join("graph");
+        let migration = match (existing.as_ref(), previous_bindings.as_ref()) {
+            (Some(existing), Some(previous))
+                if existing.composition_fingerprint != compiled_candidate.fingerprint =>
+            {
+                let plan = graphforge_storage::SemanticStorageBindings::plan_retained_data_migration_identity_equivalent(
+                    &existing.compile()?, &compiled_candidate, previous, &self.dir(), &identity_equivalent,
+                )?;
+                graphforge_storage::materialize_semantic_migration(
+                    &plan,
+                    &self.dir(),
+                    &candidate_graph,
+                    graphforge_storage::SemanticMigrationLimits::default(),
+                    || cancellation.map_or(Ok(()), crate::CancellationToken::checkpoint),
+                )?;
+                Some(plan)
+            }
+            _ => None,
+        };
+        let published_bindings = if let Some(plan) = &migration {
+            plan.bindings.clone()
+        } else {
             graphforge_storage::SemanticStorageBindings::project_with_graph_scan_identity_equivalent(
                 &compiled_candidate,
                 previous_bindings.as_ref(),
                 &self.dir(),
                 &identity_equivalent,
-            )?;
+            )?
+        };
         let published_binding = graphforge_ir::CompositionBindingContext::new(
             std::sync::Arc::new(compiled_candidate),
             request.candidate.bridges.clone(),
@@ -464,44 +490,88 @@ impl GraphForge {
                 .iter()
                 .map(|binding| (binding.symbol.clone(), binding.storage_id)),
         )?;
-        crate::workspace_ontology::publish_workspace_records(
-            self,
-            request.context.operation_uuid.0,
-            request.context.actor_uuid,
-            &ontology,
-            &configuration,
-            Some(&request.candidate),
-            Some(&published_bindings),
-            Some(expected_generation_uuid),
-            cancellation,
-        )?;
-        *self
-            .semantic_storage_bindings
-            .lock()
-            .expect("semantic storage binding lock poisoned") = Some(published_bindings);
-        *self
-            .default_composition_context
-            .lock()
-            .expect("composition binding lock poisoned") =
-            Some(std::sync::Arc::new(published_binding));
-        self.ontology_mode = configuration.ontology_mode.execution_mode();
-        *self
-            .adjacency_provider
-            .write()
-            .expect("adjacency provider lock poisoned") =
-            std::sync::Arc::new(crate::adjacency_provider_for_graph(
-                &self.dir(),
-                self.ontology_mode,
-                self.property_inventory_for_session(),
-            )?);
-        Ok(CompositionChangeReceipt {
-            project_generation_uuid: *self
-                .current_generation_uuid
+        let publication = if migration.is_some() {
+            crate::workspace_ontology::publish_workspace_records_with_graph_tree(
+                self,
+                request.context.operation_uuid.0,
+                request.context.actor_uuid,
+                &ontology,
+                &configuration,
+                &request.candidate,
+                &published_bindings,
+                expected_generation_uuid,
+                &candidate_graph,
+                cancellation,
+            )
+        } else {
+            crate::workspace_ontology::publish_workspace_records(
+                self,
+                request.context.operation_uuid.0,
+                request.context.actor_uuid,
+                &ontology,
+                &configuration,
+                Some(&request.candidate),
+                Some(&published_bindings),
+                Some(expected_generation_uuid),
+                cancellation,
+            )
+        };
+        if let Err(error) = publication {
+            // CURRENT is authoritative even when publication reports an error.
+            // An advanced or unreadable authority requires reopening; never let
+            // exact replay return a receipt while this facade still serves old readers.
+            let unchanged = graphforge_storage::resolve_project_generation(
+                self.resolved_generation.container_root(),
+            )
+            .is_ok_and(|current| {
+                current.generation_uuid() == request.expected_project_generation_uuid
+            });
+            if !unchanged {
+                self.graph_visibility.health.fail(&error);
+            }
+            return Err(error);
+        }
+        let refresh = (|| {
+            if migration.is_some() {
+                let (dir, owner, evidence) =
+                    crate::hydrate_graph_workspace(&self.resolved_generation, false)?;
+                self.replace_workspace_owner(crate::GraphWorkspace { dir, _owner: owner });
+                self.graph_open_evidence = evidence;
+                *self
+                    .uuid_membership_index
+                    .lock()
+                    .expect("UUID membership index lock poisoned") = None;
+            }
+            *self
+                .semantic_storage_bindings
                 .lock()
-                .expect("generation UUID lock poisoned"),
-            composition_fingerprint: fresh.candidate_composition_fingerprint,
-            candidate_sha256: fresh.candidate_sha256,
-        })
+                .expect("semantic storage binding lock poisoned") = Some(published_bindings);
+            *self
+                .default_composition_context
+                .lock()
+                .expect("composition binding lock poisoned") =
+                Some(std::sync::Arc::new(published_binding));
+            self.ontology_mode = configuration.ontology_mode.execution_mode();
+            self.install_property_generation(&self.resolved_generation)?;
+            if migration.is_some() {
+                *self
+                    .runtime_catalog
+                    .lock()
+                    .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&self.dir())?;
+            }
+            Ok(CompositionChangeReceipt {
+                project_generation_uuid: *self
+                    .current_generation_uuid
+                    .lock()
+                    .expect("generation UUID lock poisoned"),
+                composition_fingerprint: fresh.candidate_composition_fingerprint,
+                candidate_sha256: fresh.candidate_sha256,
+            })
+        })();
+        if let Err(error) = &refresh {
+            self.graph_visibility.health.fail(error);
+        }
+        refresh
     }
 
     pub(crate) fn replay_ontology_composition_change(
@@ -1652,4 +1722,6 @@ mod tests {
             "migration_transform_unknown"
         );
     }
+
+    mod returned_errors;
 }

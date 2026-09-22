@@ -60,3 +60,58 @@ mod tests {
         );
     }
 }
+
+pub(super) fn apply(
+    destination: &crate::GraphForge,
+    source: &crate::GraphForge,
+    key: &crate::branches::fields::Key,
+    cancel: &crate::CancellationToken,
+) -> Result<(), GfError> {
+    use std::collections::HashMap;
+    let (object, id) = match key.0.as_str() {
+        "node" => ("n", "node_uuid"),
+        "edge" => ("r", "edge_uuid"),
+        _ => {
+            return Err(invalid(
+                "retain-both requires a native multivalued property; choose an explicit owner resolution",
+            ));
+        }
+    };
+    let property = key
+        .2
+        .strip_prefix("property:")
+        .ok_or_else(|| invalid("retain-both requires a native multivalued property"))?;
+    let mut params = HashMap::from([("id".into(), IrLiteral::Uuid(*key.1.as_bytes()))]);
+    let read = |graph: &crate::GraphForge| {
+        let pattern = crate::branches::semantic_fields::property_pattern(
+            graph, &key.0, key.1, property, cancel,
+        )?;
+        crate::branches::field_application::scalar(
+            graph,
+            &format!(
+                "MATCH {pattern} WHERE {object}.{id} = $id RETURN {object}.`{}` AS value",
+                property.replace('`', "``")
+            ),
+            &params,
+            cancel,
+        )
+    };
+    let combined = lists(read(destination)?, read(source)?)?;
+    let pattern = crate::branches::semantic_fields::property_pattern(
+        destination,
+        &key.0,
+        key.1,
+        property,
+        cancel,
+    )?;
+    params.insert("value".into(), combined);
+    cancel.checkpoint()?;
+    destination.execute_with_params(
+        &format!(
+            "MATCH {pattern} WHERE {object}.{id} = $id SET {object}.`{}` = $value",
+            property.replace('`', "``")
+        ),
+        &params,
+    )?;
+    Ok(())
+}

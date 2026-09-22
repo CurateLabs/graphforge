@@ -58,16 +58,24 @@ test("native upstream review advances only the selected baseline and replays its
               object_uuid: uuid(row.object_uuid),
               field: row.field,
             },
-            resolution: { kind: "keep_local" },
+            resolution: { kind: "adopt_upstream" },
           },
         ],
       },
       acknowledge_evidence: [],
       actor_uuid: identity(),
       created_at: 2,
-      explanation: "Retain reviewed local interpretation",
+      explanation: "Adopt reviewed x only",
     };
     const receipt = await graph.updateResearchBranch(update);
+    const values = tableFromIPC(
+      await graph.queryResearchBranch(
+        branch,
+        "MATCH (n:Item) RETURN n.x AS x,n.y AS y",
+      ),
+    );
+    assert.equal(Number(values.getChild("x").get(0)), 1);
+    assert.equal(Number(values.getChild("y").get(0)), 0);
     const after = tableFromIPC(
       await graph.previewResearchUpstream(previewRequest),
     );
@@ -78,7 +86,7 @@ test("native upstream review advances only the selected baseline and replays its
           .filter((row) => row.field.startsWith("property:"))
           .map((row) => [row.field, row.change]),
       ),
-      { "property:x": "local", "property:y": "upstream" },
+      { "property:y": "upstream" },
     );
     assert.deepEqual(await graph.updateResearchBranch(update), receipt);
     const history = tableFromIPC(

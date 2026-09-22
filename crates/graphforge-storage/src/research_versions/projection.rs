@@ -52,15 +52,14 @@ pub(super) fn register(
     let graph = snapshots
         .iter()
         .find(|p| p.capability_id == "graph" && p.record_family_id == "files");
-    if graph.is_none() {
+    let Some(graph) = graph else {
         if !selection.nodes.is_empty() || !selection.edges.is_empty() {
             return Err(invalid(
                 "selected graph identities are absent from the source",
             ));
         }
         return register_graphless(root, registry, spec, &origin, &snapshots);
-    }
-    let graph = graph.expect("checked graph participant");
+    };
     let graph_key = ResearchParticipantKey {
         capability: "graph".into(),
         family: "files".into(),
