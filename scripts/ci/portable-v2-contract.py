@@ -286,6 +286,23 @@ def main() -> None:
     schema = load_json(SCHEMA)
     require(isinstance(schema, dict), "schema must be an object")
     require(schema.get("$id", "").endswith("graphforge-project-v2.schema.json"), "schema id")
+    kinds = schema["properties"]["components"]["items"]["properties"]["kind"]["enum"]
+    require(
+        set(kinds)
+        == {
+            "ontology",
+            "schema",
+            "migration",
+            "settings",
+            "graph-data",
+            "derived-artifact",
+            "evidence",
+            "provenance",
+            "compatibility",
+            "research",
+        },
+        "registered portable component kinds",
+    )
     manifest = load_json(FIXTURES / "ontology-only.manifest.json")
     require(isinstance(manifest, dict), "manifest must be an object")
     expected = manifest.pop("package_digest")

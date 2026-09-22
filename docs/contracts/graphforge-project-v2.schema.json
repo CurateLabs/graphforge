@@ -40,7 +40,7 @@
         "type": "object", "additionalProperties": false,
         "required": ["kind", "participant_id", "required_dependencies", "files"],
         "properties": {
-          "kind": { "enum": ["ontology", "schema", "migration", "settings", "graph-data", "derived-artifact", "evidence", "provenance", "compatibility"] },
+          "kind": { "enum": ["ontology", "schema", "migration", "settings", "graph-data", "derived-artifact", "evidence", "provenance", "compatibility", "research"] },
           "participant_id": { "$ref": "#/$defs/id" },
           "required_dependencies": { "$ref": "#/$defs/idList" },
           "files": {

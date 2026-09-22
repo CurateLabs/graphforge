@@ -180,8 +180,12 @@ fn fork_has_independent_governance_metadata_and_exact_retry() {
     assert_eq!(first.generation_uuid, again.generation_uuid);
     let fork = GraphForge::new(Some(request.target.to_str().unwrap())).unwrap();
     assert_eq!(fork.research_project_metadata().unwrap(), metadata);
-    let origin = source.research_reference(&ResearchReferenceTarget::Version { version_uuid }, &cancel).unwrap();
-    let citation = fork.research_reference(&ResearchReferenceTarget::Version { version_uuid }, &cancel).unwrap();
+    let origin = source
+        .research_reference(&ResearchReferenceTarget::Version { version_uuid }, &cancel)
+        .unwrap();
+    let citation = fork
+        .research_reference(&ResearchReferenceTarget::Version { version_uuid }, &cancel)
+        .unwrap();
     assert_eq!(citation.origin_project_uuid, origin.origin_project_uuid);
     assert_eq!(citation.project_uuid, request.project_uuid);
     assert_ne!(citation.project_uuid, citation.origin_project_uuid);

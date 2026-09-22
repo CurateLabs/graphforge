@@ -87,8 +87,13 @@ impl GraphForge {
                 .transpose()?;
         }
         let project_uuid = crate::research_claims::authority::project_uuid(&current)?;
-        let origin_project_uuid = registry.historical_project(version_uuid)
-            .or_else(|| registry.historical_branch(version.context_uuid).map(|branch| branch.project_uuid))
+        let origin_project_uuid = registry
+            .historical_project(version_uuid)
+            .or_else(|| {
+                registry
+                    .historical_branch(version.context_uuid)
+                    .map(|branch| branch.project_uuid)
+            })
             .unwrap_or(project_uuid);
         Ok(ResearchReference {
             contract_version: 1,
