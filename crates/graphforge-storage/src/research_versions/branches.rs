@@ -172,3 +172,24 @@ pub(super) fn validate(registry: &ResearchRegistry) -> Result<(), GfError> {
     }
     Ok(())
 }
+
+// Private native preparation can produce different physical bytes after an
+// aborted attempt (for example fresh provenance IDs). The journal's logical
+// identity must bind the public request, while its physical fingerprint and
+// the receipt still bind every prepared byte. Only fully recovered Aborted
+// journals may stage another physical preparation for that logical request.
+pub(super) fn publication_fingerprint(request: &super::ResearchOperation) -> Option<[u8; 32]> {
+    use super::ResearchMutation;
+    use sha2::{Digest, Sha256};
+    match &request.mutation {
+        ResearchMutation::PublishBranch { intent_sha256, .. } => {
+            let mut digest = Sha256::new();
+            digest.update(b"graphforge-branch-publication-intent/1");
+            digest.update(request.operation_uuid.as_bytes());
+            digest.update(request.expected_generation_uuid.as_bytes());
+            digest.update(intent_sha256);
+            Some(<[u8; 32]>::from(digest.finalize()))
+        }
+        _ => None,
+    }
+}

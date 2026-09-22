@@ -952,12 +952,13 @@ pub fn publish_research_operation_with_mode(
             "research operation CURRENT precondition changed",
         ));
     }
+    let operation_fingerprint = branches::publication_fingerprint(request);
     let graph_objects = crate::begin_graph_object_publication(root)?;
     let version_uuid = apply_mutation(root, &request.mutation, &mut registry)?;
     let mut identity = Sha256::new();
     identity.update(b"graphforge-research-publication/1");
     identity.update(request.operation_uuid.as_bytes());
-    identity.update(request_sha256);
+    identity.update(operation_fingerprint.unwrap_or(request_sha256));
     let generation_uuid = graphforge_core::canonical::uuid_v8(identity.finalize().into());
     let receipt = ResearchOperationReceipt {
         intent_sha256: match &request.mutation {
@@ -998,13 +999,15 @@ pub fn publish_research_operation_with_mode(
         let tree = parent.graph_tree_root();
         tree.is_dir().then_some(tree)
     };
-    let staged = crate::project_publication::stage_project_generation_from_admitted_parent(
-        admission,
-        parent,
-        &publication,
-        graph_tree.as_deref(),
-        None,
-    )?;
+    let staged =
+        crate::project_publication::stage_project_generation_from_admitted_parent_with_fingerprint(
+            admission,
+            parent,
+            &publication,
+            graph_tree.as_deref(),
+            None,
+            operation_fingerprint,
+        )?;
     if let ProjectStageOutcome::Staged(staged) = staged {
         staged
             .validate(|_| registry.validate(), |_, _| Ok(()))?

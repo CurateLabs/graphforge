@@ -81,3 +81,13 @@ creation definition. Its immutable membership and active/required roles survive
 source release and Branch edits. The original predicate digest remains separate
 provenance, not a promise to recover the original query text. The public Arrow
 selection projection reads the permanent base, never current field membership.
+
+Publication recovery distinguishes logical intent from a physical preparation.
+A recovered aborted Branch attempt may prepare fresh native bytes, including
+new provenance identities, for the identical public request. Its stable journal
+operation fingerprint and generation identity bind the public intent, operation
+UUID and expected CURRENT. The existing publication kernel permits replacement
+physical bytes only after the aborted attempt has been fully recovered. While
+an attempt is live, its physical request fingerprint must still match; committed
+receipts retain the full prepared-request digest and exact public-intent digest.
+Changed public requests cannot reuse an aborted or committed operation identity.

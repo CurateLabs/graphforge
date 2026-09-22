@@ -434,6 +434,21 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
     graph_tree: Option<&Path>,
     allocation: Option<&crate::StorageAllocationOperation>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_from_admitted_parent_with_fingerprint(
+        admission, parent, request, graph_tree, allocation, None,
+    )
+}
+
+/// Preserve a logical operation across fully recovered aborted preparation.
+/// Physical bytes remain independently authenticated by the request fingerprint.
+pub(crate) fn stage_project_generation_from_admitted_parent_with_fingerprint(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+    allocation: Option<&crate::StorageAllocationOperation>,
+    operation_fingerprint: Option<[u8; 32]>,
+) -> Result<ProjectStageOutcome, GfError> {
     let result = (|| {
         validate_request(request)?;
         admission.revalidate_identity()?;
@@ -470,7 +485,7 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
             parent,
             request,
             None,
-            None,
+            operation_fingerprint,
             graph_tree,
             ParticipantPayloads::Memory,
             allocation,

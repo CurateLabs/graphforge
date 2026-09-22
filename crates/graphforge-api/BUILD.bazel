@@ -469,6 +469,14 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "branch_faults",
+    srcs = ["tests/branch_faults.rs"],
+    crate = ":graphforge_api",
+    compile_data = ["//tests/contracts:branch-api-v1.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "branch_projection_provenance",
     srcs = ["tests/branch_projection_provenance.rs"],
     crate = ":graphforge_api",
@@ -648,6 +656,7 @@ test_suite(
         ":research_project",
         ":research_versions",
         ":branches",
+        ":branch_faults",
         ":branch_projection_provenance",
         ":slices",
         ":resumable_construction_surface",
