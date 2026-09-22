@@ -120,8 +120,9 @@ df = table.to_pandas()
 
 ## Next Steps
 
-- [Analyst research experience](../engineering/analyst-ux.md) — designed M11
+- [Analyst research experience](../engineering/analyst-ux.md) — native M11
   Project, Slice, Branch, Version, and Proposal workflow for Core and associated UX projects
+- [Research journey](research-journey.md) — follow two stories through real operations and inspect captured results
 - [Cypher Guide](cypher-guide.md) — complete query language reference
 - [Graph Construction](graph-construction.md) — build graphs with Python
 - [VS Code extension](vscode-extension/) — use GraphForge from your editor or coding agent

@@ -516,7 +516,9 @@ class GraphForge:
         evidence_uuid: str,
         assertion_uuid: str,
         source_uuid: str,
-        source_kind: Literal["document", "observation", "graph_node", "graph_edge"],
+        source_kind: Literal[
+            "document", "observation", "graph_node", "graph_edge", "source", "artifact"
+        ],
         role: Literal["supports", "contradicts", "context"],
         weight: float | None = None,
         actor_uuid: str | None = None,

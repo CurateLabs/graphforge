@@ -68,13 +68,13 @@ PYTHON_ONLY_METHODS = frozenset(
 )
 
 EVIDENCE = {
-    "research-interchange": {"research_interchange.py": ["main"]},
-    "research-proposals": {"research_proposals.py": ["main"]},
-    "research-upstream": {"research_upstream.py": ["main"]},
-    "research-comparison": {"research_comparison.py": ["main"]},
-    "research-claims": {"research_claims.py": ["main"]},
-    "branches": {"branches.py": ["main"]},
-    "slices": {"slices.py": ["main"]},
+    "research-interchange": {"research_journey.py": ["main"], "research_interchange.py": ["main"]},
+    "research-proposals": {"research_journey.py": ["main"], "research_proposals.py": ["main"]},
+    "research-upstream": {"research_journey.py": ["main"], "research_upstream.py": ["main"]},
+    "research-comparison": {"research_journey.py": ["main"], "research_comparison.py": ["main"]},
+    "research-claims": {"research_journey.py": ["main"], "research_claims.py": ["main"]},
+    "branches": {"research_journey.py": ["main"], "branches.py": ["main"]},
+    "slices": {"research_journey.py": ["main"], "slices.py": ["main"]},
     "infra-validation": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
@@ -94,12 +94,15 @@ EVIDENCE = {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
     "research-versions": {
+        "research_journey.py": ["main"],
         "research_versions.py": ["check_research_versions"],
     },
     "research-project": {
+        "research_journey.py": ["main"],
         "research_project.py": ["check_research_metadata_and_discovery"],
     },
     "source-artifact-lifecycle": {
+        "research_journey.py": ["main"],
         "source_artifact_lifecycle.py": [
             "check_source_artifact_lifecycle_survives_reopen",
         ],

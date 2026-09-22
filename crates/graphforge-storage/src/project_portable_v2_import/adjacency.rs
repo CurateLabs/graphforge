@@ -60,11 +60,10 @@ pub(super) fn persist_import_adjacency(
         spill_dir: Some(spill_root.clone()),
         ..crate::adjacency::AdjacencyBuildOptions::default()
     };
-    let built_at_micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX)
-        });
+    // Portable reconstruction has no durable wall-clock build observation.
+    // Zero denotes unknown time, making exact package retries byte-identical.
+    // Freshness is the topology generation; packaged indexes remain unchanged.
+    let built_at_micros = 0;
     // Lifecycle attribution (#1449): the import-side build is construction
     // work, so scope it to the encoding row and keep `read_path_scan` for
     // committed read-path work only.
@@ -377,6 +376,137 @@ mod tests {
         assert_eq!(
             persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap(),
             0
+        );
+        let first = crate::capture_graph_files(&tree).unwrap().0;
+        fs::remove_dir_all(tree.join("indexes")).unwrap();
+        persist_import_adjacency(stage.path(), &tree, &participants, None).unwrap();
+        assert_eq!(crate::capture_graph_files(&tree).unwrap().0, first);
+    }
+    fn indexless_package() -> (tempfile::TempDir, PathBuf) {
+        let source = construction_published_project();
+        let generation = crate::resolve_project_generation(source.path()).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let tree = stage.path().join("graph-tree");
+        fs::create_dir(&tree).unwrap();
+        crate::materialize_graph_objects(
+            generation.container_root(),
+            &generation.graph_files_inventory().unwrap().unwrap(),
+            &tree,
+        )
+        .unwrap();
+        fs::remove_dir_all(tree.join("indexes")).unwrap();
+        let placeholder = crate::graph_files_root_participant(&crate::GraphFilesRootV2 {
+            format: "graphforge-graph-files-root".into(),
+            format_version: crate::graph_files::GRAPH_FILES_MAPPED_ROOT_RECORD_VERSION,
+            root_node_sha256: "0".repeat(64),
+            logical_file_count: 0,
+            logical_byte_length: 0,
+        })
+        .unwrap();
+        let path = stage.path().join("graph-files.json");
+        fs::write(&path, &placeholder.bytes).unwrap();
+        let mut files = vec![ProjectFileParticipant {
+            source: path,
+            byte_length: placeholder.bytes.len() as u64,
+            content_sha256: Sha256::digest(&placeholder.bytes).into(),
+            participant: placeholder,
+        }];
+        let lease = super::super::prepare_compact_import_graph(
+            source.path(),
+            Some(&tree),
+            &mut files,
+            1024,
+        )
+        .unwrap()
+        .unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        let mut graph = files.remove(0);
+        graph.participant.bytes = fs::read(&graph.source).unwrap();
+        participants.push(graph.participant);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: supported(),
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(source.path(), &request).unwrap()
+        else {
+            panic!("fresh fixture must stage")
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish_with_graph_objects(&lease)
+            .unwrap();
+        drop(lease);
+        export_complete(source.path())
+    }
+
+    #[test]
+    fn reconstructed_adjacency_import_replays_and_changed_generation_conflicts() {
+        let (_owner, package) = indexless_package();
+        assert!(
+            !package
+                .join("data/components/graph-data/graph-tree/indexes")
+                .exists()
+        );
+        let target = tempfile::tempdir().unwrap();
+        let transaction = Uuid::now_v7();
+        let generation = Uuid::now_v7();
+        let import = |generation| {
+            import_complete_portable_v2(
+                &package,
+                target.path(),
+                transaction,
+                generation,
+                &supported(),
+                PortableV2Limits::default(),
+                None,
+            )
+        };
+        let first = import(generation).unwrap();
+        let before = crate::resolve_project_generation(target.path())
+            .unwrap()
+            .graph_files_inventory()
+            .unwrap()
+            .unwrap();
+        let replay = import(generation).unwrap();
+        assert!(replay.publication.idempotent_replay);
+        assert_eq!(
+            first.publication.generation_uuid,
+            replay.publication.generation_uuid
+        );
+        assert_eq!(first.package_digest, replay.package_digest);
+        assert_eq!(first.transport_digest, replay.transport_digest);
+        assert_eq!(
+            import(Uuid::now_v7()).unwrap_err().code,
+            PortableV2ErrorCode::ConcurrentMutation,
+        );
+        let changed_source = construction_published_project();
+        let (_changed_owner, changed_package) = export_complete(changed_source.path());
+        let changed = import_complete_portable_v2(
+            &changed_package,
+            target.path(),
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(changed.code, PortableV2ErrorCode::ConcurrentMutation);
+        let reopened = crate::resolve_project_generation(target.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), generation);
+        assert_eq!(reopened.graph_files_inventory().unwrap().unwrap(), before);
+        let tree = tempfile::tempdir().unwrap();
+        crate::materialize_graph_objects(target.path(), &before, tree.path()).unwrap();
+        assert_index_current(tree.path());
+        assert!(
+            crate::adjacency::read_manifest(tree.path())
+                .unwrap()
+                .iter()
+                .all(|row| row.built_at_micros == 0)
         );
     }
 }

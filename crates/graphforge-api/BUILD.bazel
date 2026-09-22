@@ -493,6 +493,14 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "research_journey",
+    srcs = ["tests/research_journey.rs"] + glob(["tests/research_journey/**/*.rs"]),
+    crate = ":graphforge_api",
+    compile_data = ["//tests/fixtures/analyst-journey-v1:corpus.json"],
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "research_claims",
     srcs = ["tests/research_claims.rs"],
     crate = ":graphforge_api",
@@ -673,6 +681,7 @@ test_suite(
         ":research_versions",
         ":branches",
         ":research_claims",
+        ":research_journey",
         ":research_comparison",
         ":branch_faults",
         ":branch_projection_provenance",

@@ -176,8 +176,10 @@ docs surfaces; it does not prove runtime behavior.
 M11's [product requirements](analyst-ux.md) and
 [workspace contract](../book/architecture/research-workspaces.md) integrate the
 Core Analyst UX specification (Core §§1–20) and Branch and Slice Semantics
-specification (Semantics §§1–36). They are **Designed**, not implemented merely
-because this matrix exists.
+specification (Semantics §§1–36). The operation owners #1348–#1357 have shipped
+native tests for the outcomes below. The shared-corpus composition in #1358 has
+passing Rust, Python, Node and same-build CLI evidence, recorded below. The
+matrix maps requirements to those results; it does not replace execution.
 
 Use a deterministic representative corpus with two stories, a shared character,
 scans/OCR and improved Artifacts, machine and analyst claims, competing
@@ -185,19 +187,27 @@ interpretations, an ontology extension, and external references. Use larger
 generated selections to prove bounded behavior without treating illustrative
 corpus counts as benchmark thresholds.
 
-| Scenario / source coverage | Required observable outcome | Evidence |
+Evidence paths below use `API = crates/graphforge-api`,
+`AP = API/src/research_proposals/tests`, `UP = API/src/research_upstream/tests`,
+`RI = API/src/research_interchange`, and `ST = crates/graphforge-storage/src`.
+A `path::symbol` names the exact test; API integration tests run with
+`cargo test -p graphforge-api --test <file-stem> <symbol>`, while module tests run
+with `cargo test -p graphforge-api --lib <symbol>`. Existing owner evidence and
+new composition results are distinguished below.
+
+| Scenario / source coverage | Required observable outcome | Native owner evidence |
 | --- | --- | --- |
-| Project discovery and vocabulary — Core §§1–4, 15, 17–20; Semantics §§1–2, 30–32, 36 | Metadata-only discovery, all specified entry-point categories, current/origin/Version context, and the four universal inspection questions; no Git ceremony required. | Rust facade + Python/Node/CLI parity; consumer contract review for XYG/graphforge-nextjs and other consumers. |
-| Source/Artifact lineage — Core §§2–3, 9–10, 16; Semantics §18 | Scan → OCR → extraction → claim → research is traversable in both directions; preference changes retain old bytes/history and identify affected research. | Domain validation, real facade traversal, durable reopen and source-replacement fixtures. |
-| Evidence, claims, canonicality — Core §§7–8, 16, 18–19; Semantics §§11–13, 17 | Evidence/extraction/interpretation/hypothesis are distinguishable; contextual canonical assertions/relationships and competing claims coexist; immutable records persist. | Domain/facade tests including statusless and conflicting cases; no implicit belief filtering of raw graph queries. |
-| Slice boundaries — Core §§3, 5; Semantics §§3–6, 30 | Explain inclusion, boundary references, dependency closure, expansion/contraction, and exact frozen membership; dynamic results may change, frozen results do not. | Facade queries/traversals, cancellation/resource limits, large-selection boundedness. |
-| Branch creation and identity — Core §§3, 6; Semantics §§7–10, 21–23 | Whole Project, Slice, Branch, and historical Version creation preserves object identity, exact base, evidence/ontology context, and parent genealogy. | Real facade creation/query/reopen; no full-corpus copy for a small Slice Branch. |
-| Local research — Core §§6–8, 14; Semantics §§11–13, 19–20 | Add/modify/suppress/replace/reclassify/challenge affect only selected research; Reference differs from Bring into Branch; local ontology changes do not alter parent. | Parent/Branch query and knowledge results, binding parity, pre-linearization refusal and post-linearization committed-state reconciliation. |
-| Versions and retention — Core §§3, 11, 19; Semantics §§8, 14, 23, 33 | Historical graph, evidence refs/local bytes, ontology, and research state survive parent changes, GC, compaction, restore, and reopen; external evidence limitations are explicit. | Supported-filesystem crash/recovery and retention tests, transitive Branch/Proposal pins, explicit-deletion rejection. |
-| Comparison and upstream updates — Core §§11–12; Semantics §§14–18, 24, 28 | Relevant changes and semantic diffs are complete; previews never mutate; only selected valid updates apply; competing interpretations can be retained. | Base/local/upstream conflict fixtures, stale-preview rejection, source/ontology changes, deterministic paged results. |
-| Proposals and acceptance — Core §13; Semantics §§25–27 | Proposal pins exact Version; selected/partial acceptance respects dependencies and preserves authorship/evidence; later edits do not mutate proposal or parent; Branch continues. | Atomic publication, idempotency, cancellation/fault tests, deferred-ontology dependency fixture, accepted-work divergence. |
-| Fork, sharing, and interchange — Core §§3, 14–15; Semantics §§21–23, 29, 34–36 | Fork gains independent Project governance; genealogy survives; current Branch and immutable Version references differ; round trip preserves research/evidence/ontology closure. | Rust and thin-surface export/verify/import/reopen; reject unsupported or incomplete packages before mutation. |
-| Complete journey — Core §§1–20; Semantics §§1–36 | Explore → Focus → Branch → Analyze → Compare → Propose → Integrate → continue research, with every decision and lineage visible from real operations. | Integrated Rust facade and Python/Node/CLI execution, deterministic outputs and failure cases; wrapper tests are insufficient. |
+| Project discovery and vocabulary — Core §§1–4, 15, 17–20; Semantics §§1–2, 30–32, 36 | Metadata-only discovery, all specified entry-point categories, current/origin/Version context, and the four universal inspection questions; no Git ceremony required. | `API/tests/research_project.rs::metadata_survives_reopen_and_discovery_filters_without_graph_open`; the shared-corpus journeys add entry-stage context. Consumer presentation and human comprehension are separate evidence below. |
+| Source/Artifact lineage — Core §§2–3, 9–10, 16; Semantics §18 | Scan → OCR → extraction → claim → research is traversable in both directions; preference changes retain old bytes/history and identify affected research. | `API/tests/source_artifact_lifecycle.rs::scan_to_ocr_lineage_preference_and_impact_survive_reopen`; `API/src/research_upstream/tests.rs::preference_only_source_update_is_visible_without_changing_immutable_source`; `RI/closure_tests.rs::selected_artifact_bytes_external_limits_and_ontology_survive_reopen`. |
+| Evidence, claims, canonicality — Core §§7–8, 16, 18–19; Semantics §§11–13, 17 | Evidence/extraction/interpretation/hypothesis are distinguishable; contextual canonical assertions/relationships and competing claims coexist; immutable records persist. | `API/tests/research_claims.rs::supported_and_statusless_claims_require_separate_canonical_promotion`, `canonical_parent_and_branch_decisions_are_explicit_independent_and_durable`, and `bring_selected_claim_keeps_classification_without_importing_source_authority`. |
+| Slice boundaries — Core §§3, 5; Semantics §§3–6, 30 | Explain inclusion, boundary references, dependency closure, expansion/contraction, and exact frozen membership; dynamic results may change, frozen results do not. | `API/tests/slices.rs::shared_character_has_separate_boundary_and_deterministic_explanations`, `frozen_membership_ignores_parent_edits_and_rejects_forged_capsules`, `source_artifact_evidence_closure_stays_separate_from_membership`, and `frozen_cursors_bind_selector_and_final_ipc_limits_cover_metadata`. |
+| Branch creation and identity — Core §§3, 6; Semantics §§7–10, 21–23 | Whole Project, Slice, Branch, and historical Version creation preserves object identity, exact base, evidence/ontology context, and parent genealogy. | `API/tests/branches.rs::slice_branch_preserves_selected_identity_without_parent_graph_membership`, `required_roles_survive_branch_and_historical_branch_version_creation`, and `field_origins_and_contributions_survive_local_edits_and_slice_children`. |
+| Local research — Core §§6–8, 14; Semantics §§11–13, 19–20 | Add/modify/suppress/replace/reclassify/challenge affect only selected research; Reference differs from Bring into Branch; local ontology changes do not alter parent. | `API/tests/branches.rs::two_branches_restore_independently_of_parent_and_keep_receipts_after_reopen`, `reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin`, and `local_composition_is_exact_and_does_not_change_parent_or_sibling`; `API/tests/research_claims.rs::branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph` and `child_inherits_frozen_suppression_while_sibling_and_parent_remain_visible`; `AP/ontology_dependencies.rs::semantic_secondary_label_and_typed_list_survive_selected_acceptance_and_reopen`. |
+| Versions and retention — Core §§3, 11, 19; Semantics §§8, 14, 23, 33 | Historical graph, evidence refs/local bytes, ontology, and research state survive parent changes, GC, compaction, restore, and reopen; external evidence limitations are explicit. | `API/tests/research_versions.rs::historical_graph_ontology_and_artifact_survive_cleanup_restore_and_replay`, `released_payload_preserves_exact_replay_and_required_root_blocks_deletion`, and `selected_object_root_version_executes_after_ancestor_release_and_cleanup`; `API/tests/slices.rs::selected_history_never_falls_back_to_current_or_retains_its_ancestor`. Actual Branch/Proposal growth measurements are recorded below. |
+| Comparison and upstream updates — Core §§11–12; Semantics §§14–18, 24, 28 | Relevant changes and semantic diffs are complete; previews never mutate; only selected valid updates apply; competing interpretations can be retained. | `API/tests/research_comparison.rs::independent_local_upstream_and_conflicting_fields_ignore_unrelated_parent_content`, `exact_versions_page_deterministically_while_live_continuations_fail_stale`, and `bounded_multi_page_diff_has_no_duplicate_or_missing_units`; `UP/repeated.rs::repeated_selective_updates_preserve_independent_baselines_and_original_base` and `retain_both_preserves_native_list_values_and_refuses_scalar_conflicts_atomically`; `UP/ontology.rs::typed_updates_require_reviewed_ontology_and_keep_invalid_retention_unresolved`. |
+| Proposals and acceptance — Core §13; Semantics §§25–27 | Proposal pins exact Version; selected/partial acceptance respects dependencies and preserves authorship/evidence; later edits do not mutate proposal or parent; Branch continues. | `AP/two_stories.rs::two_story_shared_character_journey_preserves_partial_review_and_continued_work`; `AP/partial_review.rs::partial_review_retains_only_accepted_fields_and_deferral_can_be_reviewed_later`; `AP/nested.rs::nested_acceptance_deduplicates_per_destination_and_preserves_contribution`; `AP/historical_comparison.rs::historical_comparison_does_not_inherit_later_acceptance_after_reopen`; `AP/ontology_dependencies.rs::relationship_acceptance_requires_reviewed_ontology_and_publishes_both_atomically`; `AP/results.rs::selected_result_artifact_preserves_bytes_and_source_provenance_with_explicit_evidence_ack`. |
+| Fork, sharing, and interchange — Core §§3, 14–15; Semantics §§21–23, 29, 34–36 | Fork gains independent Project governance; genealogy survives; current Branch and immutable Version references differ; round trip preserves research/evidence/ontology closure. | `RI/tests.rs::complete_research_roundtrip_preserves_version_and_historical_genealogy`, `fork_has_independent_governance_metadata_and_exact_retry`, and `disjoint_and_redacted_exports_have_distinct_content_and_stable_transport_identity`; `RI/fork/tests.rs::committed_fork_replays_after_source_version_release_without_resetting_destination`; `AP/interchange.rs::selected_accepted_lineage_roundtrips_without_private_ancestor_or_live_acceptance`; `AP/mixed_authority_tests.rs::fork_local_branch_exports_mixed_project_acceptance_genealogy`. The repaired cross-process import replay and passing composition results are recorded below. |
+| Complete journey — Core §§1–20; Semantics §§1–36 | Explore → Focus → Branch → Analyze → Compare → Propose → Integrate → continue research, with every decision and lineage visible from real operations. | **Passing native evidence:** `API/tests/research_journey.rs::two_story_journey_preserves_scope_evidence_review_and_continued_research`; Python `tests/research_journey.py::ResearchJourneyTests.test_native_two_story_journey`; Node `tests/research-journey.test.mjs` test `native two-story journey preserves evidence scope review restore and interchange`; CLI `tests/research_journey.rs::two_story_cli_research_survives_partial_review_restore_and_interchange`. Python/Node/CLI paths are relative to their `crates/graphforge-bindings-py`, `crates/graphforge-bindings-node`, and `crates/graphforge-cli` crates. The existing AP two-story test covers the Proposal section, not this complete composition. |
 
 Implementations must update the existing non-Cypher inventories and relevant
 domain/schema registries. Test permission-neutral Core behavior and keep
@@ -222,8 +232,10 @@ immutable identity conflicts, root-release blockers, permanent receipt replay,
 compact Parquet object corruption, local evidence through GC/reopen, and process
 faults before/after `CURRENT` replacement. These are storage-foundation tests,
 not actual Branch/Proposal lifecycle or thin-binding journey certification.
-#1536 owns bounded selected physical retention and growing-history measurements;
-#1537 owns facade/binding integration. All remain within #1350's close gate.
+The merged #1536 storage work supplies bounded selected physical retention and
+labeled growing-history fixtures; #1537 supplies native Version facade/binding
+integration. Actual Branch lifecycles are tested by #1352 and actual Proposal
+lifecycles by #1356. Neither foundation suite substitutes for those lifecycles.
 
 ### Analyst journey comprehension
 
@@ -258,19 +270,20 @@ alone, and never invent participants or successful hosted-environment runs.
 ### M11 contract regression scenarios
 
 Quality regime: **A (contracts and deterministic fixtures)**, supplemented by
-consumer journey scenarios. These are Designed acceptance requirements, not
-claims that new runtime tests already exist. #1346 defines the early
+consumer journey scenarios. The exact owner regressions below exercise shipped
+native behavior. #1346 defines the early
 [consumer projections](../book/architecture/research-workspaces.md#consumer-interaction-contract);
-each owner implements and tests them before #1358's integrated certification.
+#1358 composes those operations and publishes their actual results. A passing
+owner regression does not, by itself, certify the complete journey.
 
 | Scenario / owner | Given / when / then | Required evidence |
 | --- | --- | --- |
-| Shared authority and publication failure — #1350, #1355, #1356 | Given Branches in one Project, when update or acceptance fails before `CURRENT` replacement, prior state is unchanged; after replacement the result is committed, not rolled back. Parent change and acceptance receipt always agree. | Failpoints on both sides of linearization; admitted-filesystem crash/reopen; exact retry returns the receipt, changed request with the same identity returns `GF_IDEMPOTENCY_CONFLICT` without mutation. |
-| Selective baselines — #1352, #1354, #1355 | Given `x=0, y=0`, incorporate only `x=1`, then compare against upstream `x=2, y=2`: `x=1` is incorporated, not a local edit; `y` retains baseline 0. A later local `x=3` conflicts with upstream 2. Local suppression plus upstream modification requires explicit resolution, never automatic resurrection. | Multi-round facade comparison/update fixtures; exact per-object/field provenance; unselected baseline equality; stale-preview rejection and pinned deterministic pagination. |
-| Partial acceptance across Versions — #1354, #1356 | Given accepted subsets from different Branch Versions, when research continues and is reproposed, exact accepted contributions remain distinguishable from new divergence; neither retry nor a new operation identity reapplies them. | Durable contribution-to-destination mappings; post-submit immutability; reopen and second-proposal tests; dependency-invalid subsets rejected before mutation. |
-| Selected retention closure — #1349, #1350, #1351, #1352, #1357 | Given a fixed Slice and increasing unrelated parent data, when the parent evolves and unrelated retention roots are released, selected graph/evidence/ontology/baselines survive cleanup while genealogy alone does not retain the complete ancestor. Expansion outside retained history reports unavailable unless separately retained. | Instrument creation work, peak materialization and retained payload bytes after GC/compaction; include shared physical files/repacking, child Branches, proposals, exact local Artifact equality and explicit whole-Project retention as a control. Selected export cannot widen to the ancestor. No duplicate billion-edge certification. |
-| Integration versus canonicality — #1353, #1356 | Given a canonical claim and an alternative, integrate the alternative without promotion, then explicitly promote it: two decisions are visible and integration alone preserves existing canonical choices. | Real facade and thin-surface outcomes; source canonical status cannot confer target authority; ordinary Cypher/algorithms remain independent of epistemic filters. |
-| Early consumer boundary — #1346 definitions; #1358 composition | Given the two-story fixture, inspect live and immutable references, shared-character boundaries, evidence limitations, and a partial review without unselected private annotations; consumers can render context and decisions from Core results. | Each implementation issue owns real Rust/Python/Node/CLI fixtures for its projections and errors. #1356 proves a bounded Branch-to-acceptance journey before dependent #1357 interchange; #1358 certifies the full workflow. No application deployment or access-enforcement implementation required. |
+| Shared authority and publication failure — #1350, #1355, #1356 | Given Branches in one Project, when update or acceptance fails before `CURRENT` replacement, prior state is unchanged; after replacement the result is committed, not rolled back. Parent change and acceptance receipt always agree. | `API/tests/branch_faults.rs::branch_mutation_faults_preserve_parent_sibling_and_exact_retry_after_reopen`; `UP/recovery.rs::both_current_boundaries_preserve_atomic_baseline_history_and_exact_replay`; `AP/recovery.rs::proposal_acceptance_is_atomic_on_both_sides_of_current_and_replays_after_reopen`; `API/tests/research_versions.rs::restoration_errors_before_and_after_current_preserve_same_facade_and_retry`; `ST/project_portable_v2_import/tests/returned_errors.rs::returned_publication_and_reopen_errors_preserve_commit_evidence_and_retry` (native storage import, not a separate facade fault test). |
+| Selective baselines — #1352, #1354, #1355 | Given `x=0, y=0`, incorporate only `x=1`, then compare against upstream `x=2, y=2`: `x=1` is incorporated, not a local edit; `y` retains baseline 0. A later local `x=3` conflicts with upstream 2. Local suppression plus upstream modification requires explicit resolution, never automatic resurrection. | `UP/repeated.rs::repeated_selective_updates_preserve_independent_baselines_and_original_base`; `UP/history.rs::rejected_updates_leave_content_baselines_and_history_unchanged` and `history_pages_bind_generation_branch_and_page_size`; `API/tests/research_comparison.rs::pinned_cursor_rejects_changed_reference_retention`. The shared journey adds real x-only adoption to partial acceptance and restoration. |
+| Partial acceptance across Versions — #1354, #1356 | Given accepted subsets from different Branch Versions, when research continues and is reproposed, exact accepted contributions remain distinguishable from new divergence; neither retry nor a new operation identity reapplies them. | `AP/two_stories.rs::two_story_shared_character_journey_preserves_partial_review_and_continued_work`; `AP/partial_review.rs::partial_review_retains_only_accepted_fields_and_deferral_can_be_reviewed_later`; `AP/nested.rs::nested_acceptance_deduplicates_per_destination_and_preserves_contribution`; `API/tests/research_comparison.rs::accepted_subsets_from_distinct_versions_do_not_hide_later_local_edits`; restoration/reproposal evidence below. |
+| Selected retention closure — #1349, #1350, #1351, #1352, #1357 | Given a fixed Slice and increasing unrelated parent data, when the parent evolves and unrelated retention roots are released, selected graph/evidence/ontology/baselines survive cleanup while genealogy alone does not retain the complete ancestor. Expansion outside retained history reports unavailable unless separately retained. | `API/tests/branches.rs::selected_branch_releases_large_parent_after_evolution_and_cleanup`; `AP/retention.rs::fixed_parent_proposal_history_releases_obsolete_payloads_but_preserves_accepted_proof_and_replay`; `RI/closure_tests.rs::selected_artifact_bytes_external_limits_and_ontology_survive_reopen`; `AP/interchange.rs::selected_accepted_lineage_roundtrips_without_private_ancestor_or_live_acceptance`. Measurements below distinguish Branch creation, real Proposal history, and storage foundation fixtures. |
+| Integration versus canonicality — #1353, #1356 | Given a canonical claim and an alternative, integrate the alternative without promotion, then explicitly promote it: two decisions are visible and integration alone preserves existing canonical choices. | `API/src/research_proposals/tests.rs::frozen_submission_survives_continued_branch_edits_and_retains_only_selected_fields` explicitly checks Integrate followed by separate Promote; `API/tests/research_claims.rs::supported_and_statusless_claims_require_separate_canonical_promotion` and `bring_selected_claim_keeps_classification_without_importing_source_authority` prevent imported status from becoming target authority. |
+| Early consumer boundary — #1346 definitions; #1358 composition | Given the two-story fixture, inspect live and immutable references, shared-character boundaries, evidence limitations, and a partial review without unselected private annotations; consumers can render context and decisions from Core results. | `API/tests/slices.rs::shared_character_has_separate_boundary_and_deterministic_explanations`; `AP/two_stories.rs::two_story_shared_character_journey_preserves_partial_review_and_continued_work`; `AP/historical_comparison.rs::historical_comparison_does_not_inherit_later_acceptance_after_reopen`; `RI/reference.rs::live_and_immutable_references_preserve_base_origin_and_authorship`. Published stage outputs and full thin-surface results are recorded in the composition evidence below and the research journey guide. No application deployment or access-enforcement implementation is required. |
 
 Durability scenarios require an admitted filesystem and actual reopen/recovery;
 an unsupported filesystem's admission refusal is an environment limitation,
@@ -292,6 +305,107 @@ dependencies and original receipts. Corruption, legacy paths, busy CAS and
 pre/post-CURRENT crash/error tests cover safe cleanup. These remain storage
 consumer fixtures, not actual Branch/Proposal acceptance proof.
 
+### Actual Branch/Proposal composition and measurements (#1358)
+
+`AP/restore.rs::restored_branch_reproposal_cannot_repeat_acceptance_after_cleanup_and_reopen`
+executes accept A1(score 1) → A2(score 2) → B(score 73) → parent(score 99) →
+restore A1 → repropose → release obsolete Proposal roots → compact → cleanup →
+reopen → retry. Restored A remains 1, B remains 73, parent remains 99, the
+original receipt survives, and the accepted contribution is not applied twice.
+This is actual Proposal acceptance and restoration, not labeled storage roots.
+
+`API/tests/research_claims.rs::branch_challenge_revision_and_suppression_preserve_parent_and_shared_graph`
+now checks an Interpretation → Hypothesis immutable successor, its shared
+conceptual identity and new Branch/Version origin, retained old category and
+payload, and unchanged parent before and after reopen.
+
+The real Branch creation test
+`API/tests/branches.rs::selected_branch_releases_large_parent_after_evolution_and_cleanup`
+measures fixed selection with increasing unrelated parent data. A fresh child
+process opens an already-prepared durable Project and performs the native
+creation. Fixture construction is excluded from the child. Its pre-create and
+post-create Linux VmHWM values are observed process high-water resident memory,
+including startup/open; their difference is **not** exact allocated or
+materialized bytes. Other platforms may omit VmHWM while executing the same
+behavior checks. No hardware-dependent latency or flat-memory threshold is
+asserted.
+
+Observed on the admitted filesystem at the process root with
+`TMPDIR=/home/ubuntu/gf-test-1537` and
+`CARGO_TARGET_DIR=/home/ubuntu/gf-target-1536`:
+
+| Unrelated parent nodes | Source graph bytes | Selected graph bytes | Copied source bytes | Retained CAS bytes after cleanup | Creation µs | Pre-create HWM KiB | Post-create HWM KiB |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 16,064 | 7,212 | 0 | 30,724 | 1,803,472 | 70,728 | 127,212 |
+| 2,048 | 146,298 | 7,212 | 0 | 30,345 | 514,061 | 70,608 | 131,324 |
+
+Each parent additionally contains one selected Character. Identity encodings
+can change byte totals between runs. Assertions require source growth, selected
+graph difference below 1,024 bytes, retained-CAS growth at most 8,192 bytes,
+zero source copies, actual reclamation, unavailable released parent history,
+stable selection/genealogy, and exact selected content after reopen. This
+measurement does not include local Artifacts or ontology modules;
+`RI/closure_tests.rs::selected_artifact_bytes_external_limits_and_ontology_survive_reopen`
+provides their native closure evidence separately.
+
+For the other growth dimension,
+`AP/retention.rs::fixed_parent_proposal_history_releases_obsolete_payloads_but_preserves_accepted_proof_and_replay`
+uses real submit/review/release operations on a fixed parent with increasing
+frozen Proposal history. It checks release blockers, reclaimed obsolete payload,
+retained accepted dependencies and receipt replay. It makes no unlimited-storage
+or indefinite-payload-retention claim. The #1536 numbers above remain foundation
+controls, not measurements of this Proposal lifecycle.
+
+Recorded native results for the strengthened owner tests:
+
+- `cargo test -p graphforge-api --test branches --test research_claims -- --nocapture`:
+  11 Branch tests and 10 claim tests passed, zero failures or ignores.
+- `cargo test -p graphforge-api --test branches -- --nocapture` after the final
+  reopened-value assertions: 11 passed, zero failures or ignores; table values
+  above are from this run.
+- `cargo test -p graphforge-api --lib restored_branch_reproposal_cannot_repeat_acceptance_after_cleanup_and_reopen -- --nocapture`:
+  1 passed, zero failures or ignores.
+
+**Composition evidence:** the shared corpus is
+`tests/fixtures/analyst-journey-v1/corpus.json`. The real Rust/Python/Node/same-build
+CLI journeys pass through focus, evidence closure, independent Branch edits,
+selected upstream update, partial acceptance, continued work, restoration,
+receipt replay, complete/selected interchange, Fork and cleanup/reopen.
+`tests/fixtures/analyst-journey-v1/output/manifest.json` authenticates 32 captured
+files: native Arrow streams and serialized control results, with two explicitly
+labeled derived assertion summaries. The [journey guide](../guide/research-journey.md)
+maps analyst questions to these fields and separates original accepted, restored,
+projected and live references.
+
+Final local journey results on the admitted ext4 filesystem:
+
+- `cargo test -p graphforge-api --test research_journey -- --nocapture`: 1 passed,
+  including the external-only Artifact refusal before/after import and cleanup.
+  `GRAPHFORGE_JOURNEY_CAPTURE_DIR` recorded the checked-in native outputs.
+- `uv run --no-sync python crates/graphforge-bindings-py/tests/research_journey.py`:
+  1 passed after the native release rebuild.
+- `node --test crates/graphforge-bindings-node/tests/research-journey.test.mjs crates/graphforge-bindings-node/tests/non-cypher-release-parity.test.mjs`:
+  4 passed, zero skips, after the native release rebuild.
+- The same-build CLI harness produced by `cargo test --workspace`,
+  `research_journey-ca49e24bb51a0c1e --nocapture`: 1 passed. Its comparison retains
+  exact columns, schema fields and metadata except the per-query identity.
+
+The Rust capture additionally selects an external-only Artifact and proves
+`GF_RESULT_NOT_RETAINED` without fetching replacement bytes. Thin runners share
+the local scan/OCR route. Shared-journey ontology equality uses the default
+ontology; the nonempty extension/physical privacy/recovery cases are the owner
+regressions mapped above, not inferred from this default fixture.
+
+This composition exposed an exact portable-import replay defect: rebuilding
+omitted adjacency indexes inserted a new wall-clock time into the publication
+fingerprint. Reconstruction now records the documented unknown time `0`, while
+freshness remains topology-generation-based. Exact content and changed-request
+checks are unchanged. `cargo test -p graphforge-storage --lib project_portable_v2_import`
+passes 19 tests, including byte-identical rebuild, packaged-index preservation,
+real compact import/replay, changed-generation/package refusal, valid reopened
+adjacency and pre/post-publication error evidence. Ordinary changed-surface CI
+and the PR merge gate still apply.
+
 ### Immutable Version facade evidence (#1537)
 
 `crates/graphforge-api/tests/research_versions.rs` exercises real graph,
@@ -307,8 +421,8 @@ all thin surfaces reject disclosure of private values or field names.
 Binding parity lives in `crates/graphforge-bindings-py/tests/research_versions.py`
 and `crates/graphforge-bindings-node/tests/research-versions.test.mjs`; CLI evidence
 uses the same-build binary in `crates/graphforge-cli/tests/research_versions.rs`.
-These are native Version tests; future Branch/Proposal fixtures do not certify
-their unimplemented product lifecycles.
+These are native Version tests. The actual Branch and Proposal lifecycle tests
+listed above supply their separate product evidence.
 
 ### Reproducible Slice evidence (#1351)
 
@@ -327,7 +441,8 @@ metadata. The JSON contract is checked against native Arrow fields and defaults.
 Python `tests/slices.py`, Node `tests/slices.test.mjs`, and same-build CLI
 `tests/slices.rs` exercise the actual Rust facade, including frozen inspection,
 revision and safe malformed-input diagnostics. These tests certify Slice
-membership/context, not future Branch retention ownership or export packaging.
+membership/context; the Branch retention and interchange owner tests listed
+above supply retention ownership and export-packaging evidence.
 
 ## What counts as proof
 

@@ -1,0 +1,38 @@
+{
+  "contract": "graphforge-analyst-journey/1",
+  "title": "Two stories, one shared character",
+  "initial_graph": "CREATE (a:Story {name:'Mystery'}), (b:Story {name:'Voyage'}), (c:Character {name:'Ada',score:0,ending:'undecided',x:0,y:0,private_note:'PRIVATE_JOURNEY'}), (a)-[:FEATURES]->(c), (b)-[:FEATURES]->(c)",
+  "stories": [
+    "Mystery",
+    "Voyage"
+  ],
+  "character": "Ada",
+  "source_label": "Synthetic two-story manuscript",
+  "scan_bytes": "Synthetic scan fixture: Ada in Mystery and Voyage.",
+  "ocr_text": "Ada appears in Mystery and Voyage.",
+  "claim": "Ada appears in both stories.",
+  "local_edit": "MATCH (n:Character) SET n.score=1,n.ending='detective',n.private_note='PRIVATE_LOCAL'",
+  "upstream_edit": "MATCH (n:Character) SET n.x=1,n.y=2",
+  "selected_fields": [
+    "property:score",
+    "property:ending"
+  ],
+  "expected_parent_after_acceptance": {
+    "score": 1,
+    "ending": "undecided",
+    "private_note": "PRIVATE_JOURNEY"
+  },
+  "expected_branch_after_upstream": {
+    "score": 1,
+    "ending": "detective",
+    "x": 1,
+    "y": 0
+  },
+  "expected_after_restore": {
+    "branch_a_score": 1,
+    "branch_b_score": 73,
+    "parent_score": 99
+  },
+  "fork_title": "Independent Mystery research",
+  "external_reference": "https://example.invalid/archived-two-story-source"
+}

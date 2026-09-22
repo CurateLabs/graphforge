@@ -946,6 +946,50 @@ fn reference_does_not_expand_but_bring_preserves_selected_uuid_and_origin() {
 
 #[test]
 fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
+    // Re-enter this integration test in a fresh process so parent fixture construction
+    // cannot contaminate VmHWM. The peak still includes child startup/project open;
+    // its increase over the pre-create high-water mark is an observation, not an
+    // allocation count or a flat-memory guarantee. Other platforms report no HWM.
+    const CHILD: &str = "GRAPHFORGE_BRANCH_CREATION_MEASUREMENT";
+    fn peak_kib() -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            Some(
+                status
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("VmHWM:")
+                            .map(|value| value.split_whitespace().next().unwrap().parse().unwrap())
+                    })
+                    .expect("Linux process reports VmHWM"),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+    if let Some(directory) = std::env::var_os(CHILD) {
+        let directory = std::path::PathBuf::from(directory);
+        let request: CreateResearchBranchRequest =
+            serde_json::from_slice(&std::fs::read(directory.join("request.json")).unwrap())
+                .unwrap();
+        let mut graph = GraphForge::new(directory.join("project").to_str()).unwrap();
+        let before = peak_kib();
+        let started = std::time::Instant::now();
+        graph
+            .create_research_branch(&request, &CancellationToken::new())
+            .unwrap();
+        let elapsed_us = started.elapsed().as_micros();
+        let after = peak_kib();
+        std::fs::write(
+            directory.join("measurement.json"),
+            serde_json::to_vec(&(elapsed_us, before, after)).unwrap(),
+        )
+        .unwrap();
+        return;
+    }
     fn bytes(path: &std::path::Path) -> u64 {
         std::fs::read_dir(path)
             .unwrap()
@@ -960,14 +1004,14 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             .sum()
     }
     let mut measurements = Vec::new();
-    for count in [32, 2048] {
+    for parent_noise_nodes in [32, 2048] {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project");
         let mut graph = GraphForge::new(root.to_str()).unwrap();
         graph
             .execute("CREATE (:Character {name:'Shared'})")
             .unwrap();
-        graph.execute(&format!("UNWIND range(1,{count}) AS i CREATE (:Noise {{value:i, padding:'outside parent content'}})")).unwrap();
+        graph.execute(&format!("UNWIND range(1,{parent_noise_nodes}) AS i CREATE (:Noise {{value:i, padding:'outside parent content'}})")).unwrap();
         let source = capture(&mut graph);
         let source_record = graph.research_version(source).unwrap();
         let request = CreateResearchBranchRequest {
@@ -982,11 +1026,36 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
             created_at: 2,
             label: "Fixed character".into(),
         };
-        let started = std::time::Instant::now();
-        graph
-            .create_research_branch(&request, &CancellationToken::new())
+        std::fs::write(
+            directory.path().join("request.json"),
+            serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap();
+        drop(graph);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "selected_branch_releases_large_parent_after_evolution_and_cleanup",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path())
+            .output()
             .unwrap();
-        let elapsed = started.elapsed();
+        assert!(
+            child.status.success(),
+            "measurement child failed: {}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let (elapsed_us, before_peak_kib, after_peak_kib): (u128, Option<u64>, Option<u64>) =
+            serde_json::from_slice(
+                &std::fs::read(directory.path().join("measurement.json")).unwrap(),
+            )
+            .unwrap();
+        if let (Some(before), Some(after)) = (before_peak_kib, after_peak_kib) {
+            assert!(after >= before);
+        }
+        let mut graph = GraphForge::new(root.to_str()).unwrap();
         let selected = graph.research_version(request.version_uuid).unwrap();
         let projection = selected.content.graph_projection.clone().unwrap();
         let definition = graph
@@ -1064,6 +1133,20 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         let graph = GraphForge::new(root.to_str()).unwrap();
         let view = graph.open_research_branch(request.branch_uuid).unwrap();
         assert_eq!(count_nodes(view.graph()), 1);
+        assert_eq!(
+            count(
+                view.graph(),
+                "MATCH (n:Character) WHERE n.name = 'Branch-local change' RETURN count(n)"
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &graph,
+                "MATCH (n:Character) WHERE n.name = 'Shared' RETURN count(n)"
+            ),
+            1
+        );
         assert!(graph.open_research_version(source).is_err());
         let after_cleanup = graph
             .research_branch_selection(request.branch_uuid)
@@ -1079,19 +1162,21 @@ fn selected_branch_releases_large_parent_after_evolution_and_cleanup() {
         assert_eq!(projection.source_materialization_bytes_copied, 0);
         assert!(projection.source_materialization_bytes_copied < projection.source_payload_bytes);
         measurements.push((
-            count,
+            parent_noise_nodes,
             projection.source_payload_bytes,
             projection.selected_payload_bytes,
             projection.source_materialization_bytes_copied,
             retained,
-            elapsed.as_micros(),
+            elapsed_us,
+            before_peak_kib,
+            after_peak_kib,
         ));
     }
     assert!(measurements[1].1 > measurements[0].1);
     assert!(measurements[1].2.abs_diff(measurements[0].2) < 1024);
     assert!(measurements[1].4 <= measurements[0].4 + 8192);
     eprintln!(
-        "native Branch parent nodes/source graph bytes/selected graph bytes/source copies/retained CAS bytes/creation us: {measurements:?}"
+        "native Branch parent Noise nodes (+1 selected Character)/source graph bytes/selected graph bytes/source copies/retained CAS bytes/creation us/pre-create child VmHWM KiB/post-create child VmHWM KiB (whole-child peak, fixture construction excluded): {measurements:?}"
     );
 }
 fn count_nodes(graph: &GraphForge) -> i64 {
